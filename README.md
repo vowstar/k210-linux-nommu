@@ -45,7 +45,8 @@ RUN dnf -y update && \
         git \
         python36 \
         perl \
-        sudo
+        sudo \
+        cpio
 ```
 
 ### Git clone

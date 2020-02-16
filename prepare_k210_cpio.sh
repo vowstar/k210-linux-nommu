@@ -1,16 +1,33 @@
 #!/usr/bin/env sh
 
 export PATH=/opt/riscv64-uclibc/bin:$(pwd)/riscv64-nommu-buildroot/output/host/bin:$PATH
-export ROOTPROJ="$(pwd)/rootfs_k210"
+export PROJ_ROOT="$(pwd)"
 export ROOTFS="$(pwd)/rootfs_k210"
 export KERNEL="$(pwd)/linux-kernel"
 
 # safe check
 [ -d "rootfs_k210" ] && echo "Directory rootfs_k210 exists." || echo "Error: Directory rootfs_k210 does not exists, please cd to project root."
+
+cd $PROJ_ROOT
+
+if [ ! -d "rootfs_k210" ] ; then
+    cd "$PROJ_ROOT/busybox"
+    make k210_nommu_defconfig
+    make SKIP_STRIP=y
+    make SKIP_STRIP=y install
+
+    cd "$PROJ_ROOT/tinycc"
+    ./configure --prefix=/usr --cross-prefix=riscv64-linux- --cpu=riscv64 --extra-cflags="-DCONFIG_TCC_STATIC=1" --extra-ldflags=-Wl,-elf2flt=-r
+    make
+    make DESTDIR=../rootfs_k210 install
+fi
+
+cd $PROJ_ROOT
+
 [ -d "rootfs_k210" ] && rm -rf $KERNEL/k210.cpio || echo "Error: Please cd to project root."
 [ -d "rootfs_k210" ] && rm -rf $ROOTFS/usr/share || echo "Error: Please cd to project root."
 
-cp init $ROOTFS/bin/
+cp -rf cd $PROJ_ROOT/init $ROOTFS/bin/
 
 # Begin Damien Le Moal's code:
 # https://lore.kernel.org/linux-riscv/BYAPR04MB5816C1EADCEF92F1F1DE60E0E7140@BYAPR04MB5816.namprd04.prod.outlook.com/T/#t

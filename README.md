@@ -232,6 +232,15 @@ The result:
 
 ![RUN TCC](./images/k210_nommu_linux_run_tcc.png "k210 nommu linux run tcc")
 
+### k210 cpio image
+
+Run ``sh ./prepare_k210_cpio.sh`` to put k210 rootfs cpio image into ``linux-kernel/k210.cpio`` to update images.
+
+```bash
+cd $PROJ_ROOT
+sh ./prepare_k210_cpio.sh
+```
+
 ## Build Kernel
 
 The [linux-5.6-rc1 source](https://www.kernel.org) applied [Damien Le Moal's k210 patch](https://lore.kernel.org/linux-riscv/BYAPR04MB5816C1EADCEF92F1F1DE60E0E7140@BYAPR04MB5816.namprd04.prod.outlook.com/T/#t). 
@@ -257,6 +266,8 @@ make ARCH=riscv CROSS_COMPILE=riscv64-linux- -j
 
 Program the k210 board and enjoy linux. Suppose you are using Sipeed MAIX dan development board and the serial port is ``/dev/ttyUSB0``.
 
+To use serial port whith user $(whoami), you need add $(whoami) into uucp or/and diaout group.
+
 ```bash
 sudo usermod -a -G uucp $(whoami)
 sudo usermod -a -G diaout $(whoami)
@@ -266,3 +277,35 @@ su $(whoami)
 kflash -B dan -b 3000000 -p /dev/ttyUSB0 arch/riscv/boot/loader.bin
 python3 -m serial.tools.miniterm --raw --filter colorize /dev/ttyUSB0 115200
 ```
+
+Using vi editor to add a file ``main.c``
+
+```c
+int fib(int n){
+    if(n < 2){
+        return 1;
+    }
+    return fib(n-1) + fib(n-2);
+}
+
+int _start() {
+    int i;
+    for (i = 0; i < 15; i++)
+        printf("%d ", fib(i));
+    printf("Hello world from K210!!!\n");
+    return 0;
+}
+```
+
+Run with ``tcc -run -nostdlib main.c``
+
+```
+tcc -run -nostdlib main.c
+
+main.c:18: warning: implicit declaration of function 'printf'
+1 1 2 3 5 8 13 21 34 55 89 144 233 377 610 Hello world from K210!!!
+```
+
+You will get the hello world output.
+
+Enjoy!

@@ -1,0 +1,31 @@
+From a80286d18532306efb9292e88802912bbbc02c7d Mon Sep 17 00:00:00 2001
+From: Joris Vink <joris@coders.se>
+Date: Thu, 31 Oct 2019 13:16:13 +0100
+Subject: [PATCH 06/21] fix PTRAVE_EVENT_SECCOMP typo in ptrace.h
+
+Hi,
+
+This diff fixes a typo in the PTRACE_EVENT_SECCOMP event code.
+
+The typo itself was introduced in 2012 when syncing with glibc header
+files and was itself fixed in 2013 in the glibc headers.
+---
+ libc/sysdeps/linux/common/sys/ptrace.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libc/sysdeps/linux/common/sys/ptrace.h b/libc/sysdeps/linux/common/sys/ptrace.h
+index 6b3c7b574..ebafe4e27 100644
+--- a/libc/sysdeps/linux/common/sys/ptrace.h
++++ b/libc/sysdeps/linux/common/sys/ptrace.h
+@@ -171,7 +171,7 @@ enum __ptrace_eventcodes
+   PTRACE_EVENT_EXEC	= 4,
+   PTRACE_EVENT_VFORK_DONE = 5,
+   PTRACE_EVENT_EXIT	= 6,
+-  PTRAVE_EVENT_SECCOMP  = 7
++  PTRACE_EVENT_SECCOMP  = 7
+ };
+ 
+ /* Perform process tracing functions.  REQUEST is one of the values
+-- 
+2.24.1
+

@@ -1,0 +1,467 @@
+From 01e863c89fc772a406fe56c6dddb39f71a570c06 Mon Sep 17 00:00:00 2001
+From: Carlos Santos <unixmania@gmail.com>
+Date: Sat, 19 Oct 2019 17:49:42 -0300
+Subject: [PATCH 01/21] Make __syscall_error return long, as expected by
+ syscall() callers
+
+The return type of syscall() is long so __syscall_error, which is jumped
+to by syscall handlers to stash an error number into errno, must return
+long too otherwhise it returs 4294967295L instead of -1L. For example,
+syscall for x86_64 is defined in libc/sysdeps/linux/x86_64/syscall.S as
+
+    syscall:
+        movq %rdi, %rax         /* Syscall number -> rax.  */
+        movq %rsi, %rdi         /* shift arg1 - arg5.  */
+        movq %rdx, %rsi
+        movq %rcx, %rdx
+        movq %r8, %r10
+        movq %r9, %r8
+        movq 8(%rsp),%r9        /* arg6 is on the stack.  */
+        syscall                 /* Do the system call.  */
+        cmpq $-4095, %rax       /* Check %rax for error.  */
+        jae __syscall_error     /* Branch forward if it failed.  */
+        ret                     /* Return to caller.  */
+
+In libc/sysdeps/linux/x86_64/__syscall_error.c, __syscall_error is
+defined as
+
+    int __syscall_error(void) attribute_hidden;
+    int __syscall_error(void)
+    {
+        register int err_no __asm__ ("%rcx");
+        __asm__ ("mov %rax, %rcx\n\t"
+                 "neg %rcx");
+        __set_errno(err_no);
+        return -1;
+    }
+
+So __syscall_error returns -1 as a 32-bit int in a 64-bit register, %rax
+(0x00000000ffffffff, whose decimal value is decimal 4294967295) and a
+test like this always returns false:
+
+    if (syscall(number, ...) == -1)
+        foo();
+
+Fix the error by making __syscall_error return a long, like syscall().
+
+The problem can be circumvented by the caller by coercing the returned
+value to int before comparing it to -1:
+
+    if ((int) syscall(number, ...) == -1)
+        foo();
+
+The same problem probably occurs on other 64-bit systems but so far only
+x86_64 was tested, so this change must be considered experimental.
+
+Signed-off-by: Carlos Santos <unixmania@gmail.com>
+---
+ libc/sysdeps/linux/aarch64/__syscall_error.c              | 4 ++--
+ libc/sysdeps/linux/alpha/__syscall_error.c                | 2 +-
+ libc/sysdeps/linux/arc/__syscall_error.c                  | 2 +-
+ libc/sysdeps/linux/arc/bits/syscalls.h                    | 2 +-
+ libc/sysdeps/linux/arm/__syscall_error.c                  | 4 ++--
+ libc/sysdeps/linux/csky/__syscall_error.c                 | 2 +-
+ libc/sysdeps/linux/csky/clone.c                           | 2 +-
+ libc/sysdeps/linux/frv/sysdep.c                           | 2 +-
+ libc/sysdeps/linux/hppa/__syscall_error.c                 | 4 ++--
+ libc/sysdeps/linux/i386/__syscall_error.c                 | 4 ++--
+ libc/sysdeps/linux/ia64/__syscall_error.c                 | 4 ++--
+ libc/sysdeps/linux/m68k/__syscall_error.c                 | 4 ++--
+ libc/sysdeps/linux/metag/__syscall_error.c                | 4 ++--
+ libc/sysdeps/linux/microblaze/__syscall_error.c           | 4 ++--
+ libc/sysdeps/linux/mips/__syscall_error.c                 | 4 ++--
+ libc/sysdeps/linux/nds32/__syscall_error.c                | 4 ++--
+ libc/sysdeps/linux/nios2/__syscall_error.c                | 4 ++--
+ libc/sysdeps/linux/or1k/__syscall_error.c                 | 4 ++--
+ libc/sysdeps/linux/powerpc/__syscall_error.c              | 4 ++--
+ libc/sysdeps/linux/riscv64/__syscall_error.c              | 4 ++--
+ libc/sysdeps/linux/sparc/__syscall_error.c                | 4 ++--
+ libc/sysdeps/linux/sparc64/__syscall_error.c              | 4 ++--
+ libc/sysdeps/linux/tile/__syscall_error.c                 | 2 +-
+ libc/sysdeps/linux/x86_64/__syscall_error.c               | 4 ++--
+ libc/sysdeps/linux/xtensa/__syscall_error.c               | 4 ++--
+ libpthread/nptl/sysdeps/unix/sysv/linux/__syscall_error.c | 4 ++--
+ 26 files changed, 45 insertions(+), 45 deletions(-)
+
+diff --git a/libc/sysdeps/linux/aarch64/__syscall_error.c b/libc/sysdeps/linux/aarch64/__syscall_error.c
+index 2b642e816..c682aae49 100644
+--- a/libc/sysdeps/linux/aarch64/__syscall_error.c
++++ b/libc/sysdeps/linux/aarch64/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(int err_no) attribute_hidden;
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no) attribute_hidden;
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(-err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/alpha/__syscall_error.c b/libc/sysdeps/linux/alpha/__syscall_error.c
+index 7c081f3b5..c986e484d 100644
+--- a/libc/sysdeps/linux/alpha/__syscall_error.c
++++ b/libc/sysdeps/linux/alpha/__syscall_error.c
+@@ -8,7 +8,7 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+    an error number into errno.  */
+-int attribute_hidden __syscall_error (void)
++long attribute_hidden __syscall_error (void)
+ {
+ 	register int err_no __asm__("$0");
+ 	__set_errno (err_no);
+diff --git a/libc/sysdeps/linux/arc/__syscall_error.c b/libc/sysdeps/linux/arc/__syscall_error.c
+index 962d743e4..7f30485a8 100644
+--- a/libc/sysdeps/linux/arc/__syscall_error.c
++++ b/libc/sysdeps/linux/arc/__syscall_error.c
+@@ -8,7 +8,7 @@
+ #include <errno.h>
+ #include <sys/syscall.h>
+ 
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(-err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/arc/bits/syscalls.h b/libc/sysdeps/linux/arc/bits/syscalls.h
+index 248ef7844..c858d788b 100644
+--- a/libc/sysdeps/linux/arc/bits/syscalls.h
++++ b/libc/sysdeps/linux/arc/bits/syscalls.h
+@@ -34,7 +34,7 @@
+ /* ldso doesn't have real errno */
+ #define ERRNO_ERRANDS(_sys_result)
+ #else /* !IS_IN_rtld */
+-extern int __syscall_error (int);
++extern long __syscall_error (int);
+ #ifndef IS_IN_libc
+ /* Inter-libc callers use PLT */
+ #define CALL_ERRNO_SETTER   "bl   __syscall_error@plt    \n\t"
+diff --git a/libc/sysdeps/linux/arm/__syscall_error.c b/libc/sysdeps/linux/arm/__syscall_error.c
+index 2b642e816..c682aae49 100644
+--- a/libc/sysdeps/linux/arm/__syscall_error.c
++++ b/libc/sysdeps/linux/arm/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(int err_no) attribute_hidden;
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no) attribute_hidden;
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(-err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/csky/__syscall_error.c b/libc/sysdeps/linux/csky/__syscall_error.c
+index cc1fb5977..c6a4a14eb 100644
+--- a/libc/sysdeps/linux/csky/__syscall_error.c
++++ b/libc/sysdeps/linux/csky/__syscall_error.c
+@@ -8,7 +8,7 @@
+ #include <errno.h>
+ #include <features.h>
+ 
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(-err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/csky/clone.c b/libc/sysdeps/linux/csky/clone.c
+index 991cb8962..f0fcc257b 100644
+--- a/libc/sysdeps/linux/csky/clone.c
++++ b/libc/sysdeps/linux/csky/clone.c
+@@ -9,7 +9,7 @@
+ #include <sysdep.h>
+ #include <unistd.h>
+ 
+-extern int __syscall_error(int err_no);
++extern long __syscall_error(int err_no);
+ 
+ extern int __csky_clone (
+   int flags,
+diff --git a/libc/sysdeps/linux/frv/sysdep.c b/libc/sysdeps/linux/frv/sysdep.c
+index bfae12100..28beb418f 100644
+--- a/libc/sysdeps/linux/frv/sysdep.c
++++ b/libc/sysdeps/linux/frv/sysdep.c
+@@ -19,7 +19,7 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+    an error number into errno.  */
+-int __syscall_error (int err_no)
++long __syscall_error (int err_no)
+ {
+   __set_errno (-err_no);
+   return -1;
+diff --git a/libc/sysdeps/linux/hppa/__syscall_error.c b/libc/sysdeps/linux/hppa/__syscall_error.c
+index 5e109a83b..af26cf6ab 100644
+--- a/libc/sysdeps/linux/hppa/__syscall_error.c
++++ b/libc/sysdeps/linux/hppa/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(int err_no) attribute_hidden;
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no) attribute_hidden;
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/i386/__syscall_error.c b/libc/sysdeps/linux/i386/__syscall_error.c
+index 36946bc6d..102ebbedb 100644
+--- a/libc/sysdeps/linux/i386/__syscall_error.c
++++ b/libc/sysdeps/linux/i386/__syscall_error.c
+@@ -25,8 +25,8 @@
+ #include <errno.h>
+ #include <features.h>
+ 
+-int __syscall_error(void) attribute_hidden;
+-int __syscall_error(void)
++long __syscall_error(void) attribute_hidden;
++long __syscall_error(void)
+ {
+ 	register int eax __asm__ ("%eax");
+ 	int _errno = -eax;
+diff --git a/libc/sysdeps/linux/ia64/__syscall_error.c b/libc/sysdeps/linux/ia64/__syscall_error.c
+index 0727b2b53..cc2b13450 100644
+--- a/libc/sysdeps/linux/ia64/__syscall_error.c
++++ b/libc/sysdeps/linux/ia64/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(void) attribute_hidden;
+-int __syscall_error(void)
++long __syscall_error(void) attribute_hidden;
++long __syscall_error(void)
+ {
+ 	register int err_no __asm__("%r8");
+ 	__set_errno(err_no);
+diff --git a/libc/sysdeps/linux/m68k/__syscall_error.c b/libc/sysdeps/linux/m68k/__syscall_error.c
+index a29f6ffd6..2d2677521 100644
+--- a/libc/sysdeps/linux/m68k/__syscall_error.c
++++ b/libc/sysdeps/linux/m68k/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(void) attribute_hidden;
+-int __syscall_error(void)
++long __syscall_error(void) attribute_hidden;
++long __syscall_error(void)
+ {
+ 	register int err_no __asm__("%d0");
+ 	__set_errno(-err_no);
+diff --git a/libc/sysdeps/linux/metag/__syscall_error.c b/libc/sysdeps/linux/metag/__syscall_error.c
+index f97cd0126..3e82abe0d 100644
+--- a/libc/sysdeps/linux/metag/__syscall_error.c
++++ b/libc/sysdeps/linux/metag/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(int err_no) attribute_hidden;
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no) attribute_hidden;
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(-err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/microblaze/__syscall_error.c b/libc/sysdeps/linux/microblaze/__syscall_error.c
+index 2b642e816..c682aae49 100644
+--- a/libc/sysdeps/linux/microblaze/__syscall_error.c
++++ b/libc/sysdeps/linux/microblaze/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(int err_no) attribute_hidden;
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no) attribute_hidden;
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(-err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/mips/__syscall_error.c b/libc/sysdeps/linux/mips/__syscall_error.c
+index 5e109a83b..af26cf6ab 100644
+--- a/libc/sysdeps/linux/mips/__syscall_error.c
++++ b/libc/sysdeps/linux/mips/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(int err_no) attribute_hidden;
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no) attribute_hidden;
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/nds32/__syscall_error.c b/libc/sysdeps/linux/nds32/__syscall_error.c
+index 2aa6903e2..c8e6044a7 100644
+--- a/libc/sysdeps/linux/nds32/__syscall_error.c
++++ b/libc/sysdeps/linux/nds32/__syscall_error.c
+@@ -8,8 +8,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(int err_no) attribute_hidden;
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no) attribute_hidden;
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/nios2/__syscall_error.c b/libc/sysdeps/linux/nios2/__syscall_error.c
+index 2b642e816..c682aae49 100644
+--- a/libc/sysdeps/linux/nios2/__syscall_error.c
++++ b/libc/sysdeps/linux/nios2/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(int err_no) attribute_hidden;
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no) attribute_hidden;
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(-err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/or1k/__syscall_error.c b/libc/sysdeps/linux/or1k/__syscall_error.c
+index 1b7e8a394..7d1e09d91 100644
+--- a/libc/sysdeps/linux/or1k/__syscall_error.c
++++ b/libc/sysdeps/linux/or1k/__syscall_error.c
+@@ -17,11 +17,11 @@
+ 
+ #include <errno.h>
+ 
+-int __syscall_error (int err_no);
++long __syscall_error (int err_no);
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error (int err_no)
++long __syscall_error (int err_no)
+ {
+ 	__set_errno (err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/powerpc/__syscall_error.c b/libc/sysdeps/linux/powerpc/__syscall_error.c
+index 5e109a83b..af26cf6ab 100644
+--- a/libc/sysdeps/linux/powerpc/__syscall_error.c
++++ b/libc/sysdeps/linux/powerpc/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(int err_no) attribute_hidden;
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no) attribute_hidden;
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/riscv64/__syscall_error.c b/libc/sysdeps/linux/riscv64/__syscall_error.c
+index 2b642e816..c682aae49 100644
+--- a/libc/sysdeps/linux/riscv64/__syscall_error.c
++++ b/libc/sysdeps/linux/riscv64/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(int err_no) attribute_hidden;
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no) attribute_hidden;
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(-err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/sparc/__syscall_error.c b/libc/sysdeps/linux/sparc/__syscall_error.c
+index 5e109a83b..af26cf6ab 100644
+--- a/libc/sysdeps/linux/sparc/__syscall_error.c
++++ b/libc/sysdeps/linux/sparc/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(int err_no) attribute_hidden;
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no) attribute_hidden;
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/sparc64/__syscall_error.c b/libc/sysdeps/linux/sparc64/__syscall_error.c
+index 5e109a83b..af26cf6ab 100644
+--- a/libc/sysdeps/linux/sparc64/__syscall_error.c
++++ b/libc/sysdeps/linux/sparc64/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(int err_no) attribute_hidden;
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no) attribute_hidden;
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/tile/__syscall_error.c b/libc/sysdeps/linux/tile/__syscall_error.c
+index a91fdff3a..31cab3799 100644
+--- a/libc/sysdeps/linux/tile/__syscall_error.c
++++ b/libc/sysdeps/linux/tile/__syscall_error.c
+@@ -6,7 +6,7 @@
+ #include <errno.h>
+ #include <features.h>
+ 
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(-err_no);
+ 	return -1;
+diff --git a/libc/sysdeps/linux/x86_64/__syscall_error.c b/libc/sysdeps/linux/x86_64/__syscall_error.c
+index 448f50983..7f0f388c4 100644
+--- a/libc/sysdeps/linux/x86_64/__syscall_error.c
++++ b/libc/sysdeps/linux/x86_64/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(void) attribute_hidden;
+-int __syscall_error(void)
++long __syscall_error(void) attribute_hidden;
++long __syscall_error(void)
+ {
+ 	register int err_no __asm__ ("%rcx");
+ 	__asm__ ("mov %rax, %rcx\n\t"
+diff --git a/libc/sysdeps/linux/xtensa/__syscall_error.c b/libc/sysdeps/linux/xtensa/__syscall_error.c
+index 2b642e816..c682aae49 100644
+--- a/libc/sysdeps/linux/xtensa/__syscall_error.c
++++ b/libc/sysdeps/linux/xtensa/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(int err_no) attribute_hidden;
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no) attribute_hidden;
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(-err_no);
+ 	return -1;
+diff --git a/libpthread/nptl/sysdeps/unix/sysv/linux/__syscall_error.c b/libpthread/nptl/sysdeps/unix/sysv/linux/__syscall_error.c
+index 5e109a83b..af26cf6ab 100644
+--- a/libpthread/nptl/sysdeps/unix/sysv/linux/__syscall_error.c
++++ b/libpthread/nptl/sysdeps/unix/sysv/linux/__syscall_error.c
+@@ -10,8 +10,8 @@
+ 
+ /* This routine is jumped to by all the syscall handlers, to stash
+  * an error number into errno.  */
+-int __syscall_error(int err_no) attribute_hidden;
+-int __syscall_error(int err_no)
++long __syscall_error(int err_no) attribute_hidden;
++long __syscall_error(int err_no)
+ {
+ 	__set_errno(err_no);
+ 	return -1;
+-- 
+2.24.1
+

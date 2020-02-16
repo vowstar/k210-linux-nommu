@@ -1,0 +1,24 @@
+From c7989550b966ff993fbacd208ddc7263439bde60 Mon Sep 17 00:00:00 2001
+From: Damien Le Moal <damien.lemoal@wdc.com>
+Date: Mon, 3 Feb 2020 01:29:38 +0900
+Subject: [PATCH 20/21] libintl: Fix compilation warning
+
+Signed-off-by: Damien Le Moal <damien.lemoal@wdc.com>
+---
+ libintl/libintl.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libintl/libintl.c b/libintl/libintl.c
+index 0851fac1c..b100ef542 100644
+--- a/libintl/libintl.c
++++ b/libintl/libintl.c
+@@ -78,5 +78,5 @@ char *bind_textdomain_codeset(const char *domainname, const char *codeset)
+ }
+ 
+ /* trick configure tests checking for gnu libintl, as in the copy included in gdb */
+-const char *_nl_expand_alias () { return NULL; }
++const char *_nl_expand_alias (void) { return NULL; }
+ int _nl_msg_cat_cntr = 0;
+-- 
+2.24.1
+

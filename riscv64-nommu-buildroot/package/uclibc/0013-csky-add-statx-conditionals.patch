@@ -1,0 +1,1090 @@
+From 8a04c4d84c8a1a1297ec0c5cec5522112981e0c0 Mon Sep 17 00:00:00 2001
+From: Waldemar Brodkorb <wbx@openadk.org>
+Date: Wed, 23 Oct 2019 13:57:27 +0200
+Subject: [PATCH 13/21] csky: add statx conditionals
+
+Similar to glibc commit
+https://sourceware.org/git/?p=glibc.git;a=commit;h=6bbfc5c09fc5b5e3d4a0cddbbd4e2e457767dae7
+we need to handle Linux kernel change, which removed stat64 family from default syscall set.
+
+Signed-off-by: Waldemar Brodkorb <wbx@openadk.org>
+Signed-off-by: Waldemar Brodkorb <wbrodkorb@conet.de>
+---
+ extra/Configs/Config.csky                     |  1 -
+ include/fcntl.h                               |  5 +
+ include/sys/stat.h                            |  5 +
+ ldso/include/dl-syscall.h                     | 64 ++++++++++++-
+ ldso/ldso/csky/elfinterp.c                    | 10 +-
+ .../linux/aarch64/bits/uClibc_arch_features.h |  3 +
+ .../linux/alpha/bits/uClibc_arch_features.h   |  3 +
+ .../linux/arc/bits/uClibc_arch_features.h     |  3 +
+ .../linux/arm/bits/uClibc_arch_features.h     |  3 +
+ .../linux/avr32/bits/uClibc_arch_features.h   |  3 +
+ .../linux/bfin/bits/uClibc_arch_features.h    |  3 +
+ .../linux/c6x/bits/uClibc_arch_features.h     |  3 +
+ libc/sysdeps/linux/common/bits/statx.h        | 93 +++++++++++++++++++
+ .../linux/common/bits/uClibc_arch_features.h  |  3 +
+ libc/sysdeps/linux/common/fstat.c             | 16 +++-
+ libc/sysdeps/linux/common/fstat64.c           | 17 ++++
+ libc/sysdeps/linux/common/lstat.c             | 19 +++-
+ libc/sysdeps/linux/common/lstat64.c           | 17 ++++
+ libc/sysdeps/linux/common/stat.c              | 15 ++-
+ libc/sysdeps/linux/common/stat64.c            | 16 ++++
+ libc/sysdeps/linux/common/statx_cp.c          | 72 ++++++++++++++
+ libc/sysdeps/linux/common/statx_cp.h          | 22 +++++
+ .../linux/cris/bits/uClibc_arch_features.h    |  3 +
+ libc/sysdeps/linux/csky/Makefile.arch         |  2 +-
+ libc/sysdeps/linux/csky/bits/fcntl.h          |  6 +-
+ .../linux/csky/bits/uClibc_arch_features.h    |  3 +
+ .../linux/frv/bits/uClibc_arch_features.h     |  3 +
+ .../linux/h8300/bits/uClibc_arch_features.h   |  3 +
+ .../linux/hppa/bits/uClibc_arch_features.h    |  3 +
+ .../linux/i386/bits/uClibc_arch_features.h    |  3 +
+ .../linux/ia64/bits/uClibc_arch_features.h    |  3 +
+ .../linux/lm32/bits/uClibc_arch_features.h    |  3 +
+ .../linux/m68k/bits/uClibc_arch_features.h    |  3 +
+ .../linux/metag/bits/uClibc_arch_features.h   |  3 +
+ .../microblaze/bits/uClibc_arch_features.h    |  3 +
+ .../linux/mips/bits/uClibc_arch_features.h    |  3 +
+ .../linux/nds32/bits/uClibc_arch_features.h   |  3 +
+ .../linux/nios2/bits/uClibc_arch_features.h   |  3 +
+ .../linux/or1k/bits/uClibc_arch_features.h    |  3 +
+ .../linux/powerpc/bits/uClibc_arch_features.h |  3 +
+ .../linux/riscv64/bits/uClibc_arch_features.h |  3 +
+ .../linux/sh/bits/uClibc_arch_features.h      |  3 +
+ .../linux/sparc/bits/uClibc_arch_features.h   |  3 +
+ .../linux/sparc64/bits/uClibc_arch_features.h |  3 +
+ .../linux/tile/bits/uClibc_arch_features.h    |  3 +
+ .../linux/x86_64/bits/uClibc_arch_features.h  |  3 +
+ .../linux/xtensa/bits/uClibc_arch_features.h  |  3 +
+ 47 files changed, 456 insertions(+), 17 deletions(-)
+ create mode 100644 libc/sysdeps/linux/common/bits/statx.h
+ create mode 100644 libc/sysdeps/linux/common/statx_cp.c
+ create mode 100644 libc/sysdeps/linux/common/statx_cp.h
+
+diff --git a/extra/Configs/Config.csky b/extra/Configs/Config.csky
+index 3173ce91f..f5dc6832b 100644
+--- a/extra/Configs/Config.csky
++++ b/extra/Configs/Config.csky
+@@ -6,7 +6,6 @@ config FORCE_OPTIONS_FOR_ARCH
+ 	bool
+ 	default y
+ 	select ARCH_ANY_ENDIAN
+-	select ARCH_HAS_DEPRECATED_SYSCALLS
+ 	select ARCH_USE_MMU
+ 	select ARCH_HAS_MMU
+ 
+diff --git a/include/fcntl.h b/include/fcntl.h
+index adcd7ef4b..e8a781f28 100644
+--- a/include/fcntl.h
++++ b/include/fcntl.h
+@@ -67,6 +67,11 @@ __BEGIN_DECLS
+ #  define AT_NO_AUTOMOUNT       0x800   /* Suppress terminal automount
+                                            traversal.  */
+ #  define AT_EMPTY_PATH         0x1000  /* Allow empty relative pathname.  */
++#  define AT_STATX_SYNC_TYPE    0x6000
++#  define AT_STATX_SYNC_AS_STAT 0x0000
++#  define AT_STATX_FORCE_SYNC   0x2000
++#  define AT_STATX_DONT_SYNC    0x4000
++#  define AT_RECURSIVE          0x8000  /* Apply to the entire subtree.  */
+ # endif
+ # define AT_EACCESS		0x200	/* Test access permitted for
+ 					   effective IDs, not real IDs.  */
+diff --git a/include/sys/stat.h b/include/sys/stat.h
+index 079e77903..c06177dad 100644
+--- a/include/sys/stat.h
++++ b/include/sys/stat.h
+@@ -393,6 +393,11 @@ extern int futimens (int __fd, const struct timespec __times[2]) __THROW;
+ #undef _MKNOD_VER
+ #define _MKNOD_VER 0
+ 
++#ifdef __USE_GNU
++# include <bits/statx.h>
++#endif
++
++
+ __END_DECLS
+ 
+ 
+diff --git a/ldso/include/dl-syscall.h b/ldso/include/dl-syscall.h
+index 9d80c6a26..55688e1c1 100644
+--- a/ldso/include/dl-syscall.h
++++ b/ldso/include/dl-syscall.h
+@@ -36,9 +36,37 @@ extern int _dl_errno;
+ /* 1. common-generic ABI doesn't need kernel_stat translation
+  * 3. S_IS?ID already provided by stat.h
+  */
++#include <fcntl.h>
+ #include <sys/stat.h>
++#include <dl-string.h>
++
++static __always_inline void
++__cp_stat_statx (struct stat *to, struct statx *from)
++{
++  _dl_memset (to, 0, sizeof (struct stat));
++  to->st_dev = ((from->stx_dev_minor & 0xff) | (from->stx_dev_major << 8)
++		| ((from->stx_dev_minor & ~0xff) << 12));
++  to->st_rdev = ((from->stx_rdev_minor & 0xff) | (from->stx_rdev_major << 8)
++		 | ((from->stx_rdev_minor & ~0xff) << 12));
++  to->st_ino = from->stx_ino;
++  to->st_mode = from->stx_mode;
++  to->st_nlink = from->stx_nlink;
++  to->st_uid = from->stx_uid;
++  to->st_gid = from->stx_gid;
++  to->st_atime = from->stx_atime.tv_sec;
++  to->st_atim.tv_nsec = from->stx_atime.tv_nsec;
++  to->st_mtime = from->stx_mtime.tv_sec;
++  to->st_mtim.tv_nsec = from->stx_mtime.tv_nsec;
++  to->st_ctime = from->stx_ctime.tv_sec;
++  to->st_ctim.tv_nsec = from->stx_ctime.tv_nsec;
++  to->st_size = from->stx_size;
++  to->st_blocks = from->stx_blocks;
++  to->st_blksize = from->stx_blksize;
++}
+ #endif
+ 
++#define AT_NO_AUTOMOUNT       0x800
++#define AT_EMPTY_PATH         0x1000 
+ 
+ /* Here are the definitions for some syscalls that are used
+    by the dynamic linker.  The idea is that we want to be able
+@@ -109,14 +137,48 @@ static __always_inline int _dl_stat(const char *file_name,
+ # define __NR__dl_stat __NR_stat
+ static __always_inline _syscall2(int, _dl_stat, const char *, file_name,
+                         struct stat *, buf)
++
++#elif defined __NR_statx && defined __UCLIBC_HAVE_STATX__
++# define __NR__dl_statx __NR_statx
++# include <fcntl.h>
++# include <statx_cp.h>
++
++static __always_inline _syscall5(int, _dl_statx, int, fd, const char *, file_name, int, flags,
++			         unsigned int, mask, struct statx *, buf);
++
++static __always_inline int _dl_stat(const char *file_name,
++                        struct stat *buf)
++{
++	struct statx tmp;
++	int rc = _dl_statx(AT_FDCWD, file_name, AT_NO_AUTOMOUNT, STATX_BASIC_STATS, &tmp);
++	if (rc == 0)
++		__cp_stat_statx ((struct stat *)buf, &tmp);
++	return rc;
++}
+ #endif
+ 
+ #if defined __NR_fstat64 && !defined __NR_fstat
+ # define __NR__dl_fstat __NR_fstat64
++static __always_inline _syscall2(int, _dl_fstat, int, fd, struct stat *, buf)
+ #elif defined __NR_fstat
+ # define __NR__dl_fstat __NR_fstat
+-#endif
+ static __always_inline _syscall2(int, _dl_fstat, int, fd, struct stat *, buf)
++#elif defined __NR_statx && defined __UCLIBC_HAVE_STATX__
++# define __NR__dl_fstatx __NR_statx
++static __always_inline _syscall5(int, _dl_fstatx, int, fd, const char *, file_name, int, flags, unsigned int, mask, struct stat *, buf);
++
++static __always_inline int _dl_fstat(int fd,
++                        struct stat *buf)
++{
++	struct statx tmp;
++	int rc = _dl_fstatx(fd, "", AT_EMPTY_PATH, STATX_BASIC_STATS, &tmp);
++	if (rc == 0)
++		__cp_stat_statx ((struct stat *)buf, &tmp);
++	return rc;
++}
++#else
++static __always_inline _syscall2(int, _dl_fstat, int, fd, struct stat *, buf)
++#endif
+ 
+ #define __NR__dl_munmap __NR_munmap
+ static __always_inline _syscall2(int, _dl_munmap, void *, start, unsigned long, length)
+diff --git a/ldso/ldso/csky/elfinterp.c b/ldso/ldso/csky/elfinterp.c
+index 9dba2a041..49cdaa39b 100644
+--- a/ldso/ldso/csky/elfinterp.c
++++ b/ldso/ldso/csky/elfinterp.c
+@@ -79,17 +79,11 @@ _dl_parse(struct elf_resolve *tpnt, struct r_scope_elem*scope,
+                     strtab + symtab[symtab_index].st_name);
+         if (unlikely(res < 0)) {
+             int reloc_type = ELF32_R_TYPE(rpnt->r_info);
+-
+-#if defined (__SUPPORT_LD_DEBUG__)
+-            _dl_dprintf(2, "2can't handle reloc type '%s' in lib '%s'\n",
+-                    _dl_reltypes(reloc_type), tpnt->libname);
+-#else
+-            _dl_dprintf(2, "3can't handle reloc type %x in lib '%s'\n",
++            _dl_dprintf(2, "2can't handle reloc type %x in lib '%s'\n",
+                     reloc_type, tpnt->libname);
+-#endif
+             return res;
+         } else if (unlikely(res > 0)) {
+-            _dl_dprintf(2, "4can't resolve symbol in lib '%s'.\n", tpnt->libname);
++            _dl_dprintf(2, "3can't resolve symbol in lib '%s'.\n", tpnt->libname);
+             return res;
+         }
+     }
+diff --git a/libc/sysdeps/linux/aarch64/bits/uClibc_arch_features.h b/libc/sysdeps/linux/aarch64/bits/uClibc_arch_features.h
+index 7cae090ec..90042e815 100644
+--- a/libc/sysdeps/linux/aarch64/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/aarch64/bits/uClibc_arch_features.h
+@@ -11,6 +11,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target have a broken create_module() ? */
+ #define __UCLIBC_BROKEN_CREATE_MODULE__
+ 
+diff --git a/libc/sysdeps/linux/alpha/bits/uClibc_arch_features.h b/libc/sysdeps/linux/alpha/bits/uClibc_arch_features.h
+index 18c18f92d..844fb8bcd 100644
+--- a/libc/sysdeps/linux/alpha/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/alpha/bits/uClibc_arch_features.h
+@@ -11,6 +11,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/arc/bits/uClibc_arch_features.h b/libc/sysdeps/linux/arc/bits/uClibc_arch_features.h
+index 94e089d5d..119bbb7e1 100755
+--- a/libc/sysdeps/linux/arc/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/arc/bits/uClibc_arch_features.h
+@@ -17,6 +17,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #undef __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target have a broken create_module() ? */
+ #undef __UCLIBC_BROKEN_CREATE_MODULE__
+ 
+diff --git a/libc/sysdeps/linux/arm/bits/uClibc_arch_features.h b/libc/sysdeps/linux/arm/bits/uClibc_arch_features.h
+index 671afd3ac..b0b093c99 100644
+--- a/libc/sysdeps/linux/arm/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/arm/bits/uClibc_arch_features.h
+@@ -11,6 +11,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #undef __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #ifdef __ARM_EABI__
+ #define __UCLIBC_SYSCALL_ALIGN_64BIT__
+diff --git a/libc/sysdeps/linux/avr32/bits/uClibc_arch_features.h b/libc/sysdeps/linux/avr32/bits/uClibc_arch_features.h
+index cb0eae804..bda862fcd 100644
+--- a/libc/sysdeps/linux/avr32/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/avr32/bits/uClibc_arch_features.h
+@@ -12,6 +12,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/bfin/bits/uClibc_arch_features.h b/libc/sysdeps/linux/bfin/bits/uClibc_arch_features.h
+index 9646aac45..95f4d27e5 100644
+--- a/libc/sysdeps/linux/bfin/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/bfin/bits/uClibc_arch_features.h
+@@ -11,6 +11,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/c6x/bits/uClibc_arch_features.h b/libc/sysdeps/linux/c6x/bits/uClibc_arch_features.h
+index 7b6077e3e..ef34fa295 100644
+--- a/libc/sysdeps/linux/c6x/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/c6x/bits/uClibc_arch_features.h
+@@ -12,6 +12,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/common/bits/statx.h b/libc/sysdeps/linux/common/bits/statx.h
+new file mode 100644
+index 000000000..eb9b8535c
+--- /dev/null
++++ b/libc/sysdeps/linux/common/bits/statx.h
+@@ -0,0 +1,93 @@
++/* Generic statx-related definitions and declarations.
++   Copyright (C) 2018-2019 Free Software Foundation, Inc.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++
++/* This interface is based on <linux/stat.h> in Linux.  */
++
++#ifndef _SYS_STAT_H
++# error Never include <bits/statx.h> directly, include <sys/stat.h> instead.
++#endif
++
++struct statx_timestamp
++{
++  __int64_t tv_sec;
++  __uint32_t tv_nsec;
++  __int32_t __statx_timestamp_pad1[1];
++};
++
++/* Warning: The kernel may add additional fields to this struct in the
++   future.  Only use this struct for calling the statx function, not
++   for storing data.  (Expansion will be controlled by the mask
++   argument of the statx function.)  */
++struct statx
++{
++  __uint32_t stx_mask;
++  __uint32_t stx_blksize;
++  __uint64_t stx_attributes;
++  __uint32_t stx_nlink;
++  __uint32_t stx_uid;
++  __uint32_t stx_gid;
++  __uint16_t stx_mode;
++  __uint16_t __statx_pad1[1];
++  __uint64_t stx_ino;
++  __uint64_t stx_size;
++  __uint64_t stx_blocks;
++  __uint64_t stx_attributes_mask;
++  struct statx_timestamp stx_atime;
++  struct statx_timestamp stx_btime;
++  struct statx_timestamp stx_ctime;
++  struct statx_timestamp stx_mtime;
++  __uint32_t stx_rdev_major;
++  __uint32_t stx_rdev_minor;
++  __uint32_t stx_dev_major;
++  __uint32_t stx_dev_minor;
++  __uint64_t __statx_pad2[14];
++};
++
++#ifndef STATX_TYPE
++# define STATX_TYPE 0x0001U
++# define STATX_MODE 0x0002U
++# define STATX_NLINK 0x0004U
++# define STATX_UID 0x0008U
++# define STATX_GID 0x0010U
++# define STATX_ATIME 0x0020U
++# define STATX_MTIME 0x0040U
++# define STATX_CTIME 0x0080U
++# define STATX_INO 0x0100U
++# define STATX_SIZE 0x0200U
++# define STATX_BLOCKS 0x0400U
++# define STATX_BASIC_STATS 0x07ffU
++# define STATX_ALL 0x0fffU
++# define STATX_BTIME 0x0800U
++# define STATX__RESERVED 0x80000000U
++
++# define STATX_ATTR_COMPRESSED 0x0004
++# define STATX_ATTR_IMMUTABLE 0x0010
++# define STATX_ATTR_APPEND 0x0020
++# define STATX_ATTR_NODUMP 0x0040
++# define STATX_ATTR_ENCRYPTED 0x0800
++# define STATX_ATTR_AUTOMOUNT 0x1000
++#endif /* !STATX_TYPE */
++
++__BEGIN_DECLS
++
++/* Fill *BUF with information about PATH in DIRFD.  */
++int statx (int __dirfd, const char *__restrict __path, int __flags,
++           unsigned int __mask, struct statx *__restrict __buf)
++  __THROW __nonnull ((2, 5));
++
++__END_DECLS
++
+diff --git a/libc/sysdeps/linux/common/bits/uClibc_arch_features.h b/libc/sysdeps/linux/common/bits/uClibc_arch_features.h
+index 37c7ceb60..c79ca7dfa 100644
+--- a/libc/sysdeps/linux/common/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/common/bits/uClibc_arch_features.h
+@@ -14,6 +14,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #undef __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/common/fstat.c b/libc/sysdeps/linux/common/fstat.c
+index 030360dfc..0b2798ad4 100644
+--- a/libc/sysdeps/linux/common/fstat.c
++++ b/libc/sysdeps/linux/common/fstat.c
+@@ -29,6 +29,20 @@ int fstat(int fd, struct stat *buf)
+ }
+ libc_hidden_def(fstat)
+ 
++#elif __NR_statx && defined __UCLIBC_HAVE_STATX__
++# include <fcntl.h>
++# include <statx_cp.h>
++
++int fstat(int fd, struct stat *buf)
++{
++      struct statx tmp;
++      int rc = INLINE_SYSCALL (statx, 5, fd, "", AT_EMPTY_PATH,
++                               STATX_BASIC_STATS, &tmp);
++      if (rc == 0)
++        __cp_stat_statx ((struct stat *)buf, &tmp);
++}
++libc_hidden_def(fstat)
++
+ #elif defined __NR_fstat
+ int fstat(int fd, struct stat *buf)
+ {
+@@ -57,7 +71,7 @@ int fstat(int fd, struct stat *buf)
+ libc_hidden_def(fstat)
+ #endif
+ 
+-# if ! defined __NR_fstat64
++# if ! defined __NR_fstat64 && ! defined __UCLIBC_HAVE_STATX__
+ strong_alias_untyped(fstat,fstat64)
+ libc_hidden_def(fstat64)
+ #endif
+diff --git a/libc/sysdeps/linux/common/fstat64.c b/libc/sysdeps/linux/common/fstat64.c
+index 62995b2dc..fe1cb4fe5 100644
+--- a/libc/sysdeps/linux/common/fstat64.c
++++ b/libc/sysdeps/linux/common/fstat64.c
+@@ -28,9 +28,26 @@ int fstat64(int fd, struct stat64 *buf)
+ 		__xstat64_conv(&kbuf, buf);
+ 	}
+ 	return result;
++
+ #else
+ 	return __syscall_fstat64(fd, buf);
+ #endif
+ }
+ libc_hidden_def(fstat64)
++
++#elif __NR_statx && defined __UCLIBC_HAVE_STATX__
++# include <fcntl.h>
++# include <statx_cp.h>
++
++int fstat64(int fd, struct stat64 *buf)
++{
++      struct statx tmp;
++      int rc = INLINE_SYSCALL (statx, 5, fd, "", AT_EMPTY_PATH,
++                               STATX_BASIC_STATS, &tmp);
++      if (rc == 0)
++        __cp_stat_statx ((struct stat64 *)buf, &tmp);
++
++      return rc;
++}
++libc_hidden_def(fstat64)
+ #endif
+diff --git a/libc/sysdeps/linux/common/lstat.c b/libc/sysdeps/linux/common/lstat.c
+index 9d2024972..8a0baf85f 100644
+--- a/libc/sysdeps/linux/common/lstat.c
++++ b/libc/sysdeps/linux/common/lstat.c
+@@ -28,6 +28,23 @@ int lstat(const char *file_name, struct stat *buf)
+ }
+ libc_hidden_def(lstat)
+ 
++#elif defined __NR_statx && defined __UCLIBC_HAVE_STATX__
++# include <fcntl.h>
++# include <statx_cp.h>
++
++int lstat(const char *file_name, struct stat *buf)
++{
++      struct statx tmp;
++      int rc = INLINE_SYSCALL (statx, 5, AT_FDCWD, file_name,
++                               AT_NO_AUTOMOUNT | AT_SYMLINK_NOFOLLOW,
++                               STATX_BASIC_STATS, &tmp);
++      if (rc == 0)
++        __cp_stat_statx ((struct stat *)buf, &tmp);
++
++      return rc;
++}
++libc_hidden_def(lstat)
++
+ /* For systems which have both, prefer the old one */
+ #else
+ # include "xstatconv.h"
+@@ -57,7 +74,7 @@ int lstat(const char *file_name, struct stat *buf)
+ }
+ libc_hidden_def(lstat)
+ 
+-# if ! defined __NR_fstatat64 && ! defined __NR_lstat64
++# if ! defined __NR_fstatat64 && ! defined __NR_lstat64 && ! defined __UCLIBC_HAS_STATX__
+ strong_alias_untyped(lstat,lstat64)
+ libc_hidden_def(lstat64)
+ # endif
+diff --git a/libc/sysdeps/linux/common/lstat64.c b/libc/sysdeps/linux/common/lstat64.c
+index 2f66e7ca2..61892994e 100644
+--- a/libc/sysdeps/linux/common/lstat64.c
++++ b/libc/sysdeps/linux/common/lstat64.c
+@@ -29,6 +29,23 @@ int lstat64(const char *file_name, struct stat64 *buf)
+ }
+ libc_hidden_def(lstat64)
+ 
++#elif defined __NR_statx && defined __UCLIBC_HAVE_STATX__
++# include <fcntl.h>
++# include <statx_cp.h>
++
++int lstat64(const char *file_name, struct stat64 *buf)
++{
++      struct statx tmp;
++      int rc = INLINE_SYSCALL (statx, 5, AT_FDCWD, file_name,
++                               AT_NO_AUTOMOUNT | AT_SYMLINK_NOFOLLOW,
++                               STATX_BASIC_STATS, &tmp);
++      if (rc == 0)
++        __cp_stat64_statx ((struct stat64 *)buf, &tmp);
++
++      return rc;
++}
++libc_hidden_def(lstat64)
++
+ /* For systems which have both, prefer the old one */
+ #elif defined __NR_lstat64
+ # include "xstatconv.h"
+diff --git a/libc/sysdeps/linux/common/stat.c b/libc/sysdeps/linux/common/stat.c
+index 6489d229b..a860c0c7f 100644
+--- a/libc/sysdeps/linux/common/stat.c
++++ b/libc/sysdeps/linux/common/stat.c
+@@ -27,7 +27,20 @@ int stat(const char *file_name, struct stat *buf)
+ {
+ 	return fstatat64(AT_FDCWD, file_name, buf, 0);
+ }
++#elif __NR_statx && defined __UCLIBC_HAVE_STATX__
++# include <fcntl.h>
++# include <statx_cp.h>
+ 
++int stat(const char *file_name, struct stat *buf)
++{
++	struct statx tmp;
++	int rc = INLINE_SYSCALL (statx, 5, AT_FDCWD, file_name, AT_NO_AUTOMOUNT,
++                                STATX_BASIC_STATS, &tmp);
++	if (rc == 0)
++		__cp_stat_statx ((struct stat *)buf, &tmp);
++
++	return rc;
++}
+ #else
+ # include "xstatconv.h"
+ 
+@@ -58,7 +71,7 @@ int stat(const char *file_name, struct stat *buf)
+ #endif /* __NR_fstat64 */
+ libc_hidden_def(stat)
+ 
+-#if ! defined __NR_stat64 && ! defined __NR_fstatat64
++#if ! defined __NR_stat64 && ! defined __NR_fstatat64 && ! defined __UCLIBC_HAVE_STATX__
+ strong_alias_untyped(stat,stat64)
+ libc_hidden_def(stat64)
+ #endif
+diff --git a/libc/sysdeps/linux/common/stat64.c b/libc/sysdeps/linux/common/stat64.c
+index ef365c7e7..47d938b11 100644
+--- a/libc/sysdeps/linux/common/stat64.c
++++ b/libc/sysdeps/linux/common/stat64.c
+@@ -20,6 +20,22 @@ int stat64(const char *file_name, struct stat64 *buf)
+ }
+ libc_hidden_def(stat64)
+ 
++#elif __NR_statx && defined __UCLIBC_HAVE_STATX__
++# include <fcntl.h>
++# include <statx_cp.h>
++
++int stat64(const char *file_name, struct stat64 *buf)
++{
++	struct statx tmp;
++	int rc = INLINE_SYSCALL (statx, 5, AT_FDCWD, file_name, AT_NO_AUTOMOUNT,
++                                STATX_BASIC_STATS, &tmp);
++	if (rc == 0)
++		__cp_stat_statx ((struct stat64 *)buf, &tmp);
++
++	return rc;
++}
++libc_hidden_def(stat64)
++
+ /* For systems which have both, prefer the old one */
+ # elif defined __NR_stat64
+ # define __NR___syscall_stat64 __NR_stat64
+diff --git a/libc/sysdeps/linux/common/statx_cp.c b/libc/sysdeps/linux/common/statx_cp.c
+new file mode 100644
+index 000000000..1a6253b4d
+--- /dev/null
++++ b/libc/sysdeps/linux/common/statx_cp.c
+@@ -0,0 +1,72 @@
++/* Struct statx to stat/stat64 conversion for Linux.
++   Copyright (C) 2018 Free Software Foundation, Inc.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library.  If not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <stddef.h>
++#include <string.h>
++#include <sys/stat.h>
++
++#include <statx_cp.h>
++
++#if !defined(__NR_fstat64) || !defined(__NR_fstatat64)
++void
++__cp_stat64_statx (struct stat64 *to, struct statx *from)
++{
++  memset (to, 0, sizeof (struct stat64));
++  to->st_dev = ((from->stx_dev_minor & 0xff) | (from->stx_dev_major << 8)
++		| ((from->stx_dev_minor & ~0xff) << 12));
++  to->st_rdev = ((from->stx_rdev_minor & 0xff) | (from->stx_rdev_major << 8)
++		 | ((from->stx_rdev_minor & ~0xff) << 12));
++  to->st_ino = from->stx_ino;
++  to->st_mode = from->stx_mode;
++  to->st_nlink = from->stx_nlink;
++  to->st_uid = from->stx_uid;
++  to->st_gid = from->stx_gid;
++  to->st_atime = from->stx_atime.tv_sec;
++  to->st_atim.tv_nsec = from->stx_atime.tv_nsec;
++  to->st_mtime = from->stx_mtime.tv_sec;
++  to->st_mtim.tv_nsec = from->stx_mtime.tv_nsec;
++  to->st_ctime = from->stx_ctime.tv_sec;
++  to->st_ctim.tv_nsec = from->stx_ctime.tv_nsec;
++  to->st_size = from->stx_size;
++  to->st_blocks = from->stx_blocks;
++  to->st_blksize = from->stx_blksize;
++}
++
++void
++__cp_stat_statx (struct stat *to, struct statx *from)
++{
++  memset (to, 0, sizeof (struct stat));
++  to->st_dev = ((from->stx_dev_minor & 0xff) | (from->stx_dev_major << 8)
++		| ((from->stx_dev_minor & ~0xff) << 12));
++  to->st_rdev = ((from->stx_rdev_minor & 0xff) | (from->stx_rdev_major << 8)
++		 | ((from->stx_rdev_minor & ~0xff) << 12));
++  to->st_ino = from->stx_ino;
++  to->st_mode = from->stx_mode;
++  to->st_nlink = from->stx_nlink;
++  to->st_uid = from->stx_uid;
++  to->st_gid = from->stx_gid;
++  to->st_atime = from->stx_atime.tv_sec;
++  to->st_atim.tv_nsec = from->stx_atime.tv_nsec;
++  to->st_mtime = from->stx_mtime.tv_sec;
++  to->st_mtim.tv_nsec = from->stx_mtime.tv_nsec;
++  to->st_ctime = from->stx_ctime.tv_sec;
++  to->st_ctim.tv_nsec = from->stx_ctime.tv_nsec;
++  to->st_size = from->stx_size;
++  to->st_blocks = from->stx_blocks;
++  to->st_blksize = from->stx_blksize;
++}
++#endif
+diff --git a/libc/sysdeps/linux/common/statx_cp.h b/libc/sysdeps/linux/common/statx_cp.h
+new file mode 100644
+index 000000000..ff8fc9931
+--- /dev/null
++++ b/libc/sysdeps/linux/common/statx_cp.h
+@@ -0,0 +1,22 @@
++/* Struct statx to stat/stat64 conversion for Linux.
++   Copyright (C) 2018 Free Software Foundation, Inc.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library.  If not, see
++   <http://www.gnu.org/licenses/>.  */
++
++extern void __cp_stat64_statx (struct stat64 *to, struct statx *from)
++  attribute_hidden;
++
++extern void __cp_stat_statx (struct stat *to, struct statx *from)
++  attribute_hidden;
+diff --git a/libc/sysdeps/linux/cris/bits/uClibc_arch_features.h b/libc/sysdeps/linux/cris/bits/uClibc_arch_features.h
+index 517f68cd6..96cada276 100644
+--- a/libc/sysdeps/linux/cris/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/cris/bits/uClibc_arch_features.h
+@@ -12,6 +12,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #undef __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/csky/Makefile.arch b/libc/sysdeps/linux/csky/Makefile.arch
+index 704b36aff..a3157c265 100644
+--- a/libc/sysdeps/linux/csky/Makefile.arch
++++ b/libc/sysdeps/linux/csky/Makefile.arch
+@@ -1,6 +1,6 @@
+ CSRC-y := clone.c __syscall_error.c cacheflush.c
+ 
+ SSRC-y := __longjmp.S setjmp.S
+-SSRC-y += libc-read_tp.S vfork.S csky_clone.S
++SSRC-y += libc-read_tp.S csky_clone.S
+ 
+ 
+diff --git a/libc/sysdeps/linux/csky/bits/fcntl.h b/libc/sysdeps/linux/csky/bits/fcntl.h
+index b434badd6..de8a8a0bc 100644
+--- a/libc/sysdeps/linux/csky/bits/fcntl.h
++++ b/libc/sysdeps/linux/csky/bits/fcntl.h
+@@ -33,13 +33,13 @@
+ #define O_ASYNC		 020000
+ 
+ #ifdef __USE_XOPEN2K8
+-# define O_DIRECTORY	 040000	/* Must be a directory.	 */
+-# define O_NOFOLLOW	0100000	/* Do not follow links.	 */
++# define O_DIRECTORY   00200000	/* must be a directory */
++# define O_NOFOLLOW    00400000	/* don't follow links */
+ # define O_CLOEXEC     02000000 /* Set close_on_exec.  */
+ #endif
+ 
+ #ifdef __USE_GNU
+-# define O_DIRECT	0200000	/* Direct disk access.	*/
++# define O_DIRECT      00040000	/* direct disk access hint */
+ # define O_NOATIME     01000000 /* Do not set atime.  */
+ # define O_PATH       010000000 /* Resolve pathname but do not open file.  */
+ #endif
+diff --git a/libc/sysdeps/linux/csky/bits/uClibc_arch_features.h b/libc/sysdeps/linux/csky/bits/uClibc_arch_features.h
+index 1b866cb90..3f5dab80c 100644
+--- a/libc/sysdeps/linux/csky/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/csky/bits/uClibc_arch_features.h
+@@ -17,6 +17,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #undef __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#define __UCLIBC_HAVE_STATX__
++
+ #ifdef __CSKYABIV2__
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ #else
+diff --git a/libc/sysdeps/linux/frv/bits/uClibc_arch_features.h b/libc/sysdeps/linux/frv/bits/uClibc_arch_features.h
+index f660fd223..916b1e28d 100644
+--- a/libc/sysdeps/linux/frv/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/frv/bits/uClibc_arch_features.h
+@@ -12,6 +12,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #undef __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/h8300/bits/uClibc_arch_features.h b/libc/sysdeps/linux/h8300/bits/uClibc_arch_features.h
+index 6047d1482..e2ac28bbf 100644
+--- a/libc/sysdeps/linux/h8300/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/h8300/bits/uClibc_arch_features.h
+@@ -12,6 +12,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/hppa/bits/uClibc_arch_features.h b/libc/sysdeps/linux/hppa/bits/uClibc_arch_features.h
+index 1c096bd17..30bfdef5d 100644
+--- a/libc/sysdeps/linux/hppa/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/hppa/bits/uClibc_arch_features.h
+@@ -11,6 +11,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/i386/bits/uClibc_arch_features.h b/libc/sysdeps/linux/i386/bits/uClibc_arch_features.h
+index 5b6c2fc78..cd80c87bf 100644
+--- a/libc/sysdeps/linux/i386/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/i386/bits/uClibc_arch_features.h
+@@ -11,6 +11,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #undef __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/ia64/bits/uClibc_arch_features.h b/libc/sysdeps/linux/ia64/bits/uClibc_arch_features.h
+index 25c983206..a1e6419ba 100644
+--- a/libc/sysdeps/linux/ia64/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/ia64/bits/uClibc_arch_features.h
+@@ -11,6 +11,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/lm32/bits/uClibc_arch_features.h b/libc/sysdeps/linux/lm32/bits/uClibc_arch_features.h
+index 03cb0ca8f..adcc8c043 100644
+--- a/libc/sysdeps/linux/lm32/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/lm32/bits/uClibc_arch_features.h
+@@ -12,6 +12,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target have a broken create_module() ? */
+ #undef __UCLIBC_BROKEN_CREATE_MODULE__
+ 
+diff --git a/libc/sysdeps/linux/m68k/bits/uClibc_arch_features.h b/libc/sysdeps/linux/m68k/bits/uClibc_arch_features.h
+index 5cfaa4343..7baae5007 100644
+--- a/libc/sysdeps/linux/m68k/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/m68k/bits/uClibc_arch_features.h
+@@ -15,6 +15,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #undef __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/metag/bits/uClibc_arch_features.h b/libc/sysdeps/linux/metag/bits/uClibc_arch_features.h
+index 1433c588c..5d78b16b0 100644
+--- a/libc/sysdeps/linux/metag/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/metag/bits/uClibc_arch_features.h
+@@ -16,6 +16,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/microblaze/bits/uClibc_arch_features.h b/libc/sysdeps/linux/microblaze/bits/uClibc_arch_features.h
+index 321d699b0..312cccbce 100644
+--- a/libc/sysdeps/linux/microblaze/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/microblaze/bits/uClibc_arch_features.h
+@@ -11,6 +11,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/mips/bits/uClibc_arch_features.h b/libc/sysdeps/linux/mips/bits/uClibc_arch_features.h
+index bcdf124a4..59d9f0807 100644
+--- a/libc/sysdeps/linux/mips/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/mips/bits/uClibc_arch_features.h
+@@ -12,6 +12,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #if _MIPS_SIM == _ABIO32
+ #define __UCLIBC_SYSCALL_ALIGN_64BIT__
+diff --git a/libc/sysdeps/linux/nds32/bits/uClibc_arch_features.h b/libc/sysdeps/linux/nds32/bits/uClibc_arch_features.h
+index 5c4f634a0..275308701 100644
+--- a/libc/sysdeps/linux/nds32/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/nds32/bits/uClibc_arch_features.h
+@@ -13,6 +13,9 @@
+ /* instruction used when calling abort() to kill yourself */
+ #define __UCLIBC_ABORT_INSTRUCTION__ "bal abort"
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #define __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/nios2/bits/uClibc_arch_features.h b/libc/sysdeps/linux/nios2/bits/uClibc_arch_features.h
+index 293cc9b00..97d725048 100644
+--- a/libc/sysdeps/linux/nios2/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/nios2/bits/uClibc_arch_features.h
+@@ -12,6 +12,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #undef __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/or1k/bits/uClibc_arch_features.h b/libc/sysdeps/linux/or1k/bits/uClibc_arch_features.h
+index e11e71f88..a9560b0b9 100644
+--- a/libc/sysdeps/linux/or1k/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/or1k/bits/uClibc_arch_features.h
+@@ -14,6 +14,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target have a broken create_module() ? */
+ #undef __UCLIBC_BROKEN_CREATE_MODULE__
+ 
+diff --git a/libc/sysdeps/linux/powerpc/bits/uClibc_arch_features.h b/libc/sysdeps/linux/powerpc/bits/uClibc_arch_features.h
+index 661069384..bc6ae652e 100644
+--- a/libc/sysdeps/linux/powerpc/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/powerpc/bits/uClibc_arch_features.h
+@@ -11,6 +11,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #define __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/riscv64/bits/uClibc_arch_features.h b/libc/sysdeps/linux/riscv64/bits/uClibc_arch_features.h
+index 94ec2f51f..3b8361442 100644
+--- a/libc/sysdeps/linux/riscv64/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/riscv64/bits/uClibc_arch_features.h
+@@ -10,6 +10,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ #define __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+ /* does your target have a broken create_module() ? */
+diff --git a/libc/sysdeps/linux/sh/bits/uClibc_arch_features.h b/libc/sysdeps/linux/sh/bits/uClibc_arch_features.h
+index 401bd45d6..049c5ca1a 100644
+--- a/libc/sysdeps/linux/sh/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/sh/bits/uClibc_arch_features.h
+@@ -15,6 +15,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/sparc/bits/uClibc_arch_features.h b/libc/sysdeps/linux/sparc/bits/uClibc_arch_features.h
+index 283a250bb..76f5084ff 100644
+--- a/libc/sysdeps/linux/sparc/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/sparc/bits/uClibc_arch_features.h
+@@ -11,6 +11,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/sparc64/bits/uClibc_arch_features.h b/libc/sysdeps/linux/sparc64/bits/uClibc_arch_features.h
+index 283a250bb..76f5084ff 100644
+--- a/libc/sysdeps/linux/sparc64/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/sparc64/bits/uClibc_arch_features.h
+@@ -11,6 +11,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/tile/bits/uClibc_arch_features.h b/libc/sysdeps/linux/tile/bits/uClibc_arch_features.h
+index 1472b18ab..ec7e4111f 100644
+--- a/libc/sysdeps/linux/tile/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/tile/bits/uClibc_arch_features.h
+@@ -10,6 +10,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #undef __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ #define __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+ /* does your target have a broken create_module() ? */
+diff --git a/libc/sysdeps/linux/x86_64/bits/uClibc_arch_features.h b/libc/sysdeps/linux/x86_64/bits/uClibc_arch_features.h
+index 43801699e..400cfe3b9 100644
+--- a/libc/sysdeps/linux/x86_64/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/x86_64/bits/uClibc_arch_features.h
+@@ -11,6 +11,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #undef __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/xtensa/bits/uClibc_arch_features.h b/libc/sysdeps/linux/xtensa/bits/uClibc_arch_features.h
+index a15744c2f..de9b38983 100644
+--- a/libc/sysdeps/linux/xtensa/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/xtensa/bits/uClibc_arch_features.h
+@@ -11,6 +11,9 @@
+ /* can your target use syscall6() for mmap ? */
+ #define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
++/* does your target use statx */
++#undef __UCLIBC_HAVE_STATX__
++
+ /* does your target align 64bit values in register pairs ? (32bit arches only) */
+ #define __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+-- 
+2.24.1
+

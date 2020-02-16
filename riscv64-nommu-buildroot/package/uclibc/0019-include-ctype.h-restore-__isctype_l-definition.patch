@@ -1,0 +1,29 @@
+From 90f24fc94897d93deb80d933d18a4f31dc6bf05a Mon Sep 17 00:00:00 2001
+From: Max Filippov <jcmvbkbc@gmail.com>
+Date: Sun, 9 Feb 2020 12:13:02 -0800
+Subject: [PATCH 19/21] include/ctype.h: restore __isctype_l definition
+
+Recent is*_l fix broke uclibc build because removed __isctype_l
+definition was used in libc/misc/ctype/ctype.c. Restore it.
+
+Fixes: d1a3ca7ca566 ("include/ctype.h: drop is*_l macro definitions")
+Signed-off-by: Max Filippov <jcmvbkbc@gmail.com>
+---
+ include/ctype.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/include/ctype.h b/include/ctype.h
+index e934cf332..05f21c553 100644
+--- a/include/ctype.h
++++ b/include/ctype.h
+@@ -350,6 +350,7 @@ libc_hidden_proto(tolower_l)
+ /* Return the uppercase version of C.  */
+ extern int toupper_l (int __c, __locale_t __l) __THROW;
+ 
++# define __isctype_l(c, type, locale) ((locale)->__ctype_b[(int) (c)] & (__ctype_mask_t) type)
+ # ifndef __NO_CTYPE
+ #  if (defined __USE_SVID || defined __USE_MISC || defined __USE_XOPEN) \
+ 	&& defined __UCLIBC_SUSV4_LEGACY__
+-- 
+2.24.1
+

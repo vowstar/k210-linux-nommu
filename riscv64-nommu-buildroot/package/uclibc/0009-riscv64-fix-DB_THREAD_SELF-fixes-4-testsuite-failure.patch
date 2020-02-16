@@ -1,0 +1,25 @@
+From 4bae9977da5a322fee4b90c63753420582b84887 Mon Sep 17 00:00:00 2001
+From: Waldemar Brodkorb <wbx@openadk.org>
+Date: Sun, 17 Nov 2019 20:09:35 +0100
+Subject: [PATCH 09/21] riscv64: fix DB_THREAD_SELF, fixes 4 testsuite failures
+
+---
+ libpthread/nptl/sysdeps/riscv64/tls.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libpthread/nptl/sysdeps/riscv64/tls.h b/libpthread/nptl/sysdeps/riscv64/tls.h
+index 8295c7148..f33e6ed77 100644
+--- a/libpthread/nptl/sysdeps/riscv64/tls.h
++++ b/libpthread/nptl/sysdeps/riscv64/tls.h
+@@ -160,7 +160,7 @@ register tcbhead_t *__thread_self __asm__("tp");
+ 
+ /* Magic for libthread_db to know how to do THREAD_SELF.  */
+ # define DB_THREAD_SELF \
+-  CONST_THREAD_AREA (32, sizeof (struct pthread))
++  CONST_THREAD_AREA (64, sizeof (struct pthread))
+ 
+ /* Access to data in the thread descriptor is easy.  */
+ #define THREAD_GETMEM(descr, member) \
+-- 
+2.24.1
+

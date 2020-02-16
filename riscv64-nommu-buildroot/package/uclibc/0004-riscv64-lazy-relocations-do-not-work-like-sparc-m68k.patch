@@ -1,0 +1,102 @@
+From cb9d1f53717dd67892ba943626f3d1b46f3e760b Mon Sep 17 00:00:00 2001
+From: Waldemar Brodkorb <wbx@openadk.org>
+Date: Wed, 6 Nov 2019 04:33:22 +0100
+Subject: [PATCH 04/21] riscv64: lazy relocations do not work like sparc/m68k
+
+---
+ ldso/ldso/riscv64/elfinterp.c       |  9 ++++++++-
+ libc/misc/internals/__uClibc_main.c |  2 +-
+ libc/sysdeps/linux/riscv64/crt1.S   | 10 +++++-----
+ 3 files changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/ldso/ldso/riscv64/elfinterp.c b/ldso/ldso/riscv64/elfinterp.c
+index ec1678f2a..b954779bd 100644
+--- a/ldso/ldso/riscv64/elfinterp.c
++++ b/ldso/ldso/riscv64/elfinterp.c
+@@ -226,6 +226,8 @@ _dl_do_reloc (struct elf_resolve *tpnt, struct r_scope_elem *scope,
+ 	return 0;
+ }
+ 
++#undef __RISCV_LAZY_RELOC_WORKS
++#ifdef __RISCV_LAZY_RELOC_WORKS
+ static int
+ _dl_do_lazy_reloc (struct elf_resolve *tpnt, struct r_scope_elem *scope,
+ 		   ELF_RELOC *rpnt, ElfW(Sym) *symtab, char *strtab)
+@@ -250,7 +252,6 @@ _dl_do_lazy_reloc (struct elf_resolve *tpnt, struct r_scope_elem *scope,
+ 		case R_RISCV_NONE:
+ 			break;
+ 		case R_RISCV_JUMP_SLOT:
+-			*reloc_addr += tpnt->loadaddr;
+ 			break;
+ 		default:
+ 			return -1; /*call _dl_exit(1) */
+@@ -265,11 +266,17 @@ _dl_do_lazy_reloc (struct elf_resolve *tpnt, struct r_scope_elem *scope,
+ 
+ 	return 0;
+ }
++#endif
+ 
+ void _dl_parse_lazy_relocation_information(struct dyn_elf *rpnt,
+ 	unsigned long rel_addr, unsigned long rel_size)
+ {
++#ifdef __RISCV_LAZY_RELOC_WORKS
+ 	(void)_dl_parse(rpnt->dyn, NULL, rel_addr, rel_size, _dl_do_lazy_reloc);
++#else
++	_dl_parse_relocation_information(rpnt, &_dl_loaded_modules->symbol_scope,
++									rel_addr, rel_size);
++#endif
+ }
+ 
+ int _dl_parse_relocation_information(struct dyn_elf *rpnt,
+diff --git a/libc/misc/internals/__uClibc_main.c b/libc/misc/internals/__uClibc_main.c
+index 6611090bd..affa0ce0a 100644
+--- a/libc/misc/internals/__uClibc_main.c
++++ b/libc/misc/internals/__uClibc_main.c
+@@ -500,6 +500,7 @@ void __uClibc_main(int (*main)(int, char **, char **), int argc,
+ #endif
+     }
+ # endif
++#endif
+ 
+     /* Note: It is possible that any initialization done above could
+      * have resulted in errno being set nonzero, so set it to 0 before
+@@ -511,7 +512,6 @@ void __uClibc_main(int (*main)(int, char **, char **), int argc,
+     /* Set h_errno to 0 as well */
+     if (likely(not_null_ptr(__h_errno_location)))
+ 	*(__h_errno_location()) = 0;
+-#endif
+ 
+ #if defined HAVE_CLEANUP_JMP_BUF && defined __UCLIBC_HAS_THREADS_NATIVE__
+ 	/* Memory for the cancellation buffer.  */
+diff --git a/libc/sysdeps/linux/riscv64/crt1.S b/libc/sysdeps/linux/riscv64/crt1.S
+index 1e8403d26..15aa0763c 100644
+--- a/libc/sysdeps/linux/riscv64/crt1.S
++++ b/libc/sysdeps/linux/riscv64/crt1.S
+@@ -45,6 +45,9 @@
+ 	.globl	_start
+ 	.type	_start,%function
+ 
++	.weak _init
++	.weak _fini
++
+ _start:
+ 	call  .Lload_gp
+ 	mv    a5, a0  /* rtld_fini.  */
+@@ -52,12 +55,9 @@ _start:
+ 	la   a0, main
+ 	REG_L a1, 0(sp)      /* argc.  */
+ 	addi  a2, sp, SZREG  /* argv.  */
+-	/*
+-	 * No support fo app_init/app_fini as we don't support shared libraries.
+-	 */
+-	mv    a3, zero
+-	mv    a4, zero
+ 	andi  sp, sp, ALMASK /* Align stack. */
++	lla   a3, _init
++	lla   a4, _fini
+ 	mv    a6, sp  /* stack_end.  */
+ 
+ 	tail  __uClibc_main@plt
+-- 
+2.24.1
+

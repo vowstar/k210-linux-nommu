@@ -1,0 +1,27 @@
+From d13a57c2eb09926815550c1b263cb0fad66cde3f Mon Sep 17 00:00:00 2001
+From: Vladimir Murzin <vladimir.murzin@arm.com>
+Date: Thu, 6 Feb 2020 13:13:27 +0000
+Subject: [PATCH 15/21] aarch64: always use MMU
+
+Only MMU variant is supported.
+
+Signed-off-by: Vladimir Murzin <vladimir.murzin@arm.com>
+---
+ extra/Configs/Config.aarch64 | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/extra/Configs/Config.aarch64 b/extra/Configs/Config.aarch64
+index cf1ce3b79..d666cc595 100644
+--- a/extra/Configs/Config.aarch64
++++ b/extra/Configs/Config.aarch64
+@@ -12,6 +12,7 @@ config FORCE_OPTIONS_FOR_ARCH
+ 	default y
+ 	select ARCH_ANY_ENDIAN
+ 	select ARCH_HAS_MMU
++	select ARCH_USE_MMU
+ 	select UCLIBC_HAS_FPU
+ 
+ choice
+-- 
+2.24.1
+

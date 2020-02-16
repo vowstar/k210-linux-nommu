@@ -1,0 +1,26 @@
+From f115e689750f6e94341d4dde8e10670ab3a3d746 Mon Sep 17 00:00:00 2001
+From: Eugene Yudin <e.yudin@ndmsystems.com>
+Date: Sun, 17 Nov 2019 17:31:11 +0100
+Subject: [PATCH 07/21] Makefile.in: build utils without stack smashing
+ protector
+
+---
+ utils/Makefile.in | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/utils/Makefile.in b/utils/Makefile.in
+index 2f8d1c96a..1544c8fcc 100644
+--- a/utils/Makefile.in
++++ b/utils/Makefile.in
+@@ -9,7 +9,7 @@ subdirs += utils
+ # "make utils" flags
+ 
+ CFLAGS-utils := \
+-    $(SSP_ALL_CFLAGS) \
++    $(SSP_DISABLE_FLAGS) \
+     -I$(top_srcdir)ldso/ldso/$(TARGET_ARCH) \
+     -I$(top_srcdir)ldso/include \
+     -DUCLIBC_RUNTIME_PREFIX=\"$(RUNTIME_PREFIX)\" \
+-- 
+2.24.1
+

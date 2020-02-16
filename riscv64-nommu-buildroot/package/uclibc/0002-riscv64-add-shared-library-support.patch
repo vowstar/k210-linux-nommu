@@ -1,0 +1,812 @@
+From 60eae0def70b8a2e768c6a5bec352da9d648b26c Mon Sep 17 00:00:00 2001
+From: Waldemar Brodkorb <wbx@openadk.org>
+Date: Wed, 16 Oct 2019 02:24:18 +0200
+Subject: [PATCH 02/21] riscv64: add shared library support
+
+---
+ extra/Configs/Config.in                       |   2 +-
+ extra/Configs/Config.riscv64                  |   1 -
+ include/elf.h                                 |  67 +++++
+ ldso/ldso/riscv64/dl-startup.h                |  90 ++++++
+ ldso/ldso/riscv64/dl-syscalls.h               |   1 +
+ ldso/ldso/riscv64/dl-sysdep.h                 |  91 ++++++
+ ldso/ldso/riscv64/elfinterp.c                 | 279 ++++++++++++++++++
+ ldso/ldso/riscv64/resolve.S                   |  96 ++++++
+ libc/misc/internals/__uClibc_main.c           |   2 +-
+ .../linux/riscv64/bits/uClibc_arch_features.h |   2 +-
+ libc/sysdeps/linux/riscv64/bits/uClibc_page.h |  34 +++
+ utils/ldd.c                                   |   5 +
+ 12 files changed, 666 insertions(+), 4 deletions(-)
+ create mode 100644 ldso/ldso/riscv64/dl-startup.h
+ create mode 100644 ldso/ldso/riscv64/dl-syscalls.h
+ create mode 100644 ldso/ldso/riscv64/dl-sysdep.h
+ create mode 100644 ldso/ldso/riscv64/elfinterp.c
+ create mode 100644 ldso/ldso/riscv64/resolve.S
+ create mode 100644 libc/sysdeps/linux/riscv64/bits/uClibc_page.h
+
+diff --git a/extra/Configs/Config.in b/extra/Configs/Config.in
+index e062086ac..414a77f3f 100644
+--- a/extra/Configs/Config.in
++++ b/extra/Configs/Config.in
+@@ -480,7 +480,7 @@ config LDSO_LD_LIBRARY_PATH
+ 
+ config UCLIBC_CTOR_DTOR
+ 	bool
+-	default y
++	default y if !TARGET_riscv64
+ 	help
+ 	  If you wish to build uClibc with support for global constructor
+ 	  (ctor) and global destructor (dtor) support, then answer Y here.
+diff --git a/extra/Configs/Config.riscv64 b/extra/Configs/Config.riscv64
+index 7d0136a2b..f1e8511ee 100644
+--- a/extra/Configs/Config.riscv64
++++ b/extra/Configs/Config.riscv64
+@@ -12,4 +12,3 @@ config FORCE_OPTIONS_FOR_ARCH
+ 	default y
+ 	select ARCH_LITTLE_ENDIAN
+ 	select ARCH_HAS_MMU
+-	select ARCH_HAS_NO_LDSO
+diff --git a/include/elf.h b/include/elf.h
+index 9aae04cef..d1be3bc1b 100644
+--- a/include/elf.h
++++ b/include/elf.h
+@@ -271,6 +271,7 @@ typedef struct
+ #define EM_AARCH64	183		/* ARM AARCH64 */
+ #define EM_MICROBLAZE	189		/* Xilinx Microblaze */
+ #define EM_ARCV2	195		/* ARCv2 Cores */
++#define EM_RISCV        243     	/* RISC-V */
+ #define EM_CSKY		252		/* C-SKY Cores */
+ 
+ /* NEXT FREE NUMBER: Increment this after adding your official arch number */
+@@ -3725,6 +3726,72 @@ typedef Elf32_Addr Elf32_Conflict;
+ #define R_ARC_TLS_LE_S9		0x4a
+ #define R_ARC_TLS_LE_32		0x4b
+ 
++/* RISC-V ELF Flags */
++#define EF_RISCV_RVC                    0x0001
++#define EF_RISCV_FLOAT_ABI              0x0006
++#define EF_RISCV_FLOAT_ABI_SOFT         0x0000
++#define EF_RISCV_FLOAT_ABI_SINGLE       0x0002
++#define EF_RISCV_FLOAT_ABI_DOUBLE       0x0004
++#define EF_RISCV_FLOAT_ABI_QUAD         0x0006
++
++/* RISC-V relocations.  */
++#define R_RISCV_NONE             0
++#define R_RISCV_32               1
++#define R_RISCV_64               2
++#define R_RISCV_RELATIVE         3
++#define R_RISCV_COPY             4
++#define R_RISCV_JUMP_SLOT        5
++#define R_RISCV_TLS_DTPMOD32     6
++#define R_RISCV_TLS_DTPMOD64     7
++#define R_RISCV_TLS_DTPREL32     8
++#define R_RISCV_TLS_DTPREL64     9
++#define R_RISCV_TLS_TPREL32     10
++#define R_RISCV_TLS_TPREL64     11
++#define R_RISCV_BRANCH          16
++#define R_RISCV_JAL             17
++#define R_RISCV_CALL            18
++#define R_RISCV_CALL_PLT        19
++#define R_RISCV_GOT_HI20        20
++#define R_RISCV_TLS_GOT_HI20    21
++#define R_RISCV_TLS_GD_HI20     22
++#define R_RISCV_PCREL_HI20      23
++#define R_RISCV_PCREL_LO12_I    24
++#define R_RISCV_PCREL_LO12_S    25
++#define R_RISCV_HI20            26
++#define R_RISCV_LO12_I          27
++#define R_RISCV_LO12_S          28
++#define R_RISCV_TPREL_HI20      29
++#define R_RISCV_TPREL_LO12_I    30
++#define R_RISCV_TPREL_LO12_S    31
++#define R_RISCV_TPREL_ADD       32
++#define R_RISCV_ADD8            33
++#define R_RISCV_ADD16           34
++#define R_RISCV_ADD32           35
++#define R_RISCV_ADD64           36
++#define R_RISCV_SUB8            37
++#define R_RISCV_SUB16           38
++#define R_RISCV_SUB32           39
++#define R_RISCV_SUB64           40
++#define R_RISCV_GNU_VTINHERIT   41
++#define R_RISCV_GNU_VTENTRY     42
++#define R_RISCV_ALIGN           43
++#define R_RISCV_RVC_BRANCH      44
++#define R_RISCV_RVC_JUMP        45
++#define R_RISCV_RVC_LUI         46
++#define R_RISCV_GPREL_I         47
++#define R_RISCV_GPREL_S         48
++#define R_RISCV_TPREL_I         49
++#define R_RISCV_TPREL_S         50
++#define R_RISCV_RELAX           51
++#define R_RISCV_SUB6            52
++#define R_RISCV_SET6            53
++#define R_RISCV_SET8            54
++#define R_RISCV_SET16           55
++#define R_RISCV_SET32           56
++#define R_RISCV_32_PCREL        57
++
++#define R_RISCV_NUM             58
++
+ #ifdef	__cplusplus
+ }
+ #endif
+diff --git a/ldso/ldso/riscv64/dl-startup.h b/ldso/ldso/riscv64/dl-startup.h
+new file mode 100644
+index 000000000..dabe1bebd
+--- /dev/null
++++ b/ldso/ldso/riscv64/dl-startup.h
+@@ -0,0 +1,90 @@
++/*
++ * Architecture specific code used by dl-startup.c
++ * Copyright (C) 2019 Waldemar Brodkorb <wbx@uclibc-ng.org>
++ * Ported from GNU libc
++ * Licensed under the LGPL v2.1, see the file COPYING.LIB in this tarball.
++ */
++
++/* Copyright (C) 2011-2019 Free Software Foundation, Inc.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public License as
++   published by the Free Software Foundation; either version 2.1 of the
++   License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++
++#include <features.h>
++#include <sys/asm.h>
++
++#ifndef _RTLD_PROLOGUE
++# define _RTLD_PROLOGUE(entry)                                          \
++        ".globl\t" __STRING (entry) "\n\t"                              \
++        ".type\t" __STRING (entry) ", @function\n"                      \
++        __STRING (entry) ":\n\t"
++#endif
++
++#ifndef _RTLD_EPILOGUE
++# define _RTLD_EPILOGUE(entry)                                          \
++        ".size\t" __STRING (entry) ", . - " __STRING (entry) "\n\t"
++#endif
++
++#define STRINGXP(X) __STRING (X)  
++
++__asm__(\
++	".text\n\
++        " _RTLD_PROLOGUE (_start) "\
++        mv a0, sp\n\
++        jal _dl_start\n\
++        # Stash user entry point in s0.\n\
++        mv s0, a0\n\
++        # See if we were run as a command with the executable file\n\
++        # name as an extra leading argument.\n\
++        lw a0, _dl_skip_args\n\
++        # Load the original argument count.\n\
++        " STRINGXP (REG_L) " a1, 0(sp)\n\
++        # Subtract _dl_skip_args from it.\n\
++        sub a1, a1, a0\n\
++        # Adjust the stack pointer to skip _dl_skip_args words.\n\
++        sll a0, a0, " STRINGXP (PTRLOG) "\n\
++        add sp, sp, a0\n\
++        # Save back the modified argument count.\n\
++        " STRINGXP (REG_S) " a1, 0(sp)\n\
++        # Pass our finalizer function to _start.\n\
++        lla a0, _dl_fini\n\
++        # Jump to the user entry point.\n\
++        jr s0\n\
++        " _RTLD_EPILOGUE (_start) "\
++        .previous" \
++);
++
++/* Get a pointer to the argv array.  On many platforms this can be just
++ * the address of the first argument, on other platforms we need to
++ * do something a little more subtle here.  */
++#define GET_ARGV(ARGVP, ARGS) ARGVP = (((unsigned long*)ARGS)+1)
++
++/* Function calls are not safe until the GOT relocations have been done.  */
++#define NO_FUNCS_BEFORE_BOOTSTRAP
++
++/* Handle relocation of the symbols in the dynamic loader. */
++static __always_inline
++void PERFORM_BOOTSTRAP_RELOC(ELF_RELOC *rpnt, ElfW(Addr) *reloc_addr,
++	ElfW(Addr) symbol_addr, ElfW(Addr) load_addr, ElfW(Addr) *sym)
++{
++	switch (ELF_R_TYPE(rpnt->r_info)) {
++		case R_RISCV_NONE:
++			break;
++		case R_RISCV_JUMP_SLOT:
++			*reloc_addr = symbol_addr + rpnt->r_addend;
++			break;
++		default:
++			_dl_exit(1);
++	}
++}
+diff --git a/ldso/ldso/riscv64/dl-syscalls.h b/ldso/ldso/riscv64/dl-syscalls.h
+new file mode 100644
+index 000000000..f40c4fd31
+--- /dev/null
++++ b/ldso/ldso/riscv64/dl-syscalls.h
+@@ -0,0 +1 @@
++/* stub for arch-specific syscall issues */
+diff --git a/ldso/ldso/riscv64/dl-sysdep.h b/ldso/ldso/riscv64/dl-sysdep.h
+new file mode 100644
+index 000000000..91a45af46
+--- /dev/null
++++ b/ldso/ldso/riscv64/dl-sysdep.h
+@@ -0,0 +1,91 @@
++/*
++ * Various assembly language/system dependent hacks that are required
++ * so that we can minimize the amount of platform specific code.
++ * Copyright (C) 2000-2004 by Erik Andersen <andersen@codepoet.org>
++ * Copyright (C) 2019 by Waldemar Brodkorb <wbx@uclibc-ng.org>
++ * Ported from GNU C Library
++ * Licensed under the LGPL v2.1, see the file COPYING.LIB in this tarball.
++ */
++
++/* Copyright (C) 2011-2019 Free Software Foundation, Inc.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public License as
++   published by the Free Software Foundation; either version 2.1 of the
++   License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++
++/* Define this if the system uses RELOCA.  */
++#define ELF_USES_RELOCA
++
++#include <elf.h>
++#include <link.h>
++
++/* Initialization sequence for the GOT.  */
++#define INIT_GOT(GOT_BASE,MODULE) \
++{				\
++  GOT_BASE[2] = (unsigned long) _dl_linux_resolve; \
++  GOT_BASE[1] = (unsigned long) MODULE; \
++}
++
++/* Here we define the magic numbers that this dynamic loader should accept */
++#define MAGIC1 EM_RISCV
++#undef  MAGIC2
++
++/* Used for error messages */
++#define ELF_TARGET "RISC-V"
++
++struct elf_resolve;
++unsigned long _dl_linux_resolver(struct elf_resolve * tpnt, int reloc_entry);
++
++#define ELF_MACHINE_JMP_SLOT R_RISCV_JUMP_SLOT
++
++#define elf_machine_type_class(type)                            \
++  ((ELF_RTYPE_CLASS_PLT * ((type) == ELF_MACHINE_JMP_SLOT       \
++     || (__WORDSIZE == 32 && (type) == R_RISCV_TLS_DTPREL32)    \
++     || (__WORDSIZE == 32 && (type) == R_RISCV_TLS_DTPMOD32)    \
++     || (__WORDSIZE == 32 && (type) == R_RISCV_TLS_TPREL32)     \
++     || (__WORDSIZE == 64 && (type) == R_RISCV_TLS_DTPREL64)    \
++     || (__WORDSIZE == 64 && (type) == R_RISCV_TLS_DTPMOD64)    \
++     || (__WORDSIZE == 64 && (type) == R_RISCV_TLS_TPREL64)))   \
++   | (ELF_RTYPE_CLASS_COPY * ((type) == R_RISCV_COPY)))
++
++
++/* Return the link-time address of _DYNAMIC.  */
++static inline ElfW(Addr)
++elf_machine_dynamic (void)
++{
++  extern ElfW(Addr) _GLOBAL_OFFSET_TABLE_ __attribute__ ((visibility ("hidden")));
++  return _GLOBAL_OFFSET_TABLE_;
++}
++
++
++/* Return the run-time load address of the shared object.  */
++static __always_inline ElfW(Addr) __attribute__ ((unused))
++elf_machine_load_address (void)
++{
++  ElfW(Addr) load_addr;
++  __asm__ ("lla %0, _DYNAMIC" : "=r" (load_addr));
++  return load_addr - elf_machine_dynamic ();
++}
++
++static __always_inline void
++elf_machine_relative(Elf64_Addr load_off, const Elf64_Addr rel_addr,
++                     Elf64_Word relative_count)
++{
++	Elf64_Rela *rpnt = (Elf64_Rela*)rel_addr;
++	--rpnt;
++	do {
++		Elf64_Addr *const reloc_addr = (Elf64_Addr*)(load_off + (++rpnt)->r_offset);
++
++		*reloc_addr = load_off + rpnt->r_addend;
++	} while (--relative_count);
++}
+diff --git a/ldso/ldso/riscv64/elfinterp.c b/ldso/ldso/riscv64/elfinterp.c
+new file mode 100644
+index 000000000..ec1678f2a
+--- /dev/null
++++ b/ldso/ldso/riscv64/elfinterp.c
+@@ -0,0 +1,279 @@
++/* RISCV ELF shared library loader suppport
++ *
++ * Copyright (C) 2001-2004 Erik Andersen
++ * Copyright (C) 2019 Waldemar Brodkorb <wbx@uclibc-ng.org>
++ *
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. The name of the above contributors may not be
++ *    used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ */
++
++/* Program to load an ELF binary on a linux system, and run it.
++   References to symbols in sharable libraries can be resolved by either
++   an ELF sharable library or a linux style of shared library. */
++
++#include "ldso.h"
++
++#if defined(USE_TLS) && USE_TLS
++#include "dl-tls.h"
++#include "tlsdeschtab.h"
++#endif
++
++extern int _dl_linux_resolve(void);
++
++unsigned long _dl_linux_resolver(struct elf_resolve *tpnt, int reloc_entry)
++{
++	ELF_RELOC *this_reloc;
++	char *strtab;
++	ElfW(Sym) *symtab;
++	int symtab_index;
++	char *rel_addr;
++	char *new_addr;
++	char **got_addr;
++	ElfW(Addr) instr_addr;
++	char *symname;
++
++	rel_addr = (char *)tpnt->dynamic_info[DT_JMPREL];
++	this_reloc = (ELF_RELOC *)(rel_addr + reloc_entry);
++	symtab_index = ELF_R_SYM(this_reloc->r_info);
++
++	symtab = (ElfW(Sym) *)tpnt->dynamic_info[DT_SYMTAB];
++	strtab = (char *)tpnt->dynamic_info[DT_STRTAB];
++	symname = strtab + symtab[symtab_index].st_name;
++
++	/* Address of jump instruction to fix up */
++	instr_addr = (this_reloc->r_offset + tpnt->loadaddr);
++	got_addr = (char **)instr_addr;
++
++	/* Get the address of the GOT entry */
++	new_addr = _dl_find_hash(symname, &_dl_loaded_modules->symbol_scope, tpnt, ELF_RTYPE_CLASS_PLT, NULL);
++	if (unlikely(!new_addr)) {
++		_dl_dprintf(2, "%s: can't resolve symbol '%s'\n", _dl_progname, symname);
++		_dl_exit(1);
++	}
++#if defined (__SUPPORT_LD_DEBUG__)
++	if (_dl_debug_bindings) {
++		_dl_dprintf(_dl_debug_file, "\nresolve function: %s", symname);
++		if (_dl_debug_detail) _dl_dprintf(_dl_debug_file,
++				"\tpatched %x ==> %x @ %x", *got_addr, new_addr, got_addr);
++	}
++	if (!_dl_debug_nofixups) {
++		*got_addr = new_addr;
++	}
++#else
++	*got_addr = new_addr;
++#endif
++	return (unsigned long)new_addr;
++}
++
++static int
++_dl_parse(struct elf_resolve *tpnt, struct r_scope_elem *scope,
++	  unsigned long rel_addr, unsigned long rel_size,
++	  int (*reloc_fnc) (struct elf_resolve *tpnt, struct r_scope_elem *scope,
++			    ELF_RELOC *rpnt, ElfW(Sym) *symtab, char *strtab))
++{
++	unsigned int i;
++	char *strtab;
++	ElfW(Sym) *symtab;
++	ELF_RELOC *rpnt;
++	int symtab_index;
++
++	/* Parse the relocation information */
++	rpnt = (ELF_RELOC *)rel_addr;
++	rel_size = rel_size / sizeof(ELF_RELOC);
++
++	symtab = (ElfW(Sym) *)tpnt->dynamic_info[DT_SYMTAB];
++	strtab = (char *)tpnt->dynamic_info[DT_STRTAB];
++
++	for (i = 0; i < rel_size; i++, rpnt++) {
++		int res;
++
++		symtab_index = ELF_R_SYM(rpnt->r_info);
++
++		debug_sym(symtab, strtab, symtab_index);
++		debug_reloc(symtab, strtab, rpnt);
++
++		res = reloc_fnc(tpnt, scope, rpnt, symtab, strtab);
++
++		if (res==0) 
++			continue;
++
++		_dl_dprintf(2, "\n%s: ", _dl_progname);
++
++		if (symtab_index)
++			_dl_dprintf(2, "symbol '%s': ", 
++				strtab + symtab[symtab_index].st_name);
++
++		if (unlikely(res < 0)) {
++		        int reloc_type = ELF_R_TYPE(rpnt->r_info);
++			_dl_dprintf(2, "can't handle reloc type %x\n", reloc_type);
++			_dl_exit(-res);
++		} else if (unlikely(res > 0)) {
++			_dl_dprintf(2, "can't resolve symbol\n");
++			return res;
++		}
++	  }
++
++	  return 0;
++}
++
++static int
++_dl_do_reloc (struct elf_resolve *tpnt, struct r_scope_elem *scope,
++	      ELF_RELOC *rpnt, ElfW(Sym) *symtab, char *strtab)
++{
++	int reloc_type;
++	int symtab_index;
++	char *symname;
++#if defined USE_TLS && USE_TLS
++	struct elf_resolve *tls_tpnt = NULL;
++#endif
++	struct symbol_ref sym_ref;
++	ElfW(Addr) *reloc_addr;
++	ElfW(Addr) symbol_addr;
++#if defined (__SUPPORT_LD_DEBUG__)
++	ElfW(Addr) old_val;
++#endif
++
++	reloc_addr = (ElfW(Addr)*)(tpnt->loadaddr + (unsigned long)rpnt->r_offset);
++	reloc_type = ELF_R_TYPE(rpnt->r_info);
++	symtab_index = ELF_R_SYM(rpnt->r_info);
++	sym_ref.sym = &symtab[symtab_index];
++	sym_ref.tpnt = NULL;
++	symbol_addr = 0;
++	symname = strtab + sym_ref.sym->st_name;
++
++	if (symtab_index) {
++		symbol_addr = (ElfW(Addr))_dl_find_hash(symname, scope, tpnt,
++				elf_machine_type_class(reloc_type), &sym_ref);
++
++		/*
++		 * We want to allow undefined references to weak symbols - this might
++		 * have been intentional.  We should not be linking local symbols
++		 * here, so all bases should be covered.
++		 */
++		if (unlikely (!symbol_addr && 
++			(ELF_ST_TYPE(symtab[symtab_index].st_info) != STT_TLS) &&
++			(ELF_ST_BIND(symtab[symtab_index].st_info) != STB_WEAK))) {
++			return 1;
++		}
++		if (_dl_trace_prelink) {
++			_dl_debug_lookup (symname, tpnt, &symtab[symtab_index],
++						&sym_ref, elf_machine_type_class(reloc_type));
++		}
++#if defined USE_TLS && USE_TLS
++		tls_tpnt = sym_ref.tpnt;
++#endif
++	} else {
++		/*
++		 * Relocs against STN_UNDEF are usually treated as using a
++		 * symbol value of zero, and using the module containing the
++		 * reloc itself.
++		 */
++		symbol_addr = sym_ref.sym->st_value;
++#if defined USE_TLS && USE_TLS
++		tls_tpnt = tpnt;
++#endif
++	}
++
++#if defined (__SUPPORT_LD_DEBUG__)
++	old_val = *reloc_addr;
++#endif
++
++	switch (reloc_type) {
++		case R_RISCV_NONE:
++			break;
++		case R_RISCV_64: 		/* REL_SYMBOLIC */
++		case R_RISCV_JUMP_SLOT:	/* REL_PLT */
++			*reloc_addr = symbol_addr + rpnt->r_addend;
++			break;
++		case R_RISCV_RELATIVE:
++			*reloc_addr += tpnt->loadaddr + rpnt->r_addend;
++			break;
++		case R_RISCV_COPY:
++			_dl_memcpy((void *) reloc_addr,
++				   (void *) symbol_addr, sym_ref.sym->st_size);
++			break;
++		default:
++			return -1; /*call _dl_exit(1) */
++	}
++
++#if defined (__SUPPORT_LD_DEBUG__)
++	if (_dl_debug_reloc && _dl_debug_detail) {
++		_dl_dprintf(_dl_debug_file, "\tpatched: %x ==> %x @ %x\n", 
++				old_val, *reloc_addr, reloc_addr);
++	}
++#endif
++
++	return 0;
++}
++
++static int
++_dl_do_lazy_reloc (struct elf_resolve *tpnt, struct r_scope_elem *scope,
++		   ELF_RELOC *rpnt, ElfW(Sym) *symtab, char *strtab)
++{
++	int reloc_type;
++	ElfW(Addr) *reloc_addr;
++#if defined (__SUPPORT_LD_DEBUG__)
++	ElfW(Addr) old_val;
++#endif
++
++	(void)scope;
++	(void)strtab;
++
++	reloc_addr = (ElfW(Addr)*)(tpnt->loadaddr + rpnt->r_offset);
++	reloc_type = ELF_R_TYPE(rpnt->r_info);
++
++#if defined (__SUPPORT_LD_DEBUG__)
++	old_val = *reloc_addr;
++#endif
++
++	switch (reloc_type) {
++		case R_RISCV_NONE:
++			break;
++		case R_RISCV_JUMP_SLOT:
++			*reloc_addr += tpnt->loadaddr;
++			break;
++		default:
++			return -1; /*call _dl_exit(1) */
++	}
++
++#if defined (__SUPPORT_LD_DEBUG__)
++	if (_dl_debug_reloc && _dl_debug_detail) {
++		_dl_dprintf(_dl_debug_file, "\tpatched_lazy: %x ==> %x @ %x\n",
++			    old_val, *reloc_addr, reloc_addr);
++	}
++#endif
++
++	return 0;
++}
++
++void _dl_parse_lazy_relocation_information(struct dyn_elf *rpnt,
++	unsigned long rel_addr, unsigned long rel_size)
++{
++	(void)_dl_parse(rpnt->dyn, NULL, rel_addr, rel_size, _dl_do_lazy_reloc);
++}
++
++int _dl_parse_relocation_information(struct dyn_elf *rpnt,
++	struct r_scope_elem *scope, unsigned long rel_addr, unsigned long rel_size)
++{
++	return _dl_parse(rpnt->dyn, scope, rel_addr, rel_size, _dl_do_reloc);
++}
+diff --git a/ldso/ldso/riscv64/resolve.S b/ldso/ldso/riscv64/resolve.S
+new file mode 100644
+index 000000000..2b964274f
+--- /dev/null
++++ b/ldso/ldso/riscv64/resolve.S
+@@ -0,0 +1,96 @@
++/*
++ * Copyright (C) 2019 by Waldemar Brodkorb <wbx@uclibc-ng.org>
++ * Licensed under the LGPL v2.1, see the file COPYING.LIB in this tarball.
++ * ported from GNU libc
++ */
++
++/* Copyright (C) 2017-2019 Free Software Foundation, Inc.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public License as
++   published by the Free Software Foundation; either version 2.1 of the
++   License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library.  If not, see
++   <https://www.gnu.org/licenses/>.  */
++
++#include <features.h>
++
++#include <sysdep.h>
++#include <sys/asm.h>
++
++/* Assembler veneer called from the PLT header code for lazy loading.
++   The PLT header passes its own args in t0-t2.  */
++
++#ifdef __riscv_float_abi_soft
++# define FRAME_SIZE (-((-10 * SZREG) & ALMASK))
++#else
++# define FRAME_SIZE (-((-10 * SZREG - 8 * SZFREG) & ALMASK))
++#endif
++
++ENTRY (_dl_linux_resolve)
++  # Save arguments to stack.
++  addi sp, sp, -FRAME_SIZE
++  REG_S ra, 9*SZREG(sp)
++  REG_S a0, 1*SZREG(sp)
++  REG_S a1, 2*SZREG(sp)
++  REG_S a2, 3*SZREG(sp)
++  REG_S a3, 4*SZREG(sp)
++  REG_S a4, 5*SZREG(sp)
++  REG_S a5, 6*SZREG(sp)
++  REG_S a6, 7*SZREG(sp)
++  REG_S a7, 8*SZREG(sp)
++
++#ifndef __riscv_float_abi_soft
++  FREG_S fa0, (10*SZREG + 0*SZFREG)(sp)
++  FREG_S fa1, (10*SZREG + 1*SZFREG)(sp)
++  FREG_S fa2, (10*SZREG + 2*SZFREG)(sp)
++  FREG_S fa3, (10*SZREG + 3*SZFREG)(sp)
++  FREG_S fa4, (10*SZREG + 4*SZFREG)(sp)
++  FREG_S fa5, (10*SZREG + 5*SZFREG)(sp)
++  FREG_S fa6, (10*SZREG + 6*SZFREG)(sp)
++  FREG_S fa7, (10*SZREG + 7*SZFREG)(sp)
++#endif
++
++  # Update .got.plt and obtain runtime address of callee.
++  slli a1, t1, 1
++  mv a0, t0       # link map
++  add a1, a1, t1  # reloc offset (== thrice the .got.plt offset)
++  la a2, _dl_fixup
++  jalr a2
++  mv t1, a0
++
++  # Restore arguments from stack.
++  REG_L ra, 9*SZREG(sp)
++  REG_L a0, 1*SZREG(sp)
++  REG_L a1, 2*SZREG(sp)
++  REG_L a2, 3*SZREG(sp)
++  REG_L a3, 4*SZREG(sp)
++  REG_L a4, 5*SZREG(sp)
++  REG_L a5, 6*SZREG(sp)
++  REG_L a6, 7*SZREG(sp)
++  REG_L a7, 8*SZREG(sp)
++
++#ifndef __riscv_float_abi_soft
++  FREG_L fa0, (10*SZREG + 0*SZFREG)(sp)
++  FREG_L fa1, (10*SZREG + 1*SZFREG)(sp)
++  FREG_L fa2, (10*SZREG + 2*SZFREG)(sp)
++  FREG_L fa3, (10*SZREG + 3*SZFREG)(sp)
++  FREG_L fa4, (10*SZREG + 4*SZFREG)(sp)
++  FREG_L fa5, (10*SZREG + 5*SZFREG)(sp)
++  FREG_L fa6, (10*SZREG + 6*SZFREG)(sp)
++  FREG_L fa7, (10*SZREG + 7*SZFREG)(sp)
++#endif
++
++  addi sp, sp, FRAME_SIZE
++
++  # Invoke the callee.
++  jr t1
++END (_dl_linux_resolve)
++
+diff --git a/libc/misc/internals/__uClibc_main.c b/libc/misc/internals/__uClibc_main.c
+index affa0ce0a..6611090bd 100644
+--- a/libc/misc/internals/__uClibc_main.c
++++ b/libc/misc/internals/__uClibc_main.c
+@@ -500,7 +500,6 @@ void __uClibc_main(int (*main)(int, char **, char **), int argc,
+ #endif
+     }
+ # endif
+-#endif
+ 
+     /* Note: It is possible that any initialization done above could
+      * have resulted in errno being set nonzero, so set it to 0 before
+@@ -512,6 +511,7 @@ void __uClibc_main(int (*main)(int, char **, char **), int argc,
+     /* Set h_errno to 0 as well */
+     if (likely(not_null_ptr(__h_errno_location)))
+ 	*(__h_errno_location()) = 0;
++#endif
+ 
+ #if defined HAVE_CLEANUP_JMP_BUF && defined __UCLIBC_HAS_THREADS_NATIVE__
+ 	/* Memory for the cancellation buffer.  */
+diff --git a/libc/sysdeps/linux/riscv64/bits/uClibc_arch_features.h b/libc/sysdeps/linux/riscv64/bits/uClibc_arch_features.h
+index b754f3227..94ec2f51f 100644
+--- a/libc/sysdeps/linux/riscv64/bits/uClibc_arch_features.h
++++ b/libc/sysdeps/linux/riscv64/bits/uClibc_arch_features.h
+@@ -8,7 +8,7 @@
+ #undef __UCLIBC_ABORT_INSTRUCTION__
+ 
+ /* can your target use syscall6() for mmap ? */
+-#undef __UCLIBC_MMAP_HAS_6_ARGS__
++#define __UCLIBC_MMAP_HAS_6_ARGS__
+ 
+ #define __UCLIBC_SYSCALL_ALIGN_64BIT__
+ 
+diff --git a/libc/sysdeps/linux/riscv64/bits/uClibc_page.h b/libc/sysdeps/linux/riscv64/bits/uClibc_page.h
+new file mode 100644
+index 000000000..4792d370f
+--- /dev/null
++++ b/libc/sysdeps/linux/riscv64/bits/uClibc_page.h
+@@ -0,0 +1,34 @@
++/*  Copyright (C) 2004     Erik Andersen
++ *
++ *  This library is free software; you can redistribute it and/or
++ *  modify it under the terms of the GNU Lesser General Public
++ *  License as published by the Free Software Foundation; either
++ *  version 2.1 of the License, or (at your option) any later version.
++ *
++ *  The GNU C Library is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ *  Lesser General Public License for more details.
++ *
++ *  You should have received a copy of the GNU Lesser General Public
++ *  License along with the GNU C Library; see the file COPYING.LIB.  If
++ *  not, see <http://www.gnu.org/licenses/>.
++ */
++
++/* Supply an architecture specific value for PAGE_SIZE and friends.  */
++
++#ifndef _UCLIBC_PAGE_H
++#define _UCLIBC_PAGE_H
++
++/* PAGE_SHIFT determines the page size -- in this case 4096 */
++#define PAGE_SHIFT	13
++#define PAGE_SIZE	(1UL << PAGE_SHIFT)
++#define PAGE_MASK	(~(PAGE_SIZE-1))
++
++/* Some architectures always use 12 as page shift for mmap2() eventhough the
++ * real PAGE_SHIFT != 12.  Other architectures use the same value as
++ * PAGE_SHIFT...
++ */
++#define MMAP2_PAGE_SHIFT PAGE_SHIFT
++
++#endif /* _UCLIBC_PAGE_H */
+diff --git a/utils/ldd.c b/utils/ldd.c
+index 4c5635ca7..8852be399 100644
+--- a/utils/ldd.c
++++ b/utils/ldd.c
+@@ -122,6 +122,11 @@
+ #define ELFCLASSM	ELFCLASS32
+ #endif
+ 
++#if defined(__riscv)
++#define MATCH_MACHINE(x) (x == EM_RISCV)
++#define ELFCLASSM	ELFCLASS64
++#endif
++
+ #if defined(__sh__)
+ #define MATCH_MACHINE(x) (x == EM_SH)
+ #define ELFCLASSM	ELFCLASS32
+-- 
+2.24.1
+

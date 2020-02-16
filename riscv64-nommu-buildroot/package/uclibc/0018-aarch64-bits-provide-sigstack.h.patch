@@ -1,0 +1,78 @@
+From 901462ce37938a712851be4981bc8223e1cae38d Mon Sep 17 00:00:00 2001
+From: Vladimir Murzin <vladimir.murzin@arm.com>
+Date: Thu, 6 Feb 2020 13:16:47 +0000
+Subject: [PATCH 18/21] aarch64/bits: provide sigstack.h
+
+It fixes tst-signal6 and friends.
+
+Signed-off-by: Vladimir Murzin <vladimir.murzin@arm.com>
+---
+ libc/sysdeps/linux/aarch64/bits/sigstack.h | 56 ++++++++++++++++++++++
+ 1 file changed, 56 insertions(+)
+ create mode 100644 libc/sysdeps/linux/aarch64/bits/sigstack.h
+
+diff --git a/libc/sysdeps/linux/aarch64/bits/sigstack.h b/libc/sysdeps/linux/aarch64/bits/sigstack.h
+new file mode 100644
+index 000000000..7cb89265d
+--- /dev/null
++++ b/libc/sysdeps/linux/aarch64/bits/sigstack.h
+@@ -0,0 +1,56 @@
++/* sigstack, sigaltstack definitions.
++   Copyright (C) 1998, 1999 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#ifndef _SIGNAL_H
++# error "Never include this file directly.  Use <signal.h> instead"
++#endif
++
++
++#if defined __UCLIBC_SUSV4_LEGACY__ || !defined __UCLIBC_STRICT_HEADERS__
++/* Structure describing a signal stack (obsolete).  */
++struct sigstack
++  {
++    void *ss_sp;		/* Signal stack pointer.  */
++    int ss_onstack;		/* Nonzero if executing on this stack.  */
++  };
++#endif
++
++
++/* Possible values for `ss_flags.'.  */
++enum
++{
++  SS_ONSTACK = 1,
++#define SS_ONSTACK	SS_ONSTACK
++  SS_DISABLE
++#define SS_DISABLE	SS_DISABLE
++};
++
++/* Minimum stack size for a signal handler.  */
++#define MINSIGSTKSZ	5120
++
++/* System default stack size.  */
++#define SIGSTKSZ	16384
++
++
++/* Alternate, preferred interface.  */
++typedef struct sigaltstack
++  {
++    void *ss_sp;
++    int ss_flags;
++    size_t ss_size;
++  } stack_t;
+-- 
+2.24.1
+

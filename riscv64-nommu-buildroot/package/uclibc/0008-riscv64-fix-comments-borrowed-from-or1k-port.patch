@@ -1,0 +1,46 @@
+From b6a2df5856c774f9469e0be4840401e295031ea9 Mon Sep 17 00:00:00 2001
+From: Yann Sionneau <ysionneau@kalray.eu>
+Date: Fri, 8 Nov 2019 14:50:27 +0100
+Subject: [PATCH 08/21] riscv64: fix comments borrowed from or1k port
+
+Signed-off-by: Yann Sionneau <ysionneau@kalray.eu>
+---
+ libpthread/nptl/sysdeps/riscv64/libc-tls.c | 2 +-
+ libpthread/nptl/sysdeps/riscv64/tls.h      | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/libpthread/nptl/sysdeps/riscv64/libc-tls.c b/libpthread/nptl/sysdeps/riscv64/libc-tls.c
+index 500de1d64..67c3a6016 100644
+--- a/libpthread/nptl/sysdeps/riscv64/libc-tls.c
++++ b/libpthread/nptl/sysdeps/riscv64/libc-tls.c
+@@ -17,7 +17,7 @@
+ #include <sysdeps/generic/libc-tls.c>
+ #include <dl-tls.h>
+ 
+-/* On OpenRISC, linker optimizations are not required, so __tls_get_addr
++/* On RISC-V 64, linker optimizations are not required, so __tls_get_addr
+    can be called even in statically linked binaries.  In this case module
+    must be always 1 and PT_TLS segment exist in the binary, otherwise it
+    would not link.  */
+diff --git a/libpthread/nptl/sysdeps/riscv64/tls.h b/libpthread/nptl/sysdeps/riscv64/tls.h
+index 33a378154..8295c7148 100644
+--- a/libpthread/nptl/sysdeps/riscv64/tls.h
++++ b/libpthread/nptl/sysdeps/riscv64/tls.h
+@@ -1,4 +1,4 @@
+-/* Definition for thread-local data handling.  NPTL/OR1K version.
++/* Definition for thread-local data handling.  NPTL/RISCV64 version.
+    Copyright (C) 2005, 2007, 2011 Free Software Foundation, Inc.
+    This file is part of the GNU C Library.
+ 
+@@ -70,7 +70,7 @@ register tcbhead_t *__thread_self __asm__("tp");
+  *  ------------------------------------
+  *  | PRE | TCB | TLS MEMORY ..        |
+  *  ------------------------------------
+- *              ^ r10 / TP
++ *              ^ x4 / TP
+  *
+  * PRE is the struct pthread described below
+  * TCB is tcbhead_t
+-- 
+2.24.1
+

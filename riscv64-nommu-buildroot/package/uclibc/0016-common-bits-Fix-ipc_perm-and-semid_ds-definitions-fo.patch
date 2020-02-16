@@ -1,0 +1,76 @@
+From 28c3e6db471b00203133ca89c67f7507a9f7405d Mon Sep 17 00:00:00 2001
+From: Vladimir Murzin <vladimir.murzin@arm.com>
+Date: Thu, 6 Feb 2020 13:13:54 +0000
+Subject: [PATCH 16/21] common/bits: Fix ipc_perm and semid_ds definitions for
+ 64-bit arches
+
+It fixes:
+
+FAIL sem got 1 expected 0
+	failed: incorrect sem_nsems!
+	semget(IPC_CREAT) = 0
+	semctl(k) = 0
+	sem_nsems = 0
+
+for aarch64.
+
+Signed-off-by: Vladimir Murzin <vladimir.murzin@arm.com>
+---
+ libc/sysdeps/linux/common/bits/ipc.h | 5 +++++
+ libc/sysdeps/linux/common/bits/sem.h | 5 +++++
+ 2 files changed, 10 insertions(+)
+
+diff --git a/libc/sysdeps/linux/common/bits/ipc.h b/libc/sysdeps/linux/common/bits/ipc.h
+index 3bd5f1b6f..ca7f58cc7 100644
+--- a/libc/sysdeps/linux/common/bits/ipc.h
++++ b/libc/sysdeps/linux/common/bits/ipc.h
+@@ -20,6 +20,7 @@
+ #endif
+ 
+ #include <bits/types.h>
++#include <bits/wordsize.h>
+ 
+ /* Mode bits for `msgget', `semget', and `shmget'.  */
+ #define IPC_CREAT	01000		/* Create key if key does not exist. */
+@@ -46,8 +47,12 @@ struct ipc_perm
+     __gid_t gid;			/* Owner's group ID.  */
+     __uid_t cuid;			/* Creator's user ID.  */
+     __gid_t cgid;			/* Creator's group ID.  */
++#if __WORDSIZE == 64
++    unsigned  int mode;
++#else
+     unsigned short int mode;		/* Read/write permission.  */
+     unsigned short int __pad1;
++#endif
+     unsigned short int __seq;		/* Sequence number.  */
+     unsigned short int __pad2;
+     unsigned long int __unused1;
+diff --git a/libc/sysdeps/linux/common/bits/sem.h b/libc/sysdeps/linux/common/bits/sem.h
+index 501e0803b..3fb10d42f 100644
+--- a/libc/sysdeps/linux/common/bits/sem.h
++++ b/libc/sysdeps/linux/common/bits/sem.h
+@@ -20,6 +20,7 @@
+ #endif
+ 
+ #include <sys/types.h>
++#include <bits/wordsize.h>
+ 
+ /* Flags for `semop'.  */
+ #define SEM_UNDO	0x1000		/* undo the operation on exit */
+@@ -39,9 +40,13 @@ struct semid_ds
+ {
+   struct ipc_perm sem_perm;		/* operation permission struct */
+   __time_t sem_otime;			/* last semop() time */
++#if __WORDSIZE == 32
+   unsigned long int __unused1;
++#endif
+   __time_t sem_ctime;			/* last time changed by semctl() */
++#if __WORDSIZE == 32
+   unsigned long int __unused2;
++#endif
+   unsigned long int sem_nsems;		/* number of semaphores in set */
+   unsigned long int __unused3;
+   unsigned long int __unused4;
+-- 
+2.24.1
+

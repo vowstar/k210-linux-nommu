@@ -1,0 +1,1053 @@
+From d0bc0d2bc8e5898bed6dfa6f253d164e9fc149f4 Mon Sep 17 00:00:00 2001
+From: Waldemar Brodkorb <wbx@openadk.org>
+Date: Fri, 8 Nov 2019 03:03:43 +0100
+Subject: [PATCH 05/21] riscv64: implement NPTL/TLS
+
+basically from or1k port of uClibc-ng, with fixes for structures in
+pthreadtypes.h from 64 bit architectures.
+
+18 testsuite failures counted.
+---
+ extra/Configs/Config.in                       |   1 +
+ ldso/ldso/riscv64/elfinterp.c                 |  17 +-
+ libc/sysdeps/linux/riscv64/sys/ucontext.h     |   2 +
+ libc/sysdeps/linux/riscv64/sysdep.h           |   1 +
+ libpthread/nptl/sysdeps/riscv64/Makefile.arch |   4 +
+ libpthread/nptl/sysdeps/riscv64/dl-tls.h      |  24 +++
+ libpthread/nptl/sysdeps/riscv64/libc-tls.c    |  34 +++
+ .../nptl/sysdeps/riscv64/pthread_spin_lock.c  |  65 ++++++
+ .../sysdeps/riscv64/pthread_spin_trylock.c    |  26 +++
+ libpthread/nptl/sysdeps/riscv64/pthreaddef.h  |  36 ++++
+ .../nptl/sysdeps/riscv64/tcb-offsets.sym      |   6 +
+ libpthread/nptl/sysdeps/riscv64/tls.h         | 201 ++++++++++++++++++
+ .../sysv/linux/aarch64/bits/pthreadtypes.h    |   8 +-
+ .../sysdeps/unix/sysv/linux/riscv64/Makefile  |   9 +
+ .../unix/sysv/linux/riscv64/Makefile.arch     |   9 +
+ .../sysv/linux/riscv64/bits/pthreadtypes.h    | 167 +++++++++++++++
+ .../unix/sysv/linux/riscv64/bits/semaphore.h  |  33 +++
+ .../unix/sysv/linux/riscv64/createthread.c    |  22 ++
+ .../sysdeps/unix/sysv/linux/riscv64/fork.c    |  27 +++
+ .../unix/sysv/linux/riscv64/pthread_once.c    |  92 ++++++++
+ .../unix/sysv/linux/riscv64/sysdep-cancel.h   |  38 ++++
+ 21 files changed, 810 insertions(+), 12 deletions(-)
+ create mode 100644 libpthread/nptl/sysdeps/riscv64/Makefile.arch
+ create mode 100644 libpthread/nptl/sysdeps/riscv64/dl-tls.h
+ create mode 100644 libpthread/nptl/sysdeps/riscv64/libc-tls.c
+ create mode 100644 libpthread/nptl/sysdeps/riscv64/pthread_spin_lock.c
+ create mode 100644 libpthread/nptl/sysdeps/riscv64/pthread_spin_trylock.c
+ create mode 100644 libpthread/nptl/sysdeps/riscv64/pthreaddef.h
+ create mode 100644 libpthread/nptl/sysdeps/riscv64/tcb-offsets.sym
+ create mode 100644 libpthread/nptl/sysdeps/riscv64/tls.h
+ create mode 100644 libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/Makefile
+ create mode 100644 libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/Makefile.arch
+ create mode 100644 libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/bits/pthreadtypes.h
+ create mode 100644 libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/bits/semaphore.h
+ create mode 100644 libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/createthread.c
+ create mode 100644 libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/fork.c
+ create mode 100644 libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/pthread_once.c
+ create mode 100644 libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/sysdep-cancel.h
+
+diff --git a/extra/Configs/Config.in b/extra/Configs/Config.in
+index 414a77f3f..4e26e6741 100644
+--- a/extra/Configs/Config.in
++++ b/extra/Configs/Config.in
+@@ -529,6 +529,7 @@ config UCLIBC_HAS_LINUXTHREADS
+ 	# linuxthreads need nanosleep()
+ 	select UCLIBC_HAS_REALTIME
+ 	depends on !TARGET_aarch64 && \
++		   !TARGET_riscv64 && \
+ 		   !TARGET_metag
+ 	help
+ 	  If you want to compile uClibc with Linuxthreads support, then answer Y.
+diff --git a/ldso/ldso/riscv64/elfinterp.c b/ldso/ldso/riscv64/elfinterp.c
+index b954779bd..8ddba1f9f 100644
+--- a/ldso/ldso/riscv64/elfinterp.c
++++ b/ldso/ldso/riscv64/elfinterp.c
+@@ -33,11 +33,6 @@
+ 
+ #include "ldso.h"
+ 
+-#if defined(USE_TLS) && USE_TLS
+-#include "dl-tls.h"
+-#include "tlsdeschtab.h"
+-#endif
+-
+ extern int _dl_linux_resolve(void);
+ 
+ unsigned long _dl_linux_resolver(struct elf_resolve *tpnt, int reloc_entry)
+@@ -212,6 +207,18 @@ _dl_do_reloc (struct elf_resolve *tpnt, struct r_scope_elem *scope,
+ 			_dl_memcpy((void *) reloc_addr,
+ 				   (void *) symbol_addr, sym_ref.sym->st_size);
+ 			break;
++#if defined USE_TLS && USE_TLS
++		case R_RISCV_TLS_DTPMOD64:
++			*reloc_addr = tls_tpnt->l_tls_modid;
++			break;
++		case R_RISCV_TLS_DTPREL64:
++			*reloc_addr = symbol_addr;
++			break;
++		case R_RISCV_TLS_TPREL64:
++			CHECK_STATIC_TLS ((struct link_map *) tls_tpnt);
++			*reloc_addr = tls_tpnt->l_tls_offset + symbol_addr + rpnt->r_addend;
++			break;
++#endif
+ 		default:
+ 			return -1; /*call _dl_exit(1) */
+ 	}
+diff --git a/libc/sysdeps/linux/riscv64/sys/ucontext.h b/libc/sysdeps/linux/riscv64/sys/ucontext.h
+index 2a80a853c..2893ff359 100644
+--- a/libc/sysdeps/linux/riscv64/sys/ucontext.h
++++ b/libc/sysdeps/linux/riscv64/sys/ucontext.h
+@@ -21,6 +21,8 @@
+ #define _SYS_UCONTEXT_H	1
+ 
+ #include <features.h>
++#include <signal.h>
++#include <bits/sigcontext.h>
+ 
+ typedef unsigned long int __riscv_mc_gp_state[32];
+ 
+diff --git a/libc/sysdeps/linux/riscv64/sysdep.h b/libc/sysdeps/linux/riscv64/sysdep.h
+index b12329332..3fa04bb57 100644
+--- a/libc/sysdeps/linux/riscv64/sysdep.h
++++ b/libc/sysdeps/linux/riscv64/sysdep.h
+@@ -20,6 +20,7 @@
+ #define _LINUX_RISCV_SYSDEP_H 1
+ 
+ #include <common/sysdep.h>
++#include <sys/syscall.h>
+ 
+ #ifdef __ASSEMBLER__
+ 
+diff --git a/libpthread/nptl/sysdeps/riscv64/Makefile.arch b/libpthread/nptl/sysdeps/riscv64/Makefile.arch
+new file mode 100644
+index 000000000..01fdac0b5
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/riscv64/Makefile.arch
+@@ -0,0 +1,4 @@
++# Makefile for uClibc-ng NPTL
++# Licensed under the LGPL v2.1, see the file COPYING.LIB in this tarball.
++
++libc_arch_a_CSRC = libc-tls.c
+diff --git a/libpthread/nptl/sysdeps/riscv64/dl-tls.h b/libpthread/nptl/sysdeps/riscv64/dl-tls.h
+new file mode 100644
+index 000000000..01663edf3
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/riscv64/dl-tls.h
+@@ -0,0 +1,24 @@
++/* Copyright (C) 2005-2016 Free Software Foundation, Inc.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public License as
++   published by the Free Software Foundation; either version 2.1 of the
++   License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++/* Type used for the representation of TLS information in the GOT.  */
++typedef struct
++{
++  unsigned long int ti_module;
++  unsigned long int ti_offset;
++} tls_index;
++
++extern void *__tls_get_addr (tls_index *ti);
+diff --git a/libpthread/nptl/sysdeps/riscv64/libc-tls.c b/libpthread/nptl/sysdeps/riscv64/libc-tls.c
+new file mode 100644
+index 000000000..500de1d64
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/riscv64/libc-tls.c
+@@ -0,0 +1,34 @@
++/* Copyright (C) 2005-2016 Free Software Foundation, Inc.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public License as
++   published by the Free Software Foundation; either version 2.1 of the
++   License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <sysdeps/generic/libc-tls.c>
++#include <dl-tls.h>
++
++/* On OpenRISC, linker optimizations are not required, so __tls_get_addr
++   can be called even in statically linked binaries.  In this case module
++   must be always 1 and PT_TLS segment exist in the binary, otherwise it
++   would not link.  */
++
++#if defined(USE_TLS) && USE_TLS
++
++void *
++__tls_get_addr (tls_index *ti)
++{
++  dtv_t *dtv = THREAD_DTV ();
++  return (char *) dtv[1].pointer.val + ti->ti_offset;
++}
++
++#endif
+diff --git a/libpthread/nptl/sysdeps/riscv64/pthread_spin_lock.c b/libpthread/nptl/sysdeps/riscv64/pthread_spin_lock.c
+new file mode 100644
+index 000000000..cec3acbc6
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/riscv64/pthread_spin_lock.c
+@@ -0,0 +1,65 @@
++/* pthread_spin_lock -- lock a spin lock.  Generic version.
++   Copyright (C) 2012-2016 Free Software Foundation, Inc.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <atomic.h>
++#include "pthreadP.h"
++
++/* A machine-specific version can define SPIN_LOCK_READS_BETWEEN_CMPXCHG
++  to the number of plain reads that it's optimal to spin on between uses
++  of atomic_compare_and_exchange_val_acq.  If spinning forever is optimal
++  then use -1.  If no plain reads here would ever be optimal, use 0.  */
++#define SPIN_LOCK_READS_BETWEEN_CMPXCHG 1000
++
++int
++pthread_spin_lock (pthread_spinlock_t *lock)
++{
++  /* atomic_exchange usually takes less instructions than
++     atomic_compare_and_exchange.  On the other hand,
++     atomic_compare_and_exchange potentially generates less bus traffic
++     when the lock is locked.
++     We assume that the first try mostly will be successful, and we use
++     atomic_exchange.  For the subsequent tries we use
++     atomic_compare_and_exchange.  */
++  if (atomic_exchange_acq (lock, 1) == 0)
++    return 0;
++
++  do
++    {
++      /* The lock is contended and we need to wait.  Going straight back
++	 to cmpxchg is not a good idea on many targets as that will force
++	 expensive memory synchronizations among processors and penalize other
++	 running threads.
++	 On the other hand, we do want to update memory state on the local core
++	 once in a while to avoid spinning indefinitely until some event that
++	 will happen to update local memory as a side-effect.  */
++      if (SPIN_LOCK_READS_BETWEEN_CMPXCHG >= 0)
++	{
++	  int wait = SPIN_LOCK_READS_BETWEEN_CMPXCHG;
++
++	  while (*lock != 0 && wait > 0)
++	    --wait;
++	}
++      else
++	{
++	  while (*lock != 0)
++	    ;
++	}
++    }
++  while (atomic_compare_and_exchange_val_acq (lock, 1, 0) != 0);
++
++  return 0;
++}
+diff --git a/libpthread/nptl/sysdeps/riscv64/pthread_spin_trylock.c b/libpthread/nptl/sysdeps/riscv64/pthread_spin_trylock.c
+new file mode 100644
+index 000000000..4e9aa64d3
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/riscv64/pthread_spin_trylock.c
+@@ -0,0 +1,26 @@
++/* pthread_spin_trylock -- trylock a spin lock.  Generic version.
++   Copyright (C) 2012-2016 Free Software Foundation, Inc.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <errno.h>
++#include <atomic.h>
++#include "pthreadP.h"
++
++int
++pthread_spin_trylock (pthread_spinlock_t *lock)
++{
++  return atomic_exchange_acq (lock, 1) ? EBUSY : 0;
++}
+diff --git a/libpthread/nptl/sysdeps/riscv64/pthreaddef.h b/libpthread/nptl/sysdeps/riscv64/pthreaddef.h
+new file mode 100644
+index 000000000..fbd40a74f
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/riscv64/pthreaddef.h
+@@ -0,0 +1,36 @@
++/* Copyright (C) 2002-2012 Free Software Foundation, Inc.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public License as
++   published by the Free Software Foundation; either version 2.1 of the
++   License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++/* Default stack size.  */
++#define ARCH_STACK_DEFAULT_SIZE (2 * 1024 * 1024)
++
++/* Required stack pointer alignment at beginning.  */
++#define STACK_ALIGN 16
++
++/* Minimal stack size after allocating thread descriptor and guard size.  */
++#define MINIMAL_REST_STACK 2048
++
++/* Alignment requirement for TCB.  */
++#define TCB_ALIGNMENT 16
++
++/* Location of current stack frame.  */
++#define CURRENT_STACK_FRAME __builtin_frame_address (0)
++
++
++/* XXX Until we have a better place keep the definitions here.  */
++#define __exit_thread_inline(val) \
++  INLINE_SYSCALL (exit, 1, (val))
++
+diff --git a/libpthread/nptl/sysdeps/riscv64/tcb-offsets.sym b/libpthread/nptl/sysdeps/riscv64/tcb-offsets.sym
+new file mode 100644
+index 000000000..86025a402
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/riscv64/tcb-offsets.sym
+@@ -0,0 +1,6 @@
++#include <sysdep.h>
++#include <tls.h>
++
++MULTIPLE_THREADS_OFFSET         offsetof (struct pthread, header.multiple_threads)
++TID_OFFSET                      offsetof (struct pthread, tid)
++TP_TO_PTHREAD_OFFSET            -(sizeof (struct pthread) + sizeof (tcbhead_t))
+diff --git a/libpthread/nptl/sysdeps/riscv64/tls.h b/libpthread/nptl/sysdeps/riscv64/tls.h
+new file mode 100644
+index 000000000..33a378154
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/riscv64/tls.h
+@@ -0,0 +1,201 @@
++/* Definition for thread-local data handling.  NPTL/OR1K version.
++   Copyright (C) 2005, 2007, 2011 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library.  If not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#ifndef _TLS_H
++#define _TLS_H  1
++
++#ifndef __ASSEMBLER__
++# include <stdbool.h>
++# include <stddef.h>
++# include <stdint.h>
++
++/* Type for the dtv.  */
++typedef union dtv
++{
++  size_t counter;
++  struct
++  {
++    void *val;
++    bool is_static;
++  } pointer;
++} dtv_t;
++
++typedef struct
++{
++  dtv_t *dtv;
++} tcbhead_t;
++
++register tcbhead_t *__thread_self __asm__("tp");
++
++# define TLS_MULTIPLE_THREADS_IN_TCB 1
++
++#else /* __ASSEMBLER__ */
++# include <tcb-offsets.h>
++#endif /* __ASSEMBLER__ */
++
++/* We require TLS support in the tools.  */
++#define HAVE_TLS_SUPPORT                1
++#define HAVE_TLS_MODEL_ATTRIBUTE        1
++#define HAVE___THREAD                   1
++
++/* Signal that TLS support is available.  */
++#define USE_TLS	1
++
++#ifndef __ASSEMBLER__
++
++/* Get system call information.  */
++# include <sysdep.h>
++
++/* The TP points to the start of the TLS block.
++ * As I understand it, this isn't strictly that "TP points to DTV" - it's
++ * more where to place the TCB in the TLS block. This will place it in 
++ * the beginning.
++ *
++ * Layout:
++ *  ------------------------------------
++ *  | PRE | TCB | TLS MEMORY ..        |
++ *  ------------------------------------
++ *              ^ r10 / TP
++ *
++ * PRE is the struct pthread described below
++ * TCB is tcbhead_t
++ * TLS memory is where the TLS program sections are loaded
++ *
++ * See _dl_allocate_tls_storage and __libc_setup_tls for more information.
++ */
++# define TLS_DTV_AT_TP  1
++
++/* Get the thread descriptor definition.  */
++# include <../../descr.h>
++
++/* Requirements for the TCB.  */
++# define TLS_INIT_TCB_SIZE    sizeof (tcbhead_t)
++# define TLS_INIT_TCB_ALIGN   __alignof__ (tcbhead_t)
++
++# define TLS_TCB_SIZE         sizeof (tcbhead_t)
++# define TLS_TCB_ALIGN        __alignof__ (tcbhead_t)
++
++/* This is the size of the TCB.  */
++
++/* This is the size we need before TCB.
++ * To support THREAD_GETMEM with friends we want to have a
++ * struct pthread available.
++ * Yank it in infront of everything, I'm sure nobody will mind.
++ *
++ * This memory is really allocated PRE the TLS block, so it's possible
++ * to do ((char*)tlsblock) - TLS_PRE_TCB_SIZE to access it.
++ * This is done for THREAD_SELF. */
++# define TLS_PRE_TCB_SIZE sizeof (struct pthread)
++
++
++/* Install the dtv pointer.
++ * When called, dtvp is a pointer not the DTV per say (which should start
++ * with the generation counter) but to the length of the DTV.
++ * We can always index with -1, so we store dtvp[1]
++ */
++# define INSTALL_DTV(tcbp, dtvp) \
++  (((tcbhead_t *) (tcbp))->dtv = (dtvp) + 1)
++
++/* Install new dtv for current thread
++ * In a logicial world dtv here would also point to the length of the DTV.
++ * However it does not, this time it points to the generation counter,
++ * so just store it.
++ *
++ * Note: -1 is still valid and contains the length. */
++# define INSTALL_NEW_DTV(dtv) \
++  (THREAD_DTV() = (dtv))
++
++/* Return dtv of given thread descriptor.  */
++# define GET_DTV(tcbp) \
++  (((tcbhead_t *) (tcbp))->dtv)
++
++/* Code to initially initialize the thread pointer.
++ *
++ * Set TP to the address _after_ tcbhead_t. This will allow us
++ * to change the size of tcbhead_t without having to re-link everything.
++ *
++ * secondcall has something to do with USE__THREAD,
++ * seems to always be 0 so we don't care about it.
++ *
++ * This has to return NULL on success (or a string with the failure text).
++ * It's hard to fail this, so return NULL always.
++ */
++# define TLS_INIT_TP(tcbp, secondcall) \
++  ({__thread_self = ((tcbhead_t *)tcbp + 1); NULL;})
++
++/* Return the address of the dtv for the current thread.
++ *
++ * Dereference TP, offset to dtv - really straightforward.
++ * Remember that we made TP point to after tcb, so we need to reverse that.
++ */
++#  define THREAD_DTV() \
++  ((((tcbhead_t *)__thread_self)-1)->dtv)
++
++/* Return the thread descriptor for the current thread. 
++ *
++ * Return a pointer to the TLS_PRE area where we allocated space for
++ * a struct pthread. Again, TP points to after tcbhead_t, compensate with
++ * TLS_INIT_TCB_SIZE.
++ *
++ * I regard this is a seperate system from the "normal" TLS.
++ */
++# define THREAD_SELF \
++  ((struct pthread *) ((char *) __thread_self - TLS_INIT_TCB_SIZE \
++    - TLS_PRE_TCB_SIZE))
++
++/* Magic for libthread_db to know how to do THREAD_SELF.  */
++# define DB_THREAD_SELF \
++  CONST_THREAD_AREA (32, sizeof (struct pthread))
++
++/* Access to data in the thread descriptor is easy.  */
++#define THREAD_GETMEM(descr, member) \
++  descr->member
++#define THREAD_GETMEM_NC(descr, member, idx) \
++  descr->member[idx]
++#define THREAD_SETMEM(descr, member, value) \
++  descr->member = (value)
++#define THREAD_SETMEM_NC(descr, member, idx, value) \
++  descr->member[idx] = (value)
++
++/* Get and set the global scope generation counter in struct pthread.  */
++#define THREAD_GSCOPE_FLAG_UNUSED 0
++#define THREAD_GSCOPE_FLAG_USED   1
++#define THREAD_GSCOPE_FLAG_WAIT   2
++#define THREAD_GSCOPE_RESET_FLAG() \
++  do                       \
++    { int __res                    \
++  = atomic_exchange_rel (&THREAD_SELF->header.gscope_flag,       \
++             THREAD_GSCOPE_FLAG_UNUSED);         \
++      if (__res == THREAD_GSCOPE_FLAG_WAIT)            \
++  lll_futex_wake (&THREAD_SELF->header.gscope_flag, 1, LLL_PRIVATE);   \
++    }                      \
++  while (0)
++#define THREAD_GSCOPE_SET_FLAG() \
++  do                       \
++    {                      \
++      THREAD_SELF->header.gscope_flag = THREAD_GSCOPE_FLAG_USED;       \
++      atomic_write_barrier ();                 \
++    }                      \
++  while (0)
++#define THREAD_GSCOPE_WAIT() \
++  GL(dl_wait_lookup_done) ()
++
++#endif /* __ASSEMBLER__ */
++
++#endif  /* tls.h */
++
+diff --git a/libpthread/nptl/sysdeps/unix/sysv/linux/aarch64/bits/pthreadtypes.h b/libpthread/nptl/sysdeps/unix/sysv/linux/aarch64/bits/pthreadtypes.h
+index 47293a1a8..67fcee28b 100644
+--- a/libpthread/nptl/sysdeps/unix/sysv/linux/aarch64/bits/pthreadtypes.h
++++ b/libpthread/nptl/sysdeps/unix/sysv/linux/aarch64/bits/pthreadtypes.h
+@@ -36,7 +36,6 @@
+    exposed on purpose.  */
+ typedef unsigned long int pthread_t;
+ 
+-
+ union pthread_attr_t
+ {
+   char __size[__SIZEOF_PTHREAD_ATTR_T];
+@@ -44,7 +43,7 @@ union pthread_attr_t
+ };
+ #ifndef __have_pthread_attr_t
+ typedef union pthread_attr_t pthread_attr_t;
+-# define __have_pthread_attr_t1
++# define __have_pthread_attr_t	1
+ #endif
+ 
+ typedef struct __pthread_internal_list
+@@ -75,9 +74,6 @@ typedef union
+   long int __align;
+ } pthread_mutex_t;
+ 
+-/* Mutex __spins initializer used by PTHREAD_MUTEX_INITIALIZER.  */
+-#define __PTHREAD_SPINS 0
+-
+ typedef union
+ {
+   char __size[__SIZEOF_PTHREAD_MUTEXATTR_T];
+@@ -141,8 +137,6 @@ typedef union
+   long int __align;
+ } pthread_rwlock_t;
+ 
+-#define __PTHREAD_RWLOCK_ELISION_EXTRA 0
+-
+ typedef union
+ {
+   char __size[__SIZEOF_PTHREAD_RWLOCKATTR_T];
+diff --git a/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/Makefile b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/Makefile
+new file mode 100644
+index 000000000..2caba11b7
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/Makefile
+@@ -0,0 +1,9 @@
++# Makefile for uClibc-ng NPTL
++# Licensed under the LGPL v2.1 or later, see the file COPYING.LIB in this tarball.
++
++top_srcdir=../../../../../../../
++top_builddir=../../../../../../../
++all: objs
++include $(top_builddir)Rules.mak
++include Makefile.arch
++include $(top_srcdir)Makerules
+diff --git a/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/Makefile.arch b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/Makefile.arch
+new file mode 100644
+index 000000000..94aa25ffb
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/Makefile.arch
+@@ -0,0 +1,9 @@
++# Makefile for uClibc-ng NPTL
++# Licensed under the LGPL v2.1 or later, see the file COPYING.LIB in this tarball.
++
++libpthread_linux_arch_SSRC =
++libpthread_linux_arch_CSRC = pthread_once.c
++
++libc_linux_arch_CSRC = fork.c
++
++CFLAGS += $(SSP_ALL_CFLAGS)
+diff --git a/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/bits/pthreadtypes.h b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/bits/pthreadtypes.h
+new file mode 100644
+index 000000000..13d138cd3
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/bits/pthreadtypes.h
+@@ -0,0 +1,167 @@
++/* Copyright (C) 2002,2003,2004,2005,2006,2007 Free Software Foundation, Inc.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, write to the Free
++   Software Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA
++   02111-1307 USA.  */
++
++#ifndef _BITS_PTHREADTYPES_H
++#define _BITS_PTHREADTYPES_H	1
++
++#define __SIZEOF_PTHREAD_ATTR_T 	56
++#define __SIZEOF_PTHREAD_MUTEX_T 	40
++#define __SIZEOF_PTHREAD_MUTEXATTR_T 	4
++#define __SIZEOF_PTHREAD_COND_T 	48
++#define __SIZEOF_PTHREAD_COND_COMPAT_T 	12
++#define __SIZEOF_PTHREAD_CONDATTR_T 	4
++#define __SIZEOF_PTHREAD_RWLOCK_T 	56
++#define __SIZEOF_PTHREAD_RWLOCKATTR_T 	8
++#define __SIZEOF_PTHREAD_BARRIER_T 	32
++#define __SIZEOF_PTHREAD_BARRIERATTR_T 	4
++
++
++/* Thread identifiers.  The structure of the attribute type is not
++   exposed on purpose.  */
++typedef unsigned long int pthread_t;
++
++union pthread_attr_t
++{
++  char __size[__SIZEOF_PTHREAD_ATTR_T];
++  long int __align;
++};
++#ifndef __have_pthread_attr_t
++typedef union pthread_attr_t pthread_attr_t;
++# define __have_pthread_attr_t  1
++#endif
++
++typedef struct __pthread_internal_list
++{
++  struct __pthread_internal_list *__prev;
++  struct __pthread_internal_list *__next;
++} __pthread_list_t;
++
++
++/* Data structures for mutex handling.  The structure of the attribute
++   type is not exposed on purpose.  */
++typedef union
++{
++  struct __pthread_mutex_s
++  {
++    int __lock;
++    unsigned int __count;
++    int __owner;
++    unsigned int __nusers;
++    /* KIND must stay at this position in the structure to maintain
++       binary compatibility with static initializers.  */
++    int __kind;
++    int __spins;
++    __pthread_list_t __list;
++#define __PTHREAD_MUTEX_HAVE_PREV	1
++  } __data;
++  char __size[__SIZEOF_PTHREAD_MUTEX_T];
++  long int __align;
++} pthread_mutex_t;
++
++typedef union
++{
++  char __size[__SIZEOF_PTHREAD_MUTEXATTR_T];
++  long int __align;
++} pthread_mutexattr_t;
++
++
++/* Data structure for conditional variable handling.  The structure of
++   the attribute type is not exposed on purpose.  */
++typedef union
++{
++  struct
++  {
++    int __lock;
++    unsigned int __futex;
++    __extension__ unsigned long long int __total_seq;
++    __extension__ unsigned long long int __wakeup_seq;
++    __extension__ unsigned long long int __woken_seq;
++    void *__mutex;
++    unsigned int __nwaiters;
++    unsigned int __broadcast_seq;
++  } __data;
++  char __size[__SIZEOF_PTHREAD_COND_T];
++  __extension__ long long int __align;
++} pthread_cond_t;
++
++typedef union
++{
++  char __size[__SIZEOF_PTHREAD_CONDATTR_T];
++  long int __align;
++} pthread_condattr_t;
++
++
++/* Keys for thread-specific data */
++typedef unsigned int pthread_key_t;
++
++
++/* Once-only execution */
++typedef int pthread_once_t;
++
++
++#if defined __USE_UNIX98 || defined __USE_XOPEN2K
++/* Data structure for read-write lock variable handling.  The
++   structure of the attribute type is not exposed on purpose.  */
++typedef union
++{
++  struct
++  {
++    int __lock;
++    unsigned int __nr_readers;
++    unsigned int __readers_wakeup;
++    unsigned int __writer_wakeup;
++    unsigned int __nr_readers_queued;
++    unsigned int __nr_writers_queued;
++    int __writer;
++    int __shared;
++    unsigned long int __pad1;
++    unsigned long int __pad2;
++    unsigned int __flags;
++  } __data;
++  char __size[__SIZEOF_PTHREAD_RWLOCK_T];
++  long int __align;
++} pthread_rwlock_t;
++
++typedef union
++{
++  char __size[__SIZEOF_PTHREAD_RWLOCKATTR_T];
++  long int __align;
++} pthread_rwlockattr_t;
++#endif
++
++
++#ifdef __USE_XOPEN2K
++/* POSIX spinlock data type.  */
++typedef volatile int pthread_spinlock_t;
++
++
++/* POSIX barriers data type.  The structure of the type is
++   deliberately not exposed.  */
++typedef union
++{
++  char __size[__SIZEOF_PTHREAD_BARRIER_T];
++  long int __align;
++} pthread_barrier_t;
++
++typedef union
++{
++  char __size[__SIZEOF_PTHREAD_BARRIERATTR_T];
++  int __align;
++} pthread_barrierattr_t;
++#endif
++
++#endif	/* bits/pthreadtypes.h */
+diff --git a/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/bits/semaphore.h b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/bits/semaphore.h
+new file mode 100644
+index 000000000..796a4383b
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/bits/semaphore.h
+@@ -0,0 +1,33 @@
++/* Copyright (C) 2002, 2005, 2007 Free Software Foundation, Inc.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library.  If not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#ifndef _SEMAPHORE_H
++# error "Never use <bits/semaphore.h> directly; include <semaphore.h> instead."
++#endif
++
++
++#define __SIZEOF_SEM_T	(4 * __SIZEOF_POINTER__)
++
++
++/* Value returned if `sem_open' failed.  */
++#define SEM_FAILED      ((sem_t *) 0)
++
++
++typedef union
++{
++  char __size[__SIZEOF_SEM_T];
++  long int __align;
++} sem_t;
+diff --git a/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/createthread.c b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/createthread.c
+new file mode 100644
+index 000000000..10bb1bbfe
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/createthread.c
+@@ -0,0 +1,22 @@
++/* Copyright (C) 2012 Free Software Foundation, Inc.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; see the file COPYING.LIB.  If
++   not, see <http://www.gnu.org/licenses/>.  */
++
++/* Value passed to 'clone' for initialization of the thread register.  */
++#define TLS_VALUE ((void *) (pd) \
++		   + TLS_PRE_TCB_SIZE + TLS_INIT_TCB_SIZE)
++
++/* Get the real implementation.  */
++#include <sysdeps/pthread/createthread.c>
+diff --git a/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/fork.c b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/fork.c
+new file mode 100644
+index 000000000..e55d05d41
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/fork.c
+@@ -0,0 +1,27 @@
++/* Copyright (C) 2005 Free Software Foundation, Inc.
++   Contributed by Phil Blundell <pb@nexus.co.uk>, 2005
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++#include <sched.h>
++#include <signal.h>
++#include <sysdep.h>
++#include <tls.h>
++
++#define ARCH_FORK() \
++  INLINE_SYSCALL (clone, 5,                                                  \
++                 CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD, 0,     \
++                 NULL, &THREAD_SELF->tid, NULL)
++
++#include "../fork.c"
+diff --git a/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/pthread_once.c b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/pthread_once.c
+new file mode 100644
+index 000000000..ce68ce68c
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/pthread_once.c
+@@ -0,0 +1,92 @@
++/* Copyright (C) 2003-2013 Free Software Foundation, Inc.
++   Contributed by Jakub Jelinek <jakub@redhat.com>, 2003.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.	 See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include "pthreadP.h"
++#include <lowlevellock.h>
++
++
++unsigned long int __fork_generation attribute_hidden;
++
++
++static void
++clear_once_control (void *arg)
++{
++  pthread_once_t *once_control = (pthread_once_t *) arg;
++
++  *once_control = 0;
++  lll_futex_wake (once_control, INT_MAX, LLL_PRIVATE);
++}
++
++
++int
++__pthread_once (once_control, init_routine)
++     pthread_once_t *once_control;
++     void (*init_routine) (void);
++{
++  while (1)
++    {
++      int oldval, val, newval;
++
++      val = *once_control;
++      do
++	{
++	  /* Check if the initialized has already been done.  */
++	  if ((val & 2) != 0)
++	    return 0;
++
++	  oldval = val;
++	  newval = (oldval & 3) | __fork_generation | 1;
++	  val = atomic_compare_and_exchange_val_acq (once_control, newval,
++						     oldval);
++	}
++      while (__builtin_expect (val != oldval, 0));
++
++      /* Check if another thread already runs the initializer.	*/
++      if ((oldval & 1) != 0)
++	{
++	  /* Check whether the initializer execution was interrupted
++	     by a fork.	 */
++	  if (((oldval ^ newval) & -4) == 0)
++	    {
++	      /* Same generation, some other thread was faster. Wait.  */
++	      lll_futex_wait (once_control, newval, LLL_PRIVATE);
++	      continue;
++	    }
++	}
++
++      /* This thread is the first here.  Do the initialization.
++	 Register a cleanup handler so that in case the thread gets
++	 interrupted the initialization can be restarted.  */
++      pthread_cleanup_push (clear_once_control, once_control);
++
++      init_routine ();
++
++      pthread_cleanup_pop (0);
++
++
++      /* Add one to *once_control.  */
++      atomic_increment (once_control);
++
++      /* Wake up all other threads.  */
++      lll_futex_wake (once_control, INT_MAX, LLL_PRIVATE);
++      break;
++    }
++
++  return 0;
++}
++weak_alias (__pthread_once, pthread_once)
++strong_alias (__pthread_once, __pthread_once_internal)
+diff --git a/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/sysdep-cancel.h b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/sysdep-cancel.h
+new file mode 100644
+index 000000000..f7e70514a
+--- /dev/null
++++ b/libpthread/nptl/sysdeps/unix/sysv/linux/riscv64/sysdep-cancel.h
+@@ -0,0 +1,38 @@
++/* Copyright (C) 2014 Free Software Foundation, Inc.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library.  If not, see
++   <http://www.gnu.org/licenses/>.  */
++
++#include <sysdep.h>
++#include <tls.h>
++#ifndef __ASSEMBLER__
++# include <pthreadP.h>
++#endif
++
++#if !defined NOT_IN_libc || defined IS_IN_libpthread || defined IS_IN_librt
++
++# define SINGLE_THREAD_P \
++  __builtin_expect (THREAD_GETMEM (THREAD_SELF, \
++                                   header.multiple_threads) == 0, 1)
++
++#else
++
++# define SINGLE_THREAD_P 1
++# define NO_CANCELLATION 1
++
++#endif
++
++#define RTLD_SINGLE_THREAD_P \
++  __builtin_expect (THREAD_GETMEM (THREAD_SELF, \
++                                   header.multiple_threads) == 0, 1)
+-- 
+2.24.1
+

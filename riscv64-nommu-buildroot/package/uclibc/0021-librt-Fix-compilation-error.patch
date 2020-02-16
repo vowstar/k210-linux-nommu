@@ -1,0 +1,29 @@
+From 2bee2b6aa373fb9affd7af8548daf3b5072da930 Mon Sep 17 00:00:00 2001
+From: Damien Le Moal <damien.lemoal@wdc.com>
+Date: Mon, 3 Feb 2020 01:37:40 +0900
+Subject: [PATCH 21/21] librt: Fix compilation error
+
+clock_nanosleep.
+
+Signed-off-by: Damien Le Moal <damien.lemoal@wdc.com>
+---
+ librt/clock_nanosleep.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/librt/clock_nanosleep.c b/librt/clock_nanosleep.c
+index 4cf1e06b4..d99ea5e66 100644
+--- a/librt/clock_nanosleep.c
++++ b/librt/clock_nanosleep.c
+@@ -21,6 +21,9 @@
+ 
+ #include "kernel-posix-cpu-timers.h"
+ 
++# define LIBC_CANCEL_ASYNC()    0 /* Just a dummy value.  */
++# define LIBC_CANCEL_RESET(val) ((void)(val)) /* Nothing, but evaluate it.  */
++# define LIBC_CANCEL_HANDLED()  /* Nothing.  */
+ 
+ /* We can simply use the syscall.  The CPU clocks are not supported
+    with this function.  */
+-- 
+2.24.1
+

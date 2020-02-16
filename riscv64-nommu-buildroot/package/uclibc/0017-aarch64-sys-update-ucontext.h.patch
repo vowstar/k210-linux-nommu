@@ -1,0 +1,35 @@
+From b5fc5f845923d15b35079a3473448e7bc26e0127 Mon Sep 17 00:00:00 2001
+From: Vladimir Murzin <vladimir.murzin@arm.com>
+Date: Thu, 6 Feb 2020 13:14:38 +0000
+Subject: [PATCH 17/21] aarch64/sys: update ucontext.h
+
+It fixes tst-cancel1 and friends.
+
+Signed-off-by: Vladimir Murzin <vladimir.murzin@arm.com>
+---
+ libc/sysdeps/linux/aarch64/sys/ucontext.h | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/libc/sysdeps/linux/aarch64/sys/ucontext.h b/libc/sysdeps/linux/aarch64/sys/ucontext.h
+index dc7303b54..5f75cbbf3 100644
+--- a/libc/sysdeps/linux/aarch64/sys/ucontext.h
++++ b/libc/sysdeps/linux/aarch64/sys/ucontext.h
+@@ -45,12 +45,13 @@ typedef elf_fpregset_t	fpregset_t;
+ typedef struct sigcontext mcontext_t;
+ 
+ /* Userlevel context.  */
+-typedef struct ucontext
++typedef struct ucontext_t
+   {
+     unsigned long uc_flags;
+-    struct ucontext *uc_link;
++    struct ucontext_t *uc_link;
+     stack_t uc_stack;
+     __sigset_t uc_sigmask;
++    unsigned char __reserved[128];
+     mcontext_t uc_mcontext;
+   } ucontext_t;
+ 
+-- 
+2.24.1
+

@@ -1,0 +1,38 @@
+From fbe25933d475de36fca739154162e668db2b125f Mon Sep 17 00:00:00 2001
+From: "Ata, John  (US)" <john.ata@baesystems.com>
+Date: Tue, 28 Jan 2020 14:10:21 +0100
+Subject: [PATCH 10/21] fix getenv bug
+
+The getenv() library call can trap under certain conditions.  It compares the
+passed in environment variable name (var) with the name=variables (*ep) in the
+environment area and returns a pointer to the value in the environment if it
+exists.  To accomplish this, it does a memcmp() using the length of the passed
+in name (len) for each environment variable (*ep) against the passed in name (
+var).  So memcmp will attempt to scan both strings for len bytes. However, if
+for some reason, len is equal to or greater than 16 and  longer than the length
+of  the *ep in the environment and the *ep resides near the end of a page
+boundary while the next page is not present or mapped, the memcmp could trap
+with a sigsegv error while continuing the scan with the optimization
+read-ahead. However, if strncmp is used instead, there is no problem since both
+source and destination scanning will stop when either reaches a terminating
+NULL
+---
+ libc/stdlib/getenv.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/libc/stdlib/getenv.c b/libc/stdlib/getenv.c
+index 9b04d0fab..a1a65e6c7 100644
+--- a/libc/stdlib/getenv.c
++++ b/libc/stdlib/getenv.c
+@@ -20,7 +20,7 @@ char *getenv(const char *var)
+ 	return NULL;
+     len = strlen(var);
+     while(*ep) {
+-	if (memcmp(var, *ep, len) == 0 && (*ep)[len] == '=') {
++	if (strncmp(var, *ep, len) == 0 && (*ep)[len] == '=') {
+ 	    return *ep + len + 1;
+ 	}
+ 	ep++;
+-- 
+2.24.1
+

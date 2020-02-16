@@ -1,0 +1,134 @@
+From 24681d328c46df64062dc67d0af4ef2d7ca6da0c Mon Sep 17 00:00:00 2001
+From: Yann Sionneau <ysionneau@kalray.eu>
+Date: Tue, 28 Jan 2020 15:27:47 +0100
+Subject: [PATCH 11/21] poll: avoid calling select with empty sets which hangs
+ the process
+
+Avoid calling select with empty sets which hangs the process
+
+This makes uClibc-ng act like glibc and musl
+Without this fix the test_poll of python3 testsuite hangs forever
+
+Scenario of the issue:
+If you call poll with only invalid file descriptors, like in python3
+testsuite
+(https://github.com/python/cpython/blob/master/Lib/test/test_poll.py#L83)
+You will go through uClibc poll emulation code, which is based on
+select syscall.
+
+Your first call to select will fail, it will return -1 and errno will be
+set to EBADF: https://github.com/wbx-github/uclibc-ng/blob/master/libc/sysdeps/linux/common/poll.c#L120
+Then you will go through the for loop which tests individually each file descriptor by calling
+select on each one: https://github.com/wbx-github/uclibc-ng/blob/master/libc/sysdeps/linux/common/poll.c#L163
+each call will also return -1 with errno being equal to EBADF.
+Therefore all pollfd will have the POLLNVAL flag in their respective revents field.
+And, the most important, rset/wset/xset will stay empty.
+
+Then the for loop ends, the "continue" makes the while loop run again.
+The following select() is run again: https://github.com/wbx-github/uclibc-ng/blob/master/libc/sysdeps/linux/common/poll.c#L120
+
+But this time the sets are empty.
+If the poll was called with timeout set to -1, this select will hang forever because there is no timeout
+and the sets are empty so no event will ever wake it up.
+
+test program:
+
+int main(void)
+{
+	struct pollfd pfd;
+	int ret;
+	int pipe_fds[2];
+
+	pipe(pipe_fds);
+	close(pipe_fds[0]);
+	close(pipe_fds[1]);
+
+	pfd.fd = pipe_fds[0];
+	pfd.events = POLLIN | POLLOUT | POLLPRI;
+	pfd.revents = 0;
+
+	ret = poll(&pfd, 1, -1);
+
+	printf("ret: %d\n", ret);
+	if (ret < 0)
+		printf("error: %s", strerror(errno));
+	else {
+		puts("revents: ");
+		if (pfd.revents & POLLERR)
+			printf(" POLLERR");
+		if (pfd.revents & POLLHUP)
+			printf(" POLLHUP");
+		if (pfd.revents & POLLNVAL)
+			printf(" POLLNVAL");
+		puts("");
+	}
+
+	return 0;
+}
+
+This hangs on uClibc-ng aarch64 and Kalray's arch (kv3) but does the following on musl and glibc:
+"
+ret: 1
+revents:
+ POLLNVAL
+"
+
+strace output of this program with uClibc *without* the patch applied:
+
+pselect6(4, [3], [3], [3], NULL, NULL)  = -1 EBADF (Bad file descriptor)
+pselect6(4, [3], [3], [3], {tv_sec=0, tv_nsec=0}, NULL) = -1 EBADF (Bad file descriptor)
+pselect6(0, 0x7ffffffb80, 0x7ffffffb68, 0x7ffffffb50, NULL, NULL
+(never finishes)
+
+strace output of this program with uClibc *with* the patch applied:
+pselect6(4, [3], [3], [3], NULL, NULL)  = -1 EBADF (Bad file descriptor)
+pselect6(4, [3], [3], [3], {tv_sec=0, tv_nsec=0}, NULL) = -1 EBADF (Bad file descriptor)
+write(1, "ret: 1\n", 7ret: 1
+)                 = 7
+write(1, "revents: \n", 10revents:
+)             = 10
+write(1, " POLLNVAL\n", 10 POLLNVAL
+)             = 10
+exit_group(0)                           = ?
++++ exited with 0 +++
+---
+ libc/sysdeps/linux/common/poll.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/libc/sysdeps/linux/common/poll.c b/libc/sysdeps/linux/common/poll.c
+index d1f1f1723..3d46d5bee 100644
+--- a/libc/sysdeps/linux/common/poll.c
++++ b/libc/sysdeps/linux/common/poll.c
+@@ -53,6 +53,7 @@ int __NC(poll)(struct pollfd *fds, nfds_t nfds, int timeout)
+     fd_set *rset, *wset, *xset;
+     struct pollfd *f;
+     int ready;
++    int error_num;
+     int maxfd = 0;
+     int bytes;
+ 
+@@ -142,6 +143,7 @@ int __NC(poll)(struct pollfd *fds, nfds_t nfds, int timeout)
+ 
+ 	    /* Reset the return value.  */
+ 	    ready = 0;
++	    error_num = 0;
+ 
+ 	    for (f = fds; f < &fds[nfds]; ++f)
+ 		if (f->fd != -1 && (f->events & (POLLIN|POLLOUT|POLLPRI))
+@@ -178,8 +180,13 @@ int __NC(poll)(struct pollfd *fds, nfds_t nfds, int timeout)
+ 			    ++ready;
+ 		    }
+ 		    else if (errno == EBADF)
++		    {
+ 			f->revents |= POLLNVAL;
++			error_num++;
++		    }
+ 		}
++	    if (ready == 0)
++		return error_num;
+ 	    /* Try again.  */
+ 	    continue;
+ 	}
+-- 
+2.24.1
+

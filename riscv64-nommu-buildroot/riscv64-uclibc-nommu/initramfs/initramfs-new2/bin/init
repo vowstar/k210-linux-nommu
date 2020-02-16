@@ -1,0 +1,13 @@
+#!/bin/sh
+
+echo ""
+echo "-----------------------------"
+echo "| Kendryte K210 NOMMU Linux |"
+echo "-----------------------------"
+
+echo "Mounting /proc"
+mount -t proc proc /proc
+
+echo "Starting shell"
+exec /bin/sh
+

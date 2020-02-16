@@ -59,7 +59,7 @@ export PROJ_ROOT=$(pwd)
 
 ## Buildroot
 
-First we need to compile the toolchain, according to the description of A, the toolchain can be obtained through [modified buildroot](https://github.com/damien-lemoal/riscv64-nommu-buildroot).Originally planned to be added as a git submodule, but some people said that this is a tutorial for beginners, so the [buildroot source code](./riscv64-nommu-buildroot) was added to this project.
+First we need to compile the toolchain, according to the description of Damien Le Moal's k210 patch, the toolchain can be obtained through [modified buildroot](https://github.com/damien-lemoal/riscv64-nommu-buildroot). Originally planned to be added as a git submodule, but some people said that this is a tutorial for beginners, so the [buildroot source code](./riscv64-nommu-buildroot) was added to this project.
 
 Original buildroot by Damien Le Moal @damien-lemoal:
 

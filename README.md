@@ -91,6 +91,21 @@ export PATH=/opt/riscv64-uclibc/bin:$PATH
 
 ## Build Rootfs
 
+### Busybox
+
+This busybox clone from git://git.busybox.net/busybox.git. Originally planned to be added as a git submodule, but some people said that this is a tutorial for beginners, so the [busybox source code](./busybox) was added to this project.
+
+I modified the ``$PROJ_ROOT/busybox/configs/k210_nommu_defconfig`` file to fit k210 nommu linux.
+
+```bash
+export PATH=/opt/riscv64-uclibc/bin:$PATH
+cd "$PROJ_ROOT/busybox"
+make k210_nommu_defconfig
+make SKIP_STRIP=y
+make SKIP_STRIP=y install
+```
+
+After install, all the data installed to ``$PROJ_ROOT/rootfs_k210``
 
 
 ## Build Kernel

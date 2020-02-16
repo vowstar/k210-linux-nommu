@@ -113,6 +113,124 @@ make SKIP_STRIP=y install
 
 After install, all the data installed to ``$PROJ_ROOT/rootfs_k210``
 
+### Tiny C Compiler
+
+C Scripting Everywhere - The Smallest ANSI C compiler. We have a wish is to have a C compiler on k210 that can develop k210 C programs. 
+So we cross-compiled tcc. This process is done by @minix and me together.
+
+The Tiny C Compiler source code from https://github.com/mirror/tinycc.git. Originally planned to be added as a git submodule, but some people said that this is a tutorial for beginners, so the [tinycc source code](./tinycc) was added to this project.
+
+```bash
+export PATH=/opt/riscv64-uclibc/bin:$PATH
+cd "$PROJ_ROOT/tinycc"
+./configure --prefix=/usr --cross-prefix=riscv64-linux- --cpu=riscv64 --extra-cflags="-DCONFIG_TCC_STATIC=1" --extra-ldflags=-Wl,-elf2flt=-r
+make
+make DESTDIR=../rootfs_k210 install
+```
+
+If not add ``--extra-cflags="-DCONFIG_TCC_STATIC=1"``, when compile it will get error:
+
+```
+tcc.h:41:12: fatal error: dlfcn.h: No such file or directory
+```
+
+@minix fix it using ``-DCONFIG_TCC_STATIC=1``
+
+Also the current k210 nommu uclibc have no threading support, so I changed the code and removed the ``-lpthread``:
+
+```diff
+--- a/Makefile
++++ b/Makefile
+@@ -30,7 +30,8 @@ ifdef CONFIG_WIN32
+  CFGWIN = -win
+  NATIVE_TARGET = $(ARCH)-win$(if $(findstring arm,$(ARCH)),ce,32)
+ else
+- LIBS=-lm -lpthread
++ #LIBS=-lm -lpthread
++ LIBS=-lm
+  ifneq ($(CONFIG_ldl),no)
+   LIBS+=-ldl
+  endif
+```
+
+When tcc is compiled, it consumes a lot of memory, which makes it impossible to run on k210 nommu linux. @minux found the reason in only 10 minutes, and edit the code as follows:
+
+```diff
+--- a/tccpp.c
++++ b/tccpp.c
+@@ -130,9 +130,9 @@ ST_FUNC void expect(const char *msg)
+ #define TAL_DEBUG_FILE_LEN 40
+ #endif
+ 
+-#define TOKSYM_TAL_SIZE     (768 * 1024) /* allocator for tiny TokenSym in table_ident */
+-#define TOKSTR_TAL_SIZE     (768 * 1024) /* allocator for tiny TokenString instances */
+-#define CSTR_TAL_SIZE       (256 * 1024) /* allocator for tiny CString instances */
++#define TOKSYM_TAL_SIZE     (64 * 1024) /* allocator for tiny TokenSym in table_ident */
++#define TOKSTR_TAL_SIZE     (64 * 1024) /* allocator for tiny TokenString instances */
++#define CSTR_TAL_SIZE       (16 * 1024) /* allocator for tiny CString instances */
+ #define TOKSYM_TAL_LIMIT    256 /* prefer unique limits to distinguish allocators debug msgs */
+ #define TOKSTR_TAL_LIMIT    128 /* 32 * sizeof(int) */
+ #define CSTR_TAL_LIMIT      1024
+```
+
+And then it is works.
+
+Then, we encountered the mprotect problem when ``tcc -run``. @minux found the reason, k210 nommu linux don't need mprotect. Edit the code:
+
+```diff
+diff --git a/tccrun.c b/tccrun.c
+index 4bf709d..42a0852 100644
+--- a/tccrun.c
++++ b/tccrun.c
+@@ -304,6 +304,13 @@ static int tcc_relocate_ex(TCCState *s1, void *ptr, addr_t ptr_diff)
+ 
+ static void set_pages_executable(TCCState *s1, void *ptr, unsigned long length)
+ {
++#if defined TCC_TARGET_RISCV64
++    /* RISC-V NON MMU don't need mprotect */
++    void __clear_cache(void *beginning, void *end);
++    __clear_cache(ptr, (char *)ptr + length);
++    return;
++#endif
++
+ #ifdef _WIN32
+     unsigned long old_protect;
+     VirtualProtect(ptr, length, PAGE_EXECUTE_READWRITE, &old_protect);
+```
+
+It almost works.
+
+TODO: Add elf2flt support. The tcc output format is elf, can't run under k210 nommu linux directly, so need some convert.
+
+But ``tcc -run`` works, example:
+
+```c
+// main.c
+int fib(int n){
+    if(n < 2){
+        return 1;
+    }
+    return fib(n-1) + fib(n-2);
+}
+
+int _start() {
+    int i;
+    for (i = 0; i < 15; i++)
+        printf("%d ", fib(i));
+    printf("Hello world from K210!!!\n");
+    return 0;
+}
+```
+
+Run with:
+
+```bash
+tcc -run -nostdlib main.c
+```
+
+The result:
+
+![RUN TCC](./images/k210_nommu_linux_run_tcc.png "k210 nommu linux run tcc")
 
 ## Build Kernel
 

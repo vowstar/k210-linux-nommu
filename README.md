@@ -153,7 +153,7 @@ Also the current k210 nommu uclibc have no threading support, so I changed the c
   endif
 ```
 
-When tcc is compiled, it consumes a lot of memory, which makes it impossible to run on k210 nommu linux. @minux found the reason in only 10 minutes, and edit the code as follows:
+When tcc is compiled, it consumes a lot of memory, which makes it impossible to run on k210 nommu linux. [@minux](https://github.com/minux) found the reason in only 10 minutes, and edit the code as follows:
 
 ```diff
 --- a/tccpp.c
@@ -175,7 +175,7 @@ When tcc is compiled, it consumes a lot of memory, which makes it impossible to 
 
 And then it is works.
 
-Then, we encountered the mprotect problem when ``tcc -run``. @minux found the reason, k210 nommu linux don't need mprotect. Edit the code:
+Then, we encountered the mprotect problem when ``tcc -run``. [@minux](https://github.com/minux) found the reason, k210 nommu linux don't need mprotect. Edit the code:
 
 ```diff
 diff --git a/tccrun.c b/tccrun.c

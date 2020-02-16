@@ -280,6 +280,8 @@ python3 -m serial.tools.miniterm --raw --filter colorize /dev/ttyUSB0 115200
 Using vi editor to add a file ``main.c``
 
 ```c
+int printf(const char *, ...);
+
 int fib(int n){
     if(n < 2){
         return 1;

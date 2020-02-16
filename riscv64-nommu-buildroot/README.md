@@ -1,4 +1,4 @@
-Buildrrot for RISC-V 64 NOMMU
+Buildroot for RISC-V 64 NOMMU
 =============================
 
 Buildroot is a simple, efficient and easy-to-use tool to generate embedded

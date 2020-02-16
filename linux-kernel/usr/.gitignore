@@ -1,0 +1,3 @@
+gen_init_cpio
+initramfs_data.cpio
+/initramfs_inc_data

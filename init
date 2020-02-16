@@ -1,0 +1,15 @@
+#!/bin/sh
+
+echo ""
+echo "--------------------------------------"
+echo "| Kendryte K210 Linux mod by vowstar |"
+echo "--------------------------------------"
+
+echo "Mounting /proc"
+mount -t proc proc /proc
+
+echo "Starting shell"
+
+while true; do
+    exec /bin/sh
+done

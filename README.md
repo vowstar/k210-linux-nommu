@@ -4,7 +4,7 @@
 
 This is a tutorial for beginners, mainly describes how to compile the kernel to run NOMMU linux on k210. And, this tutorial will show how to cross compile a tcc so that you can execute a C program with tcc on the k210. The kernel source is download from https://www.kernel.org, and applied [Damien Le Moal's k210 patch](https://lore.kernel.org/linux-riscv/BYAPR04MB5816C1EADCEF92F1F1DE60E0E7140@BYAPR04MB5816.namprd04.prod.outlook.com/T/#t) 
 
-@damien-lemoal
+[@damien-lemoal](https://github.com/damien-lemoal)
 
 ## Before build
 
@@ -116,7 +116,7 @@ After install, all the data installed to ``$PROJ_ROOT/rootfs_k210``
 ### Tiny C Compiler
 
 C Scripting Everywhere - The Smallest ANSI C compiler. We have a wish is to have a C compiler on k210 that can develop k210 C programs. 
-So we cross-compiled tcc. This process is done by @minix and me together.
+So we cross-compiled tcc. This process is done by [@minux](https://github.com/minux) and me together.
 
 The Tiny C Compiler source code from https://github.com/mirror/tinycc.git. Originally planned to be added as a git submodule, but some people said that this is a tutorial for beginners, so the [tinycc source code](./tinycc) was added to this project.
 
@@ -134,7 +134,7 @@ If not add ``--extra-cflags="-DCONFIG_TCC_STATIC=1"``, when compile it will get 
 tcc.h:41:12: fatal error: dlfcn.h: No such file or directory
 ```
 
-@minix fix it using ``-DCONFIG_TCC_STATIC=1``
+[@minux](https://github.com/minux) fix it using ``-DCONFIG_TCC_STATIC=1``
 
 Also the current k210 nommu uclibc have no threading support, so I changed the code and removed the ``-lpthread``:
 

@@ -248,6 +248,8 @@ In order to be able to compile smoothly, I shamelessly put the ROOTFS ``k210.cpi
 
 ```bash
 cd "$PROJ_ROOT/linux-kernel"
+export PATH=/opt/riscv64-uclibc/bin:$PATH
+make ARCH=riscv CROSS_COMPILE=riscv64-linux- nommu_k210_defconfig
 make ARCH=riscv CROSS_COMPILE=riscv64-linux- -j
 ```
 

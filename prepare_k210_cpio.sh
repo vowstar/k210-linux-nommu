@@ -27,7 +27,7 @@ cd $PROJ_ROOT
 [ -d "rootfs_k210" ] && rm -rf $KERNEL/k210.cpio || echo "Error: Please cd to project root."
 [ -d "rootfs_k210" ] && rm -rf $ROOTFS/usr/share || echo "Error: Please cd to project root."
 
-cp -rf cd $PROJ_ROOT/init $ROOTFS/bin/
+cp -rf $PROJ_ROOT/init $ROOTFS/bin/
 
 # Begin Damien Le Moal's code:
 # https://lore.kernel.org/linux-riscv/BYAPR04MB5816C1EADCEF92F1F1DE60E0E7140@BYAPR04MB5816.namprd04.prod.outlook.com/T/#t

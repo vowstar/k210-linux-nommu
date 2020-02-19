@@ -1,0 +1,31 @@
+BasedOnStyle: LLVM
+Standard: Cpp03
+IndentWidth: 4
+UseTab: Never
+BreakBeforeBraces: Linux
+AllowShortIfStatementsOnASingleLine: false
+IndentCaseLabels: false
+ColumnLimit: 120
+PenaltyExcessCharacter: 2
+PenaltyBreakString: 1000
+PenaltyReturnTypeOnItsOwnLine: 0
+AccessModifierOffset: 0
+AllowShortFunctionsOnASingleLine: None
+ConstructorInitializerAllOnOneLineOrOnePerLine: false
+AlignConsecutiveAssignments: true
+AlignTrailingComments: true
+# not supported before 3.6
+#AlignAfterOpenBracket: false
+# not supported before 3.8
+#BreakBeforeBraces: WebKit
+ContinuationIndentWidth: 4
+SortIncludes: true
+IncludeCategories:
+  - Regex:           '^<.*\\.h>'
+    Priority:        -4
+  - Regex:           '^<.+\/.+'
+    Priority:        -3
+  - Regex:           '^<.*'
+    Priority:        -2
+  - Regex:           '^".+\/.+'
+    Priority:        -1

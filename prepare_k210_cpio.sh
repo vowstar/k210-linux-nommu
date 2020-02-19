@@ -19,7 +19,16 @@ if [ ! -d "rootfs_k210" ] ; then
     cd "$PROJ_ROOT/tinycc"
     ./configure --prefix=/usr --cross-prefix=riscv64-linux- --cpu=riscv64 --extra-cflags="-DCONFIG_TCC_STATIC=1" --extra-ldflags=-Wl,-elf2flt=-r
     make
-    make DESTDIR=../rootfs_k210 install
+    make DESTDIR=$(pwd)/../rootfs_k210 install
+
+    # remove data to reduce size
+    rm -rf $ROOTFS/usr/include/libtcc.h
+    rm -rf $ROOTFS/usr/lib/libtcc.a
+    rm -rf $ROOTFS/usr/lib/tcc
+
+    cd "$PROJ_ROOT/k210_lib"
+    make
+    make DESTDIR=$(pwd)/../rootfs_k210 install
 fi
 
 cd $PROJ_ROOT

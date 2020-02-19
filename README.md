@@ -280,37 +280,6 @@ python3 -m serial.tools.miniterm --raw --filter colorize /dev/ttyUSB0 115200
 Using vi editor to add a file ``main.c``
 
 ```c
-int printf(const char *, ...);
-
-int fib(int n){
-    if(n < 2){
-        return 1;
-    }
-    return fib(n-1) + fib(n-2);
-}
-
-int _start() {
-    int i;
-    for (i = 0; i < 15; i++)
-        printf("%d ", fib(i));
-    printf("Hello world from K210!!!\n");
-    return 0;
-}
-```
-
-Run with ``tcc -run -nostdlib main.c``
-
-```
-tcc -run -nostdlib main.c
-
-1 1 2 3 5 8 13 21 34 55 89 144 233 377 610 Hello world from K210!!!
-```
-
-You will get the hello world output.
-
-Now it supports more formal C code, e.g.:
-
-```c
 #include <stdio.h>
 
 int fib(int n){
@@ -329,11 +298,13 @@ int main(int argc, char* argv[]) {
 }
 ```
 
-And run:
+And run with ``tcc -run main.c``
 
 ```
 tcc -run main.c
 1 1 2 3 5 8 13 21 34 55 89 144 233 377 610 Hello world from K210!!!
 ```
+
+You will get the hello world output.
 
 Enjoy!

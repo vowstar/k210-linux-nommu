@@ -265,11 +265,11 @@ make ARCH=riscv CROSS_COMPILE=riscv64-linux- -j
 
 Program the k210 board and enjoy linux. Suppose you are using Sipeed MAIX dan development board and the serial port is ``/dev/ttyUSB0``.
 
-To use serial port whith user $(whoami), you need add $(whoami) into uucp or/and diaout group.
+To use serial port whith user $(whoami), you need add $(whoami) into uucp or/and dialout group.
 
 ```bash
 sudo usermod -a -G uucp $(whoami)
-sudo usermod -a -G diaout $(whoami)
+sudo usermod -a -G dialout $(whoami)
 sudo python3 -m pip install kflash
 su $(whoami)
 

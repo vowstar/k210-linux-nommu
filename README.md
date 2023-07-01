@@ -50,16 +50,41 @@ RUN dnf -y update && \
 ### Git clone
 
 ```bash
-git clone https://github.com/vowstar/k210-linux-nommu.git
+git clone https://github.com/JAicewizard/k210-linux-nommu.git
 
 cd k210-linux-nommu
 
 export PROJ_ROOT=$(pwd)
 ```
 
+## Init kernel tree
+
+First we need to download the kernel sources. This is done by
+
+```
+cd $PROJ_ROOT
+git submodule update --init
+```
+
+This might take a while as the kernel tree is very large.
+
+If you want to try out a specific version you can run the following to start using kernel version x.y
+
+```
+cd "$PROJ_ROOT/linux-kernel"
+git checkout vx.y
+```
+
+To top it off we need to apply a small patch that allows us to start a shell:
+
+```
+cd "PROJ_ROOT/linux-kernel"
+git apply ../fixk210.patch
+```
+
 ## Buildroot
 
-First we need to compile the toolchain, according to the description of Damien Le Moal's k210 patch, the toolchain can be obtained through [modified buildroot](https://github.com/damien-lemoal/riscv64-nommu-buildroot). Originally planned to be added as a git submodule, but some people said that this is a tutorial for beginners, so the [buildroot source code](./riscv64-nommu-buildroot) was added to this project.
+After this we need to compile the toolchain, according to the description of Damien Le Moal's k210 patch, the toolchain can be obtained through [modified buildroot](https://github.com/damien-lemoal/riscv64-nommu-buildroot). Originally planned to be added as a git submodule, but some people said that this is a tutorial for beginners, so the [buildroot source code](./riscv64-nommu-buildroot) was added to this project.
 
 Original buildroot by Damien Le Moal @damien-lemoal:
 

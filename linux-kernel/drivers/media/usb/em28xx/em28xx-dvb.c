@@ -16,10 +16,6 @@
 // Based on cx88-dvb, saa7134-dvb and videobuf-dvb originally written by:
 //	(c) 2004, 2005 Chris Pascoe <c.pascoe@itee.uq.edu.au>
 //	(c) 2004 Gerd Knorr <kraxel@bytesex.org> [SuSE Labs]
-//
-// This program is free software; you can redistribute it and/or modify
-// it under the terms of the GNU General Public License as published by
-// the Free Software Foundation version 2 of the License.
 
 #include "em28xx.h"
 
@@ -62,6 +58,7 @@
 #include "si2157.h"
 #include "tc90522.h"
 #include "qm1d1c0042.h"
+#include "mxl692.h"
 
 MODULE_AUTHOR("Mauro Carvalho Chehab <mchehab@kernel.org>");
 MODULE_LICENSE("GPL v2");
@@ -1207,6 +1204,67 @@ static int em28178_dvb_init_pctv_461e(struct em28xx *dev)
 
 	/* attach SEC */
 	a8293_pdata.dvb_frontend = dvb->fe[0];
+	/*
+	 * 461e has a tendency to have vIN undervoltage troubles.
+	 * Slew mitigates this.
+	 */
+	a8293_pdata.volt_slew_nanos_per_mv = 20;
+
+	dvb->i2c_client_sec = dvb_module_probe("a8293", NULL,
+					       &dev->i2c_adap[dev->def_i2c_bus],
+					       0x08, &a8293_pdata);
+	if (!dvb->i2c_client_sec) {
+		dvb_module_release(dvb->i2c_client_tuner);
+		dvb_module_release(dvb->i2c_client_demod);
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
+static int em28178_dvb_init_pctv_461e_v2(struct em28xx *dev)
+{
+	struct em28xx_dvb *dvb = dev->dvb;
+	struct i2c_adapter *i2c_adapter;
+	struct m88ds3103_platform_data m88ds3103_pdata = {};
+	struct ts2020_config ts2020_config = {};
+	struct a8293_platform_data a8293_pdata = {};
+
+	/* attach demod */
+	m88ds3103_pdata.clk = 27000000;
+	m88ds3103_pdata.i2c_wr_max = 33;
+	m88ds3103_pdata.ts_mode = M88DS3103_TS_PARALLEL;
+	m88ds3103_pdata.ts_clk = 16000;
+	m88ds3103_pdata.ts_clk_pol = 0;
+	m88ds3103_pdata.agc = 0x99;
+	m88ds3103_pdata.agc_inv = 0;
+	m88ds3103_pdata.spec_inv = 0;
+	dvb->i2c_client_demod = dvb_module_probe("m88ds3103", "m88ds3103b",
+						 &dev->i2c_adap[dev->def_i2c_bus],
+						 0x6a, &m88ds3103_pdata);
+
+	if (!dvb->i2c_client_demod)
+		return -ENODEV;
+
+	dvb->fe[0] = m88ds3103_pdata.get_dvb_frontend(dvb->i2c_client_demod);
+	i2c_adapter = m88ds3103_pdata.get_i2c_adapter(dvb->i2c_client_demod);
+
+	/* attach tuner */
+	ts2020_config.fe = dvb->fe[0];
+	dvb->i2c_client_tuner = dvb_module_probe("ts2020", "ts2022",
+						 i2c_adapter,
+						 0x60, &ts2020_config);
+	if (!dvb->i2c_client_tuner) {
+		dvb_module_release(dvb->i2c_client_demod);
+		return -ENODEV;
+	}
+
+	/* delegate signal strength measurement to tuner */
+	dvb->fe[0]->ops.read_signal_strength =
+			dvb->fe[0]->ops.tuner_ops.get_rf_strength;
+
+	/* attach SEC */
+	a8293_pdata.dvb_frontend = dvb->fe[0];
 	dvb->i2c_client_sec = dvb_module_probe("a8293", NULL,
 					       &dev->i2c_adap[dev->def_i2c_bus],
 					       0x08, &a8293_pdata);
@@ -1400,6 +1458,26 @@ static int em28174_dvb_init_hauppauge_wintv_dualhd_01595(struct em28xx *dev)
 		dvb_module_release(dvb->i2c_client_demod);
 		return -ENODEV;
 	}
+
+	return 0;
+}
+
+static int em2874_dvb_init_hauppauge_usb_quadhd(struct em28xx *dev)
+{
+	struct em28xx_dvb *dvb = dev->dvb;
+	struct mxl692_config mxl692_config = {};
+	unsigned char addr;
+
+	/* attach demod/tuner combo */
+	mxl692_config.id = (dev->ts == PRIMARY_TS) ? 0 : 1;
+	mxl692_config.fe = &dvb->fe[0];
+	addr = (dev->ts == PRIMARY_TS) ? 0x60 : 0x63;
+
+	dvb->i2c_client_demod = dvb_module_probe("mxl692", NULL,
+						 &dev->i2c_adap[dev->def_i2c_bus],
+						 addr, &mxl692_config);
+	if (!dvb->i2c_client_demod)
+		return -ENODEV;
 
 	return 0;
 }
@@ -1860,6 +1938,11 @@ static int em28xx_dvb_init(struct em28xx *dev)
 		if (result)
 			goto out_free;
 		break;
+	case EM28178_BOARD_PCTV_461E_V2:
+		result = em28178_dvb_init_pctv_461e_v2(dev);
+		if (result)
+			goto out_free;
+		break;
 	case EM28178_BOARD_PCTV_292E:
 		result = em28178_dvb_init_pctv_292e(dev);
 		if (result)
@@ -1882,6 +1965,11 @@ static int em28xx_dvb_init(struct em28xx *dev)
 		break;
 	case EM28174_BOARD_HAUPPAUGE_WINTV_DUALHD_01595:
 		result = em28174_dvb_init_hauppauge_wintv_dualhd_01595(dev);
+		if (result)
+			goto out_free;
+		break;
+	case EM2874_BOARD_HAUPPAUGE_USB_QUADHD:
+		result = em2874_dvb_init_hauppauge_usb_quadhd(dev);
 		if (result)
 			goto out_free;
 		break;
@@ -1924,6 +2012,7 @@ ret:
 	return result;
 
 out_free:
+	em28xx_uninit_usb_xfer(dev, EM28XX_DIGITAL_MODE);
 	kfree(dvb);
 	dev->dvb = NULL;
 	goto ret;

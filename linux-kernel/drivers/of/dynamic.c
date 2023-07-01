@@ -27,7 +27,7 @@ static struct device_node *kobj_to_device_node(struct kobject *kobj)
  * @node:	Node to inc refcount, NULL is supported to simplify writing of
  *		callers
  *
- * Returns node.
+ * Return: The node with refcount incremented.
  */
 struct device_node *of_node_get(struct device_node *node)
 {
@@ -104,7 +104,8 @@ int of_reconfig_notify(unsigned long action, struct of_reconfig_data *p)
  * @arg		- argument of the of notifier
  *
  * Returns the new state of a device based on the notifier used.
- * Returns 0 on device going from enabled to disabled, 1 on device
+ *
+ * Return: 0 on device going from enabled to disabled, 1 on device
  * going from disabled to enabled and -1 on no change.
  */
 int of_reconfig_get_state_change(unsigned long action, struct of_reconfig_data *pr)
@@ -225,10 +226,12 @@ static void __of_attach_node(struct device_node *np)
 	np->sibling = np->parent->child;
 	np->parent->child = np;
 	of_node_clear_flag(np, OF_DETACHED);
+	np->fwnode.flags |= FWNODE_FLAG_NOT_DEVICE;
 }
 
 /**
  * of_attach_node() - Plug a device node into the tree and global list.
+ * @np:		Pointer to the caller's Device Node
  */
 int of_attach_node(struct device_node *np)
 {
@@ -281,12 +284,12 @@ void __of_detach_node(struct device_node *np)
 
 /**
  * of_detach_node() - "Unplug" a node from the device tree.
+ * @np:		Pointer to the caller's Device Node
  */
 int of_detach_node(struct device_node *np)
 {
 	struct of_reconfig_data rd;
 	unsigned long flags;
-	int rc = 0;
 
 	memset(&rd, 0, sizeof(rd));
 	rd.dn = np;
@@ -301,7 +304,7 @@ int of_detach_node(struct device_node *np)
 
 	of_reconfig_notify(OF_RECONFIG_DETACH_NODE, &rd);
 
-	return rc;
+	return 0;
 }
 EXPORT_SYMBOL_GPL(of_detach_node);
 
@@ -319,7 +322,7 @@ static void property_list_free(struct property *prop_list)
 
 /**
  * of_node_release() - release a dynamically allocated node
- * @kref: kref element of the node to be released
+ * @kobj: kernel object of the node to be released
  *
  * In of_node_put() this function is passed to kref_put() as the destructor.
  */
@@ -327,10 +330,30 @@ void of_node_release(struct kobject *kobj)
 {
 	struct device_node *node = kobj_to_device_node(kobj);
 
+	/*
+	 * can not use '"%pOF", node' in pr_err() calls from this function
+	 * because an of_node_get(node) when refcount is already zero
+	 * will result in an error and a stack dump
+	 */
+
 	/* We should never be releasing nodes that haven't been detached. */
 	if (!of_node_check_flag(node, OF_DETACHED)) {
-		pr_err("ERROR: Bad of_node_put() on %pOF\n", node);
-		dump_stack();
+
+		pr_err("ERROR: %s() detected bad of_node_put() on %pOF/%s\n",
+			__func__, node->parent, node->full_name);
+
+		/*
+		 * of unittests will test this path.  Do not print the stack
+		 * trace when the error is caused by unittest so that we do
+		 * not display what a normal developer might reasonably
+		 * consider a real bug.
+		 */
+		if (!IS_ENABLED(CONFIG_OF_UNITTEST) ||
+		    strcmp(node->parent->full_name, "testcase-data")) {
+			dump_stack();
+			pr_err("ERROR: next of_node_put() on this node will result in a kobject warning 'refcount_t: underflow; use-after-free.'\n");
+		}
+
 		return;
 	}
 	if (!of_node_check_flag(node, OF_DYNAMIC))
@@ -355,8 +378,13 @@ void of_node_release(struct kobject *kobj)
 			       __func__, node);
 	}
 
+	if (node->child)
+		pr_err("ERROR: %s() unexpected children for %pOF/%s\n",
+			__func__, node->parent, node->full_name);
+
 	property_list_free(node->properties);
 	property_list_free(node->deadprops);
+	fwnode_links_purge(of_fwnode_handle(node));
 
 	kfree(node->full_name);
 	kfree(node->data);
@@ -372,7 +400,8 @@ void of_node_release(struct kobject *kobj)
  * property structure and the property name & contents. The property's
  * flags have the OF_DYNAMIC bit set so that we can differentiate between
  * dynamically allocated properties and not.
- * Returns the newly allocated property or NULL on out of memory error.
+ *
+ * Return: The newly allocated property or NULL on out of memory error.
  */
 struct property *__of_prop_dup(const struct property *prop, gfp_t allocflags)
 {
@@ -415,7 +444,8 @@ struct property *__of_prop_dup(const struct property *prop, gfp_t allocflags)
  * another node.  The node data are dynamically allocated and all the node
  * flags have the OF_DYNAMIC & OF_DETACHED bits set.
  *
- * Returns the newly allocated node or NULL on out of memory error.
+ * Return: The newly allocated node or NULL on out of memory error.  Use
+ * of_node_put() on it when done to free the memory allocated for it.
  */
 struct device_node *__of_node_dup(const struct device_node *np,
 				  const char *full_name)
@@ -781,7 +811,8 @@ static int __of_changeset_apply(struct of_changeset *ocs)
  * Any side-effects of live tree state changes are applied here on
  * success, like creation/destruction of devices and side-effects
  * like creation of sysfs properties and directories.
- * Returns 0 on success, a negative error value in case of an error.
+ *
+ * Return: 0 on success, a negative error value in case of an error.
  * On error the partially applied effects are reverted.
  */
 int of_changeset_apply(struct of_changeset *ocs)
@@ -875,7 +906,8 @@ static int __of_changeset_revert(struct of_changeset *ocs)
  * was before the application.
  * Any side-effects like creation/destruction of devices and
  * removal of sysfs properties and directories are applied.
- * Returns 0 on success, a negative error value in case of an error.
+ *
+ * Return: 0 on success, a negative error value in case of an error.
  */
 int of_changeset_revert(struct of_changeset *ocs)
 {
@@ -903,7 +935,8 @@ EXPORT_SYMBOL_GPL(of_changeset_revert);
  * + OF_RECONFIG_ADD_PROPERTY
  * + OF_RECONFIG_REMOVE_PROPERTY,
  * + OF_RECONFIG_UPDATE_PROPERTY
- * Returns 0 on success, a negative error value in case of an error.
+ *
+ * Return: 0 on success, a negative error value in case of an error.
  */
 int of_changeset_action(struct of_changeset *ocs, unsigned long action,
 		struct device_node *np, struct property *prop)

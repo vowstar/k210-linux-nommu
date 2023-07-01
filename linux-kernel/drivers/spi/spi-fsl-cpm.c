@@ -226,7 +226,7 @@ static void fsl_spi_free_dummy_rx(void)
 	case 1:
 		kfree(fsl_dummy_rx);
 		fsl_dummy_rx = NULL;
-		/* fall through */
+		fallthrough;
 	default:
 		fsl_dummy_rx_refcnt--;
 		break;
@@ -294,7 +294,7 @@ int fsl_spi_cpm_init(struct mpc8xxx_spi *mspi)
 		switch (mspi->subblock) {
 		default:
 			dev_warn(dev, "cell-index unspecified, assuming SPI1\n");
-			/* fall through */
+			fallthrough;
 		case 0:
 			mspi->subblock = QE_CR_SUBBLOCK_SPI1;
 			break;
@@ -333,7 +333,7 @@ int fsl_spi_cpm_init(struct mpc8xxx_spi *mspi)
 		goto err_bds;
 	}
 
-	mspi->dma_dummy_tx = dma_map_single(dev, empty_zero_page, PAGE_SIZE,
+	mspi->dma_dummy_tx = dma_map_single(dev, ZERO_PAGE(0), PAGE_SIZE,
 					    DMA_TO_DEVICE);
 	if (dma_mapping_error(dev, mspi->dma_dummy_tx)) {
 		dev_err(dev, "unable to map dummy tx buffer\n");

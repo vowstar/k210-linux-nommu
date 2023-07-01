@@ -1,20 +1,10 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 /*
  * dvbdev.c
  *
  * Copyright (C) 2000 Ralph  Metzler <ralph@convergence.de>
  *                  & Marcus Metzler <marcus@convergence.de>
  *                    for convergence integrated media GmbH
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public License
- * as published by the Free Software Foundation; either version 2.1
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #define pr_fmt(fmt) "dvbdev: " fmt
@@ -107,7 +97,7 @@ static int dvb_device_open(struct inode *inode, struct file *file)
 		new_fops = fops_get(dvbdev->fops);
 		if (!new_fops)
 			goto fail;
-		file->private_data = dvbdev;
+		file->private_data = dvb_device_get(dvbdev);
 		replace_fops(file, new_fops);
 		if (file->f_op->open)
 			err = file->f_op->open(inode, file);
@@ -171,6 +161,9 @@ int dvb_generic_release(struct inode *inode, struct file *file)
 	}
 
 	dvbdev->users++;
+
+	dvb_device_put(dvbdev);
+
 	return 0;
 }
 EXPORT_SYMBOL(dvb_generic_release);
@@ -241,6 +234,7 @@ static void dvb_media_device_free(struct dvb_device *dvbdev)
 
 	if (dvbdev->adapter->conn) {
 		media_device_unregister_entity(dvbdev->adapter->conn);
+		kfree(dvbdev->adapter->conn);
 		dvbdev->adapter->conn = NULL;
 		kfree(dvbdev->adapter->conn_pads);
 		dvbdev->adapter->conn_pads = NULL;
@@ -252,7 +246,7 @@ static void dvb_media_device_free(struct dvb_device *dvbdev)
 static int dvb_create_tsout_entity(struct dvb_device *dvbdev,
 				    const char *name, int npads)
 {
-	int i, ret = 0;
+	int i;
 
 	dvbdev->tsout_pads = kcalloc(npads, sizeof(*dvbdev->tsout_pads),
 				     GFP_KERNEL);
@@ -269,6 +263,7 @@ static int dvb_create_tsout_entity(struct dvb_device *dvbdev,
 	for (i = 0; i < npads; i++) {
 		struct media_pad *pads = &dvbdev->tsout_pads[i];
 		struct media_entity *entity = &dvbdev->tsout_entity[i];
+		int ret;
 
 		entity->name = kasprintf(GFP_KERNEL, "%s #%d", name, i);
 		if (!entity->name)
@@ -341,6 +336,7 @@ static int dvb_create_media_entity(struct dvb_device *dvbdev,
 				       GFP_KERNEL);
 		if (!dvbdev->pads) {
 			kfree(dvbdev->entity);
+			dvbdev->entity = NULL;
 			return -ENOMEM;
 		}
 	}
@@ -487,6 +483,7 @@ int dvb_register_device(struct dvb_adapter *adap, struct dvb_device **pdvbdev,
 	}
 
 	memcpy(dvbdev, template, sizeof(struct dvb_device));
+	kref_init(&dvbdev->ref);
 	dvbdev->type = type;
 	dvbdev->id = id;
 	dvbdev->adapter = adap;
@@ -505,6 +502,7 @@ int dvb_register_device(struct dvb_adapter *adap, struct dvb_device **pdvbdev,
 			break;
 
 	if (minor == MAX_DVB_MINORS) {
+		list_del (&dvbdev->list_head);
 		kfree(dvbdevfops);
 		kfree(dvbdev);
 		up_write(&minor_rwsem);
@@ -516,7 +514,7 @@ int dvb_register_device(struct dvb_adapter *adap, struct dvb_device **pdvbdev,
 #endif
 
 	dvbdev->minor = minor;
-	dvb_minors[minor] = dvbdev;
+	dvb_minors[minor] = dvb_device_get(dvbdev);
 	up_write(&minor_rwsem);
 
 	ret = dvb_register_media_device(dvbdev, type, minor, demux_sink_pads);
@@ -525,6 +523,7 @@ int dvb_register_device(struct dvb_adapter *adap, struct dvb_device **pdvbdev,
 		      __func__);
 
 		dvb_media_device_free(dvbdev);
+		list_del (&dvbdev->list_head);
 		kfree(dvbdevfops);
 		kfree(dvbdev);
 		mutex_unlock(&dvbdev_register_lock);
@@ -539,6 +538,10 @@ int dvb_register_device(struct dvb_adapter *adap, struct dvb_device **pdvbdev,
 	if (IS_ERR(clsdev)) {
 		pr_err("%s: failed to create device dvb%d.%s%d (%ld)\n",
 		       __func__, adap->num, dnames[type], id, PTR_ERR(clsdev));
+		dvb_media_device_free(dvbdev);
+		list_del (&dvbdev->list_head);
+		kfree(dvbdevfops);
+		kfree(dvbdev);
 		return PTR_ERR(clsdev);
 	}
 	dprintk("DVB: register adapter%d/%s%d @ minor: %i (0x%02x)\n",
@@ -556,6 +559,7 @@ void dvb_remove_device(struct dvb_device *dvbdev)
 
 	down_write(&minor_rwsem);
 	dvb_minors[dvbdev->minor] = NULL;
+	dvb_device_put(dvbdev);
 	up_write(&minor_rwsem);
 
 	dvb_media_device_free(dvbdev);
@@ -567,21 +571,34 @@ void dvb_remove_device(struct dvb_device *dvbdev)
 EXPORT_SYMBOL(dvb_remove_device);
 
 
-void dvb_free_device(struct dvb_device *dvbdev)
+static void dvb_free_device(struct kref *ref)
 {
-	if (!dvbdev)
-		return;
+	struct dvb_device *dvbdev = container_of(ref, struct dvb_device, ref);
 
 	kfree (dvbdev->fops);
 	kfree (dvbdev);
 }
-EXPORT_SYMBOL(dvb_free_device);
+
+
+struct dvb_device *dvb_device_get(struct dvb_device *dvbdev)
+{
+	kref_get(&dvbdev->ref);
+	return dvbdev;
+}
+EXPORT_SYMBOL(dvb_device_get);
+
+
+void dvb_device_put(struct dvb_device *dvbdev)
+{
+	if (dvbdev)
+		kref_put(&dvbdev->ref, dvb_free_device);
+}
 
 
 void dvb_unregister_device(struct dvb_device *dvbdev)
 {
 	dvb_remove_device(dvbdev);
-	dvb_free_device(dvbdev);
+	dvb_device_put(dvbdev);
 }
 EXPORT_SYMBOL(dvb_unregister_device);
 
@@ -707,9 +724,10 @@ int dvb_create_media_graph(struct dvb_adapter *adap,
 	}
 
 	if (ntuner && ndemod) {
-		pad_source = media_get_pad_index(tuner, true,
+		/* NOTE: first found tuner source pad presumed correct */
+		pad_source = media_get_pad_index(tuner, false,
 						 PAD_SIGNAL_ANALOG);
-		if (pad_source)
+		if (pad_source < 0)
 			return -EINVAL;
 		ret = media_create_pad_links(mdev,
 					     MEDIA_ENT_F_TUNER,
@@ -1010,9 +1028,9 @@ void dvb_module_release(struct i2c_client *client)
 EXPORT_SYMBOL_GPL(dvb_module_release);
 #endif
 
-static int dvb_uevent(struct device *dev, struct kobj_uevent_env *env)
+static int dvb_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
-	struct dvb_device *dvbdev = dev_get_drvdata(dev);
+	const struct dvb_device *dvbdev = dev_get_drvdata(dev);
 
 	add_uevent_var(env, "DVB_ADAPTER_NUM=%d", dvbdev->adapter->num);
 	add_uevent_var(env, "DVB_DEVICE_TYPE=%s", dnames[dvbdev->type]);
@@ -1020,9 +1038,9 @@ static int dvb_uevent(struct device *dev, struct kobj_uevent_env *env)
 	return 0;
 }
 
-static char *dvb_devnode(struct device *dev, umode_t *mode)
+static char *dvb_devnode(const struct device *dev, umode_t *mode)
 {
-	struct dvb_device *dvbdev = dev_get_drvdata(dev);
+	const struct dvb_device *dvbdev = dev_get_drvdata(dev);
 
 	return kasprintf(GFP_KERNEL, "dvb/adapter%d/%s%d",
 		dvbdev->adapter->num, dnames[dvbdev->type], dvbdev->id);

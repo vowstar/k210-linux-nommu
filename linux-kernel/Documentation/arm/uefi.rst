@@ -23,7 +23,7 @@ makes it possible for the kernel to support additional features:
 For actually enabling [U]EFI support, enable:
 
 - CONFIG_EFI=y
-- CONFIG_EFI_VARS=y or m
+- CONFIG_EFIVAR_FS=y or m
 
 The implementation depends on receiving information about the UEFI environment
 in a Flattened Device Tree (FDT) - so is only available with CONFIG_OF.
@@ -64,4 +64,7 @@ linux,uefi-mmap-desc-size   32-bit   Size in bytes of each entry in the UEFI
                                      memory map.
 
 linux,uefi-mmap-desc-ver    32-bit   Version of the mmap descriptor format.
+
+kaslr-seed                  64-bit   Entropy used to randomize the kernel image
+                                     base address location.
 ==========================  ======   ===========================================

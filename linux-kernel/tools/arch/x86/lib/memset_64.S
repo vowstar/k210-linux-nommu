@@ -3,9 +3,10 @@
 
 #include <linux/linkage.h>
 #include <asm/cpufeatures.h>
-#include <asm/alternative-asm.h>
+#include <asm/alternative.h>
+#include <asm/export.h>
 
-.weak memset
+.section .noinstr.text, "ax"
 
 /*
  * ISO C memset - set a memory block to a byte value. This function uses fast
@@ -18,7 +19,6 @@
  *
  * rax   original destination
  */
-SYM_FUNC_START_ALIAS(memset)
 SYM_FUNC_START(__memset)
 	/*
 	 * Some CPUs support enhanced REP MOVSB/STOSB feature. It is recommended
@@ -41,9 +41,12 @@ SYM_FUNC_START(__memset)
 	movl %edx,%ecx
 	rep stosb
 	movq %r9,%rax
-	ret
+	RET
 SYM_FUNC_END(__memset)
-SYM_FUNC_END_ALIAS(memset)
+EXPORT_SYMBOL(__memset)
+
+SYM_FUNC_ALIAS(memset, __memset)
+EXPORT_SYMBOL(memset)
 
 /*
  * ISO C memset - set a memory block to a byte value. This function uses
@@ -56,16 +59,16 @@ SYM_FUNC_END_ALIAS(memset)
  *
  * rax   original destination
  */
-SYM_FUNC_START(memset_erms)
+SYM_FUNC_START_LOCAL(memset_erms)
 	movq %rdi,%r9
 	movb %sil,%al
 	movq %rdx,%rcx
 	rep stosb
 	movq %r9,%rax
-	ret
+	RET
 SYM_FUNC_END(memset_erms)
 
-SYM_FUNC_START(memset_orig)
+SYM_FUNC_START_LOCAL(memset_orig)
 	movq %rdi,%r10
 
 	/* expand byte value  */
@@ -124,7 +127,7 @@ SYM_FUNC_START(memset_orig)
 
 .Lende:
 	movq	%r10,%rax
-	ret
+	RET
 
 .Lbad_alignment:
 	cmpq $7,%rdx

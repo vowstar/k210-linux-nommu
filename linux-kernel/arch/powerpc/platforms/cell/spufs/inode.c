@@ -21,9 +21,10 @@
 #include <linux/namei.h>
 #include <linux/pagemap.h>
 #include <linux/poll.h>
+#include <linux/of.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
 
-#include <asm/prom.h>
 #include <asm/spu.h>
 #include <asm/spu_priv1.h>
 #include <linux/uaccess.h>
@@ -91,14 +92,15 @@ out:
 }
 
 static int
-spufs_setattr(struct dentry *dentry, struct iattr *attr)
+spufs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+	      struct iattr *attr)
 {
 	struct inode *inode = d_inode(dentry);
 
 	if ((attr->ia_valid & ATTR_SIZE) &&
 	    (attr->ia_size != inode->i_size))
 		return -EINVAL;
-	setattr_copy(inode, attr);
+	setattr_copy(&nop_mnt_idmap, inode, attr);
 	mark_inode_dirty(inode);
 	return 0;
 }
@@ -235,10 +237,7 @@ spufs_mkdir(struct inode *dir, struct dentry *dentry, unsigned int flags,
 	if (!inode)
 		return -ENOSPC;
 
-	if (dir->i_mode & S_ISGID) {
-		inode->i_gid = dir->i_gid;
-		inode->i_mode &= S_ISGID;
-	}
+	inode_init_owner(&nop_mnt_idmap, inode, dir, mode | S_IFDIR);
 	ctx = alloc_spu_context(SPUFS_I(dir)->i_gang); /* XXX gang */
 	SPUFS_I(inode)->i_ctx = ctx;
 	if (!ctx) {
@@ -276,7 +275,7 @@ spufs_mkdir(struct inode *dir, struct dentry *dentry, unsigned int flags,
 	return ret;
 }
 
-static int spufs_context_open(struct path *path)
+static int spufs_context_open(const struct path *path)
 {
 	int ret;
 	struct file *filp;
@@ -469,10 +468,7 @@ spufs_mkgang(struct inode *dir, struct dentry *dentry, umode_t mode)
 		goto out;
 
 	ret = 0;
-	if (dir->i_mode & S_ISGID) {
-		inode->i_gid = dir->i_gid;
-		inode->i_mode &= S_ISGID;
-	}
+	inode_init_owner(&nop_mnt_idmap, inode, dir, mode | S_IFDIR);
 	gang = alloc_spu_gang();
 	SPUFS_I(inode)->i_ctx = NULL;
 	SPUFS_I(inode)->i_gang = gang;
@@ -495,7 +491,7 @@ out:
 	return ret;
 }
 
-static int spufs_gang_open(struct path *path)
+static int spufs_gang_open(const struct path *path)
 {
 	int ret;
 	struct file *filp;
@@ -540,7 +536,7 @@ static int spufs_create_gang(struct inode *inode,
 
 static struct file_system_type spufs_type;
 
-long spufs_create(struct path *path, struct dentry *dentry,
+long spufs_create(const struct path *path, struct dentry *dentry,
 		unsigned int flags, umode_t mode, struct file *filp)
 {
 	struct inode *dir = d_inode(path->dentry);
@@ -652,7 +648,7 @@ static void spufs_exit_isolated_loader(void)
 			get_order(isolated_loader_size));
 }
 
-static void
+static void __init
 spufs_init_isolated_loader(void)
 {
 	struct device_node *dn;
@@ -664,6 +660,7 @@ spufs_init_isolated_loader(void)
 		return;
 
 	loader = of_get_property(dn, "loader", &size);
+	of_node_put(dn);
 	if (!loader)
 		return;
 

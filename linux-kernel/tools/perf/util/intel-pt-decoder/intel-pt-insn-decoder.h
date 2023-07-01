@@ -24,6 +24,7 @@ enum intel_pt_insn_op {
 	INTEL_PT_OP_INT,
 	INTEL_PT_OP_SYSCALL,
 	INTEL_PT_OP_SYSRET,
+	INTEL_PT_OP_VMENTRY,
 };
 
 enum intel_pt_insn_branch {
@@ -36,6 +37,7 @@ enum intel_pt_insn_branch {
 struct intel_pt_insn {
 	enum intel_pt_insn_op		op;
 	enum intel_pt_insn_branch	branch;
+	bool				emulated_ptwrite;
 	int				length;
 	int32_t				rel;
 	unsigned char			buf[INTEL_PT_INSN_BUF_SZ];

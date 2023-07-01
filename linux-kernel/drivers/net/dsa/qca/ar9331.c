@@ -97,10 +97,29 @@
 	(AR9331_SW_PORT_STATUS_TXMAC | AR9331_SW_PORT_STATUS_RXMAC)
 
 #define AR9331_SW_PORT_STATUS_LINK_MASK \
-	(AR9331_SW_PORT_STATUS_LINK_EN | AR9331_SW_PORT_STATUS_FLOW_LINK_EN | \
-	 AR9331_SW_PORT_STATUS_DUPLEX_MODE | \
+	(AR9331_SW_PORT_STATUS_DUPLEX_MODE | \
 	 AR9331_SW_PORT_STATUS_RX_FLOW_EN | AR9331_SW_PORT_STATUS_TX_FLOW_EN | \
 	 AR9331_SW_PORT_STATUS_SPEED_M)
+
+#define AR9331_SW_REG_PORT_CTRL(_port)			(0x104 + (_port) * 0x100)
+#define AR9331_SW_PORT_CTRL_HEAD_EN			BIT(11)
+#define AR9331_SW_PORT_CTRL_PORT_STATE			GENMASK(2, 0)
+#define AR9331_SW_PORT_CTRL_PORT_STATE_DISABLED		0
+#define AR9331_SW_PORT_CTRL_PORT_STATE_BLOCKING		1
+#define AR9331_SW_PORT_CTRL_PORT_STATE_LISTENING	2
+#define AR9331_SW_PORT_CTRL_PORT_STATE_LEARNING		3
+#define AR9331_SW_PORT_CTRL_PORT_STATE_FORWARD		4
+
+#define AR9331_SW_REG_PORT_VLAN(_port)			(0x108 + (_port) * 0x100)
+#define AR9331_SW_PORT_VLAN_8021Q_MODE			GENMASK(31, 30)
+#define AR9331_SW_8021Q_MODE_SECURE			3
+#define AR9331_SW_8021Q_MODE_CHECK			2
+#define AR9331_SW_8021Q_MODE_FALLBACK			1
+#define AR9331_SW_8021Q_MODE_NONE			0
+#define AR9331_SW_PORT_VLAN_PORT_VID_MEMBER		GENMASK(25, 16)
+
+/* MIB registers */
+#define AR9331_MIB_COUNTER(x)			(0x20000 + ((x) * 0x100))
 
 /* Phy bypass mode
  * ------------------------------------------------------------------------
@@ -155,16 +174,88 @@
 #define AR9331_SW_MDIO_POLL_SLEEP_US		1
 #define AR9331_SW_MDIO_POLL_TIMEOUT_US		20
 
+/* The interval should be small enough to avoid overflow of 32bit MIBs */
+/*
+ * FIXME: until we can read MIBs from stats64 call directly (i.e. sleep
+ * there), we have to poll stats more frequently then it is actually needed.
+ * For overflow protection, normally, 100 sec interval should have been OK.
+ */
+#define STATS_INTERVAL_JIFFIES			(3 * HZ)
+
+struct ar9331_sw_stats_raw {
+	u32 rxbroad;			/* 0x00 */
+	u32 rxpause;			/* 0x04 */
+	u32 rxmulti;			/* 0x08 */
+	u32 rxfcserr;			/* 0x0c */
+	u32 rxalignerr;			/* 0x10 */
+	u32 rxrunt;			/* 0x14 */
+	u32 rxfragment;			/* 0x18 */
+	u32 rx64byte;			/* 0x1c */
+	u32 rx128byte;			/* 0x20 */
+	u32 rx256byte;			/* 0x24 */
+	u32 rx512byte;			/* 0x28 */
+	u32 rx1024byte;			/* 0x2c */
+	u32 rx1518byte;			/* 0x30 */
+	u32 rxmaxbyte;			/* 0x34 */
+	u32 rxtoolong;			/* 0x38 */
+	u32 rxgoodbyte;			/* 0x3c */
+	u32 rxgoodbyte_hi;
+	u32 rxbadbyte;			/* 0x44 */
+	u32 rxbadbyte_hi;
+	u32 rxoverflow;			/* 0x4c */
+	u32 filtered;			/* 0x50 */
+	u32 txbroad;			/* 0x54 */
+	u32 txpause;			/* 0x58 */
+	u32 txmulti;			/* 0x5c */
+	u32 txunderrun;			/* 0x60 */
+	u32 tx64byte;			/* 0x64 */
+	u32 tx128byte;			/* 0x68 */
+	u32 tx256byte;			/* 0x6c */
+	u32 tx512byte;			/* 0x70 */
+	u32 tx1024byte;			/* 0x74 */
+	u32 tx1518byte;			/* 0x78 */
+	u32 txmaxbyte;			/* 0x7c */
+	u32 txoversize;			/* 0x80 */
+	u32 txbyte;			/* 0x84 */
+	u32 txbyte_hi;
+	u32 txcollision;		/* 0x8c */
+	u32 txabortcol;			/* 0x90 */
+	u32 txmulticol;			/* 0x94 */
+	u32 txsinglecol;		/* 0x98 */
+	u32 txexcdefer;			/* 0x9c */
+	u32 txdefer;			/* 0xa0 */
+	u32 txlatecol;			/* 0xa4 */
+};
+
+struct ar9331_sw_port {
+	int idx;
+	struct delayed_work mib_read;
+	struct rtnl_link_stats64 stats;
+	struct ethtool_pause_stats pause_stats;
+	struct spinlock stats_lock;
+};
+
 struct ar9331_sw_priv {
 	struct device *dev;
 	struct dsa_switch ds;
 	struct dsa_switch_ops ops;
 	struct irq_domain *irqdomain;
+	u32 irq_mask;
+	struct mutex lock_irq;
 	struct mii_bus *mbus; /* mdio master */
 	struct mii_bus *sbus; /* mdio slave */
 	struct regmap *regmap;
 	struct reset_control *sw_reset;
+	struct ar9331_sw_port port[AR9331_SW_PORTS];
 };
+
+static struct ar9331_sw_priv *ar9331_sw_port_to_priv(struct ar9331_sw_port *port)
+{
+	struct ar9331_sw_port *p = port - port->idx;
+
+	return (struct ar9331_sw_priv *)((void *)p -
+					 offsetof(struct ar9331_sw_priv, port));
+}
 
 /* Warning: switch reset will reset last AR9331_SW_MDIO_PHY_MODE_PAGE request
  * If some kind of optimization is used, the request should be repeated.
@@ -288,7 +379,7 @@ static int ar9331_sw_mbus_init(struct ar9331_sw_priv *priv)
 	if (!mnp)
 		return -ENODEV;
 
-	ret = of_mdiobus_register(mbus, mnp);
+	ret = devm_of_mdiobus_register(dev, mbus, mnp);
 	of_node_put(mnp);
 	if (ret)
 		return ret;
@@ -298,11 +389,59 @@ static int ar9331_sw_mbus_init(struct ar9331_sw_priv *priv)
 	return 0;
 }
 
+static int ar9331_sw_setup_port(struct dsa_switch *ds, int port)
+{
+	struct ar9331_sw_priv *priv = (struct ar9331_sw_priv *)ds->priv;
+	struct regmap *regmap = priv->regmap;
+	u32 port_mask, port_ctrl, val;
+	int ret;
+
+	/* Generate default port settings */
+	port_ctrl = FIELD_PREP(AR9331_SW_PORT_CTRL_PORT_STATE,
+			       AR9331_SW_PORT_CTRL_PORT_STATE_FORWARD);
+
+	if (dsa_is_cpu_port(ds, port)) {
+		/* CPU port should be allowed to communicate with all user
+		 * ports.
+		 */
+		port_mask = dsa_user_ports(ds);
+		/* Enable Atheros header on CPU port. This will allow us
+		 * communicate with each port separately
+		 */
+		port_ctrl |= AR9331_SW_PORT_CTRL_HEAD_EN;
+	} else if (dsa_is_user_port(ds, port)) {
+		/* User ports should communicate only with the CPU port.
+		 */
+		port_mask = BIT(dsa_upstream_port(ds, port));
+	} else {
+		/* Other ports do not need to communicate at all */
+		port_mask = 0;
+	}
+
+	val = FIELD_PREP(AR9331_SW_PORT_VLAN_8021Q_MODE,
+			 AR9331_SW_8021Q_MODE_NONE) |
+		FIELD_PREP(AR9331_SW_PORT_VLAN_PORT_VID_MEMBER, port_mask);
+
+	ret = regmap_write(regmap, AR9331_SW_REG_PORT_VLAN(port), val);
+	if (ret)
+		goto error;
+
+	ret = regmap_write(regmap, AR9331_SW_REG_PORT_CTRL(port), port_ctrl);
+	if (ret)
+		goto error;
+
+	return 0;
+error:
+	dev_err(priv->dev, "%s: error: %i\n", __func__, ret);
+
+	return ret;
+}
+
 static int ar9331_sw_setup(struct dsa_switch *ds)
 {
 	struct ar9331_sw_priv *priv = (struct ar9331_sw_priv *)ds->priv;
 	struct regmap *regmap = priv->regmap;
-	int ret;
+	int ret, i;
 
 	ret = ar9331_sw_reset(priv);
 	if (ret)
@@ -329,6 +468,14 @@ static int ar9331_sw_setup(struct dsa_switch *ds)
 	if (ret)
 		goto error;
 
+	for (i = 0; i < ds->num_ports; i++) {
+		ret = ar9331_sw_setup_port(ds, i);
+		if (ret)
+			goto error;
+	}
+
+	ds->configure_vlan_while_not_filtering = false;
+
 	return 0;
 error:
 	dev_err_ratelimited(priv->dev, "%s: %i\n", __func__, ret);
@@ -353,54 +500,27 @@ static enum dsa_tag_protocol ar9331_sw_get_tag_protocol(struct dsa_switch *ds,
 	return DSA_TAG_PROTO_AR9331;
 }
 
-static void ar9331_sw_phylink_validate(struct dsa_switch *ds, int port,
-				       unsigned long *supported,
-				       struct phylink_link_state *state)
+static void ar9331_sw_phylink_get_caps(struct dsa_switch *ds, int port,
+				       struct phylink_config *config)
 {
-	__ETHTOOL_DECLARE_LINK_MODE_MASK(mask) = { 0, };
+	config->mac_capabilities = MAC_ASYM_PAUSE | MAC_SYM_PAUSE |
+		MAC_10 | MAC_100;
 
 	switch (port) {
 	case 0:
-		if (state->interface != PHY_INTERFACE_MODE_GMII)
-			goto unsupported;
-
-		phylink_set(mask, 1000baseT_Full);
-		phylink_set(mask, 1000baseT_Half);
+		__set_bit(PHY_INTERFACE_MODE_GMII,
+			  config->supported_interfaces);
+		config->mac_capabilities |= MAC_1000;
 		break;
 	case 1:
 	case 2:
 	case 3:
 	case 4:
 	case 5:
-		if (state->interface != PHY_INTERFACE_MODE_INTERNAL)
-			goto unsupported;
+		__set_bit(PHY_INTERFACE_MODE_INTERNAL,
+			  config->supported_interfaces);
 		break;
-	default:
-		bitmap_zero(supported, __ETHTOOL_LINK_MODE_MASK_NBITS);
-		dev_err(ds->dev, "Unsupported port: %i\n", port);
-		return;
 	}
-
-	phylink_set_port_modes(mask);
-	phylink_set(mask, Pause);
-	phylink_set(mask, Asym_Pause);
-
-	phylink_set(mask, 10baseT_Half);
-	phylink_set(mask, 10baseT_Full);
-	phylink_set(mask, 100baseT_Half);
-	phylink_set(mask, 100baseT_Full);
-
-	bitmap_and(supported, supported, mask,
-		   __ETHTOOL_LINK_MODE_MASK_NBITS);
-	bitmap_and(state->advertising, state->advertising, mask,
-		   __ETHTOOL_LINK_MODE_MASK_NBITS);
-
-	return;
-
-unsupported:
-	bitmap_zero(supported, __ETHTOOL_LINK_MODE_MASK_NBITS);
-	dev_err(ds->dev, "Unsupported interface: %d, port: %d\n",
-		state->interface, port);
 }
 
 static void ar9331_sw_phylink_mac_config(struct dsa_switch *ds, int port,
@@ -410,33 +530,10 @@ static void ar9331_sw_phylink_mac_config(struct dsa_switch *ds, int port,
 	struct ar9331_sw_priv *priv = (struct ar9331_sw_priv *)ds->priv;
 	struct regmap *regmap = priv->regmap;
 	int ret;
-	u32 val;
-
-	switch (state->speed) {
-	case SPEED_1000:
-		val = AR9331_SW_PORT_STATUS_SPEED_1000;
-		break;
-	case SPEED_100:
-		val = AR9331_SW_PORT_STATUS_SPEED_100;
-		break;
-	case SPEED_10:
-		val = AR9331_SW_PORT_STATUS_SPEED_10;
-		break;
-	default:
-		return;
-	}
-
-	if (state->duplex)
-		val |= AR9331_SW_PORT_STATUS_DUPLEX_MODE;
-
-	if (state->pause & MLO_PAUSE_TX)
-		val |= AR9331_SW_PORT_STATUS_TX_FLOW_EN;
-
-	if (state->pause & MLO_PAUSE_RX)
-		val |= AR9331_SW_PORT_STATUS_RX_FLOW_EN;
 
 	ret = regmap_update_bits(regmap, AR9331_SW_REG_PORT_STATUS(port),
-				 AR9331_SW_PORT_STATUS_LINK_MASK, val);
+				 AR9331_SW_PORT_STATUS_LINK_EN |
+				 AR9331_SW_PORT_STATUS_FLOW_LINK_EN, 0);
 	if (ret)
 		dev_err_ratelimited(priv->dev, "%s: %i\n", __func__, ret);
 }
@@ -446,6 +543,7 @@ static void ar9331_sw_phylink_mac_link_down(struct dsa_switch *ds, int port,
 					    phy_interface_t interface)
 {
 	struct ar9331_sw_priv *priv = (struct ar9331_sw_priv *)ds->priv;
+	struct ar9331_sw_port *p = &priv->port[port];
 	struct regmap *regmap = priv->regmap;
 	int ret;
 
@@ -453,32 +551,149 @@ static void ar9331_sw_phylink_mac_link_down(struct dsa_switch *ds, int port,
 				 AR9331_SW_PORT_STATUS_MAC_MASK, 0);
 	if (ret)
 		dev_err_ratelimited(priv->dev, "%s: %i\n", __func__, ret);
+
+	cancel_delayed_work_sync(&p->mib_read);
 }
 
 static void ar9331_sw_phylink_mac_link_up(struct dsa_switch *ds, int port,
 					  unsigned int mode,
 					  phy_interface_t interface,
-					  struct phy_device *phydev)
+					  struct phy_device *phydev,
+					  int speed, int duplex,
+					  bool tx_pause, bool rx_pause)
 {
 	struct ar9331_sw_priv *priv = (struct ar9331_sw_priv *)ds->priv;
+	struct ar9331_sw_port *p = &priv->port[port];
 	struct regmap *regmap = priv->regmap;
+	u32 val;
 	int ret;
 
+	schedule_delayed_work(&p->mib_read, 0);
+
+	val = AR9331_SW_PORT_STATUS_MAC_MASK;
+	switch (speed) {
+	case SPEED_1000:
+		val |= AR9331_SW_PORT_STATUS_SPEED_1000;
+		break;
+	case SPEED_100:
+		val |= AR9331_SW_PORT_STATUS_SPEED_100;
+		break;
+	case SPEED_10:
+		val |= AR9331_SW_PORT_STATUS_SPEED_10;
+		break;
+	default:
+		return;
+	}
+
+	if (duplex)
+		val |= AR9331_SW_PORT_STATUS_DUPLEX_MODE;
+
+	if (tx_pause)
+		val |= AR9331_SW_PORT_STATUS_TX_FLOW_EN;
+
+	if (rx_pause)
+		val |= AR9331_SW_PORT_STATUS_RX_FLOW_EN;
+
 	ret = regmap_update_bits(regmap, AR9331_SW_REG_PORT_STATUS(port),
-				 AR9331_SW_PORT_STATUS_MAC_MASK,
-				 AR9331_SW_PORT_STATUS_MAC_MASK);
+				 AR9331_SW_PORT_STATUS_MAC_MASK |
+				 AR9331_SW_PORT_STATUS_LINK_MASK,
+				 val);
 	if (ret)
 		dev_err_ratelimited(priv->dev, "%s: %i\n", __func__, ret);
+}
+
+static void ar9331_read_stats(struct ar9331_sw_port *port)
+{
+	struct ar9331_sw_priv *priv = ar9331_sw_port_to_priv(port);
+	struct ethtool_pause_stats *pstats = &port->pause_stats;
+	struct rtnl_link_stats64 *stats = &port->stats;
+	struct ar9331_sw_stats_raw raw;
+	int ret;
+
+	/* Do the slowest part first, to avoid needless locking for long time */
+	ret = regmap_bulk_read(priv->regmap, AR9331_MIB_COUNTER(port->idx),
+			       &raw, sizeof(raw) / sizeof(u32));
+	if (ret) {
+		dev_err_ratelimited(priv->dev, "%s: %i\n", __func__, ret);
+		return;
+	}
+	/* All MIB counters are cleared automatically on read */
+
+	spin_lock(&port->stats_lock);
+
+	stats->rx_bytes += raw.rxgoodbyte;
+	stats->tx_bytes += raw.txbyte;
+
+	stats->rx_packets += raw.rx64byte + raw.rx128byte + raw.rx256byte +
+		raw.rx512byte + raw.rx1024byte + raw.rx1518byte + raw.rxmaxbyte;
+	stats->tx_packets += raw.tx64byte + raw.tx128byte + raw.tx256byte +
+		raw.tx512byte + raw.tx1024byte + raw.tx1518byte + raw.txmaxbyte;
+
+	stats->rx_length_errors += raw.rxrunt + raw.rxfragment + raw.rxtoolong;
+	stats->rx_crc_errors += raw.rxfcserr;
+	stats->rx_frame_errors += raw.rxalignerr;
+	stats->rx_missed_errors += raw.rxoverflow;
+	stats->rx_dropped += raw.filtered;
+	stats->rx_errors += raw.rxfcserr + raw.rxalignerr + raw.rxrunt +
+		raw.rxfragment + raw.rxoverflow + raw.rxtoolong;
+
+	stats->tx_window_errors += raw.txlatecol;
+	stats->tx_fifo_errors += raw.txunderrun;
+	stats->tx_aborted_errors += raw.txabortcol;
+	stats->tx_errors += raw.txoversize + raw.txabortcol + raw.txunderrun +
+		raw.txlatecol;
+
+	stats->multicast += raw.rxmulti;
+	stats->collisions += raw.txcollision;
+
+	pstats->tx_pause_frames += raw.txpause;
+	pstats->rx_pause_frames += raw.rxpause;
+
+	spin_unlock(&port->stats_lock);
+}
+
+static void ar9331_do_stats_poll(struct work_struct *work)
+{
+	struct ar9331_sw_port *port = container_of(work, struct ar9331_sw_port,
+						   mib_read.work);
+
+	ar9331_read_stats(port);
+
+	schedule_delayed_work(&port->mib_read, STATS_INTERVAL_JIFFIES);
+}
+
+static void ar9331_get_stats64(struct dsa_switch *ds, int port,
+			       struct rtnl_link_stats64 *s)
+{
+	struct ar9331_sw_priv *priv = (struct ar9331_sw_priv *)ds->priv;
+	struct ar9331_sw_port *p = &priv->port[port];
+
+	spin_lock(&p->stats_lock);
+	memcpy(s, &p->stats, sizeof(*s));
+	spin_unlock(&p->stats_lock);
+}
+
+static void ar9331_get_pause_stats(struct dsa_switch *ds, int port,
+				   struct ethtool_pause_stats *pause_stats)
+{
+	struct ar9331_sw_priv *priv = (struct ar9331_sw_priv *)ds->priv;
+	struct ar9331_sw_port *p = &priv->port[port];
+
+	spin_lock(&p->stats_lock);
+	memcpy(pause_stats, &p->pause_stats, sizeof(*pause_stats));
+	spin_unlock(&p->stats_lock);
 }
 
 static const struct dsa_switch_ops ar9331_sw_ops = {
 	.get_tag_protocol	= ar9331_sw_get_tag_protocol,
 	.setup			= ar9331_sw_setup,
 	.port_disable		= ar9331_sw_port_disable,
-	.phylink_validate	= ar9331_sw_phylink_validate,
+	.phylink_get_caps	= ar9331_sw_phylink_get_caps,
 	.phylink_mac_config	= ar9331_sw_phylink_mac_config,
 	.phylink_mac_link_down	= ar9331_sw_phylink_mac_link_down,
 	.phylink_mac_link_up	= ar9331_sw_phylink_mac_link_up,
+	.get_stats64		= ar9331_get_stats64,
+	.get_pause_stats	= ar9331_get_pause_stats,
 };
 
 static irqreturn_t ar9331_sw_irq(int irq, void *data)
@@ -516,32 +731,44 @@ static irqreturn_t ar9331_sw_irq(int irq, void *data)
 static void ar9331_sw_mask_irq(struct irq_data *d)
 {
 	struct ar9331_sw_priv *priv = irq_data_get_irq_chip_data(d);
-	struct regmap *regmap = priv->regmap;
-	int ret;
 
-	ret = regmap_update_bits(regmap, AR9331_SW_REG_GINT_MASK,
-				 AR9331_SW_GINT_PHY_INT, 0);
-	if (ret)
-		dev_err(priv->dev, "could not mask IRQ\n");
+	priv->irq_mask = 0;
 }
 
 static void ar9331_sw_unmask_irq(struct irq_data *d)
+{
+	struct ar9331_sw_priv *priv = irq_data_get_irq_chip_data(d);
+
+	priv->irq_mask = AR9331_SW_GINT_PHY_INT;
+}
+
+static void ar9331_sw_irq_bus_lock(struct irq_data *d)
+{
+	struct ar9331_sw_priv *priv = irq_data_get_irq_chip_data(d);
+
+	mutex_lock(&priv->lock_irq);
+}
+
+static void ar9331_sw_irq_bus_sync_unlock(struct irq_data *d)
 {
 	struct ar9331_sw_priv *priv = irq_data_get_irq_chip_data(d);
 	struct regmap *regmap = priv->regmap;
 	int ret;
 
 	ret = regmap_update_bits(regmap, AR9331_SW_REG_GINT_MASK,
-				 AR9331_SW_GINT_PHY_INT,
-				 AR9331_SW_GINT_PHY_INT);
+				 AR9331_SW_GINT_PHY_INT, priv->irq_mask);
 	if (ret)
-		dev_err(priv->dev, "could not unmask IRQ\n");
+		dev_err(priv->dev, "failed to change IRQ mask\n");
+
+	mutex_unlock(&priv->lock_irq);
 }
 
 static struct irq_chip ar9331_sw_irq_chip = {
 	.name = AR9331_SW_NAME,
 	.irq_mask = ar9331_sw_mask_irq,
 	.irq_unmask = ar9331_sw_unmask_irq,
+	.irq_bus_lock = ar9331_sw_irq_bus_lock,
+	.irq_bus_sync_unlock = ar9331_sw_irq_bus_sync_unlock,
 };
 
 static int ar9331_sw_irq_map(struct irq_domain *domain, unsigned int irq,
@@ -580,6 +807,7 @@ static int ar9331_sw_irq_init(struct ar9331_sw_priv *priv)
 		return irq ? irq : -EINVAL;
 	}
 
+	mutex_init(&priv->lock_irq);
 	ret = devm_request_threaded_irq(dev, irq, NULL, ar9331_sw_irq,
 					IRQF_ONESHOT, AR9331_SW_NAME, priv);
 	if (ret) {
@@ -607,7 +835,7 @@ static int __ar9331_mdio_write(struct mii_bus *sbus, u8 mode, u16 reg, u16 val)
 		FIELD_GET(AR9331_SW_LOW_ADDR_PHY, reg);
 	r = FIELD_GET(AR9331_SW_LOW_ADDR_REG, reg);
 
-	return mdiobus_write(sbus, p, r, val);
+	return __mdiobus_write(sbus, p, r, val);
 }
 
 static int __ar9331_mdio_read(struct mii_bus *sbus, u16 reg)
@@ -618,7 +846,7 @@ static int __ar9331_mdio_read(struct mii_bus *sbus, u16 reg)
 		FIELD_GET(AR9331_SW_LOW_ADDR_PHY, reg);
 	r = FIELD_GET(AR9331_SW_LOW_ADDR_REG, reg);
 
-	return mdiobus_read(sbus, p, r);
+	return __mdiobus_read(sbus, p, r);
 }
 
 static int ar9331_mdio_read(void *ctx, const void *reg_buf, size_t reg_len,
@@ -638,6 +866,8 @@ static int ar9331_mdio_read(void *ctx, const void *reg_buf, size_t reg_len,
 		return 0;
 	}
 
+	mutex_lock_nested(&sbus->mdio_lock, MDIO_MUTEX_NESTED);
+
 	ret = __ar9331_mdio_read(sbus, reg);
 	if (ret < 0)
 		goto error;
@@ -649,9 +879,13 @@ static int ar9331_mdio_read(void *ctx, const void *reg_buf, size_t reg_len,
 
 	*(u32 *)val_buf |= ret << 16;
 
+	mutex_unlock(&sbus->mdio_lock);
+
 	return 0;
 error:
+	mutex_unlock(&sbus->mdio_lock);
 	dev_err_ratelimited(&sbus->dev, "Bus error. Failed to read register.\n");
+
 	return ret;
 }
 
@@ -661,27 +895,42 @@ static int ar9331_mdio_write(void *ctx, u32 reg, u32 val)
 	struct mii_bus *sbus = priv->sbus;
 	int ret;
 
+	mutex_lock_nested(&sbus->mdio_lock, MDIO_MUTEX_NESTED);
 	if (reg == AR9331_SW_REG_PAGE) {
 		ret = __ar9331_mdio_write(sbus, AR9331_SW_MDIO_PHY_MODE_PAGE,
 					  0, val);
 		if (ret < 0)
 			goto error;
 
+		mutex_unlock(&sbus->mdio_lock);
+
 		return 0;
 	}
 
-	ret = __ar9331_mdio_write(sbus, AR9331_SW_MDIO_PHY_MODE_REG, reg, val);
-	if (ret < 0)
-		goto error;
-
+	/* In case of this switch we work with 32bit registers on top of 16bit
+	 * bus. Some registers (for example access to forwarding database) have
+	 * trigger bit on the first 16bit half of request, the result and
+	 * configuration of request in the second half.
+	 * To make it work properly, we should do the second part of transfer
+	 * before the first one is done.
+	 */
 	ret = __ar9331_mdio_write(sbus, AR9331_SW_MDIO_PHY_MODE_REG, reg + 2,
 				  val >> 16);
 	if (ret < 0)
 		goto error;
 
+	ret = __ar9331_mdio_write(sbus, AR9331_SW_MDIO_PHY_MODE_REG, reg, val);
+	if (ret < 0)
+		goto error;
+
+	mutex_unlock(&sbus->mdio_lock);
+
 	return 0;
+
 error:
+	mutex_unlock(&sbus->mdio_lock);
 	dev_err_ratelimited(&sbus->dev, "Bus error. Failed to write register.\n");
+
 	return ret;
 }
 
@@ -777,7 +1026,7 @@ static int ar9331_sw_probe(struct mdio_device *mdiodev)
 {
 	struct ar9331_sw_priv *priv;
 	struct dsa_switch *ds;
-	int ret;
+	int ret, i;
 
 	priv = devm_kzalloc(&mdiodev->dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
@@ -812,6 +1061,14 @@ static int ar9331_sw_probe(struct mdio_device *mdiodev)
 	ds->ops = &priv->ops;
 	dev_set_drvdata(&mdiodev->dev, priv);
 
+	for (i = 0; i < ARRAY_SIZE(priv->port); i++) {
+		struct ar9331_sw_port *port = &priv->port[i];
+
+		port->idx = i;
+		spin_lock_init(&port->stats_lock);
+		INIT_DELAYED_WORK(&port->mib_read, ar9331_do_stats_poll);
+	}
+
 	ret = dsa_register_switch(ds);
 	if (ret)
 		goto err_remove_irq;
@@ -827,12 +1084,33 @@ err_remove_irq:
 static void ar9331_sw_remove(struct mdio_device *mdiodev)
 {
 	struct ar9331_sw_priv *priv = dev_get_drvdata(&mdiodev->dev);
+	unsigned int i;
+
+	if (!priv)
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(priv->port); i++) {
+		struct ar9331_sw_port *port = &priv->port[i];
+
+		cancel_delayed_work_sync(&port->mib_read);
+	}
 
 	irq_domain_remove(priv->irqdomain);
-	mdiobus_unregister(priv->mbus);
 	dsa_unregister_switch(&priv->ds);
 
 	reset_control_assert(priv->sw_reset);
+}
+
+static void ar9331_sw_shutdown(struct mdio_device *mdiodev)
+{
+	struct ar9331_sw_priv *priv = dev_get_drvdata(&mdiodev->dev);
+
+	if (!priv)
+		return;
+
+	dsa_switch_shutdown(&priv->ds);
+
+	dev_set_drvdata(&mdiodev->dev, NULL);
 }
 
 static const struct of_device_id ar9331_sw_of_match[] = {
@@ -843,6 +1121,7 @@ static const struct of_device_id ar9331_sw_of_match[] = {
 static struct mdio_driver ar9331_sw_mdio_driver = {
 	.probe = ar9331_sw_probe,
 	.remove = ar9331_sw_remove,
+	.shutdown = ar9331_sw_shutdown,
 	.mdiodrv.driver = {
 		.name = AR9331_SW_NAME,
 		.of_match_table = ar9331_sw_of_match,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/**
+/*
  * Copyright (C) 2016 Linaro Ltd
  */
 #include <linux/module.h>
@@ -53,9 +53,10 @@ static int qcom_usb_hs_phy_set_mode(struct phy *phy,
 		case PHY_MODE_USB_OTG:
 		case PHY_MODE_USB_HOST:
 			val |= ULPI_INT_IDGRD;
-			/* fall through */
+			fallthrough;
 		case PHY_MODE_USB_DEVICE:
 			val |= ULPI_INT_SESS_VALID;
+			break;
 		default:
 			break;
 		}

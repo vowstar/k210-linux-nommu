@@ -15,8 +15,7 @@
 #include <linux/list.h>
 #include <linux/wait.h>
 #include <linux/kobject.h>
-
-#include "../most.h"
+#include <linux/most.h>
 
 #define MEP_HDR_LEN 8
 #define MDP_HDR_LEN 16
@@ -68,8 +67,8 @@ struct net_dev_context {
 	struct list_head list;
 };
 
-static struct list_head net_devices = LIST_HEAD_INIT(net_devices);
-static struct mutex probe_disc_mt; /* ch->linked = true, most_nd_open */
+static LIST_HEAD(net_devices);
+static DEFINE_MUTEX(probe_disc_mt); /* ch->linked = true, most_nd_open */
 static DEFINE_SPINLOCK(list_lock); /* list_head, ch->linked = false, dev_hold */
 static struct most_component comp;
 
@@ -521,7 +520,6 @@ static int __init most_net_init(void)
 {
 	int err;
 
-	mutex_init(&probe_disc_mt);
 	err = most_register_component(&comp);
 	if (err)
 		return err;
@@ -541,9 +539,9 @@ static void __exit most_net_exit(void)
 
 /**
  * on_netinfo - callback for HDM to be informed about HW's MAC
- * @param iface - most interface instance
- * @param link_stat - link status
- * @param mac_addr - MAC address
+ * @iface: most interface instance
+ * @link_stat: link status
+ * @mac_addr: MAC address
  */
 static void on_netinfo(struct most_interface *iface,
 		       unsigned char link_stat, unsigned char *mac_addr)
@@ -565,13 +563,11 @@ static void on_netinfo(struct most_interface *iface,
 
 	if (m && is_valid_ether_addr(m)) {
 		if (!is_valid_ether_addr(dev->dev_addr)) {
-			netdev_info(dev, "set mac %02x-%02x-%02x-%02x-%02x-%02x\n",
-				    m[0], m[1], m[2], m[3], m[4], m[5]);
-			ether_addr_copy(dev->dev_addr, m);
+			netdev_info(dev, "set mac %pM\n", m);
+			eth_hw_addr_set(dev, m);
 			netif_dormant_off(dev);
 		} else if (!ether_addr_equal(dev->dev_addr, m)) {
-			netdev_warn(dev, "reject mac %02x-%02x-%02x-%02x-%02x-%02x\n",
-				    m[0], m[1], m[2], m[3], m[4], m[5]);
+			netdev_warn(dev, "reject mac %pM\n", m);
 		}
 	}
 

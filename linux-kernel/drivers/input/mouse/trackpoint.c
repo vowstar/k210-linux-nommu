@@ -17,10 +17,12 @@
 #include "trackpoint.h"
 
 static const char * const trackpoint_variants[] = {
-	[TP_VARIANT_IBM]	= "IBM",
-	[TP_VARIANT_ALPS]	= "ALPS",
-	[TP_VARIANT_ELAN]	= "Elan",
-	[TP_VARIANT_NXP]	= "NXP",
+	[TP_VARIANT_IBM]		= "IBM",
+	[TP_VARIANT_ALPS]		= "ALPS",
+	[TP_VARIANT_ELAN]		= "Elan",
+	[TP_VARIANT_NXP]		= "NXP",
+	[TP_VARIANT_JYT_SYNAPTICS]	= "JYT_Synaptics",
+	[TP_VARIANT_SYNAPTICS]		= "Synaptics",
 };
 
 /*
@@ -212,7 +214,7 @@ static bool trackpoint_is_attr_available(struct psmouse *psmouse,
 static umode_t trackpoint_is_attr_visible(struct kobject *kobj,
 					  struct attribute *attr, int n)
 {
-	struct device *dev = container_of(kobj, struct device, kobj);
+	struct device *dev = kobj_to_dev(kobj);
 	struct serio *serio = to_serio_port(dev);
 	struct psmouse *psmouse = serio_get_drvdata(serio);
 
@@ -280,6 +282,8 @@ static int trackpoint_start_protocol(struct psmouse *psmouse,
 	case TP_VARIANT_ALPS:
 	case TP_VARIANT_ELAN:
 	case TP_VARIANT_NXP:
+	case TP_VARIANT_JYT_SYNAPTICS:
+	case TP_VARIANT_SYNAPTICS:
 		if (variant_id)
 			*variant_id = param[0];
 		if (firmware_id)

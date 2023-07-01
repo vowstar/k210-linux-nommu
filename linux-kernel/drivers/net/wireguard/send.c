@@ -124,35 +124,38 @@ void wg_packet_send_handshake_cookie(struct wg_device *wg,
 static void keep_key_fresh(struct wg_peer *peer)
 {
 	struct noise_keypair *keypair;
-	bool send = false;
+	bool send;
 
 	rcu_read_lock_bh();
 	keypair = rcu_dereference_bh(peer->keypairs.current_keypair);
-	if (likely(keypair && READ_ONCE(keypair->sending.is_valid)) &&
-	    (unlikely(atomic64_read(&keypair->sending.counter.counter) >
-		      REKEY_AFTER_MESSAGES) ||
-	     (keypair->i_am_the_initiator &&
-	      unlikely(wg_birthdate_has_expired(keypair->sending.birthdate,
-						REKEY_AFTER_TIME)))))
-		send = true;
+	send = keypair && READ_ONCE(keypair->sending.is_valid) &&
+	       (atomic64_read(&keypair->sending_counter) > REKEY_AFTER_MESSAGES ||
+		(keypair->i_am_the_initiator &&
+		 wg_birthdate_has_expired(keypair->sending.birthdate, REKEY_AFTER_TIME)));
 	rcu_read_unlock_bh();
 
-	if (send)
+	if (unlikely(send))
 		wg_packet_send_queued_handshake_initiation(peer, false);
 }
 
 static unsigned int calculate_skb_padding(struct sk_buff *skb)
 {
+	unsigned int padded_size, last_unit = skb->len;
+
+	if (unlikely(!PACKET_CB(skb)->mtu))
+		return ALIGN(last_unit, MESSAGE_PADDING_MULTIPLE) - last_unit;
+
 	/* We do this modulo business with the MTU, just in case the networking
 	 * layer gives us a packet that's bigger than the MTU. In that case, we
 	 * wouldn't want the final subtraction to overflow in the case of the
-	 * padded_size being clamped.
+	 * padded_size being clamped. Fortunately, that's very rarely the case,
+	 * so we optimize for that not happening.
 	 */
-	unsigned int last_unit = skb->len % PACKET_CB(skb)->mtu;
-	unsigned int padded_size = ALIGN(last_unit, MESSAGE_PADDING_MULTIPLE);
+	if (unlikely(last_unit > PACKET_CB(skb)->mtu))
+		last_unit %= PACKET_CB(skb)->mtu;
 
-	if (padded_size > PACKET_CB(skb)->mtu)
-		padded_size = PACKET_CB(skb)->mtu;
+	padded_size = min(PACKET_CB(skb)->mtu,
+			  ALIGN(last_unit, MESSAGE_PADDING_MULTIPLE));
 	return padded_size - last_unit;
 }
 
@@ -163,6 +166,11 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 	struct message_data *header;
 	struct sk_buff *trailer;
 	int num_frags;
+
+	/* Force hash calculation before encryption so that flow analysis is
+	 * consistent over the inner packet.
+	 */
+	skb_get_hash(skb);
 
 	/* Calculate lengths. */
 	padding_len = calculate_skb_padding(skb);
@@ -231,8 +239,7 @@ void wg_packet_send_keepalive(struct wg_peer *peer)
 	wg_packet_send_staged_packets(peer);
 }
 
-static void wg_packet_create_data_done(struct sk_buff *first,
-				       struct wg_peer *peer)
+static void wg_packet_create_data_done(struct wg_peer *peer, struct sk_buff *first)
 {
 	struct sk_buff *skb, *next;
 	bool is_keepalive, data_sent = false;
@@ -254,27 +261,26 @@ static void wg_packet_create_data_done(struct sk_buff *first,
 
 void wg_packet_tx_worker(struct work_struct *work)
 {
-	struct crypt_queue *queue = container_of(work, struct crypt_queue,
-						 work);
+	struct wg_peer *peer = container_of(work, struct wg_peer, transmit_packet_work);
 	struct noise_keypair *keypair;
 	enum packet_state state;
 	struct sk_buff *first;
-	struct wg_peer *peer;
 
-	while ((first = __ptr_ring_peek(&queue->ring)) != NULL &&
+	while ((first = wg_prev_queue_peek(&peer->tx_queue)) != NULL &&
 	       (state = atomic_read_acquire(&PACKET_CB(first)->state)) !=
 		       PACKET_STATE_UNCRYPTED) {
-		__ptr_ring_discard_one(&queue->ring);
-		peer = PACKET_PEER(first);
+		wg_prev_queue_drop_peeked(&peer->tx_queue);
 		keypair = PACKET_CB(first)->keypair;
 
 		if (likely(state == PACKET_STATE_CRYPTED))
-			wg_packet_create_data_done(first, peer);
+			wg_packet_create_data_done(peer, first);
 		else
 			kfree_skb_list(first);
 
 		wg_noise_keypair_put(keypair, false);
 		wg_peer_put(peer);
+		if (need_resched())
+			cond_resched();
 	}
 }
 
@@ -290,21 +296,20 @@ void wg_packet_encrypt_worker(struct work_struct *work)
 		skb_list_walk_safe(first, skb, next) {
 			if (likely(encrypt_packet(skb,
 					PACKET_CB(first)->keypair))) {
-				wg_reset_packet(skb);
+				wg_reset_packet(skb, true);
 			} else {
 				state = PACKET_STATE_DEAD;
 				break;
 			}
 		}
-		wg_queue_enqueue_per_peer(&PACKET_PEER(first)->tx_queue, first,
-					  state);
-
+		wg_queue_enqueue_per_peer_tx(first, state);
+		if (need_resched())
+			cond_resched();
 	}
 }
 
-static void wg_packet_create_data(struct sk_buff *first)
+static void wg_packet_create_data(struct wg_peer *peer, struct sk_buff *first)
 {
-	struct wg_peer *peer = PACKET_PEER(first);
 	struct wg_device *wg = peer->device;
 	int ret = -EINVAL;
 
@@ -312,13 +317,10 @@ static void wg_packet_create_data(struct sk_buff *first)
 	if (unlikely(READ_ONCE(peer->is_dead)))
 		goto err;
 
-	ret = wg_queue_enqueue_per_device_and_peer(&wg->encrypt_queue,
-						   &peer->tx_queue, first,
-						   wg->packet_crypt_wq,
-						   &wg->encrypt_queue.last_cpu);
+	ret = wg_queue_enqueue_per_device_and_peer(&wg->encrypt_queue, &peer->tx_queue, first,
+						   wg->packet_crypt_wq, &wg->encrypt_queue.last_cpu);
 	if (unlikely(ret == -EPIPE))
-		wg_queue_enqueue_per_peer(&peer->tx_queue, first,
-					  PACKET_STATE_DEAD);
+		wg_queue_enqueue_per_peer_tx(first, PACKET_STATE_DEAD);
 err:
 	rcu_read_unlock_bh();
 	if (likely(!ret || ret == -EPIPE))
@@ -338,7 +340,6 @@ void wg_packet_purge_staged_packets(struct wg_peer *peer)
 
 void wg_packet_send_staged_packets(struct wg_peer *peer)
 {
-	struct noise_symmetric_key *key;
 	struct noise_keypair *keypair;
 	struct sk_buff_head packets;
 	struct sk_buff *skb;
@@ -358,10 +359,9 @@ void wg_packet_send_staged_packets(struct wg_peer *peer)
 	rcu_read_unlock_bh();
 	if (unlikely(!keypair))
 		goto out_nokey;
-	key = &keypair->sending;
-	if (unlikely(!READ_ONCE(key->is_valid)))
+	if (unlikely(!READ_ONCE(keypair->sending.is_valid)))
 		goto out_nokey;
-	if (unlikely(wg_birthdate_has_expired(key->birthdate,
+	if (unlikely(wg_birthdate_has_expired(keypair->sending.birthdate,
 					      REJECT_AFTER_TIME)))
 		goto out_invalid;
 
@@ -376,7 +376,7 @@ void wg_packet_send_staged_packets(struct wg_peer *peer)
 		 */
 		PACKET_CB(skb)->ds = ip_tunnel_ecn_encap(0, ip_hdr(skb), skb);
 		PACKET_CB(skb)->nonce =
-				atomic64_inc_return(&key->counter.counter) - 1;
+				atomic64_inc_return(&keypair->sending_counter) - 1;
 		if (unlikely(PACKET_CB(skb)->nonce >= REJECT_AFTER_MESSAGES))
 			goto out_invalid;
 	}
@@ -384,11 +384,11 @@ void wg_packet_send_staged_packets(struct wg_peer *peer)
 	packets.prev->next = NULL;
 	wg_peer_get(keypair->entry.peer);
 	PACKET_CB(packets.next)->keypair = keypair;
-	wg_packet_create_data(packets.next);
+	wg_packet_create_data(peer, packets.next);
 	return;
 
 out_invalid:
-	WRITE_ONCE(key->is_valid, false);
+	WRITE_ONCE(keypair->sending.is_valid, false);
 out_nokey:
 	wg_noise_keypair_put(keypair, false);
 

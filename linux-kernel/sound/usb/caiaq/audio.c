@@ -804,7 +804,7 @@ int snd_usb_caiaq_audio_init(struct snd_usb_caiaqdev *cdev)
 	}
 
 	cdev->pcm->private_data = cdev;
-	strlcpy(cdev->pcm->name, cdev->product_name, sizeof(cdev->pcm->name));
+	strscpy(cdev->pcm->name, cdev->product_name, sizeof(cdev->pcm->name));
 
 	memset(cdev->sub_playback, 0, sizeof(cdev->sub_playback));
 	memset(cdev->sub_capture, 0, sizeof(cdev->sub_capture));
@@ -820,7 +820,7 @@ int snd_usb_caiaq_audio_init(struct snd_usb_caiaqdev *cdev)
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_SESSIONIO):
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_GUITARRIGMOBILE):
 		cdev->samplerates |= SNDRV_PCM_RATE_192000;
-		/* fall thru */
+		fallthrough;
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_AUDIO2DJ):
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_AUDIO4DJ):
 	case USB_ID(USB_VID_NATIVEINSTRUMENTS, USB_PID_AUDIO8DJ):

@@ -8,6 +8,7 @@
 #include <linux/mempool.h>
 #include <linux/rbtree.h>
 #include <linux/refcount.h>
+#include <linux/ktime.h>
 
 #include <linux/ceph/types.h>
 #include <linux/ceph/osdmap.h>
@@ -135,6 +136,7 @@ struct ceph_osd_req_op {
 		struct {
 			u64 expected_object_size;
 			u64 expected_write_size;
+			u32 flags;  /* CEPH_OSD_OP_ALLOC_HINT_FLAG_* */
 		} alloc_hint;
 		struct {
 			u64 snapid;
@@ -164,6 +166,7 @@ struct ceph_osd_request_target {
 	bool recovery_deletes;
 
 	unsigned int flags;                /* CEPH_OSD_FLAG_* */
+	bool used_replica;
 	bool paused;
 
 	u32 epoch;
@@ -213,6 +216,8 @@ struct ceph_osd_request {
 	/* internal */
 	unsigned long r_stamp;                /* jiffies, send or check time */
 	unsigned long r_start_stamp;          /* jiffies */
+	ktime_t r_start_latency;              /* ktime_t */
+	ktime_t r_end_latency;                /* ktime_t */
 	int r_attempts;
 	u32 r_map_dne_bound;
 
@@ -281,6 +286,9 @@ struct ceph_osd_linger_request {
 	rados_watchcb2_t wcb;
 	rados_watcherrcb_t errcb;
 	void *data;
+
+	struct ceph_pagelist *request_pl;
+	struct page **notify_id_pages;
 
 	struct page ***preply_pages;
 	size_t *preply_len;
@@ -399,7 +407,7 @@ void ceph_osdc_clear_abort_err(struct ceph_osd_client *osdc);
 	&__oreq->r_ops[__whch].typ.fld;					\
 })
 
-extern void osd_req_op_init(struct ceph_osd_request *osd_req,
+struct ceph_osd_req_op *osd_req_op_init(struct ceph_osd_request *osd_req,
 			    unsigned int which, u16 opcode, u32 flags);
 
 extern void osd_req_op_raw_data_in_pages(struct ceph_osd_request *,
@@ -468,7 +476,16 @@ extern int osd_req_op_xattr_init(struct ceph_osd_request *osd_req, unsigned int 
 extern void osd_req_op_alloc_hint_init(struct ceph_osd_request *osd_req,
 				       unsigned int which,
 				       u64 expected_object_size,
-				       u64 expected_write_size);
+				       u64 expected_write_size,
+				       u32 flags);
+extern int osd_req_op_copy_from_init(struct ceph_osd_request *req,
+				     u64 src_snapid, u64 src_version,
+				     struct ceph_object_id *src_oid,
+				     struct ceph_object_locator *src_oloc,
+				     u32 src_fadvise_flags,
+				     u32 dst_fadvise_flags,
+				     u32 truncate_seq, u64 truncate_size,
+				     u8 copy_from_flags);
 
 extern struct ceph_osd_request *ceph_osdc_alloc_request(struct ceph_osd_client *osdc,
 					       struct ceph_snap_context *snapc,
@@ -490,9 +507,8 @@ extern struct ceph_osd_request *ceph_osdc_new_request(struct ceph_osd_client *,
 extern void ceph_osdc_get_request(struct ceph_osd_request *req);
 extern void ceph_osdc_put_request(struct ceph_osd_request *req);
 
-extern int ceph_osdc_start_request(struct ceph_osd_client *osdc,
-				   struct ceph_osd_request *req,
-				   bool nofail);
+void ceph_osdc_start_request(struct ceph_osd_client *osdc,
+			     struct ceph_osd_request *req);
 extern void ceph_osdc_cancel_request(struct ceph_osd_request *req);
 extern int ceph_osdc_wait_request(struct ceph_osd_client *osdc,
 				  struct ceph_osd_request *req);
@@ -508,34 +524,6 @@ int ceph_osdc_call(struct ceph_osd_client *osdc,
 		   unsigned int flags,
 		   struct page *req_page, size_t req_len,
 		   struct page **resp_pages, size_t *resp_len);
-
-extern int ceph_osdc_readpages(struct ceph_osd_client *osdc,
-			       struct ceph_vino vino,
-			       struct ceph_file_layout *layout,
-			       u64 off, u64 *plen,
-			       u32 truncate_seq, u64 truncate_size,
-			       struct page **pages, int nr_pages,
-			       int page_align);
-
-extern int ceph_osdc_writepages(struct ceph_osd_client *osdc,
-				struct ceph_vino vino,
-				struct ceph_file_layout *layout,
-				struct ceph_snap_context *sc,
-				u64 off, u64 len,
-				u32 truncate_seq, u64 truncate_size,
-				struct timespec64 *mtime,
-				struct page **pages, int nr_pages);
-
-int ceph_osdc_copy_from(struct ceph_osd_client *osdc,
-			u64 src_snapid, u64 src_version,
-			struct ceph_object_id *src_oid,
-			struct ceph_object_locator *src_oloc,
-			u32 src_fadvise_flags,
-			struct ceph_object_id *dst_oid,
-			struct ceph_object_locator *dst_oloc,
-			u32 dst_fadvise_flags,
-			u32 truncate_seq, u64 truncate_size,
-			u8 copy_from_flags);
 
 /* watch/notify */
 struct ceph_osd_linger_request *

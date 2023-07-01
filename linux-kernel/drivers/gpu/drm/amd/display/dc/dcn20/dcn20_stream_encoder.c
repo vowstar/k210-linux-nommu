@@ -29,10 +29,11 @@
 #include "dcn20_stream_encoder.h"
 #include "reg_helper.h"
 #include "hw_shared.h"
+#include "link.h"
+#include "dpcd_defs.h"
 
 #define DC_LOGGER \
 		enc1->base.ctx->logger
-
 
 #define REG(reg)\
 	(enc1->regs->reg)
@@ -152,11 +153,12 @@ static void enc2_stream_encoder_update_hdmi_info_packets(
 
 	/*Always add mandatory packets first followed by optional ones*/
 	enc2_update_hdmi_info_packet(enc1, 0, &info_frame->avi);
-	enc2_update_hdmi_info_packet(enc1, 5, &info_frame->hfvsif);
+	enc2_update_hdmi_info_packet(enc1, 1, &info_frame->hfvsif);
 	enc2_update_hdmi_info_packet(enc1, 2, &info_frame->gamut);
-	enc2_update_hdmi_info_packet(enc1, 1, &info_frame->vendor);
-	enc2_update_hdmi_info_packet(enc1, 3, &info_frame->spd);
-	enc2_update_hdmi_info_packet(enc1, 4, &info_frame->hdrsmd);
+	enc2_update_hdmi_info_packet(enc1, 3, &info_frame->vendor);
+	enc2_update_hdmi_info_packet(enc1, 4, &info_frame->spd);
+	enc2_update_hdmi_info_packet(enc1, 5, &info_frame->hdrsmd);
+	enc2_update_hdmi_info_packet(enc1, 6, &info_frame->vtem);
 }
 
 static void enc2_stream_encoder_stop_hdmi_info_packets(
@@ -209,7 +211,8 @@ static void enc2_stream_encoder_stop_hdmi_info_packets(
 /* Update GSP7 SDP 128 byte long */
 static void enc2_update_gsp7_128_info_packet(
 	struct dcn10_stream_encoder *enc1,
-	const struct dc_info_packet_128 *info_packet)
+	const struct dc_info_packet_128 *info_packet,
+	bool immediate_update)
 {
 	uint32_t i;
 
@@ -264,7 +267,9 @@ static void enc2_update_gsp7_128_info_packet(
 		REG_WRITE(AFMT_GENERIC_7, *content++);
 	}
 
-	REG_UPDATE(AFMT_VBI_PACKET_CONTROL1, AFMT_GENERIC7_FRAME_UPDATE, 1);
+	REG_UPDATE_2(AFMT_VBI_PACKET_CONTROL1,
+			AFMT_GENERIC7_FRAME_UPDATE, !immediate_update,
+			AFMT_GENERIC7_IMMEDIATE_UPDATE, immediate_update);
 }
 
 /* Set DSC-related configuration.
@@ -290,7 +295,8 @@ static void enc2_dp_set_dsc_config(struct stream_encoder *enc,
 
 static void enc2_dp_set_dsc_pps_info_packet(struct stream_encoder *enc,
 					bool enable,
-					uint8_t *dsc_packed_pps)
+					uint8_t *dsc_packed_pps,
+					bool immediate_update)
 {
 	struct dcn10_stream_encoder *enc1 = DCN10STRENC_FROM_STRENC(enc);
 
@@ -306,7 +312,7 @@ static void enc2_dp_set_dsc_pps_info_packet(struct stream_encoder *enc,
 		pps_sdp.hb2 = 127;
 		pps_sdp.hb3 = 0;
 		memcpy(&pps_sdp.sb[0], dsc_packed_pps, sizeof(pps_sdp.sb));
-		enc2_update_gsp7_128_info_packet(enc1, &pps_sdp);
+		enc2_update_gsp7_128_info_packet(enc1, &pps_sdp, immediate_update);
 
 		/* Enable Generic Stream Packet 7 (GSP) transmission */
 		//REG_UPDATE(DP_SEC_CNTL,
@@ -417,6 +423,22 @@ void enc2_set_dynamic_metadata(struct stream_encoder *enc,
 	}
 }
 
+static void enc2_stream_encoder_update_dp_info_packets_sdp_line_num(
+		struct stream_encoder *enc,
+		struct encoder_info_frame *info_frame)
+{
+	struct dcn10_stream_encoder *enc1 = DCN10STRENC_FROM_STRENC(enc);
+
+	if (info_frame->adaptive_sync.valid == true &&
+		info_frame->sdp_line_num.adaptive_sync_line_num_valid == true) {
+		//00: REFER_TO_DP_SOF, 01: REFER_TO_OTG_SOF
+		REG_UPDATE(DP_SEC_CNTL1, DP_SEC_GSP5_LINE_REFERENCE, 1);
+
+		REG_UPDATE(DP_SEC_CNTL5, DP_SEC_GSP5_LINE_NUM,
+					info_frame->sdp_line_num.adaptive_sync_line_num);
+	}
+}
+
 static void enc2_stream_encoder_update_dp_info_packets(
 	struct stream_encoder *enc,
 	const struct encoder_info_frame *info_frame)
@@ -444,6 +466,7 @@ static bool is_two_pixels_per_containter(const struct dc_crtc_timing *timing)
 }
 
 void enc2_stream_encoder_dp_unblank(
+		struct dc_link *link,
 		struct stream_encoder *enc,
 		const struct encoder_unblank_param *param)
 {
@@ -522,6 +545,8 @@ void enc2_stream_encoder_dp_unblank(
 	 */
 
 	REG_UPDATE(DP_VID_STREAM_CNTL, DP_VID_STREAM_ENABLE, true);
+
+	link_dp_source_sequence_trace(link, DPCD_SOURCE_SEQ_AFTER_ENABLE_DP_VID_STREAM);
 }
 
 static void enc2_dp_set_odm_combine(
@@ -552,6 +577,17 @@ void enc2_stream_encoder_dp_set_stream_attribute(
 		DP_SST_SDP_SPLITTING, enable_sdp_splitting);
 }
 
+uint32_t enc2_get_fifo_cal_average_level(
+		struct stream_encoder *enc)
+{
+	struct dcn10_stream_encoder *enc1 = DCN10STRENC_FROM_STRENC(enc);
+	uint32_t fifo_level;
+
+	REG_GET(DIG_FIFO_STATUS,
+			DIG_FIFO_CAL_AVERAGE_LEVEL, &fifo_level);
+	return fifo_level;
+}
+
 static const struct stream_encoder_funcs dcn20_str_enc_funcs = {
 	.dp_set_odm_combine =
 		enc2_dp_set_odm_combine,
@@ -561,12 +597,14 @@ static const struct stream_encoder_funcs dcn20_str_enc_funcs = {
 		enc1_stream_encoder_hdmi_set_stream_attribute,
 	.dvi_set_stream_attribute =
 		enc1_stream_encoder_dvi_set_stream_attribute,
-	.set_mst_bandwidth =
-		enc1_stream_encoder_set_mst_bandwidth,
+	.set_throttled_vcp_size =
+		enc1_stream_encoder_set_throttled_vcp_size,
 	.update_hdmi_info_packets =
 		enc2_stream_encoder_update_hdmi_info_packets,
 	.stop_hdmi_info_packets =
 		enc2_stream_encoder_stop_hdmi_info_packets,
+	.update_dp_info_packets_sdp_line_num =
+		enc2_stream_encoder_update_dp_info_packets_sdp_line_num,
 	.update_dp_info_packets =
 		enc2_stream_encoder_update_dp_info_packets,
 	.send_immediate_sdp_message =
@@ -598,6 +636,7 @@ static const struct stream_encoder_funcs dcn20_str_enc_funcs = {
 	.dp_set_dsc_pps_info_packet = enc2_dp_set_dsc_pps_info_packet,
 	.set_dynamic_metadata = enc2_set_dynamic_metadata,
 	.hdmi_reset_stream_attribute = enc1_reset_hdmi_stream_attribute,
+	.get_fifo_cal_average_level = enc2_get_fifo_cal_average_level,
 };
 
 void dcn20_stream_encoder_construct(
@@ -616,5 +655,6 @@ void dcn20_stream_encoder_construct(
 	enc1->regs = regs;
 	enc1->se_shift = se_shift;
 	enc1->se_mask = se_mask;
+	enc1->base.stream_enc_inst = eng_id - ENGINE_ID_DIGA;
 }
 

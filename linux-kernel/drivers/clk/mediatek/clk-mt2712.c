@@ -13,8 +13,9 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
-#include "clk-mtk.h"
 #include "clk-gate.h"
+#include "clk-pll.h"
+#include "clk-mtk.h"
 
 #include <dt-bindings/clock/mt2712-clk.h>
 
@@ -1222,44 +1223,62 @@ static const struct mtk_pll_div_table mmpll_div_table[] = {
 };
 
 static const struct mtk_pll_data plls[] = {
-	PLL(CLK_APMIXED_MAINPLL, "mainpll", 0x0230, 0x023C, 0xf0000101,
+	PLL(CLK_APMIXED_MAINPLL, "mainpll", 0x0230, 0x023C, 0xf0000100,
 		HAVE_RST_BAR, 31, 0x0230, 4, 0, 0, 0, 0x0234, 0),
-	PLL(CLK_APMIXED_UNIVPLL, "univpll", 0x0240, 0x024C, 0xfe000101,
+	PLL(CLK_APMIXED_UNIVPLL, "univpll", 0x0240, 0x024C, 0xfe000100,
 		HAVE_RST_BAR, 31, 0x0240, 4, 0, 0, 0, 0x0244, 0),
-	PLL(CLK_APMIXED_VCODECPLL, "vcodecpll", 0x0320, 0x032C, 0xc0000101,
+	PLL(CLK_APMIXED_VCODECPLL, "vcodecpll", 0x0320, 0x032C, 0xc0000100,
 		0, 31, 0x0320, 4, 0, 0, 0, 0x0324, 0),
-	PLL(CLK_APMIXED_VENCPLL, "vencpll", 0x0280, 0x028C, 0x00000101,
+	PLL(CLK_APMIXED_VENCPLL, "vencpll", 0x0280, 0x028C, 0x00000100,
 		0, 31, 0x0280, 4, 0, 0, 0, 0x0284, 0),
-	PLL(CLK_APMIXED_APLL1, "apll1", 0x0330, 0x0340, 0x00000101,
+	PLL(CLK_APMIXED_APLL1, "apll1", 0x0330, 0x0340, 0x00000100,
 		0, 31, 0x0330, 4, 0x0338, 0x0014, 0, 0x0334, 0),
-	PLL(CLK_APMIXED_APLL2, "apll2", 0x0350, 0x0360, 0x00000101,
+	PLL(CLK_APMIXED_APLL2, "apll2", 0x0350, 0x0360, 0x00000100,
 		0, 31, 0x0350, 4, 0x0358, 0x0014, 1, 0x0354, 0),
-	PLL(CLK_APMIXED_LVDSPLL, "lvdspll", 0x0370, 0x037c, 0x00000101,
+	PLL(CLK_APMIXED_LVDSPLL, "lvdspll", 0x0370, 0x037c, 0x00000100,
 		0, 31, 0x0370, 4, 0, 0, 0, 0x0374, 0),
-	PLL(CLK_APMIXED_LVDSPLL2, "lvdspll2", 0x0390, 0x039C, 0x00000101,
+	PLL(CLK_APMIXED_LVDSPLL2, "lvdspll2", 0x0390, 0x039C, 0x00000100,
 		0, 31, 0x0390, 4, 0, 0, 0, 0x0394, 0),
-	PLL(CLK_APMIXED_MSDCPLL, "msdcpll", 0x0270, 0x027C, 0x00000101,
+	PLL(CLK_APMIXED_MSDCPLL, "msdcpll", 0x0270, 0x027C, 0x00000100,
 		0, 31, 0x0270, 4, 0, 0, 0, 0x0274, 0),
-	PLL(CLK_APMIXED_MSDCPLL2, "msdcpll2", 0x0410, 0x041C, 0x00000101,
+	PLL(CLK_APMIXED_MSDCPLL2, "msdcpll2", 0x0410, 0x041C, 0x00000100,
 		0, 31, 0x0410, 4, 0, 0, 0, 0x0414, 0),
-	PLL(CLK_APMIXED_TVDPLL, "tvdpll", 0x0290, 0x029C, 0xc0000101,
+	PLL(CLK_APMIXED_TVDPLL, "tvdpll", 0x0290, 0x029C, 0xc0000100,
 		0, 31, 0x0290, 4, 0, 0, 0, 0x0294, 0),
-	PLL_B(CLK_APMIXED_MMPLL, "mmpll", 0x0250, 0x0260, 0x00000101,
+	PLL_B(CLK_APMIXED_MMPLL, "mmpll", 0x0250, 0x0260, 0x00000100,
 		0, 31, 0x0250, 4, 0, 0, 0, 0x0254, 0,
 		mmpll_div_table),
-	PLL_B(CLK_APMIXED_ARMCA35PLL, "armca35pll", 0x0100, 0x0110, 0xf0000101,
+	PLL_B(CLK_APMIXED_ARMCA35PLL, "armca35pll", 0x0100, 0x0110, 0xf0000100,
 		HAVE_RST_BAR, 31, 0x0100, 4, 0, 0, 0, 0x0104, 0,
 		armca35pll_div_table),
-	PLL_B(CLK_APMIXED_ARMCA72PLL, "armca72pll", 0x0210, 0x0220, 0x00000101,
+	PLL_B(CLK_APMIXED_ARMCA72PLL, "armca72pll", 0x0210, 0x0220, 0x00000100,
 		0, 31, 0x0210, 4, 0, 0, 0, 0x0214, 0,
 		armca72pll_div_table),
-	PLL(CLK_APMIXED_ETHERPLL, "etherpll", 0x0300, 0x030C, 0xc0000101,
+	PLL(CLK_APMIXED_ETHERPLL, "etherpll", 0x0300, 0x030C, 0xc0000100,
 		0, 31, 0x0300, 4, 0, 0, 0, 0x0304, 0),
+};
+
+static u16 infrasys_rst_ofs[] = { 0x30, 0x34, };
+static u16 pericfg_rst_ofs[] = { 0x0, 0x4, };
+
+static const struct mtk_clk_rst_desc clk_rst_desc[] = {
+	/* infra */
+	{
+		.version = MTK_RST_SIMPLE,
+		.rst_bank_ofs = infrasys_rst_ofs,
+		.rst_bank_nr = ARRAY_SIZE(infrasys_rst_ofs),
+	},
+	/* peri */
+	{
+		.version = MTK_RST_SIMPLE,
+		.rst_bank_ofs = pericfg_rst_ofs,
+		.rst_bank_nr = ARRAY_SIZE(pericfg_rst_ofs),
+	},
 };
 
 static int clk_mt2712_apmixed_probe(struct platform_device *pdev)
 {
-	struct clk_onecell_data *clk_data;
+	struct clk_hw_onecell_data *clk_data;
 	int r;
 	struct device_node *node = pdev->dev.of_node;
 
@@ -1267,7 +1286,7 @@ static int clk_mt2712_apmixed_probe(struct platform_device *pdev)
 
 	mtk_clk_register_plls(node, plls, ARRAY_SIZE(plls), clk_data);
 
-	r = of_clk_add_provider(node, of_clk_src_onecell_get, clk_data);
+	r = of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
 
 	if (r != 0)
 		pr_err("%s(): could not register clock provider: %d\n",
@@ -1276,7 +1295,7 @@ static int clk_mt2712_apmixed_probe(struct platform_device *pdev)
 	return r;
 }
 
-static struct clk_onecell_data *top_clk_data;
+static struct clk_hw_onecell_data *top_clk_data;
 
 static void clk_mt2712_top_init_early(struct device_node *node)
 {
@@ -1286,13 +1305,13 @@ static void clk_mt2712_top_init_early(struct device_node *node)
 		top_clk_data = mtk_alloc_clk_data(CLK_TOP_NR_CLK);
 
 		for (i = 0; i < CLK_TOP_NR_CLK; i++)
-			top_clk_data->clks[i] = ERR_PTR(-EPROBE_DEFER);
+			top_clk_data->hws[i] = ERR_PTR(-EPROBE_DEFER);
 	}
 
 	mtk_clk_register_factors(top_early_divs, ARRAY_SIZE(top_early_divs),
 			top_clk_data);
 
-	r = of_clk_add_provider(node, of_clk_src_onecell_get, top_clk_data);
+	r = of_clk_add_hw_provider(node, of_clk_hw_onecell_get, top_clk_data);
 	if (r)
 		pr_err("%s(): could not register clock provider: %d\n",
 			__func__, r);
@@ -1317,8 +1336,8 @@ static int clk_mt2712_top_probe(struct platform_device *pdev)
 		top_clk_data = mtk_alloc_clk_data(CLK_TOP_NR_CLK);
 	} else {
 		for (i = 0; i < CLK_TOP_NR_CLK; i++) {
-			if (top_clk_data->clks[i] == ERR_PTR(-EPROBE_DEFER))
-				top_clk_data->clks[i] = ERR_PTR(-ENOENT);
+			if (top_clk_data->hws[i] == ERR_PTR(-EPROBE_DEFER))
+				top_clk_data->hws[i] = ERR_PTR(-ENOENT);
 		}
 	}
 
@@ -1327,69 +1346,26 @@ static int clk_mt2712_top_probe(struct platform_device *pdev)
 	mtk_clk_register_factors(top_early_divs, ARRAY_SIZE(top_early_divs),
 			top_clk_data);
 	mtk_clk_register_factors(top_divs, ARRAY_SIZE(top_divs), top_clk_data);
-	mtk_clk_register_composites(top_muxes, ARRAY_SIZE(top_muxes), base,
-			&mt2712_clk_lock, top_clk_data);
+	mtk_clk_register_composites(&pdev->dev, top_muxes,
+				    ARRAY_SIZE(top_muxes), base,
+				    &mt2712_clk_lock, top_clk_data);
 	mtk_clk_register_dividers(top_adj_divs, ARRAY_SIZE(top_adj_divs), base,
 			&mt2712_clk_lock, top_clk_data);
-	mtk_clk_register_gates(node, top_clks, ARRAY_SIZE(top_clks),
-			top_clk_data);
+	mtk_clk_register_gates(&pdev->dev, node, top_clks,
+			       ARRAY_SIZE(top_clks), top_clk_data);
 
-	r = of_clk_add_provider(node, of_clk_src_onecell_get, top_clk_data);
-
-	if (r != 0)
-		pr_err("%s(): could not register clock provider: %d\n",
-			__func__, r);
-
-	return r;
-}
-
-static int clk_mt2712_infra_probe(struct platform_device *pdev)
-{
-	struct clk_onecell_data *clk_data;
-	int r;
-	struct device_node *node = pdev->dev.of_node;
-
-	clk_data = mtk_alloc_clk_data(CLK_INFRA_NR_CLK);
-
-	mtk_clk_register_gates(node, infra_clks, ARRAY_SIZE(infra_clks),
-			clk_data);
-
-	r = of_clk_add_provider(node, of_clk_src_onecell_get, clk_data);
+	r = of_clk_add_hw_provider(node, of_clk_hw_onecell_get, top_clk_data);
 
 	if (r != 0)
 		pr_err("%s(): could not register clock provider: %d\n",
 			__func__, r);
-
-	mtk_register_reset_controller(node, 2, 0x30);
-
-	return r;
-}
-
-static int clk_mt2712_peri_probe(struct platform_device *pdev)
-{
-	struct clk_onecell_data *clk_data;
-	int r;
-	struct device_node *node = pdev->dev.of_node;
-
-	clk_data = mtk_alloc_clk_data(CLK_PERI_NR_CLK);
-
-	mtk_clk_register_gates(node, peri_clks, ARRAY_SIZE(peri_clks),
-			clk_data);
-
-	r = of_clk_add_provider(node, of_clk_src_onecell_get, clk_data);
-
-	if (r != 0)
-		pr_err("%s(): could not register clock provider: %d\n",
-			__func__, r);
-
-	mtk_register_reset_controller(node, 2, 0);
 
 	return r;
 }
 
 static int clk_mt2712_mcu_probe(struct platform_device *pdev)
 {
-	struct clk_onecell_data *clk_data;
+	struct clk_hw_onecell_data *clk_data;
 	int r;
 	struct device_node *node = pdev->dev.of_node;
 	void __iomem *base;
@@ -1402,10 +1378,13 @@ static int clk_mt2712_mcu_probe(struct platform_device *pdev)
 
 	clk_data = mtk_alloc_clk_data(CLK_MCU_NR_CLK);
 
-	mtk_clk_register_composites(mcu_muxes, ARRAY_SIZE(mcu_muxes), base,
-			&mt2712_clk_lock, clk_data);
+	r = mtk_clk_register_composites(&pdev->dev, mcu_muxes,
+					ARRAY_SIZE(mcu_muxes), base,
+					&mt2712_clk_lock, clk_data);
+	if (r)
+		dev_err(&pdev->dev, "Could not register composites: %d\n", r);
 
-	r = of_clk_add_provider(node, of_clk_src_onecell_get, clk_data);
+	r = of_clk_add_hw_provider(node, of_clk_hw_onecell_get, clk_data);
 
 	if (r != 0)
 		pr_err("%s(): could not register clock provider: %d\n",
@@ -1421,12 +1400,6 @@ static const struct of_device_id of_match_clk_mt2712[] = {
 	}, {
 		.compatible = "mediatek,mt2712-topckgen",
 		.data = clk_mt2712_top_probe,
-	}, {
-		.compatible = "mediatek,mt2712-infracfg",
-		.data = clk_mt2712_infra_probe,
-	}, {
-		.compatible = "mediatek,mt2712-pericfg",
-		.data = clk_mt2712_peri_probe,
 	}, {
 		.compatible = "mediatek,mt2712-mcucfg",
 		.data = clk_mt2712_mcu_probe,
@@ -1453,6 +1426,33 @@ static int clk_mt2712_probe(struct platform_device *pdev)
 	return r;
 }
 
+static const struct mtk_clk_desc infra_desc = {
+	.clks = infra_clks,
+	.num_clks = ARRAY_SIZE(infra_clks),
+	.rst_desc = &clk_rst_desc[0],
+};
+
+static const struct mtk_clk_desc peri_desc = {
+	.clks = peri_clks,
+	.num_clks = ARRAY_SIZE(peri_clks),
+	.rst_desc = &clk_rst_desc[1],
+};
+
+static const struct of_device_id of_match_clk_mt2712_simple[] = {
+	{ .compatible = "mediatek,mt2712-infracfg", .data = &infra_desc },
+	{ .compatible = "mediatek,mt2712-pericfg", .data = &peri_desc, },
+	{ /* sentinel */ }
+};
+
+static struct platform_driver clk_mt2712_simple_drv = {
+	.probe = mtk_clk_simple_probe,
+	.remove = mtk_clk_simple_remove,
+	.driver = {
+		.name = "clk-mt2712-simple",
+		.of_match_table = of_match_clk_mt2712_simple,
+	},
+};
+
 static struct platform_driver clk_mt2712_drv = {
 	.probe = clk_mt2712_probe,
 	.driver = {
@@ -1463,7 +1463,11 @@ static struct platform_driver clk_mt2712_drv = {
 
 static int __init clk_mt2712_init(void)
 {
-	return platform_driver_register(&clk_mt2712_drv);
+	int ret = platform_driver_register(&clk_mt2712_drv);
+
+	if (ret)
+		return ret;
+	return platform_driver_register(&clk_mt2712_simple_drv);
 }
 
 arch_initcall(clk_mt2712_init);

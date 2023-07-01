@@ -7,6 +7,7 @@
  *
  */
 
+#include <linux/bits.h>
 #include <linux/clk-provider.h>
 #include <linux/err.h>
 #include <linux/io.h>
@@ -22,14 +23,17 @@
 
 /* PLL Configuration Register (xPLLCFG) */
 #define PLL_CFG_OFFSET		0x08
+#define IMX8ULP_PLL_CFG_OFFSET	0x10
 #define BP_PLL_MULT		16
 #define BM_PLL_MULT		(0x7f << 16)
 
 /* PLL Numerator Register (xPLLNUM) */
 #define PLL_NUM_OFFSET		0x10
+#define IMX8ULP_PLL_NUM_OFFSET	0x1c
 
 /* PLL Denominator Register (xPLLDENOM) */
 #define PLL_DENOM_OFFSET	0x14
+#define IMX8ULP_PLL_DENOM_OFFSET	0x18
 
 #define MAX_MFD			0x3fffffff
 #define DEFAULT_MFD		1000000
@@ -37,6 +41,9 @@
 struct clk_pllv4 {
 	struct clk_hw	hw;
 	void __iomem	*base;
+	u32		cfg_offset;
+	u32		num_offset;
+	u32		denom_offset;
 };
 
 /* Valid PLL MULT Table */
@@ -54,7 +61,7 @@ static inline int clk_pllv4_wait_lock(struct clk_pllv4 *pll)
 				  csr, csr & PLL_VLD, 0, LOCK_TIMEOUT_US);
 }
 
-static int clk_pllv4_is_enabled(struct clk_hw *hw)
+static int clk_pllv4_is_prepared(struct clk_hw *hw)
 {
 	struct clk_pllv4 *pll = to_clk_pllv4(hw);
 
@@ -71,12 +78,12 @@ static unsigned long clk_pllv4_recalc_rate(struct clk_hw *hw,
 	u32 mult, mfn, mfd;
 	u64 temp64;
 
-	mult = readl_relaxed(pll->base + PLL_CFG_OFFSET);
+	mult = readl_relaxed(pll->base + pll->cfg_offset);
 	mult &= BM_PLL_MULT;
 	mult >>= BP_PLL_MULT;
 
-	mfn = readl_relaxed(pll->base + PLL_NUM_OFFSET);
-	mfd = readl_relaxed(pll->base + PLL_DENOM_OFFSET);
+	mfn = readl_relaxed(pll->base + pll->num_offset);
+	mfd = readl_relaxed(pll->base + pll->denom_offset);
 	temp64 = parent_rate;
 	temp64 *= mfn;
 	do_div(temp64, mfd);
@@ -164,18 +171,18 @@ static int clk_pllv4_set_rate(struct clk_hw *hw, unsigned long rate,
 	do_div(temp64, parent_rate);
 	mfn = temp64;
 
-	val = readl_relaxed(pll->base + PLL_CFG_OFFSET);
+	val = readl_relaxed(pll->base + pll->cfg_offset);
 	val &= ~BM_PLL_MULT;
 	val |= mult << BP_PLL_MULT;
-	writel_relaxed(val, pll->base + PLL_CFG_OFFSET);
+	writel_relaxed(val, pll->base + pll->cfg_offset);
 
-	writel_relaxed(mfn, pll->base + PLL_NUM_OFFSET);
-	writel_relaxed(mfd, pll->base + PLL_DENOM_OFFSET);
+	writel_relaxed(mfn, pll->base + pll->num_offset);
+	writel_relaxed(mfd, pll->base + pll->denom_offset);
 
 	return 0;
 }
 
-static int clk_pllv4_enable(struct clk_hw *hw)
+static int clk_pllv4_prepare(struct clk_hw *hw)
 {
 	u32 val;
 	struct clk_pllv4 *pll = to_clk_pllv4(hw);
@@ -187,7 +194,7 @@ static int clk_pllv4_enable(struct clk_hw *hw)
 	return clk_pllv4_wait_lock(pll);
 }
 
-static void clk_pllv4_disable(struct clk_hw *hw)
+static void clk_pllv4_unprepare(struct clk_hw *hw)
 {
 	u32 val;
 	struct clk_pllv4 *pll = to_clk_pllv4(hw);
@@ -201,13 +208,13 @@ static const struct clk_ops clk_pllv4_ops = {
 	.recalc_rate	= clk_pllv4_recalc_rate,
 	.round_rate	= clk_pllv4_round_rate,
 	.set_rate	= clk_pllv4_set_rate,
-	.enable		= clk_pllv4_enable,
-	.disable	= clk_pllv4_disable,
-	.is_enabled	= clk_pllv4_is_enabled,
+	.prepare	= clk_pllv4_prepare,
+	.unprepare	= clk_pllv4_unprepare,
+	.is_prepared	= clk_pllv4_is_prepared,
 };
 
-struct clk_hw *imx_clk_hw_pllv4(const char *name, const char *parent_name,
-			  void __iomem *base)
+struct clk_hw *imx_clk_hw_pllv4(enum imx_pllv4_type type, const char *name,
+		 const char *parent_name, void __iomem *base)
 {
 	struct clk_pllv4 *pll;
 	struct clk_hw *hw;
@@ -219,6 +226,16 @@ struct clk_hw *imx_clk_hw_pllv4(const char *name, const char *parent_name,
 		return ERR_PTR(-ENOMEM);
 
 	pll->base = base;
+
+	if (type == IMX_PLLV4_IMX8ULP) {
+		pll->cfg_offset = IMX8ULP_PLL_CFG_OFFSET;
+		pll->num_offset = IMX8ULP_PLL_NUM_OFFSET;
+		pll->denom_offset = IMX8ULP_PLL_DENOM_OFFSET;
+	} else {
+		pll->cfg_offset = PLL_CFG_OFFSET;
+		pll->num_offset = PLL_NUM_OFFSET;
+		pll->denom_offset = PLL_DENOM_OFFSET;
+	}
 
 	init.name = name;
 	init.ops = &clk_pllv4_ops;
@@ -237,3 +254,4 @@ struct clk_hw *imx_clk_hw_pllv4(const char *name, const char *parent_name,
 
 	return hw;
 }
+EXPORT_SYMBOL_GPL(imx_clk_hw_pllv4);

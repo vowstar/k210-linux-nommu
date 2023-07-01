@@ -23,7 +23,6 @@
 #include <asm/q40_master.h>
 #include <linux/fb.h>
 #include <linux/module.h>
-#include <asm/pgtable.h>
 
 #define Q40_PHYS_SCREEN_ADDR 0xFE800000
 
@@ -134,7 +133,7 @@ static struct platform_device q40fb_device = {
 	.name	= "q40fb",
 };
 
-int __init q40fb_init(void)
+static int __init q40fb_init(void)
 {
 	int ret = 0;
 

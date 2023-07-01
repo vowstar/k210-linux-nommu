@@ -83,7 +83,7 @@ static pte_t *__alloc_for_ptecache(struct mm_struct *mm, int kernel)
 	spin_lock(&mm->page_table_lock);
 	/*
 	 * If we find pgtable_page set, we return
-	 * the allocated page with single fragement
+	 * the allocated page with single fragment
 	 * count.
 	 */
 	if (likely(!pte_frag_get(&mm->context))) {
@@ -109,6 +109,9 @@ pte_t *pte_fragment_alloc(struct mm_struct *mm, int kernel)
 void pte_fragment_free(unsigned long *table, int kernel)
 {
 	struct page *page = virt_to_page(table);
+
+	if (PageReserved(page))
+		return free_reserved_page(page);
 
 	BUG_ON(atomic_read(&page->pt_frag_refcount) <= 0);
 	if (atomic_dec_and_test(&page->pt_frag_refcount)) {

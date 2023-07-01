@@ -16,9 +16,6 @@
 #include <sound/soc.h>
 #include <sound/soc-acpi.h>
 
-#include "../common/sst-dsp.h"
-#include "../haswell/sst-haswell-ipc.h"
-
 #include "../../codecs/rt5645.h"
 
 struct bdw_rt5650_priv {
@@ -87,14 +84,14 @@ static int broadwell_ssp0_fixup(struct snd_soc_pcm_runtime *rtd,
 			struct snd_pcm_hw_params *params)
 {
 	struct snd_interval *rate = hw_param_interval(params,
-			SNDRV_PCM_HW_PARAM_RATE);
-	struct snd_interval *channels = hw_param_interval(params,
-						SNDRV_PCM_HW_PARAM_CHANNELS);
+						      SNDRV_PCM_HW_PARAM_RATE);
+	struct snd_interval *chan = hw_param_interval(params,
+						      SNDRV_PCM_HW_PARAM_CHANNELS);
 
-	/* The ADSP will covert the FE rate to 48k, max 4-channels */
+	/* The ADSP will convert the FE rate to 48k, max 4-channels */
 	rate->min = rate->max = 48000;
-	channels->min = 2;
-	channels->max = 4;
+	chan->min = 2;
+	chan->max = 4;
 
 	/* set SSP0 to 24 bit */
 	snd_mask_set_format(hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT),
@@ -106,8 +103,8 @@ static int broadwell_ssp0_fixup(struct snd_soc_pcm_runtime *rtd,
 static int bdw_rt5650_hw_params(struct snd_pcm_substream *substream,
 	struct snd_pcm_hw_params *params)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_dai *codec_dai = rtd->codec_dai;
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_dai *codec_dai = asoc_rtd_to_codec(rtd, 0);
 	int ret;
 
 	/* Workaround: set codec PLL to 19.2MHz that PLL source is
@@ -138,36 +135,40 @@ static struct snd_soc_ops bdw_rt5650_ops = {
 	.hw_params = bdw_rt5650_hw_params,
 };
 
-#if !IS_ENABLED(CONFIG_SND_SOC_SOF_BROADWELL)
-static int bdw_rt5650_rtd_init(struct snd_soc_pcm_runtime *rtd)
+static const unsigned int channels[] = {
+	2, 4,
+};
+
+static const struct snd_pcm_hw_constraint_list constraints_channels = {
+	.count = ARRAY_SIZE(channels),
+	.list = channels,
+	.mask = 0,
+};
+
+static int bdw_rt5650_fe_startup(struct snd_pcm_substream *substream)
 {
-	struct snd_soc_component *component =
-		snd_soc_rtdcom_lookup(rtd, DRV_NAME);
-	struct sst_pdata *pdata = dev_get_platdata(component->dev);
-	struct sst_hsw *broadwell = pdata->dsp;
-	int ret;
+	struct snd_pcm_runtime *runtime = substream->runtime;
 
-	/* Set ADSP SSP port settings
-	 * clock_divider = 4 means BCLK = MCLK/5 = 24MHz/5 = 4.8MHz
-	 */
-	ret = sst_hsw_device_set_config(broadwell, SST_HSW_DEVICE_SSP_0,
-		SST_HSW_DEVICE_MCLK_FREQ_24_MHZ,
-		SST_HSW_DEVICE_TDM_CLOCK_MASTER, 4);
-	if (ret < 0) {
-		dev_err(rtd->dev, "error: failed to set device config\n");
-		return ret;
-	}
+	/* Board supports stereo and quad configurations for capture */
+	if (substream->stream != SNDRV_PCM_STREAM_CAPTURE)
+		return 0;
 
-	return 0;
+	runtime->hw.channels_max = 4;
+	return snd_pcm_hw_constraint_list(runtime, 0,
+					  SNDRV_PCM_HW_PARAM_CHANNELS,
+					  &constraints_channels);
 }
-#endif
+
+static const struct snd_soc_ops bdw_rt5650_fe_ops = {
+	.startup = bdw_rt5650_fe_startup,
+};
 
 static int bdw_rt5650_init(struct snd_soc_pcm_runtime *rtd)
 {
 	struct bdw_rt5650_priv *bdw_rt5650 =
 		snd_soc_card_get_drvdata(rtd->card);
-	struct snd_soc_component *component = rtd->codec_dai->component;
-	struct snd_soc_dai *codec_dai = rtd->codec_dai;
+	struct snd_soc_dai *codec_dai = asoc_rtd_to_codec(rtd, 0);
+	struct snd_soc_component *component = codec_dai->component;
 	int ret;
 
 	/* Enable codec ASRC function for Stereo DAC/Stereo1 ADC/DMIC/I2S1.
@@ -191,15 +192,15 @@ static int bdw_rt5650_init(struct snd_soc_pcm_runtime *rtd)
 	}
 
 	/* Create and initialize headphone jack */
-	if (snd_soc_card_jack_new(rtd->card, "Headphone Jack",
+	if (snd_soc_card_jack_new_pins(rtd->card, "Headphone Jack",
 			SND_JACK_HEADPHONE, &headphone_jack,
 			&headphone_jack_pin, 1)) {
 		dev_err(component->dev, "Can't create headphone jack\n");
 	}
 
 	/* Create and initialize mic jack */
-	if (snd_soc_card_jack_new(rtd->card, "Mic Jack", SND_JACK_MICROPHONE,
-			&mic_jack, &mic_jack_pin, 1)) {
+	if (snd_soc_card_jack_new_pins(rtd->card, "Mic Jack",
+			SND_JACK_MICROPHONE, &mic_jack, &mic_jack_pin, 1)) {
 		dev_err(component->dev, "Can't create mic jack\n");
 	}
 
@@ -223,23 +224,17 @@ SND_SOC_DAILINK_DEF(platform,
 SND_SOC_DAILINK_DEF(be,
 	DAILINK_COMP_ARRAY(COMP_CODEC("i2c-10EC5650:00", "rt5645-aif1")));
 
-#if IS_ENABLED(CONFIG_SND_SOC_SOF_BROADWELL)
 SND_SOC_DAILINK_DEF(ssp0_port,
 	    DAILINK_COMP_ARRAY(COMP_CPU("ssp0-port")));
-#else
-SND_SOC_DAILINK_DEF(ssp0_port,
-	    DAILINK_COMP_ARRAY(COMP_DUMMY()));
-#endif
 
 static struct snd_soc_dai_link bdw_rt5650_dais[] = {
 	/* Front End DAI links */
 	{
 		.name = "System PCM",
 		.stream_name = "System Playback",
+		.nonatomic = 1,
 		.dynamic = 1,
-#if !IS_ENABLED(CONFIG_SND_SOC_SOF_BROADWELL)
-		.init = bdw_rt5650_rtd_init,
-#endif
+		.ops = &bdw_rt5650_fe_ops,
 		.trigger = {
 			SND_SOC_DPCM_TRIGGER_POST,
 			SND_SOC_DPCM_TRIGGER_POST
@@ -254,10 +249,10 @@ static struct snd_soc_dai_link bdw_rt5650_dais[] = {
 		/* SSP0 - Codec */
 		.name = "Codec",
 		.id = 0,
+		.nonatomic = 1,
 		.no_pcm = 1,
 		.dai_fmt = SND_SOC_DAIFMT_DSP_B | SND_SOC_DAIFMT_NB_NF |
-			SND_SOC_DAIFMT_CBS_CFS,
-		.ignore_suspend = 1,
+			SND_SOC_DAIFMT_CBC_CFC,
 		.ignore_pmdown_time = 1,
 		.be_hw_params_fixup = broadwell_ssp0_fixup,
 		.ops = &bdw_rt5650_ops,
@@ -268,9 +263,17 @@ static struct snd_soc_dai_link bdw_rt5650_dais[] = {
 	},
 };
 
+/* use space before codec name to simplify card ID, and simplify driver name */
+#define SOF_CARD_NAME "bdw rt5650" /* card name will be 'sof-bdw rt5650' */
+#define SOF_DRIVER_NAME "SOF"
+
+#define CARD_NAME "bdw-rt5650"
+#define DRIVER_NAME NULL /* card name will be used for driver name */
+
 /* ASoC machine driver for Broadwell DSP + RT5650 */
 static struct snd_soc_card bdw_rt5650_card = {
-	.name = "bdw-rt5650",
+	.name = CARD_NAME,
+	.driver_name = DRIVER_NAME,
 	.owner = THIS_MODULE,
 	.dai_link = bdw_rt5650_dais,
 	.num_links = ARRAY_SIZE(bdw_rt5650_dais),
@@ -297,13 +300,22 @@ static int bdw_rt5650_probe(struct platform_device *pdev)
 	if (!bdw_rt5650)
 		return -ENOMEM;
 
-	/* override plaform name, if required */
-	mach = (&pdev->dev)->platform_data;
+	/* override platform name, if required */
+	mach = pdev->dev.platform_data;
 	ret = snd_soc_fixup_dai_links_platform_name(&bdw_rt5650_card,
 						    mach->mach_params.platform);
 
 	if (ret)
 		return ret;
+
+	/* set card and driver name */
+	if (snd_soc_acpi_sof_parent(&pdev->dev)) {
+		bdw_rt5650_card.name = SOF_CARD_NAME;
+		bdw_rt5650_card.driver_name = SOF_DRIVER_NAME;
+	} else {
+		bdw_rt5650_card.name = CARD_NAME;
+		bdw_rt5650_card.driver_name = DRIVER_NAME;
+	}
 
 	snd_soc_card_set_drvdata(&bdw_rt5650_card, bdw_rt5650);
 

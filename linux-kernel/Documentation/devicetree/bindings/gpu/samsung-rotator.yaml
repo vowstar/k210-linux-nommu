@@ -22,6 +22,12 @@ properties:
   interrupts:
     maxItems: 1
 
+  iommus:
+    maxItems: 1
+
+  power-domains:
+    maxItems: 1
+
   clocks:
     maxItems: 1
 
@@ -36,6 +42,8 @@ required:
   - clocks
   - clock-names
 
+additionalProperties: false
+
 examples:
   - |
     rotator@12810000 {
@@ -45,4 +53,3 @@ examples:
         clocks = <&clock 278>;
         clock-names = "rotator";
     };
-

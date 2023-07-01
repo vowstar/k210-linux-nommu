@@ -23,12 +23,9 @@ static inline struct udphdr *udp_hdr(const struct sk_buff *skb)
 	return (struct udphdr *)skb_transport_header(skb);
 }
 
-static inline struct udphdr *inner_udp_hdr(const struct sk_buff *skb)
-{
-	return (struct udphdr *)skb_inner_transport_header(skb);
-}
-
+#define UDP_HTABLE_SIZE_MIN_PERNET	128
 #define UDP_HTABLE_SIZE_MIN		(CONFIG_BASE_SMALL ? 128 : 256)
+#define UDP_HTABLE_SIZE_MAX		65536
 
 static inline u32 udp_hashfn(const struct net *net, u32 num, u32 mask)
 {
@@ -51,7 +48,9 @@ struct udp_sock {
 					   * different encapsulation layer set
 					   * this
 					   */
-			 gro_enabled:1;	/* Can accept GRO packets */
+			 gro_enabled:1,	/* Request GRO aggregation */
+			 accept_udp_l4:1,
+			 accept_udp_fraglist:1;
 	/*
 	 * Following member retains the information to create a UDP header
 	 * when the socket is uncorked.
@@ -73,6 +72,8 @@ struct udp_sock {
 	 * For encapsulation sockets.
 	 */
 	int (*encap_rcv)(struct sock *sk, struct sk_buff *skb);
+	void (*encap_err_rcv)(struct sock *sk, struct sk_buff *skb, int err,
+			      __be16 port, u32 info, u8 *payload);
 	int (*encap_err_lookup)(struct sock *sk, struct sk_buff *skb);
 	void (*encap_destroy)(struct sock *sk);
 
@@ -89,6 +90,9 @@ struct udp_sock {
 
 	/* This field is dirtied by udp_recvmsg() */
 	int		forward_deficit;
+
+	/* This fields follows rcvbuf value, and is touched by udp_recvmsg */
+	int		forward_threshold;
 };
 
 #define UDP_MAX_SEGMENTS	(1 << 6UL)
@@ -131,8 +135,22 @@ static inline void udp_cmsg_recv(struct msghdr *msg, struct sock *sk,
 
 static inline bool udp_unexpected_gso(struct sock *sk, struct sk_buff *skb)
 {
-	return !udp_sk(sk)->gro_enabled && skb_is_gso(skb) &&
-	       skb_shinfo(skb)->gso_type & SKB_GSO_UDP_L4;
+	if (!skb_is_gso(skb))
+		return false;
+
+	if (skb_shinfo(skb)->gso_type & SKB_GSO_UDP_L4 && !udp_sk(sk)->accept_udp_l4)
+		return true;
+
+	if (skb_shinfo(skb)->gso_type & SKB_GSO_FRAGLIST && !udp_sk(sk)->accept_udp_fraglist)
+		return true;
+
+	return false;
+}
+
+static inline void udp_allow_gso(struct sock *sk)
+{
+	udp_sk(sk)->accept_udp_l4 = 1;
+	udp_sk(sk)->accept_udp_fraglist = 1;
 }
 
 #define udp_portaddr_for_each_entry(__sk, list) \

@@ -269,7 +269,6 @@ static const struct drm_display_mode default_mode = {
 	.vsync_start = 1600 + 4,
 	.vsync_end = 1600 + 4 + 8,
 	.vtotal = 1600 + 4 + 8 + 32,
-	.vrefresh = 60,
 };
 
 static int sharp_panel_get_modes(struct drm_panel *panel,
@@ -281,7 +280,7 @@ static int sharp_panel_get_modes(struct drm_panel *panel,
 	if (!mode) {
 		dev_err(panel->dev, "failed to add mode %ux%ux@%u\n",
 			default_mode.hdisplay, default_mode.vdisplay,
-			default_mode.vrefresh);
+			drm_mode_vrefresh(&default_mode));
 		return -ENOMEM;
 	}
 
@@ -326,7 +325,9 @@ static int sharp_panel_add(struct sharp_panel *sharp)
 	if (ret)
 		return ret;
 
-	return drm_panel_add(&sharp->base);
+	drm_panel_add(&sharp->base);
+
+	return 0;
 }
 
 static void sharp_panel_del(struct sharp_panel *sharp)
@@ -390,7 +391,7 @@ static int sharp_panel_probe(struct mipi_dsi_device *dsi)
 	return 0;
 }
 
-static int sharp_panel_remove(struct mipi_dsi_device *dsi)
+static void sharp_panel_remove(struct mipi_dsi_device *dsi)
 {
 	struct sharp_panel *sharp = mipi_dsi_get_drvdata(dsi);
 	int err;
@@ -398,7 +399,7 @@ static int sharp_panel_remove(struct mipi_dsi_device *dsi)
 	/* only detach from host for the DSI-LINK2 interface */
 	if (!sharp) {
 		mipi_dsi_detach(dsi);
-		return 0;
+		return;
 	}
 
 	err = drm_panel_disable(&sharp->base);
@@ -410,8 +411,6 @@ static int sharp_panel_remove(struct mipi_dsi_device *dsi)
 		dev_err(&dsi->dev, "failed to detach from DSI host: %d\n", err);
 
 	sharp_panel_del(sharp);
-
-	return 0;
 }
 
 static void sharp_panel_shutdown(struct mipi_dsi_device *dsi)

@@ -92,7 +92,7 @@ static const struct tps6586x_irq_data tps6586x_irqs[] = {
 	[TPS6586X_INT_RTC_ALM2] = TPS6586X_IRQ(TPS6586X_INT_MASK4, 1 << 1),
 };
 
-static struct resource tps6586x_rtc_resources[] = {
+static const struct resource tps6586x_rtc_resources[] = {
 	{
 		.start  = TPS6586X_INT_RTC_ALM1,
 		.end	= TPS6586X_INT_RTC_ALM1,
@@ -269,15 +269,11 @@ static void tps6586x_irq_sync_unlock(struct irq_data *data)
 	mutex_unlock(&tps6586x->irq_lock);
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int tps6586x_irq_set_wake(struct irq_data *irq_data, unsigned int on)
 {
 	struct tps6586x *tps6586x = irq_data_get_irq_chip_data(irq_data);
 	return irq_set_irq_wake(tps6586x->irq, on);
 }
-#else
-#define tps6586x_irq_set_wake NULL
-#endif
 
 static struct irq_chip tps6586x_irq_chip = {
 	.name = "tps6586x",
@@ -285,7 +281,7 @@ static struct irq_chip tps6586x_irq_chip = {
 	.irq_bus_sync_unlock = tps6586x_irq_sync_unlock,
 	.irq_disable = tps6586x_irq_disable,
 	.irq_enable = tps6586x_irq_enable,
-	.irq_set_wake = tps6586x_irq_set_wake,
+	.irq_set_wake = pm_sleep_ptr(tps6586x_irq_set_wake),
 };
 
 static int tps6586x_irq_map(struct irq_domain *h, unsigned int virq,
@@ -309,18 +305,19 @@ static const struct irq_domain_ops tps6586x_domain_ops = {
 static irqreturn_t tps6586x_irq(int irq, void *data)
 {
 	struct tps6586x *tps6586x = data;
-	u32 acks;
+	uint32_t acks;
+	__le32 val;
 	int ret = 0;
 
 	ret = tps6586x_reads(tps6586x->dev, TPS6586X_INT_ACK1,
-			     sizeof(acks), (uint8_t *)&acks);
+			     sizeof(acks), (uint8_t *)&val);
 
 	if (ret < 0) {
 		dev_err(tps6586x->dev, "failed to read interrupt status\n");
 		return IRQ_NONE;
 	}
 
-	acks = le32_to_cpu(acks);
+	acks = le32_to_cpu(val);
 
 	while (acks) {
 		int i = __ffs(acks);
@@ -498,8 +495,7 @@ static void tps6586x_print_version(struct i2c_client *client, int version)
 	dev_info(&client->dev, "Found %s, VERSIONCRC is %02x\n", name, version);
 }
 
-static int tps6586x_i2c_probe(struct i2c_client *client,
-					const struct i2c_device_id *id)
+static int tps6586x_i2c_probe(struct i2c_client *client)
 {
 	struct tps6586x_platform_data *pdata = dev_get_platdata(&client->dev);
 	struct tps6586x *tps6586x;
@@ -578,7 +574,7 @@ err_mfd_add:
 	return ret;
 }
 
-static int tps6586x_i2c_remove(struct i2c_client *client)
+static void tps6586x_i2c_remove(struct i2c_client *client)
 {
 	struct tps6586x *tps6586x = i2c_get_clientdata(client);
 
@@ -586,7 +582,6 @@ static int tps6586x_i2c_remove(struct i2c_client *client)
 	mfd_remove_devices(tps6586x->dev);
 	if (client->irq)
 		free_irq(client->irq, tps6586x);
-	return 0;
 }
 
 static int __maybe_unused tps6586x_i2c_suspend(struct device *dev)
@@ -624,7 +619,7 @@ static struct i2c_driver tps6586x_driver = {
 		.of_match_table = of_match_ptr(tps6586x_of_match),
 		.pm	= &tps6586x_pm_ops,
 	},
-	.probe		= tps6586x_i2c_probe,
+	.probe_new	= tps6586x_i2c_probe,
 	.remove		= tps6586x_i2c_remove,
 	.id_table	= tps6586x_id_table,
 };

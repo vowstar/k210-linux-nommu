@@ -2136,7 +2136,7 @@ static const struct net_device_ops sbmac_netdev_ops = {
 	.ndo_start_xmit		= sbmac_start_tx,
 	.ndo_set_rx_mode	= sbmac_set_rx_mode,
 	.ndo_tx_timeout		= sbmac_tx_timeout,
-	.ndo_do_ioctl		= sbmac_mii_ioctl,
+	.ndo_eth_ioctl		= sbmac_mii_ioctl,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= eth_mac_addr,
 #ifdef CONFIG_NET_POLL_CONTROLLER
@@ -2183,9 +2183,7 @@ static int sbmac_init(struct platform_device *pldev, long long base)
 		ea_reg >>= 8;
 	}
 
-	for (i = 0; i < 6; i++) {
-		dev->dev_addr[i] = eaddr[i];
-	}
+	eth_hw_addr_set(dev, eaddr);
 
 	/*
 	 * Initialize context (get pointers to registers and stuff), then
@@ -2205,7 +2203,7 @@ static int sbmac_init(struct platform_device *pldev, long long base)
 	dev->min_mtu = 0;
 	dev->max_mtu = ENET_PACKET_SIZE;
 
-	netif_napi_add(dev, &sc->napi, sbmac_poll, 16);
+	netif_napi_add_weight(dev, &sc->napi, sbmac_poll, 16);
 
 	dev->irq		= UNIT_INT(idx);
 
@@ -2536,7 +2534,12 @@ static int sbmac_probe(struct platform_device *pldev)
 	int err;
 
 	res = platform_get_resource(pldev, IORESOURCE_MEM, 0);
-	BUG_ON(!res);
+	if (!res) {
+		printk(KERN_ERR "%s: failed to get resource\n",
+		       dev_name(&pldev->dev));
+		err = -EINVAL;
+		goto out_out;
+	}
 	sbm_base = ioremap(res->start, resource_size(res));
 	if (!sbm_base) {
 		printk(KERN_ERR "%s: unable to map device registers\n",

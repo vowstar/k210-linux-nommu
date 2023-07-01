@@ -656,11 +656,9 @@ static void bd2802_unregister_led_classdev(struct bd2802_led *led)
 	led_classdev_unregister(&led->cdev_led1r);
 }
 
-static int bd2802_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int bd2802_probe(struct i2c_client *client)
 {
 	struct bd2802_led *led;
-	struct bd2802_led_platform_data *pdata;
 	int ret, i;
 
 	led = devm_kzalloc(&client->dev, sizeof(struct bd2802_led), GFP_KERNEL);
@@ -668,7 +666,6 @@ static int bd2802_probe(struct i2c_client *client,
 		return -ENOMEM;
 
 	led->client = client;
-	pdata = led->pdata = dev_get_platdata(&client->dev);
 	i2c_set_clientdata(client, led);
 
 	/*
@@ -724,7 +721,7 @@ failed_unregister_dev_file:
 	return ret;
 }
 
-static int bd2802_remove(struct i2c_client *client)
+static void bd2802_remove(struct i2c_client *client)
 {
 	struct bd2802_led *led = i2c_get_clientdata(client);
 	int i;
@@ -735,8 +732,6 @@ static int bd2802_remove(struct i2c_client *client)
 		bd2802_disable_adv_conf(led);
 	for (i = 0; i < ARRAY_SIZE(bd2802_attributes); i++)
 		device_remove_file(&led->client->dev, bd2802_attributes[i]);
-
-	return 0;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -791,7 +786,7 @@ static struct i2c_driver bd2802_i2c_driver = {
 		.name	= "BD2802",
 		.pm	= &bd2802_pm,
 	},
-	.probe		= bd2802_probe,
+	.probe_new	= bd2802_probe,
 	.remove		= bd2802_remove,
 	.id_table	= bd2802_id,
 };

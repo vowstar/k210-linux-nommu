@@ -12,11 +12,15 @@ s390 Architecture
     qeth
     s390dbf
     vfio-ap
+    vfio-ap-locking
     vfio-ccw
     zfcpdump
     common_io
+    pci
 
     text_files
+
+    features
 
 .. only::  subproject and html
 

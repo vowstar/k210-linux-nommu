@@ -12,11 +12,11 @@
 #include <uapi/linux/if_team.h>
 
 struct team_pcpu_stats {
-	u64			rx_packets;
-	u64			rx_bytes;
-	u64			rx_multicast;
-	u64			tx_packets;
-	u64			tx_bytes;
+	u64_stats_t		rx_packets;
+	u64_stats_t		rx_bytes;
+	u64_stats_t		rx_multicast;
+	u64_stats_t		tx_packets;
+	u64_stats_t		tx_bytes;
 	struct u64_stats_sync	syncp;
 	u32			rx_dropped;
 	u32			tx_dropped;
@@ -67,7 +67,7 @@ struct team_port {
 	u16 queue_id;
 	struct list_head qom_list; /* node in queue override mapping list */
 	struct rcu_head	rcu;
-	long mode_priv[0];
+	long mode_priv[];
 };
 
 static inline struct team_port *team_port_get_rcu(const struct net_device *dev)
@@ -102,10 +102,7 @@ static inline bool team_port_dev_txable(const struct net_device *port_dev)
 static inline void team_netpoll_send_skb(struct team_port *port,
 					 struct sk_buff *skb)
 {
-	struct netpoll *np = port->np;
-
-	if (np)
-		netpoll_send_skb(np, skb);
+	netpoll_send_skb(port->np, skb);
 }
 #else
 static inline void team_netpoll_send_skb(struct team_port *port,

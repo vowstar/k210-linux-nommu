@@ -119,7 +119,7 @@ enum { SDI0, SDI1, SDI2, SDI3, SDO0, SDO1, SDO2, SDO3 };
 #define AZX_REG_VS_EM3U			0x103C
 #define AZX_REG_VS_EM4L			0x1040
 #define AZX_REG_VS_EM4U			0x1044
-#define AZX_REG_VS_LTRC			0x1048
+#define AZX_REG_VS_LTRP			0x1048
 #define AZX_REG_VS_D0I3C		0x104A
 #define AZX_REG_VS_PCE			0x104B
 #define AZX_REG_VS_L2MAGC		0x1050
@@ -140,8 +140,12 @@ enum { SDI0, SDI1, SDI2, SDI3, SDO0, SDO1, SDO2, SDO3 };
 #define BDL_SIZE		4096
 #define AZX_MAX_BDL_ENTRIES	(BDL_SIZE / 16)
 #define AZX_MAX_FRAG		32
-/* max buffer size - no h/w limit, you can increase as you like */
-#define AZX_MAX_BUF_SIZE	(1024*1024*1024)
+/*
+ * max buffer size - artificial 4MB limit per stream to avoid big allocations
+ * In theory it can be really big, but as it is per stream on systems with many streams memory could
+ * be quickly saturated if userspace requests maximum buffer size for each of them.
+ */
+#define AZX_MAX_BUF_SIZE	(4*1024*1024)
 
 /* RIRB int mask: overrun[2], response[0] */
 #define RIRB_INT_RESPONSE	0x01
@@ -256,22 +260,24 @@ enum { SDI0, SDI1, SDI2, SDI3, SDO0, SDO1, SDO2, SDO3 };
 
 #define AZX_REG_ML_LCAP			0x00
 #define AZX_REG_ML_LCTL			0x04
+
+#define AZX_ML_LCTL_CPA			BIT(23)
+#define AZX_ML_LCTL_CPA_SHIFT		23
+#define AZX_ML_LCTL_SPA			BIT(16)
+#define AZX_ML_LCTL_SPA_SHIFT		16
+#define AZX_ML_LCTL_SCF			GENMASK(3, 0)
+
 #define AZX_REG_ML_LOSIDV		0x08
+
+/* bit0 is reserved, with BIT(1) mapping to stream1 */
+#define AZX_ML_LOSIDV_STREAM_MASK	0xFFFE
+
 #define AZX_REG_ML_LSDIID		0x0C
 #define AZX_REG_ML_LPSOO		0x10
 #define AZX_REG_ML_LPSIO		0x12
 #define AZX_REG_ML_LWALFC		0x18
 #define AZX_REG_ML_LOUTPAY		0x20
 #define AZX_REG_ML_LINPAY		0x30
-
-/* bit0 is reserved, with BIT(1) mapping to stream1 */
-#define ML_LOSIDV_STREAM_MASK		0xFFFE
-
-#define ML_LCTL_SCF_MASK			0xF
-#define AZX_MLCTL_SPA				(0x1 << 16)
-#define AZX_MLCTL_CPA				(0x1 << 23)
-#define AZX_MLCTL_SPA_SHIFT			16
-#define AZX_MLCTL_CPA_SHIFT			23
 
 /* registers for DMA Resume Capability Structure */
 #define AZX_DRSM_CAP_ID			0x5

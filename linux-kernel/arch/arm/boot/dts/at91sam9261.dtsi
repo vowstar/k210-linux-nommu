@@ -9,6 +9,7 @@
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/clock/at91.h>
+#include <dt-bindings/mfd/at91-usart.h>
 
 / {
 	#address-cells = <1>;
@@ -33,16 +34,17 @@
 	};
 
 	cpus {
-		#address-cells = <0>;
+		#address-cells = <1>;
 		#size-cells = <0>;
 
-		cpu {
+		cpu@0 {
 			compatible = "arm,arm926ej-s";
 			device_type = "cpu";
+			reg = <0>;
 		};
 	};
 
-	memory {
+	memory@20000000 {
 		device_type = "memory";
 		reg = <0x20000000 0x08000000>;
 	};
@@ -64,6 +66,9 @@
 	sram: sram@300000 {
 		compatible = "mmio-sram";
 		reg = <0x00300000 0x28000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges = <0 0x00300000 0x28000>;
 	};
 
 	ahb {
@@ -175,6 +180,7 @@
 			usart0: serial@fffb0000 {
 				compatible = "atmel,at91sam9260-usart";
 				reg = <0xfffb0000 0x200>;
+				atmel,usart-mode = <AT91_USART_MODE_SERIAL>;
 				interrupts = <6 IRQ_TYPE_LEVEL_HIGH 5>;
 				atmel,use-dma-rx;
 				atmel,use-dma-tx;
@@ -188,6 +194,7 @@
 			usart1: serial@fffb4000 {
 				compatible = "atmel,at91sam9260-usart";
 				reg = <0xfffb4000 0x200>;
+				atmel,usart-mode = <AT91_USART_MODE_SERIAL>;
 				interrupts = <7 IRQ_TYPE_LEVEL_HIGH 5>;
 				atmel,use-dma-rx;
 				atmel,use-dma-tx;
@@ -201,6 +208,7 @@
 			usart2: serial@fffb8000{
 				compatible = "atmel,at91sam9260-usart";
 				reg = <0xfffb8000 0x200>;
+				atmel,usart-mode = <AT91_USART_MODE_SERIAL>;
 				interrupts = <8 IRQ_TYPE_LEVEL_HIGH 5>;
 				atmel,use-dma-rx;
 				atmel,use-dma-tx;
@@ -297,6 +305,7 @@
 			dbgu: serial@fffff200 {
 				compatible = "atmel,at91sam9260-dbgu", "atmel,at91sam9260-usart";
 				reg = <0xfffff200 0x200>;
+				atmel,usart-mode = <AT91_USART_MODE_SERIAL>;
 				interrupts = <1 IRQ_TYPE_LEVEL_HIGH 7>;
 				pinctrl-names = "default";
 				pinctrl-0 = <&pinctrl_dbgu>;
@@ -599,7 +608,7 @@
 				clock-names = "slow_xtal", "main_xtal";
 			};
 
-			rstc@fffffd00 {
+			reset-controller@fffffd00 {
 				compatible = "atmel,at91sam9260-rstc";
 				reg = <0xfffffd00 0x10>;
 				clocks = <&slow_xtal>;

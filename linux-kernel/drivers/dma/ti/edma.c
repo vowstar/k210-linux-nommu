@@ -1,16 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * TI EDMA DMA engine driver
  *
  * Copyright 2012 Texas Instruments
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation version 2.
- *
- * This program is distributed "as is" WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/dmaengine.h>
@@ -118,10 +110,10 @@
 
 /*
  * Max of 20 segments per channel to conserve PaRAM slots
- * Also note that MAX_NR_SG should be atleast the no.of periods
+ * Also note that MAX_NR_SG should be at least the no.of periods
  * that are required for ASoC, otherwise DMA prep calls will
  * fail. Today davinci-pcm is the only user of this driver and
- * requires atleast 17 slots, so we setup the default to 20.
+ * requires at least 17 slots, so we setup the default to 20.
  */
 #define MAX_NR_SG		20
 #define EDMA_MAX_SLOTS		MAX_NR_SG
@@ -211,7 +203,7 @@ struct edma_desc {
 	u32				residue;
 	u32				residue_stat;
 
-	struct edma_pset		pset[0];
+	struct edma_pset		pset[];
 };
 
 struct edma_cc;
@@ -360,12 +352,6 @@ static inline void edma_modify_array(struct edma_cc *ecc, int offset, int i,
 	edma_modify(ecc, offset + (i << 2), and, or);
 }
 
-static inline void edma_or_array(struct edma_cc *ecc, int offset, int i,
-				 unsigned or)
-{
-	edma_or(ecc, offset + (i << 2), or);
-}
-
 static inline void edma_or_array2(struct edma_cc *ecc, int offset, int i, int j,
 				  unsigned or)
 {
@@ -376,11 +362,6 @@ static inline void edma_write_array2(struct edma_cc *ecc, int offset, int i,
 				     int j, unsigned val)
 {
 	edma_write(ecc, offset + ((i * 2 + j) << 2), val);
-}
-
-static inline unsigned int edma_shadow0_read(struct edma_cc *ecc, int offset)
-{
-	return edma_read(ecc, EDMA_SHADOW0 + offset);
 }
 
 static inline unsigned int edma_shadow0_read_array(struct edma_cc *ecc,
@@ -401,34 +382,10 @@ static inline void edma_shadow0_write_array(struct edma_cc *ecc, int offset,
 	edma_write(ecc, EDMA_SHADOW0 + offset + (i << 2), val);
 }
 
-static inline unsigned int edma_param_read(struct edma_cc *ecc, int offset,
-					   int param_no)
-{
-	return edma_read(ecc, EDMA_PARM + offset + (param_no << 5));
-}
-
-static inline void edma_param_write(struct edma_cc *ecc, int offset,
-				    int param_no, unsigned val)
-{
-	edma_write(ecc, EDMA_PARM + offset + (param_no << 5), val);
-}
-
 static inline void edma_param_modify(struct edma_cc *ecc, int offset,
 				     int param_no, unsigned and, unsigned or)
 {
 	edma_modify(ecc, EDMA_PARM + offset + (param_no << 5), and, or);
-}
-
-static inline void edma_param_and(struct edma_cc *ecc, int offset, int param_no,
-				  unsigned and)
-{
-	edma_and(ecc, EDMA_PARM + offset + (param_no << 5), and);
-}
-
-static inline void edma_param_or(struct edma_cc *ecc, int offset, int param_no,
-				 unsigned or)
-{
-	edma_or(ecc, EDMA_PARM + offset + (param_no << 5), or);
 }
 
 static void edma_assign_priority_to_queue(struct edma_cc *ecc, int queue_no,
@@ -751,11 +708,6 @@ static void edma_free_channel(struct edma_chan *echan)
 	edma_setup_interrupt(echan, false);
 }
 
-static inline struct edma_cc *to_edma_cc(struct dma_device *d)
-{
-	return container_of(d, struct edma_cc, dma_slave);
-}
-
 static inline struct edma_chan *to_edma_chan(struct dma_chan *c)
 {
 	return container_of(c, struct edma_chan, vchan.chan);
@@ -976,7 +928,7 @@ static int edma_config_pset(struct dma_chan *chan, struct edma_pset *epset,
 		 * and quotient respectively of the division of:
 		 * (dma_length / acnt) by (SZ_64K -1). This is so
 		 * that in case bcnt over flows, we have ccnt to use.
-		 * Note: In A-sync tranfer only, bcntrld is used, but it
+		 * Note: In A-sync transfer only, bcntrld is used, but it
 		 * only applies for sg_dma_len(sg) >= SZ_64K.
 		 * In this case, the best way adopted is- bccnt for the
 		 * first frame will be the remainder below. Then for
@@ -1203,7 +1155,7 @@ static struct dma_async_tx_descriptor *edma_prep_dma_memcpy(
 		 * slot2: the remaining amount of data after slot1.
 		 *	  ACNT = full_length - length1, length2 = ACNT
 		 *
-		 * When the full_length is multibple of 32767 one slot can be
+		 * When the full_length is a multiple of 32767 one slot can be
 		 * used to complete the transfer.
 		 */
 		width = array_size;
@@ -1270,6 +1222,81 @@ static struct dma_async_tx_descriptor *edma_prep_dma_memcpy(
 	}
 
 	if (!(tx_flags & DMA_PREP_INTERRUPT))
+		edesc->polled = true;
+
+	return vchan_tx_prep(&echan->vchan, &edesc->vdesc, tx_flags);
+}
+
+static struct dma_async_tx_descriptor *
+edma_prep_dma_interleaved(struct dma_chan *chan,
+			  struct dma_interleaved_template *xt,
+			  unsigned long tx_flags)
+{
+	struct device *dev = chan->device->dev;
+	struct edma_chan *echan = to_edma_chan(chan);
+	struct edmacc_param *param;
+	struct edma_desc *edesc;
+	size_t src_icg, dst_icg;
+	int src_bidx, dst_bidx;
+
+	/* Slave mode is not supported */
+	if (is_slave_direction(xt->dir))
+		return NULL;
+
+	if (xt->frame_size != 1 || xt->numf == 0)
+		return NULL;
+
+	if (xt->sgl[0].size > SZ_64K || xt->numf > SZ_64K)
+		return NULL;
+
+	src_icg = dmaengine_get_src_icg(xt, &xt->sgl[0]);
+	if (src_icg) {
+		src_bidx = src_icg + xt->sgl[0].size;
+	} else if (xt->src_inc) {
+		src_bidx = xt->sgl[0].size;
+	} else {
+		dev_err(dev, "%s: SRC constant addressing is not supported\n",
+			__func__);
+		return NULL;
+	}
+
+	dst_icg = dmaengine_get_dst_icg(xt, &xt->sgl[0]);
+	if (dst_icg) {
+		dst_bidx = dst_icg + xt->sgl[0].size;
+	} else if (xt->dst_inc) {
+		dst_bidx = xt->sgl[0].size;
+	} else {
+		dev_err(dev, "%s: DST constant addressing is not supported\n",
+			__func__);
+		return NULL;
+	}
+
+	if (src_bidx > SZ_64K || dst_bidx > SZ_64K)
+		return NULL;
+
+	edesc = kzalloc(struct_size(edesc, pset, 1), GFP_ATOMIC);
+	if (!edesc)
+		return NULL;
+
+	edesc->direction = DMA_MEM_TO_MEM;
+	edesc->echan = echan;
+	edesc->pset_nr = 1;
+
+	param = &edesc->pset[0].param;
+
+	param->src = xt->src_start;
+	param->dst = xt->dst_start;
+	param->a_b_cnt = xt->numf << 16 | xt->sgl[0].size;
+	param->ccnt = 1;
+	param->src_dst_bidx = (dst_bidx << 16) | src_bidx;
+	param->src_dst_cidx = 0;
+
+	param->opt = EDMA_TCC(EDMA_CHAN_SLOT(echan->ch_num));
+	param->opt |= ITCCHEN;
+	/* Enable transfer complete interrupt if requested */
+	if (tx_flags & DMA_PREP_INTERRUPT)
+		param->opt |= TCINTEN;
+	else
 		edesc->polled = true;
 
 	return vchan_tx_prep(&echan->vchan, &edesc->vdesc, tx_flags);
@@ -1606,8 +1633,7 @@ static irqreturn_t dma_ccerr_handler(int irq, void *data)
 
 			dev_dbg(ecc->dev, "EMR%d 0x%08x\n", j, val);
 			emr = val;
-			for (i = find_next_bit(&emr, 32, 0); i < 32;
-			     i = find_next_bit(&emr, 32, i + 1)) {
+			for_each_set_bit(i, &emr, 32) {
 				int k = (j << 5) + i;
 
 				/* Clear the corresponding EMR bits */
@@ -1740,7 +1766,7 @@ static void edma_issue_pending(struct dma_chan *chan)
  * This limit exists to avoid a possible infinite loop when waiting for proof
  * that a particular transfer is completed. This limit can be hit if there
  * are large bursts to/from slow devices or the CPU is never able to catch
- * the DMA hardware idle. On an AM335x transfering 48 bytes from the UART
+ * the DMA hardware idle. On an AM335x transferring 48 bytes from the UART
  * RX-FIFO, as many as 55 loops have been seen.
  */
 #define EDMA_MAX_TR_WAIT_LOOPS 1000
@@ -1917,7 +1943,9 @@ static void edma_dma_init(struct edma_cc *ecc, bool legacy_mode)
 			 "Legacy memcpy is enabled, things might not work\n");
 
 		dma_cap_set(DMA_MEMCPY, s_ddev->cap_mask);
+		dma_cap_set(DMA_INTERLEAVE, s_ddev->cap_mask);
 		s_ddev->device_prep_dma_memcpy = edma_prep_dma_memcpy;
+		s_ddev->device_prep_interleaved_dma = edma_prep_dma_interleaved;
 		s_ddev->directions = BIT(DMA_MEM_TO_MEM);
 	}
 
@@ -1953,8 +1981,10 @@ static void edma_dma_init(struct edma_cc *ecc, bool legacy_mode)
 
 		dma_cap_zero(m_ddev->cap_mask);
 		dma_cap_set(DMA_MEMCPY, m_ddev->cap_mask);
+		dma_cap_set(DMA_INTERLEAVE, m_ddev->cap_mask);
 
 		m_ddev->device_prep_dma_memcpy = edma_prep_dma_memcpy;
+		m_ddev->device_prep_interleaved_dma = edma_prep_dma_interleaved;
 		m_ddev->device_alloc_chan_resources = edma_alloc_chan_resources;
 		m_ddev->device_free_chan_resources = edma_free_chan_resources;
 		m_ddev->device_issue_pending = edma_issue_pending;

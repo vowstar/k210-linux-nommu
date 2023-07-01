@@ -5,7 +5,7 @@
  * Copyright (C) 2008 Magnus Damm
  */
 #include <linux/clkdev.h>
-#include <linux/dma-mapping.h>
+#include <linux/dma-map-ops.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
 #include <linux/interrupt.h>
@@ -633,7 +633,7 @@ static void __init migor_mv_mem_reserve(void)
 	if (!phys)
 		panic("Failed to allocate CEU memory\n");
 
-	memblock_free(phys, size);
+	memblock_phys_free(phys, size);
 	memblock_remove(phys, size);
 
 	ceu_dma_membase = phys;

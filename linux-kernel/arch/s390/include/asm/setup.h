@@ -8,15 +8,11 @@
 
 #include <linux/bits.h>
 #include <uapi/asm/setup.h>
+#include <linux/build_bug.h>
 
-#define EP_OFFSET		0x10008
-#define EP_STRING		"S390EP"
 #define PARMAREA		0x10400
-#define EARLY_SCCB_OFFSET	0x11000
-#define HEAD_END		0x12000
 
-#define EARLY_SCCB_SIZE		PAGE_SIZE
-
+#define COMMAND_LINE_SIZE CONFIG_COMMAND_LINE_SIZE
 /*
  * Machine features detected in early.c
  */
@@ -37,6 +33,8 @@
 #define MACHINE_FLAG_NX		BIT(15)
 #define MACHINE_FLAG_GS		BIT(16)
 #define MACHINE_FLAG_SCC	BIT(17)
+#define MACHINE_FLAG_PCI_MIO	BIT(18)
+#define MACHINE_FLAG_RDP	BIT(19)
 
 #define LPP_MAGIC		BIT(31)
 #define LPP_PID_MASK		_AC(0xffffffff, UL)
@@ -46,27 +44,12 @@
 #define STARTUP_NORMAL_OFFSET	0x10000
 #define STARTUP_KDUMP_OFFSET	0x10010
 
-/* Offsets to parameters in kernel/head.S  */
-
-#define IPL_DEVICE_OFFSET	0x10400
-#define INITRD_START_OFFSET	0x10408
-#define INITRD_SIZE_OFFSET	0x10410
-#define OLDMEM_BASE_OFFSET	0x10418
-#define OLDMEM_SIZE_OFFSET	0x10420
-#define KERNEL_VERSION_OFFSET	0x10428
-#define COMMAND_LINE_OFFSET	0x10480
+#define LEGACY_COMMAND_LINE_SIZE	896
 
 #ifndef __ASSEMBLY__
 
 #include <asm/lowcore.h>
 #include <asm/types.h>
-
-#define IPL_DEVICE	(*(unsigned long *)  (IPL_DEVICE_OFFSET))
-#define INITRD_START	(*(unsigned long *)  (INITRD_START_OFFSET))
-#define INITRD_SIZE	(*(unsigned long *)  (INITRD_SIZE_OFFSET))
-#define OLDMEM_BASE	(*(unsigned long *)  (OLDMEM_BASE_OFFSET))
-#define OLDMEM_SIZE	(*(unsigned long *)  (OLDMEM_SIZE_OFFSET))
-#define COMMAND_LINE	((char *)	     (COMMAND_LINE_OFFSET))
 
 struct parmarea {
 	unsigned long ipl_device;			/* 0x10400 */
@@ -75,9 +58,12 @@ struct parmarea {
 	unsigned long oldmem_base;			/* 0x10418 */
 	unsigned long oldmem_size;			/* 0x10420 */
 	unsigned long kernel_version;			/* 0x10428 */
-	char pad1[0x10480 - 0x10430];			/* 0x10430 - 0x10480 */
-	char command_line[ARCH_COMMAND_LINE_SIZE];	/* 0x10480 */
+	unsigned long max_command_line_size;		/* 0x10430 */
+	char pad1[0x10480-0x10438];			/* 0x10438 - 0x10480 */
+	char command_line[COMMAND_LINE_SIZE];		/* 0x10480 */
 };
+
+extern struct parmarea parmarea;
 
 extern unsigned int zlib_dfltcc_support;
 #define ZLIB_DFLTCC_DISABLED		0
@@ -87,11 +73,14 @@ extern unsigned int zlib_dfltcc_support;
 #define ZLIB_DFLTCC_FULL_DEBUG		4
 
 extern int noexec_disabled;
-extern int memory_end_set;
-extern unsigned long memory_end;
-extern unsigned long vmalloc_size;
-extern unsigned long max_physmem_end;
-extern unsigned long __swsusp_reset_dma;
+extern unsigned long ident_map_size;
+extern unsigned long pgalloc_pos;
+extern unsigned long pgalloc_end;
+extern unsigned long pgalloc_low;
+extern unsigned long __amode31_base;
+
+/* The Write Back bit position in the physaddr is given by the SLPC PCI */
+extern unsigned long mio_wb_bit_mask;
 
 #define MACHINE_IS_VM		(S390_lowcore.machine_flags & MACHINE_FLAG_VM)
 #define MACHINE_IS_KVM		(S390_lowcore.machine_flags & MACHINE_FLAG_KVM)
@@ -110,6 +99,8 @@ extern unsigned long __swsusp_reset_dma;
 #define MACHINE_HAS_NX		(S390_lowcore.machine_flags & MACHINE_FLAG_NX)
 #define MACHINE_HAS_GS		(S390_lowcore.machine_flags & MACHINE_FLAG_GS)
 #define MACHINE_HAS_SCC		(S390_lowcore.machine_flags & MACHINE_FLAG_SCC)
+#define MACHINE_HAS_PCI_MIO	(S390_lowcore.machine_flags & MACHINE_FLAG_PCI_MIO)
+#define MACHINE_HAS_RDP		(S390_lowcore.machine_flags & MACHINE_FLAG_RDP)
 
 /*
  * Console mode. Override with conmode=
@@ -117,9 +108,6 @@ extern unsigned long __swsusp_reset_dma;
 extern unsigned int console_mode;
 extern unsigned int console_devno;
 extern unsigned int console_irq;
-
-extern char vmhalt_cmd[];
-extern char vmpoff_cmd[];
 
 #define CONSOLE_IS_UNDEFINED	(console_mode == 0)
 #define CONSOLE_IS_SCLP		(console_mode == 1)
@@ -162,14 +150,24 @@ static inline unsigned long kaslr_offset(void)
 	return __kaslr_offset;
 }
 
-#else /* __ASSEMBLY__ */
+extern int is_full_image;
 
-#define IPL_DEVICE	(IPL_DEVICE_OFFSET)
-#define INITRD_START	(INITRD_START_OFFSET)
-#define INITRD_SIZE	(INITRD_SIZE_OFFSET)
-#define OLDMEM_BASE	(OLDMEM_BASE_OFFSET)
-#define OLDMEM_SIZE	(OLDMEM_SIZE_OFFSET)
-#define COMMAND_LINE	(COMMAND_LINE_OFFSET)
+struct initrd_data {
+	unsigned long start;
+	unsigned long size;
+};
+extern struct initrd_data initrd_data;
 
+struct oldmem_data {
+	unsigned long start;
+	unsigned long size;
+};
+extern struct oldmem_data oldmem_data;
+
+static inline u32 gen_lpswe(unsigned long addr)
+{
+	BUILD_BUG_ON(addr > 0xfff);
+	return 0xb2b20000 | addr;
+}
 #endif /* __ASSEMBLY__ */
 #endif /* _ASM_S390_SETUP_H */

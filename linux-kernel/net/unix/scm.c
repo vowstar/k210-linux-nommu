@@ -8,6 +8,7 @@
 #include <net/af_unix.h>
 #include <net/scm.h>
 #include <linux/init.h>
+#include <linux/io_uring.h>
 
 #include "scm.h"
 
@@ -59,7 +60,8 @@ void unix_inflight(struct user_struct *user, struct file *fp)
 		} else {
 			BUG_ON(list_empty(&u->link));
 		}
-		unix_tot_inflight++;
+		/* Paired with READ_ONCE() in wait_for_unix_gc() */
+		WRITE_ONCE(unix_tot_inflight, unix_tot_inflight + 1);
 	}
 	user->unix_inflight++;
 	spin_unlock(&unix_gc_lock);
@@ -79,7 +81,8 @@ void unix_notinflight(struct user_struct *user, struct file *fp)
 
 		if (atomic_long_dec_and_test(&u->inflight))
 			list_del_init(&u->link);
-		unix_tot_inflight--;
+		/* Paired with READ_ONCE() in wait_for_unix_gc() */
+		WRITE_ONCE(unix_tot_inflight, unix_tot_inflight - 1);
 	}
 	user->unix_inflight--;
 	spin_unlock(&unix_gc_lock);

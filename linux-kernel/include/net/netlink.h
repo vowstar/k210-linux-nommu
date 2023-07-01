@@ -142,7 +142,7 @@
  * Attribute Misc:
  *   nla_memcpy(dest, nla, count)	copy attribute into memory
  *   nla_memcmp(nla, data, size)	compare attribute with memory area
- *   nla_strlcpy(dst, nla, size)	copy attribute to a sized string
+ *   nla_strscpy(dst, nla, size)	copy attribute to a sized string
  *   nla_strcmp(nla, str)		compare attribute with string
  *
  * Attribute Parsing:
@@ -181,19 +181,29 @@ enum {
 	NLA_S64,
 	NLA_BITFIELD32,
 	NLA_REJECT,
-	NLA_EXACT_LEN,
-	NLA_EXACT_LEN_WARN,
-	NLA_MIN_LEN,
+	NLA_BE16,
+	NLA_BE32,
 	__NLA_TYPE_MAX,
 };
 
 #define NLA_TYPE_MAX (__NLA_TYPE_MAX - 1)
 
+struct netlink_range_validation {
+	u64 min, max;
+};
+
+struct netlink_range_validation_signed {
+	s64 min, max;
+};
+
 enum nla_policy_validation {
 	NLA_VALIDATE_NONE,
 	NLA_VALIDATE_RANGE,
+	NLA_VALIDATE_RANGE_WARN_TOO_LONG,
 	NLA_VALIDATE_MIN,
 	NLA_VALIDATE_MAX,
+	NLA_VALIDATE_MASK,
+	NLA_VALIDATE_RANGE_PTR,
 	NLA_VALIDATE_FUNCTION,
 };
 
@@ -213,79 +223,99 @@ enum nla_policy_validation {
  *    NLA_NUL_STRING       Maximum length of string (excluding NUL)
  *    NLA_FLAG             Unused
  *    NLA_BINARY           Maximum length of attribute payload
- *    NLA_MIN_LEN          Minimum length of attribute payload
+ *                         (but see also below with the validation type)
  *    NLA_NESTED,
  *    NLA_NESTED_ARRAY     Length verification is done by checking len of
  *                         nested header (or empty); len field is used if
- *                         validation_data is also used, for the max attr
+ *                         nested_policy is also used, for the max attr
  *                         number in the nested policy.
  *    NLA_U8, NLA_U16,
  *    NLA_U32, NLA_U64,
  *    NLA_S8, NLA_S16,
  *    NLA_S32, NLA_S64,
+ *    NLA_BE16, NLA_BE32,
  *    NLA_MSECS            Leaving the length field zero will verify the
  *                         given type fits, using it verifies minimum length
  *                         just like "All other"
  *    NLA_BITFIELD32       Unused
  *    NLA_REJECT           Unused
- *    NLA_EXACT_LEN        Attribute must have exactly this length, otherwise
- *                         it is rejected.
- *    NLA_EXACT_LEN_WARN   Attribute should have exactly this length, a warning
- *                         is logged if it is longer, shorter is rejected.
- *    NLA_MIN_LEN          Minimum length of attribute payload
  *    All other            Minimum length of attribute payload
  *
- * Meaning of `validation_data' field:
+ * Meaning of validation union:
  *    NLA_BITFIELD32       This is a 32-bit bitmap/bitselector attribute and
- *                         validation data must point to a u32 value of valid
- *                         flags
- *    NLA_REJECT           This attribute is always rejected and validation data
+ *                         `bitfield32_valid' is the u32 value of valid flags
+ *    NLA_REJECT           This attribute is always rejected and `reject_message'
  *                         may point to a string to report as the error instead
  *                         of the generic one in extended ACK.
- *    NLA_NESTED           Points to a nested policy to validate, must also set
- *                         `len' to the max attribute number.
+ *    NLA_NESTED           `nested_policy' to a nested policy to validate, must
+ *                         also set `len' to the max attribute number. Use the
+ *                         provided NLA_POLICY_NESTED() macro.
  *                         Note that nla_parse() will validate, but of course not
  *                         parse, the nested sub-policies.
- *    NLA_NESTED_ARRAY     Points to a nested policy to validate, must also set
- *                         `len' to the max attribute number. The difference to
- *                         NLA_NESTED is the structure - NLA_NESTED has the
- *                         nested attributes directly inside, while an array has
- *                         the nested attributes at another level down and the
- *                         attributes directly in the nesting don't matter.
- *    All other            Unused - but note that it's a union
- *
- * Meaning of `min' and `max' fields, use via NLA_POLICY_MIN, NLA_POLICY_MAX
- * and NLA_POLICY_RANGE:
+ *    NLA_NESTED_ARRAY     `nested_policy' points to a nested policy to validate,
+ *                         must also set `len' to the max attribute number. Use
+ *                         the provided NLA_POLICY_NESTED_ARRAY() macro.
+ *                         The difference to NLA_NESTED is the structure:
+ *                         NLA_NESTED has the nested attributes directly inside
+ *                         while an array has the nested attributes at another
+ *                         level down and the attribute types directly in the
+ *                         nesting don't matter.
  *    NLA_U8,
  *    NLA_U16,
  *    NLA_U32,
  *    NLA_U64,
+ *    NLA_BE16,
+ *    NLA_BE32,
  *    NLA_S8,
  *    NLA_S16,
  *    NLA_S32,
- *    NLA_S64              These are used depending on the validation_type
- *                         field, if that is min/max/range then the minimum,
- *                         maximum and both are used (respectively) to check
+ *    NLA_S64              The `min' and `max' fields are used depending on the
+ *                         validation_type field, if that is min/max/range then
+ *                         the min, max or both are used (respectively) to check
  *                         the value of the integer attribute.
  *                         Note that in the interest of code simplicity and
  *                         struct size both limits are s16, so you cannot
  *                         enforce a range that doesn't fall within the range
- *                         of s16 - do that as usual in the code instead.
+ *                         of s16 - do that using the NLA_POLICY_FULL_RANGE()
+ *                         or NLA_POLICY_FULL_RANGE_SIGNED() macros instead.
+ *                         Use the NLA_POLICY_MIN(), NLA_POLICY_MAX() and
+ *                         NLA_POLICY_RANGE() macros.
+ *    NLA_U8,
+ *    NLA_U16,
+ *    NLA_U32,
+ *    NLA_U64              If the validation_type field instead is set to
+ *                         NLA_VALIDATE_RANGE_PTR, `range' must be a pointer
+ *                         to a struct netlink_range_validation that indicates
+ *                         the min/max values.
+ *                         Use NLA_POLICY_FULL_RANGE().
+ *    NLA_S8,
+ *    NLA_S16,
+ *    NLA_S32,
+ *    NLA_S64              If the validation_type field instead is set to
+ *                         NLA_VALIDATE_RANGE_PTR, `range_signed' must be a
+ *                         pointer to a struct netlink_range_validation_signed
+ *                         that indicates the min/max values.
+ *                         Use NLA_POLICY_FULL_RANGE_SIGNED().
+ *
+ *    NLA_BINARY           If the validation type is like the ones for integers
+ *                         above, then the min/max length (not value like for
+ *                         integers) of the attribute is enforced.
+ *
  *    All other            Unused - but note that it's a union
  *
  * Meaning of `validate' field, use via NLA_POLICY_VALIDATE_FN:
- *    NLA_BINARY           Validation function called for the attribute,
- *                         not compatible with use of the validation_data
- *                         as in NLA_BITFIELD32, NLA_REJECT, NLA_NESTED and
- *                         NLA_NESTED_ARRAY.
+ *    NLA_BINARY           Validation function called for the attribute.
  *    All other            Unused - but note that it's a union
  *
  * Example:
+ *
+ * static const u32 myvalidflags = 0xff231023;
+ *
  * static const struct nla_policy my_policy[ATTR_MAX+1] = {
  * 	[ATTR_FOO] = { .type = NLA_U16 },
  *	[ATTR_BAR] = { .type = NLA_STRING, .len = BARSIZ },
- *	[ATTR_BAZ] = { .type = NLA_EXACT_LEN, .len = sizeof(struct mystruct) },
- *	[ATTR_GOO] = { .type = NLA_BITFIELD32, .validation_data = &myvalidflags },
+ *	[ATTR_BAZ] = NLA_POLICY_EXACT_LEN(sizeof(struct mystruct)),
+ *	[ATTR_GOO] = NLA_POLICY_BITFIELD32(myvalidflags),
  * };
  */
 struct nla_policy {
@@ -293,22 +323,20 @@ struct nla_policy {
 	u8		validation_type;
 	u16		len;
 	union {
-		const void *validation_data;
-		struct {
-			s16 min, max;
-		};
-		int (*validate)(const struct nlattr *attr,
-				struct netlink_ext_ack *extack);
-		/* This entry is special, and used for the attribute at index 0
+		/**
+		 * @strict_start_type: first attribute to validate strictly
+		 *
+		 * This entry is special, and used for the attribute at index 0
 		 * only, and specifies special data about the policy, namely it
 		 * specifies the "boundary type" where strict length validation
 		 * starts for any attribute types >= this value, also, strict
 		 * nesting validation starts here.
 		 *
 		 * Additionally, it means that NLA_UNSPEC is actually NLA_REJECT
-		 * for any types >= this, so need to use NLA_MIN_LEN to get the
-		 * previous pure { .len = xyz } behaviour. The advantage of this
-		 * is that types not specified in the policy will be rejected.
+		 * for any types >= this, so need to use NLA_POLICY_MIN_LEN() to
+		 * get the previous pure { .len = xyz } behaviour. The advantage
+		 * of this is that types not specified in the policy will be
+		 * rejected.
 		 *
 		 * For completely new families it should be set to 1 so that the
 		 * validation is enforced for all attributes. For existing ones
@@ -317,55 +345,101 @@ struct nla_policy {
 		 * was added to enforce strict validation from thereon.
 		 */
 		u16 strict_start_type;
+
+		/* private: use NLA_POLICY_*() to set */
+		const u32 bitfield32_valid;
+		const u32 mask;
+		const char *reject_message;
+		const struct nla_policy *nested_policy;
+		struct netlink_range_validation *range;
+		struct netlink_range_validation_signed *range_signed;
+		struct {
+			s16 min, max;
+		};
+		int (*validate)(const struct nlattr *attr,
+				struct netlink_ext_ack *extack);
 	};
 };
-
-#define NLA_POLICY_EXACT_LEN(_len)	{ .type = NLA_EXACT_LEN, .len = _len }
-#define NLA_POLICY_EXACT_LEN_WARN(_len)	{ .type = NLA_EXACT_LEN_WARN, \
-					  .len = _len }
-#define NLA_POLICY_MIN_LEN(_len)	{ .type = NLA_MIN_LEN, .len = _len }
 
 #define NLA_POLICY_ETH_ADDR		NLA_POLICY_EXACT_LEN(ETH_ALEN)
 #define NLA_POLICY_ETH_ADDR_COMPAT	NLA_POLICY_EXACT_LEN_WARN(ETH_ALEN)
 
 #define _NLA_POLICY_NESTED(maxattr, policy) \
-	{ .type = NLA_NESTED, .validation_data = policy, .len = maxattr }
+	{ .type = NLA_NESTED, .nested_policy = policy, .len = maxattr }
 #define _NLA_POLICY_NESTED_ARRAY(maxattr, policy) \
-	{ .type = NLA_NESTED_ARRAY, .validation_data = policy, .len = maxattr }
+	{ .type = NLA_NESTED_ARRAY, .nested_policy = policy, .len = maxattr }
 #define NLA_POLICY_NESTED(policy) \
 	_NLA_POLICY_NESTED(ARRAY_SIZE(policy) - 1, policy)
 #define NLA_POLICY_NESTED_ARRAY(policy) \
 	_NLA_POLICY_NESTED_ARRAY(ARRAY_SIZE(policy) - 1, policy)
+#define NLA_POLICY_BITFIELD32(valid) \
+	{ .type = NLA_BITFIELD32, .bitfield32_valid = valid }
+
+#define __NLA_IS_UINT_TYPE(tp)						\
+	(tp == NLA_U8 || tp == NLA_U16 || tp == NLA_U32 || tp == NLA_U64)
+#define __NLA_IS_SINT_TYPE(tp)						\
+	(tp == NLA_S8 || tp == NLA_S16 || tp == NLA_S32 || tp == NLA_S64)
+#define __NLA_IS_BEINT_TYPE(tp)						\
+	(tp == NLA_BE16 || tp == NLA_BE32)
 
 #define __NLA_ENSURE(condition) BUILD_BUG_ON_ZERO(!(condition))
-#define NLA_ENSURE_INT_TYPE(tp)				\
-	(__NLA_ENSURE(tp == NLA_S8 || tp == NLA_U8 ||	\
-		      tp == NLA_S16 || tp == NLA_U16 ||	\
-		      tp == NLA_S32 || tp == NLA_U32 ||	\
-		      tp == NLA_S64 || tp == NLA_U64) + tp)
+#define NLA_ENSURE_UINT_TYPE(tp)			\
+	(__NLA_ENSURE(__NLA_IS_UINT_TYPE(tp)) + tp)
+#define NLA_ENSURE_UINT_OR_BINARY_TYPE(tp)		\
+	(__NLA_ENSURE(__NLA_IS_UINT_TYPE(tp) ||	\
+		      tp == NLA_MSECS ||		\
+		      tp == NLA_BINARY) + tp)
+#define NLA_ENSURE_SINT_TYPE(tp)			\
+	(__NLA_ENSURE(__NLA_IS_SINT_TYPE(tp)) + tp)
+#define NLA_ENSURE_INT_OR_BINARY_TYPE(tp)		\
+	(__NLA_ENSURE(__NLA_IS_UINT_TYPE(tp) ||		\
+		      __NLA_IS_SINT_TYPE(tp) ||		\
+		      __NLA_IS_BEINT_TYPE(tp) ||	\
+		      tp == NLA_MSECS ||		\
+		      tp == NLA_BINARY) + tp)
 #define NLA_ENSURE_NO_VALIDATION_PTR(tp)		\
 	(__NLA_ENSURE(tp != NLA_BITFIELD32 &&		\
 		      tp != NLA_REJECT &&		\
 		      tp != NLA_NESTED &&		\
 		      tp != NLA_NESTED_ARRAY) + tp)
+#define NLA_ENSURE_BEINT_TYPE(tp)			\
+	(__NLA_ENSURE(__NLA_IS_BEINT_TYPE(tp)) + tp)
 
 #define NLA_POLICY_RANGE(tp, _min, _max) {		\
-	.type = NLA_ENSURE_INT_TYPE(tp),		\
+	.type = NLA_ENSURE_INT_OR_BINARY_TYPE(tp),	\
 	.validation_type = NLA_VALIDATE_RANGE,		\
 	.min = _min,					\
 	.max = _max					\
 }
 
+#define NLA_POLICY_FULL_RANGE(tp, _range) {		\
+	.type = NLA_ENSURE_UINT_OR_BINARY_TYPE(tp),	\
+	.validation_type = NLA_VALIDATE_RANGE_PTR,	\
+	.range = _range,				\
+}
+
+#define NLA_POLICY_FULL_RANGE_SIGNED(tp, _range) {	\
+	.type = NLA_ENSURE_SINT_TYPE(tp),		\
+	.validation_type = NLA_VALIDATE_RANGE_PTR,	\
+	.range_signed = _range,				\
+}
+
 #define NLA_POLICY_MIN(tp, _min) {			\
-	.type = NLA_ENSURE_INT_TYPE(tp),		\
+	.type = NLA_ENSURE_INT_OR_BINARY_TYPE(tp),	\
 	.validation_type = NLA_VALIDATE_MIN,		\
 	.min = _min,					\
 }
 
 #define NLA_POLICY_MAX(tp, _max) {			\
-	.type = NLA_ENSURE_INT_TYPE(tp),		\
+	.type = NLA_ENSURE_INT_OR_BINARY_TYPE(tp),	\
 	.validation_type = NLA_VALIDATE_MAX,		\
 	.max = _max,					\
+}
+
+#define NLA_POLICY_MASK(tp, _mask) {			\
+	.type = NLA_ENSURE_UINT_TYPE(tp),		\
+	.validation_type = NLA_VALIDATE_MASK,		\
+	.mask = _mask,					\
 }
 
 #define NLA_POLICY_VALIDATE_FN(tp, fn, ...) {		\
@@ -374,6 +448,15 @@ struct nla_policy {
 	.validate = fn,					\
 	.len = __VA_ARGS__ + 0,				\
 }
+
+#define NLA_POLICY_EXACT_LEN(_len)	NLA_POLICY_RANGE(NLA_BINARY, _len, _len)
+#define NLA_POLICY_EXACT_LEN_WARN(_len) {			\
+	.type = NLA_BINARY,					\
+	.validation_type = NLA_VALIDATE_RANGE_WARN_TOO_LONG,	\
+	.min = _len,						\
+	.max = _len						\
+}
+#define NLA_POLICY_MIN_LEN(_len)	NLA_POLICY_MIN(NLA_BINARY, _len)
 
 /**
  * struct nl_info - netlink source information
@@ -439,7 +522,7 @@ int __nla_parse(struct nlattr **tb, int maxtype, const struct nlattr *head,
 		struct netlink_ext_ack *extack);
 int nla_policy_len(const struct nla_policy *, int);
 struct nlattr *nla_find(const struct nlattr *head, int len, int attrtype);
-size_t nla_strlcpy(char *dst, const struct nlattr *nla, size_t dstsize);
+ssize_t nla_strscpy(char *dst, const struct nlattr *nla, size_t dstsize);
 char *nla_strdup(const struct nlattr *nla, gfp_t flags);
 int nla_memcpy(void *dest, const struct nlattr *src, int count);
 int nla_memcmp(const struct nlattr *nla, const void *data, size_t size);
@@ -674,7 +757,7 @@ static inline int __nlmsg_parse(const struct nlmsghdr *nlh, int hdrlen,
  * @hdrlen: length of family specific header
  * @tb: destination array with maxtype+1 elements
  * @maxtype: maximum attribute type to be expected
- * @validate: validation strictness
+ * @policy: validation policy
  * @extack: extended ACK report struct
  *
  * See nla_parse()
@@ -694,6 +777,7 @@ static inline int nlmsg_parse(const struct nlmsghdr *nlh, int hdrlen,
  * @hdrlen: length of family specific header
  * @tb: destination array with maxtype+1 elements
  * @maxtype: maximum attribute type to be expected
+ * @policy: validation policy
  * @extack: extended ACK report struct
  *
  * See nla_parse_deprecated()
@@ -713,6 +797,7 @@ static inline int nlmsg_parse_deprecated(const struct nlmsghdr *nlh, int hdrlen,
  * @hdrlen: length of family specific header
  * @tb: destination array with maxtype+1 elements
  * @maxtype: maximum attribute type to be expected
+ * @policy: validation policy
  * @extack: extended ACK report struct
  *
  * See nla_parse_deprecated_strict()
@@ -748,7 +833,6 @@ static inline struct nlattr *nlmsg_find_attr(const struct nlmsghdr *nlh,
  * @len: length of attribute stream
  * @maxtype: maximum attribute type to be expected
  * @policy: validation policy
- * @validate: validation strictness
  * @extack: extended ACK report struct
  *
  * Validates all attributes in the specified attribute stream against the
@@ -772,7 +856,6 @@ static inline int nla_validate_deprecated(const struct nlattr *head, int len,
  * @len: length of attribute stream
  * @maxtype: maximum attribute type to be expected
  * @policy: validation policy
- * @validate: validation strictness
  * @extack: extended ACK report struct
  *
  * Validates all attributes in the specified attribute stream against the
@@ -820,7 +903,18 @@ static inline int nlmsg_validate_deprecated(const struct nlmsghdr *nlh,
  */
 static inline int nlmsg_report(const struct nlmsghdr *nlh)
 {
-	return !!(nlh->nlmsg_flags & NLM_F_ECHO);
+	return nlh ? !!(nlh->nlmsg_flags & NLM_F_ECHO) : 0;
+}
+
+/**
+ * nlmsg_seq - return the seq number of netlink message
+ * @nlh: netlink message header
+ *
+ * Returns 0 if netlink message is NULL
+ */
+static inline u32 nlmsg_seq(const struct nlmsghdr *nlh)
+{
+	return nlh ? nlh->nlmsg_seq : 0;
 }
 
 /**
@@ -853,6 +947,27 @@ static inline struct nlmsghdr *nlmsg_put(struct sk_buff *skb, u32 portid, u32 se
 		return NULL;
 
 	return __nlmsg_put(skb, portid, seq, type, payload, flags);
+}
+
+/**
+ * nlmsg_append - Add more data to a nlmsg in a skb
+ * @skb: socket buffer to store message in
+ * @size: length of message payload
+ *
+ * Append data to an existing nlmsg, used when constructing a message
+ * with multiple fixed-format headers (which is rare).
+ * Returns NULL if the tailroom of the skb is insufficient to store
+ * the extra payload.
+ */
+static inline void *nlmsg_append(struct sk_buff *skb, u32 size)
+{
+	if (unlikely(skb_tailroom(skb) < NLMSG_ALIGN(size)))
+		return NULL;
+
+	if (NLMSG_ALIGN(size) - size)
+		memset(skb_tail_pointer(skb) + size, 0,
+		       NLMSG_ALIGN(size) - size);
+	return __skb_put(skb, NLMSG_ALIGN(size));
 }
 
 /**
@@ -1466,6 +1581,21 @@ static inline int nla_put_in6_addr(struct sk_buff *skb, int attrtype,
 }
 
 /**
+ * nla_put_bitfield32 - Add a bitfield32 netlink attribute to a socket buffer
+ * @skb: socket buffer to add attribute to
+ * @attrtype: attribute type
+ * @value: value carrying bits
+ * @selector: selector of valid bits
+ */
+static inline int nla_put_bitfield32(struct sk_buff *skb, int attrtype,
+				     __u32 value, __u32 selector)
+{
+	struct nla_bitfield32 tmp = { value, selector, };
+
+	return nla_put(skb, attrtype, sizeof(tmp), &tmp);
+}
+
+/**
  * nla_get_u32 - return payload of u32 attribute
  * @nla: u32 netlink attribute
  */
@@ -1860,5 +1990,27 @@ static inline bool nla_is_last(const struct nlattr *nla, int rem)
 {
 	return nla->nla_len == rem;
 }
+
+void nla_get_range_unsigned(const struct nla_policy *pt,
+			    struct netlink_range_validation *range);
+void nla_get_range_signed(const struct nla_policy *pt,
+			  struct netlink_range_validation_signed *range);
+
+struct netlink_policy_dump_state;
+
+int netlink_policy_dump_add_policy(struct netlink_policy_dump_state **pstate,
+				   const struct nla_policy *policy,
+				   unsigned int maxtype);
+int netlink_policy_dump_get_policy_idx(struct netlink_policy_dump_state *state,
+				       const struct nla_policy *policy,
+				       unsigned int maxtype);
+bool netlink_policy_dump_loop(struct netlink_policy_dump_state *state);
+int netlink_policy_dump_write(struct sk_buff *skb,
+			      struct netlink_policy_dump_state *state);
+int netlink_policy_dump_attr_size_estimate(const struct nla_policy *pt);
+int netlink_policy_dump_write_attr(struct sk_buff *skb,
+				   const struct nla_policy *pt,
+				   int nestattr);
+void netlink_policy_dump_free(struct netlink_policy_dump_state *state);
 
 #endif

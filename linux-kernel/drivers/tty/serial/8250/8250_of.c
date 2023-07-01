@@ -7,7 +7,6 @@
 #include <linux/console.h>
 #include <linux/module.h>
 #include <linux/slab.h>
-#include <linux/delay.h>
 #include <linux/serial_core.h>
 #include <linux/serial_reg.h>
 #include <linux/of_address.h>
@@ -26,67 +25,16 @@ struct of_serial_info {
 	int line;
 };
 
-#ifdef CONFIG_ARCH_TEGRA
-static void tegra_serial_handle_break(struct uart_port *p)
-{
-	unsigned int status, tmout = 10000;
-
-	do {
-		status = p->serial_in(p, UART_LSR);
-		if (status & (UART_LSR_FIFOE | UART_LSR_BRK_ERROR_BITS))
-			status = p->serial_in(p, UART_RX);
-		else
-			break;
-		if (--tmout == 0)
-			break;
-		udelay(1);
-	} while (1);
-}
-#else
-static inline void tegra_serial_handle_break(struct uart_port *port)
-{
-}
-#endif
-
-static int of_8250_rs485_config(struct uart_port *port,
-				  struct serial_rs485 *rs485)
-{
-	struct uart_8250_port *up = up_to_u8250p(port);
-
-	/* Clamp the delays to [0, 100ms] */
-	rs485->delay_rts_before_send = min(rs485->delay_rts_before_send, 100U);
-	rs485->delay_rts_after_send  = min(rs485->delay_rts_after_send, 100U);
-
-	port->rs485 = *rs485;
-
-	/*
-	 * Both serial8250_em485_init and serial8250_em485_destroy
-	 * are idempotent
-	 */
-	if (rs485->flags & SER_RS485_ENABLED) {
-		int ret = serial8250_em485_init(up);
-
-		if (ret) {
-			rs485->flags &= ~SER_RS485_ENABLED;
-			port->rs485.flags &= ~SER_RS485_ENABLED;
-		}
-		return ret;
-	}
-
-	serial8250_em485_destroy(up);
-
-	return 0;
-}
-
 /*
  * Fill a struct uart_port for a given device node
  */
 static int of_platform_serial_setup(struct platform_device *ofdev,
-			int type, struct uart_port *port,
+			int type, struct uart_8250_port *up,
 			struct of_serial_info *info)
 {
 	struct resource resource;
 	struct device_node *np = ofdev->dev.of_node;
+	struct uart_port *port = &up->port;
 	u32 clk, spd, prop;
 	int ret, irq;
 
@@ -135,8 +83,17 @@ static int of_platform_serial_setup(struct platform_device *ofdev,
 		port->mapsize = resource_size(&resource);
 
 		/* Check for shifted address mapping */
-		if (of_property_read_u32(np, "reg-offset", &prop) == 0)
+		if (of_property_read_u32(np, "reg-offset", &prop) == 0) {
+			if (prop >= port->mapsize) {
+				dev_warn(&ofdev->dev, "reg-offset %u exceeds region size %pa\n",
+					 prop, &port->mapsize);
+				ret = -EINVAL;
+				goto err_unprepare;
+			}
+
 			port->mapbase += prop;
+			port->mapsize -= prop;
+		}
 
 		port->iotype = UPIO_MEM;
 		if (of_property_read_u32(np, "reg-io-width", &prop) == 0) {
@@ -202,19 +159,17 @@ static int of_platform_serial_setup(struct platform_device *ofdev,
 
 	port->type = type;
 	port->uartclk = clk;
-	port->irqflags |= IRQF_SHARED;
 
 	if (of_property_read_bool(np, "no-loopback-test"))
 		port->flags |= UPF_SKIP_TEST;
 
 	port->dev = &ofdev->dev;
-	port->rs485_config = of_8250_rs485_config;
+	port->rs485_config = serial8250_em485_config;
+	port->rs485_supported = serial8250_em485_supported;
+	up->rs485_start_tx = serial8250_em485_start_tx;
+	up->rs485_stop_tx = serial8250_em485_stop_tx;
 
 	switch (type) {
-	case PORT_TEGRA:
-		port->handle_break = tegra_serial_handle_break;
-		break;
-
 	case PORT_RT2880:
 		port->iotype = UPIO_AU;
 		break;
@@ -247,6 +202,10 @@ static int of_platform_serial_probe(struct platform_device *ofdev)
 	u32 tx_threshold;
 	int ret;
 
+	if (IS_ENABLED(CONFIG_SERIAL_8250_BCM7271) &&
+	    of_device_is_compatible(ofdev->dev.of_node, "brcm,bcm7271-uart"))
+		return -ENODEV;
+
 	port_type = (unsigned long)of_device_get_match_data(&ofdev->dev);
 	if (port_type == PORT_UNKNOWN)
 		return -EINVAL;
@@ -259,7 +218,7 @@ static int of_platform_serial_probe(struct platform_device *ofdev)
 		return -ENOMEM;
 
 	memset(&port8250, 0, sizeof(port8250));
-	ret = of_platform_serial_setup(ofdev, port_type, &port8250.port, info);
+	ret = of_platform_serial_setup(ofdev, port_type, &port8250, info);
 	if (ret)
 		goto err_free;
 
@@ -359,7 +318,6 @@ static const struct of_device_id of_platform_serial_table[] = {
 	{ .compatible = "ns16550",  .data = (void *)PORT_16550, },
 	{ .compatible = "ns16750",  .data = (void *)PORT_16750, },
 	{ .compatible = "ns16850",  .data = (void *)PORT_16850, },
-	{ .compatible = "nvidia,tegra20-uart", .data = (void *)PORT_TEGRA, },
 	{ .compatible = "nxp,lpc3220-uart", .data = (void *)PORT_LPC3220, },
 	{ .compatible = "ralink,rt2880-uart", .data = (void *)PORT_RT2880, },
 	{ .compatible = "intel,xscale-uart", .data = (void *)PORT_XSCALE, },
@@ -369,11 +327,14 @@ static const struct of_device_id of_platform_serial_table[] = {
 		.data = (void *)PORT_ALTR_16550_F64, },
 	{ .compatible = "altr,16550-FIFO128",
 		.data = (void *)PORT_ALTR_16550_F128, },
+	{ .compatible = "fsl,16550-FIFO64",
+		.data = (void *)PORT_16550A_FSL64, },
 	{ .compatible = "mediatek,mtk-btif",
 		.data = (void *)PORT_MTK_BTIF, },
 	{ .compatible = "mrvl,mmp-uart",
 		.data = (void *)PORT_XSCALE, },
 	{ .compatible = "ti,da830-uart", .data = (void *)PORT_DA830, },
+	{ .compatible = "nuvoton,wpcm450-uart", .data = (void *)PORT_NPCM, },
 	{ .compatible = "nuvoton,npcm750-uart", .data = (void *)PORT_NPCM, },
 	{ /* end of list */ },
 };

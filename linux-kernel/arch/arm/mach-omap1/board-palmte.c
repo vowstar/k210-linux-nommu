@@ -25,21 +25,19 @@
 #include <linux/interrupt.h>
 #include <linux/apm-emulation.h>
 #include <linux/omapfb.h>
+#include <linux/omap-dma.h>
+#include <linux/platform_data/keypad-omap.h>
 #include <linux/platform_data/omap1_bl.h>
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 
+#include "tc.h"
 #include "flash.h"
-#include <mach/mux.h>
-#include <mach/tc.h>
-#include <linux/omap-dma.h>
-#include <linux/platform_data/keypad-omap.h>
-
-#include <mach/hardware.h>
-#include <mach/usb.h>
-
+#include "mux.h"
+#include "hardware.h"
+#include "usb.h"
 #include "mmc.h"
 #include "common.h"
 
@@ -258,7 +256,7 @@ static void __init omap_palmte_init(void)
 
 MACHINE_START(OMAP_PALMTE, "OMAP310 based Palm Tungsten E")
 	.atag_offset	= 0x100,
-	.map_io		= omap15xx_map_io,
+	.map_io		= omap1_map_io,
 	.init_early     = omap1_init_early,
 	.init_irq	= omap1_init_irq,
 	.handle_irq	= omap1_handle_irq,

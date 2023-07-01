@@ -13,6 +13,9 @@
 #define REG_ASSOCIATED_BFMER1_INFO	0x06EC
 #define REG_TX_CSI_RPT_PARAM_BW20	0x06F4
 #define REG_SND_PTCL_CTRL		0x0718
+#define BIT_DIS_CHK_VHTSIGB_CRC		BIT(6)
+#define BIT_DIS_CHK_VHTSIGA_CRC		BIT(5)
+#define BIT_MASK_BEAMFORM		(GENMASK(4, 0) | BIT(7))
 #define REG_MU_TX_CTL			0x14C0
 #define REG_MU_STA_GID_VLD		0x14C4
 #define REG_MU_STA_USER_POS_INFO	0x14C8
@@ -42,8 +45,8 @@
 #define BIT_RXFLTMAP4_BF_REPORT_POLL	BIT(4)
 
 #define RTW_NDP_RX_STANDBY_TIME	0x70
-#define RTW_SND_CTRL_REMOVE	0xD8
-#define RTW_SND_CTRL_SOUNDING	0xDB
+#define RTW_SND_CTRL_REMOVE	0x98
+#define RTW_SND_CTRL_SOUNDING	0x9B
 
 enum csi_seg_len {
 	HAL_CSI_SEG_4K = 0,
@@ -89,4 +92,26 @@ void rtw_bf_set_gid_table(struct rtw_dev *rtwdev, struct ieee80211_vif *vif,
 void rtw_bf_phy_init(struct rtw_dev *rtwdev);
 void rtw_bf_cfg_csi_rate(struct rtw_dev *rtwdev, u8 rssi, u8 cur_rate,
 			 u8 fixrate_en, u8 *new_rate);
+static inline void rtw_chip_config_bfee(struct rtw_dev *rtwdev, struct rtw_vif *vif,
+					struct rtw_bfee *bfee, bool enable)
+{
+	if (rtwdev->chip->ops->config_bfee)
+		rtwdev->chip->ops->config_bfee(rtwdev, vif, bfee, enable);
+}
+
+static inline void rtw_chip_set_gid_table(struct rtw_dev *rtwdev,
+					  struct ieee80211_vif *vif,
+					  struct ieee80211_bss_conf *conf)
+{
+	if (rtwdev->chip->ops->set_gid_table)
+		rtwdev->chip->ops->set_gid_table(rtwdev, vif, conf);
+}
+
+static inline void rtw_chip_cfg_csi_rate(struct rtw_dev *rtwdev, u8 rssi, u8 cur_rate,
+					 u8 fixrate_en, u8 *new_rate)
+{
+	if (rtwdev->chip->ops->cfg_csi_rate)
+		rtwdev->chip->ops->cfg_csi_rate(rtwdev, rssi, cur_rate,
+						fixrate_en, new_rate);
+}
 #endif

@@ -7,14 +7,13 @@
  * Denis Ciocca <denis.ciocca@st.com>
  */
 
+#include <linux/i2c.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/slab.h>
 #include <linux/iio/iio.h>
 #include <linux/regmap.h>
 
 #include <linux/iio/common/st_sensors_i2c.h>
-
 
 #define ST_SENSORS_I2C_MULTIREAD	0x80
 
@@ -49,22 +48,20 @@ int st_sensors_i2c_configure(struct iio_dev *indio_dev,
 
 	sdata->regmap = devm_regmap_init_i2c(client, config);
 	if (IS_ERR(sdata->regmap)) {
-		dev_err(&client->dev, "Failed to register i2c regmap (%d)\n",
-			(int)PTR_ERR(sdata->regmap));
+		dev_err(&client->dev, "Failed to register i2c regmap (%ld)\n",
+			PTR_ERR(sdata->regmap));
 		return PTR_ERR(sdata->regmap);
 	}
 
 	i2c_set_clientdata(client, indio_dev);
 
-	indio_dev->dev.parent = &client->dev;
 	indio_dev->name = client->name;
 
-	sdata->dev = &client->dev;
 	sdata->irq = client->irq;
 
 	return 0;
 }
-EXPORT_SYMBOL(st_sensors_i2c_configure);
+EXPORT_SYMBOL_NS(st_sensors_i2c_configure, IIO_ST_SENSORS);
 
 MODULE_AUTHOR("Denis Ciocca <denis.ciocca@st.com>");
 MODULE_DESCRIPTION("STMicroelectronics ST-sensors i2c driver");

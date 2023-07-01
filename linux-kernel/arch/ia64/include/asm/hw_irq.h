@@ -69,7 +69,6 @@ extern int ia64_last_device_vector;
 #define IA64_NUM_DEVICE_VECTORS		(IA64_LAST_DEVICE_VECTOR - IA64_FIRST_DEVICE_VECTOR + 1)
 
 #define IA64_MCA_RENDEZ_VECTOR		0xe8	/* MCA rendez interrupt */
-#define IA64_PERFMON_VECTOR		0xee	/* performance monitor interrupt vector */
 #define IA64_TIMER_VECTOR		0xef	/* use highest-prio group 15 interrupt for timer */
 #define	IA64_MCA_WAKEUP_VECTOR		0xf0	/* MCA wakeup (must be >MCA_RENDEZ_VECTOR) */
 #define IA64_IPI_LOCAL_TLB_FLUSH	0xfc	/* SMP flush local TLB */
@@ -113,7 +112,6 @@ extern struct irq_chip irq_type_ia64_lsapic;	/* CPU-internal interrupt controlle
 #define ia64_register_ipi	ia64_native_register_ipi
 #define assign_irq_vector	ia64_native_assign_irq_vector
 #define free_irq_vector		ia64_native_free_irq_vector
-#define register_percpu_irq	ia64_native_register_percpu_irq
 #define ia64_resend_irq		ia64_native_resend_irq
 
 extern void ia64_native_register_ipi(void);
@@ -123,7 +121,6 @@ extern void ia64_native_free_irq_vector (int vector);
 extern int reserve_irq_vector (int vector);
 extern void __setup_vector_irq(int cpu);
 extern void ia64_send_ipi (int cpu, int vector, int delivery_mode, int redirect);
-extern void ia64_native_register_percpu_irq (ia64_vector vec, struct irqaction *action);
 extern void destroy_and_reserve_irq (unsigned int irq);
 
 #ifdef CONFIG_SMP

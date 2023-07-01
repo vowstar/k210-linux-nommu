@@ -23,8 +23,6 @@
  *
  */
 
-#include <linux/delay.h>
-
 #include "dm_services.h"
 #include "core_types.h"
 #include "timing_generator.h"
@@ -92,8 +90,8 @@ static const struct out_csc_color_matrix_type output_csc_matrix[] = {
 		{ 0xE00, 0xF349, 0xFEB7, 0x1000, 0x6CE, 0x16E3,
 				0x24F, 0x200, 0xFCCB, 0xF535, 0xE00, 0x1000} },
 	{ COLOR_SPACE_YCBCR2020_TYPE,
-		{ 0x1000, 0xF149, 0xFEB7, 0x0000, 0x0868, 0x15B2,
-				0x01E6, 0x0000, 0xFB88, 0xF478, 0x1000, 0x0000} },
+		{ 0x1000, 0xF149, 0xFEB7, 0x1004, 0x0868, 0x15B2,
+				0x01E6, 0x201, 0xFB88, 0xF478, 0x1000, 0x1004} },
 	{ COLOR_SPACE_YCBCR709_BLACK_TYPE,
 		{ 0x0000, 0x0000, 0x0000, 0x1000, 0x0000, 0x0000,
 				0x0000, 0x0200, 0x0000, 0x0000, 0x0000, 0x1000} },
@@ -177,7 +175,7 @@ static bool is_ycbcr709_limited_type(
 		ret = true;
 	return ret;
 }
-enum dc_color_space_type get_color_space_type(enum dc_color_space color_space)
+static enum dc_color_space_type get_color_space_type(enum dc_color_space color_space)
 {
 	enum dc_color_space_type type = COLOR_SPACE_RGB_TYPE;
 
@@ -290,4 +288,182 @@ bool hwss_wait_for_blank_complete(
 	}
 
 	return true;
+}
+
+void get_mpctree_visual_confirm_color(
+		struct pipe_ctx *pipe_ctx,
+		struct tg_color *color)
+{
+	const struct tg_color pipe_colors[6] = {
+			{MAX_TG_COLOR_VALUE, 0, 0}, /* red */
+			{MAX_TG_COLOR_VALUE, MAX_TG_COLOR_VALUE / 4, 0}, /* orange */
+			{MAX_TG_COLOR_VALUE, MAX_TG_COLOR_VALUE, 0}, /* yellow */
+			{0, MAX_TG_COLOR_VALUE, 0}, /* green */
+			{0, 0, MAX_TG_COLOR_VALUE}, /* blue */
+			{MAX_TG_COLOR_VALUE / 2, 0, MAX_TG_COLOR_VALUE / 2}, /* purple */
+	};
+
+	struct pipe_ctx *top_pipe = pipe_ctx;
+
+	while (top_pipe->top_pipe)
+		top_pipe = top_pipe->top_pipe;
+
+	*color = pipe_colors[top_pipe->pipe_idx];
+}
+
+void get_surface_visual_confirm_color(
+		const struct pipe_ctx *pipe_ctx,
+		struct tg_color *color)
+{
+	uint32_t color_value = MAX_TG_COLOR_VALUE;
+
+	switch (pipe_ctx->plane_res.scl_data.format) {
+	case PIXEL_FORMAT_ARGB8888:
+		/* set border color to red */
+		color->color_r_cr = color_value;
+		if (pipe_ctx->plane_state->layer_index > 0) {
+			/* set border color to pink */
+			color->color_b_cb = color_value;
+			color->color_g_y = color_value * 0.5;
+		}
+		break;
+
+	case PIXEL_FORMAT_ARGB2101010:
+		/* set border color to blue */
+		color->color_b_cb = color_value;
+		if (pipe_ctx->plane_state->layer_index > 0) {
+			/* set border color to cyan */
+			color->color_g_y = color_value;
+		}
+		break;
+	case PIXEL_FORMAT_420BPP8:
+		/* set border color to green */
+		color->color_g_y = color_value;
+		break;
+	case PIXEL_FORMAT_420BPP10:
+		/* set border color to yellow */
+		color->color_g_y = color_value;
+		color->color_r_cr = color_value;
+		break;
+	case PIXEL_FORMAT_FP16:
+		/* set border color to white */
+		color->color_r_cr = color_value;
+		color->color_b_cb = color_value;
+		color->color_g_y = color_value;
+		if (pipe_ctx->plane_state->layer_index > 0) {
+			/* set border color to orange */
+			color->color_g_y = 0.22 * color_value;
+			color->color_b_cb = 0;
+		}
+		break;
+	default:
+		break;
+	}
+}
+
+void get_hdr_visual_confirm_color(
+		struct pipe_ctx *pipe_ctx,
+		struct tg_color *color)
+{
+	uint32_t color_value = MAX_TG_COLOR_VALUE;
+	bool is_sdr = false;
+
+	/* Determine the overscan color based on the top-most (desktop) plane's context */
+	struct pipe_ctx *top_pipe_ctx  = pipe_ctx;
+
+	while (top_pipe_ctx->top_pipe != NULL)
+		top_pipe_ctx = top_pipe_ctx->top_pipe;
+
+	switch (top_pipe_ctx->plane_res.scl_data.format) {
+	case PIXEL_FORMAT_ARGB2101010:
+		if (top_pipe_ctx->stream->out_transfer_func->tf == TRANSFER_FUNCTION_PQ) {
+			/* HDR10, ARGB2101010 - set border color to red */
+			color->color_r_cr = color_value;
+		} else if (top_pipe_ctx->stream->out_transfer_func->tf == TRANSFER_FUNCTION_GAMMA22) {
+			/* FreeSync 2 ARGB2101010 - set border color to pink */
+			color->color_r_cr = color_value;
+			color->color_b_cb = color_value;
+		} else
+			is_sdr = true;
+		break;
+	case PIXEL_FORMAT_FP16:
+		if (top_pipe_ctx->stream->out_transfer_func->tf == TRANSFER_FUNCTION_PQ) {
+			/* HDR10, FP16 - set border color to blue */
+			color->color_b_cb = color_value;
+		} else if (top_pipe_ctx->stream->out_transfer_func->tf == TRANSFER_FUNCTION_GAMMA22) {
+			/* FreeSync 2 HDR - set border color to green */
+			color->color_g_y = color_value;
+		} else
+			is_sdr = true;
+		break;
+	default:
+		is_sdr = true;
+		break;
+	}
+
+	if (is_sdr) {
+		/* SDR - set border color to Gray */
+		color->color_r_cr = color_value/2;
+		color->color_b_cb = color_value/2;
+		color->color_g_y = color_value/2;
+	}
+}
+
+void get_subvp_visual_confirm_color(
+		struct dc *dc,
+		struct pipe_ctx *pipe_ctx,
+		struct tg_color *color)
+{
+	uint32_t color_value = MAX_TG_COLOR_VALUE;
+	bool enable_subvp = false;
+	int i;
+
+	if (!dc->ctx || !dc->ctx->dmub_srv || !pipe_ctx)
+		return;
+
+	for (i = 0; i < dc->res_pool->pipe_count; i++) {
+		struct pipe_ctx *pipe = &dc->current_state->res_ctx.pipe_ctx[i];
+
+		if (pipe->stream && pipe->stream->mall_stream_config.paired_stream &&
+		    pipe->stream->mall_stream_config.type == SUBVP_MAIN) {
+			/* SubVP enable - red */
+			color->color_r_cr = color_value;
+			enable_subvp = true;
+
+			if (pipe_ctx->stream == pipe->stream)
+				return;
+			break;
+		}
+	}
+
+	if (enable_subvp && pipe_ctx->stream->mall_stream_config.type == SUBVP_NONE) {
+		color->color_r_cr = 0;
+		if (pipe_ctx->stream->ignore_msa_timing_param == 1)
+			/* SubVP enable and DRR on - green */
+			color->color_g_y = color_value;
+		else
+			/* SubVP enable and No DRR - blue */
+			color->color_b_cb = color_value;
+	}
+}
+
+void get_surface_tile_visual_confirm_color(
+		struct pipe_ctx *pipe_ctx,
+		struct tg_color *color)
+{
+	uint32_t color_value = MAX_TG_COLOR_VALUE;
+	/* Determine the overscan color based on the bottom-most plane's context */
+	struct pipe_ctx *bottom_pipe_ctx  = pipe_ctx;
+
+	while (bottom_pipe_ctx->bottom_pipe != NULL)
+		bottom_pipe_ctx = bottom_pipe_ctx->bottom_pipe;
+
+	switch (bottom_pipe_ctx->plane_state->tiling_info.gfx9.swizzle) {
+	case DC_SW_LINEAR:
+		/* LINEAR Surface - set border color to red */
+		color->color_r_cr = color_value;
+		break;
+	default:
+		break;
+	}
 }

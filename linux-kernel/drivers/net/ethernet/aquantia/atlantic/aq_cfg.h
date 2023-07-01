@@ -9,8 +9,6 @@
 #ifndef AQ_CFG_H
 #define AQ_CFG_H
 
-#include <generated/utsrelease.h>
-
 #define AQ_CFG_VECS_DEF   8U
 #define AQ_CFG_TCS_DEF    1U
 
@@ -42,6 +40,7 @@
 #define AQ_CFG_RX_HDR_SIZE 256U
 
 #define AQ_CFG_RX_PAGEORDER 0U
+#define AQ_CFG_XDP_PAGEORDER 2U
 
 /* LRO */
 #define AQ_CFG_IS_LRO_DEF           1U
@@ -66,8 +65,6 @@
  */
 #define AQ_CFG_RESTART_DESC_THRES   (AQ_CFG_SKB_FRAGS_MAX * 2)
 
-#define AQ_CFG_NAPI_WEIGHT     64U
-
 /*#define AQ_CFG_MAC_ADDR_PERMANENT {0x30, 0x0E, 0xE3, 0x12, 0x34, 0x56}*/
 
 #define AQ_CFG_FC_MODE AQ_NIC_FC_FULL
@@ -82,10 +79,8 @@
 
 #define AQ_CFG_LOCK_TRYS   100U
 
-#define AQ_CFG_DRV_AUTHOR      "aQuantia"
-#define AQ_CFG_DRV_DESC        "aQuantia Corporation(R) Network Driver"
+#define AQ_CFG_DRV_AUTHOR      "Marvell"
+#define AQ_CFG_DRV_DESC        "Marvell (Aquantia) Corporation(R) Network Driver"
 #define AQ_CFG_DRV_NAME        "atlantic"
-#define AQ_CFG_DRV_VERSION	UTS_RELEASE \
-				AQ_CFG_DRV_VERSION_SUFFIX
 
 #endif /* AQ_CFG_H */

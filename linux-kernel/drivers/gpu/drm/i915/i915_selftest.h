@@ -92,12 +92,14 @@ int __i915_subtests(const char *caller,
 			T, ARRAY_SIZE(T), data)
 #define i915_live_subtests(T, data) ({ \
 	typecheck(struct drm_i915_private *, data); \
+	(data)->gt[0]->uc.guc.submission_state.sched_disable_delay_ms = 0; \
 	__i915_subtests(__func__, \
 			__i915_live_setup, __i915_live_teardown, \
 			T, ARRAY_SIZE(T), data); \
 })
 #define intel_gt_live_subtests(T, data) ({ \
 	typecheck(struct intel_gt *, data); \
+	(data)->uc.guc.submission_state.sched_disable_delay_ms = 0; \
 	__i915_subtests(__func__, \
 			__intel_gt_live_setup, __intel_gt_live_teardown, \
 			T, ARRAY_SIZE(T), data); \
@@ -107,6 +109,7 @@ int __i915_subtests(const char *caller,
 
 #define I915_SELFTEST_DECLARE(x) x
 #define I915_SELFTEST_ONLY(x) unlikely(x)
+#define I915_SELFTEST_EXPORT
 
 #else /* !IS_ENABLED(CONFIG_DRM_I915_SELFTEST) */
 
@@ -116,6 +119,7 @@ static inline int i915_perf_selftests(struct pci_dev *pdev) { return 0; }
 
 #define I915_SELFTEST_DECLARE(x)
 #define I915_SELFTEST_ONLY(x) 0
+#define I915_SELFTEST_EXPORT static
 
 #endif
 
@@ -132,5 +136,7 @@ bool __igt_timeout(unsigned long timeout, const char *fmt, ...);
 
 #define igt_timeout(t, fmt, ...) \
 	__igt_timeout((t), KERN_DEBUG pr_fmt(fmt), ##__VA_ARGS__)
+
+void igt_hexdump(const void *buf, size_t len);
 
 #endif /* !__I915_SELFTEST_H__ */

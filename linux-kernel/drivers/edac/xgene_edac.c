@@ -501,7 +501,7 @@ static int xgene_edac_mc_remove(struct xgene_edac_mc_ctx *mcu)
 #define MEMERR_L2C_L2ESRA_PAGE_OFFSET		0x0804
 
 /*
- * Processor Module Domain (PMD) context - Context for a pair of processsors.
+ * Processor Module Domain (PMD) context - Context for a pair of processors.
  * Each PMD consists of 2 CPUs and a shared L2 cache. Each CPU consists of
  * its own L1 cache.
  */
@@ -1349,7 +1349,6 @@ static int xgene_edac_l3_remove(struct xgene_edac_dev_ctx *l3)
 #define WORD_ALIGNED_ERR_MASK		BIT(28)
 #define PAGE_ACCESS_ERR_MASK		BIT(27)
 #define WRITE_ACCESS_MASK		BIT(26)
-#define RBERRADDR_RD(src)		((src) & 0x03FFFFFF)
 
 static const char * const soc_mem_err_v1[] = {
 	"10GbE0",
@@ -1483,13 +1482,11 @@ static void xgene_edac_rb_report(struct edac_device_ctl_info *edac_dev)
 		return;
 	if (reg & STICKYERR_MASK) {
 		bool write;
-		u32 address;
 
 		dev_err(edac_dev->dev, "IOB bus access error(s)\n");
 		if (regmap_read(ctx->edac->rb_map, RBEIR, &reg))
 			return;
 		write = reg & WRITE_ACCESS_MASK ? 1 : 0;
-		address = RBERRADDR_RD(reg);
 		if (reg & AGENT_OFFLINE_ERR_MASK)
 			dev_err(edac_dev->dev,
 				"IOB bus %s access to offline agent error\n",
@@ -1919,10 +1916,10 @@ static int xgene_edac_probe(struct platform_device *pdev)
 		int i;
 
 		for (i = 0; i < 3; i++) {
-			irq = platform_get_irq(pdev, i);
+			irq = platform_get_irq_optional(pdev, i);
 			if (irq < 0) {
 				dev_err(&pdev->dev, "No IRQ resource\n");
-				rc = -EINVAL;
+				rc = irq;
 				goto out_err;
 			}
 			rc = devm_request_irq(&pdev->dev, irq,
@@ -2006,6 +2003,9 @@ static struct platform_driver xgene_edac_driver = {
 static int __init xgene_edac_init(void)
 {
 	int rc;
+
+	if (ghes_get_devices())
+		return -EBUSY;
 
 	/* Make sure error reporting method is sane */
 	switch (edac_op_state) {

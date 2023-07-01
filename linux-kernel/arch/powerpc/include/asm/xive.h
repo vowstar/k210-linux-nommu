@@ -5,6 +5,8 @@
 #ifndef _ASM_POWERPC_XIVE_H
 #define _ASM_POWERPC_XIVE_H
 
+#include <asm/opal-api.h>
+
 #define XIVE_INVALID_VP	0xffffffff
 
 #ifdef CONFIG_PPC_XIVE
@@ -58,13 +60,13 @@ struct xive_irq_data {
 };
 #define XIVE_IRQ_FLAG_STORE_EOI	0x01
 #define XIVE_IRQ_FLAG_LSI	0x02
-#define XIVE_IRQ_FLAG_SHIFT_BUG	0x04
-#define XIVE_IRQ_FLAG_MASK_FW	0x08
-#define XIVE_IRQ_FLAG_EOI_FW	0x10
+/* #define XIVE_IRQ_FLAG_SHIFT_BUG	0x04 */ /* P9 DD1.0 workaround */
+/* #define XIVE_IRQ_FLAG_MASK_FW	0x08 */ /* P9 DD1.0 workaround */
+/* #define XIVE_IRQ_FLAG_EOI_FW	0x10 */ /* P9 DD1.0 workaround */
 #define XIVE_IRQ_FLAG_H_INT_ESB	0x20
 
 /* Special flag set by KVM for excalation interrupts */
-#define XIVE_IRQ_NO_EOI		0x80
+#define XIVE_IRQ_FLAG_NO_EOI	0x80
 
 #define XIVE_INVALID_CHIP_ID	-1
 
@@ -100,6 +102,7 @@ void xive_flush_interrupt(void);
 /* xmon hook */
 void xmon_xive_do_dump(int cpu);
 int xmon_xive_get_irq_config(u32 hw_irq, struct irq_data *d);
+void xmon_xive_get_irq_all(void);
 
 /* APIs used by KVM */
 u32 xive_native_default_eq_shift(void);
@@ -108,7 +111,7 @@ void xive_native_free_vp_block(u32 vp_base);
 int xive_native_populate_irq_data(u32 hw_irq,
 				  struct xive_irq_data *data);
 void xive_cleanup_irq_data(struct xive_irq_data *xd);
-u32 xive_native_alloc_irq(void);
+void xive_irq_free_data(unsigned int virq);
 void xive_native_free_irq(u32 irq);
 int xive_native_configure_irq(u32 hw_irq, u32 target, u8 prio, u32 sw_irq);
 
@@ -123,6 +126,7 @@ int xive_native_enable_vp(u32 vp_id, bool single_escalation);
 int xive_native_disable_vp(u32 vp_id);
 int xive_native_get_vp_info(u32 vp_id, u32 *out_cam_id, u32 *out_chip_id);
 bool xive_native_has_single_escalation(void);
+bool xive_native_has_save_restore(void);
 
 int xive_native_get_queue_info(u32 vp_id, uint32_t prio,
 			       u64 *out_qpage,
@@ -137,6 +141,12 @@ int xive_native_set_queue_state(u32 vp_id, uint32_t prio, u32 qtoggle,
 				u32 qindex);
 int xive_native_get_vp_state(u32 vp_id, u64 *out_state);
 bool xive_native_has_queue_state_support(void);
+extern u32 xive_native_alloc_irq_on_chip(u32 chip_id);
+
+static inline u32 xive_native_alloc_irq(void)
+{
+	return xive_native_alloc_irq_on_chip(OPAL_XIVE_ANY_CHIP);
+}
 
 #else
 
@@ -148,7 +158,6 @@ static inline void xive_smp_probe(void) { }
 static inline int  xive_smp_prepare_cpu(unsigned int cpu) { return -EINVAL; }
 static inline void xive_smp_setup_cpu(void) { }
 static inline void xive_smp_disable_cpu(void) { }
-static inline void xive_kexec_teardown_cpu(int secondary) { }
 static inline void xive_shutdown(void) { }
 static inline void xive_flush_interrupt(void) { }
 

@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
+#include "bpf_misc.h"
 
 __attribute__ ((noinline))
 int f1(struct __sk_buff *skb)
@@ -24,8 +25,9 @@ int f3(int val, struct __sk_buff *skb)
 	return skb->ifindex * val;
 }
 
-SEC("classifier/test")
-int test_cls(struct __sk_buff *skb)
+SEC("tc")
+__failure __msg("expected pointer to ctx, but got PTR")
+int global_func5(struct __sk_buff *skb)
 {
 	return f1(skb) + f2(2, skb) + f3(3, skb);
 }

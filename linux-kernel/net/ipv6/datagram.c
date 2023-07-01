@@ -19,6 +19,7 @@
 #include <linux/route.h>
 #include <linux/slab.h>
 #include <linux/export.h>
+#include <linux/icmp.h>
 
 #include <net/ipv6.h>
 #include <net/ndisc.h>
@@ -41,25 +42,30 @@ static void ip6_datagram_flow_key_init(struct flowi6 *fl6, struct sock *sk)
 {
 	struct inet_sock *inet = inet_sk(sk);
 	struct ipv6_pinfo *np = inet6_sk(sk);
+	int oif = sk->sk_bound_dev_if;
 
 	memset(fl6, 0, sizeof(*fl6));
 	fl6->flowi6_proto = sk->sk_protocol;
 	fl6->daddr = sk->sk_v6_daddr;
 	fl6->saddr = np->saddr;
-	fl6->flowi6_oif = sk->sk_bound_dev_if;
 	fl6->flowi6_mark = sk->sk_mark;
 	fl6->fl6_dport = inet->inet_dport;
 	fl6->fl6_sport = inet->inet_sport;
-	fl6->flowlabel = np->flow_label;
+	fl6->flowlabel = ip6_make_flowinfo(np->tclass, np->flow_label);
 	fl6->flowi6_uid = sk->sk_uid;
 
-	if (!fl6->flowi6_oif)
-		fl6->flowi6_oif = np->sticky_pktinfo.ipi6_ifindex;
+	if (!oif)
+		oif = np->sticky_pktinfo.ipi6_ifindex;
 
-	if (!fl6->flowi6_oif && ipv6_addr_is_multicast(&fl6->daddr))
-		fl6->flowi6_oif = np->mcast_oif;
+	if (!oif) {
+		if (ipv6_addr_is_multicast(&fl6->daddr))
+			oif = np->mcast_oif;
+		else
+			oif = np->ucast_oif;
+	}
 
-	security_sk_classify_flow(sk, flowi6_to_flowi(fl6));
+	fl6->flowi6_oif = oif;
+	security_sk_classify_flow(sk, flowi6_to_flowi_common(fl6));
 }
 
 int ip6_datagram_dst_update(struct sock *sk, bool fix_sk_saddr)
@@ -144,7 +150,7 @@ int __ip6_datagram_connect(struct sock *sk, struct sockaddr *uaddr,
 	int			err;
 
 	if (usin->sin6_family == AF_INET) {
-		if (__ipv6_only_sock(sk))
+		if (ipv6_only_sock(sk))
 			return -EAFNOSUPPORT;
 		err = __ip4_datagram_connect(sk, uaddr, addr_len);
 		goto ipv4_connected;
@@ -177,7 +183,7 @@ int __ip6_datagram_connect(struct sock *sk, struct sockaddr *uaddr,
 	if (addr_type & IPV6_ADDR_MAPPED) {
 		struct sockaddr_in sin;
 
-		if (__ipv6_only_sock(sk)) {
+		if (ipv6_only_sock(sk)) {
 			err = -ENETUNREACH;
 			goto out;
 		}
@@ -217,11 +223,11 @@ ipv4_connected:
 				err = -EINVAL;
 				goto out;
 			}
-			sk->sk_bound_dev_if = usin->sin6_scope_id;
+			WRITE_ONCE(sk->sk_bound_dev_if, usin->sin6_scope_id);
 		}
 
 		if (!sk->sk_bound_dev_if && (addr_type & IPV6_ADDR_MULTICAST))
-			sk->sk_bound_dev_if = np->mcast_oif;
+			WRITE_ONCE(sk->sk_bound_dev_if, np->mcast_oif);
 
 		/* Connect to link-local address requires an interface */
 		if (!sk->sk_bound_dev_if) {
@@ -255,7 +261,7 @@ ipv4_connected:
 		goto out;
 	}
 
-	reuseport_has_conns(sk, true);
+	reuseport_has_conns_set(sk);
 	sk->sk_state = TCP_ESTABLISHED;
 	sk_set_txhash(sk);
 out:
@@ -283,6 +289,17 @@ int ip6_datagram_connect_v6_only(struct sock *sk, struct sockaddr *uaddr,
 	return ip6_datagram_connect(sk, uaddr, addr_len);
 }
 EXPORT_SYMBOL_GPL(ip6_datagram_connect_v6_only);
+
+static void ipv6_icmp_error_rfc4884(const struct sk_buff *skb,
+				    struct sock_ee_data_rfc4884 *out)
+{
+	switch (icmp6_hdr(skb)->icmp6_type) {
+	case ICMPV6_TIME_EXCEED:
+	case ICMPV6_DEST_UNREACH:
+		ip_icmp_error_rfc4884(skb, out, sizeof(struct icmp6hdr),
+				      icmp6_hdr(skb)->icmp6_datagram_len * 8);
+	}
+}
 
 void ipv6_icmp_error(struct sock *sk, struct sk_buff *skb, int err,
 		     __be16 port, u32 info, u8 *payload)
@@ -313,11 +330,16 @@ void ipv6_icmp_error(struct sock *sk, struct sk_buff *skb, int err,
 	serr->port = port;
 
 	__skb_pull(skb, payload - skb->data);
+
+	if (inet6_sk(sk)->recverr_rfc4884)
+		ipv6_icmp_error_rfc4884(skb, &serr->ee.ee_rfc4884);
+
 	skb_reset_transport_header(skb);
 
 	if (sock_queue_err_skb(sk, skb))
 		kfree_skb(skb);
 }
+EXPORT_SYMBOL_GPL(ipv6_icmp_error);
 
 void ipv6_local_error(struct sock *sk, int err, struct flowi6 *fl6, u32 info)
 {
@@ -755,7 +777,7 @@ int ip6_datagram_send_ctl(struct net *net, struct sock *sk,
 		}
 
 		if (cmsg->cmsg_level == SOL_SOCKET) {
-			err = __sock_cmsg_send(sk, msg, cmsg, &ipc6->sockc);
+			err = __sock_cmsg_send(sk, cmsg, &ipc6->sockc);
 			if (err)
 				return err;
 			continue;
@@ -782,7 +804,7 @@ int ip6_datagram_send_ctl(struct net *net, struct sock *sk,
 			if (src_idx) {
 				if (fl6->flowi6_oif &&
 				    src_idx != fl6->flowi6_oif &&
-				    (sk->sk_bound_dev_if != fl6->flowi6_oif ||
+				    (READ_ONCE(sk->sk_bound_dev_if) != fl6->flowi6_oif ||
 				     !sk_dev_equal_l3scope(sk, src_idx)))
 					return -EINVAL;
 				fl6->flowi6_oif = src_idx;

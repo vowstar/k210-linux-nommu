@@ -208,9 +208,9 @@ static const struct iio_info t5403_info = {
 	.attrs = &t5403_attribute_group,
 };
 
-static int t5403_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+static int t5403_probe(struct i2c_client *client)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct t5403_data *data;
 	struct iio_dev *indio_dev;
 	int ret;
@@ -236,7 +236,6 @@ static int t5403_probe(struct i2c_client *client,
 	i2c_set_clientdata(client, indio_dev);
 	indio_dev->info = &t5403_info;
 	indio_dev->name = id->name;
-	indio_dev->dev.parent = &client->dev;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels = t5403_channels;
 	indio_dev->num_channels = ARRAY_SIZE(t5403_channels);
@@ -261,7 +260,7 @@ static struct i2c_driver t5403_driver = {
 	.driver = {
 		.name	= "t5403",
 	},
-	.probe = t5403_probe,
+	.probe_new = t5403_probe,
 	.id_table = t5403_id,
 };
 module_i2c_driver(t5403_driver);

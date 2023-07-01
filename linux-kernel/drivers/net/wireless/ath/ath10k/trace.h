@@ -52,15 +52,12 @@ DECLARE_EVENT_CLASS(ath10k_log_event,
 	TP_STRUCT__entry(
 		__string(device, dev_name(ar->dev))
 		__string(driver, dev_driver_string(ar->dev))
-		__dynamic_array(char, msg, ATH10K_MSG_MAX)
+		__vstring(msg, vaf->fmt, vaf->va)
 	),
 	TP_fast_assign(
 		__assign_str(device, dev_name(ar->dev));
 		__assign_str(driver, dev_driver_string(ar->dev));
-		WARN_ON_ONCE(vsnprintf(__get_dynamic_array(msg),
-				       ATH10K_MSG_MAX,
-				       vaf->fmt,
-				       *vaf->va) >= ATH10K_MSG_MAX);
+		__assign_vstr(msg, vaf->fmt, vaf->va);
 	),
 	TP_printk(
 		"%s %s %s",
@@ -92,16 +89,13 @@ TRACE_EVENT(ath10k_log_dbg,
 		__string(device, dev_name(ar->dev))
 		__string(driver, dev_driver_string(ar->dev))
 		__field(unsigned int, level)
-		__dynamic_array(char, msg, ATH10K_MSG_MAX)
+		__vstring(msg, vaf->fmt, vaf->va)
 	),
 	TP_fast_assign(
 		__assign_str(device, dev_name(ar->dev));
 		__assign_str(driver, dev_driver_string(ar->dev));
 		__entry->level = level;
-		WARN_ON_ONCE(vsnprintf(__get_dynamic_array(msg),
-				       ATH10K_MSG_MAX,
-				       vaf->fmt,
-				       *vaf->va) >= ATH10K_MSG_MAX);
+		__assign_vstr(msg, vaf->fmt, vaf->va);
 	),
 	TP_printk(
 		"%s %s %s",
@@ -283,7 +277,7 @@ TRACE_EVENT(ath10k_htt_pktlog,
 	),
 
 	TP_printk(
-		"%s %s %d size %hu",
+		"%s %s %d size %u",
 		__get_str(driver),
 		__get_str(device),
 		__entry->hw_type,
@@ -488,7 +482,7 @@ TRACE_EVENT(ath10k_wmi_diag_container,
 	),
 
 	TP_printk(
-		"%s %s diag container type %hhu timestamp %u code %u len %d",
+		"%s %s diag container type %u timestamp %u code %u len %d",
 		__get_str(driver),
 		__get_str(device),
 		__entry->type,

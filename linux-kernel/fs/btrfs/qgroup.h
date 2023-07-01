@@ -8,8 +8,10 @@
 
 #include <linux/spinlock.h>
 #include <linux/rbtree.h>
+#include <linux/kobject.h>
 #include "ulist.h"
 #include "delayed-ref.h"
+#include "misc.h"
 
 /*
  * Btrfs qgroup overview
@@ -98,6 +100,9 @@
  *     modification to the swapped subtrees, no need to trigger heavy qgroup
  *     subtree rescan for them.
  */
+
+#define BTRFS_QGROUP_RUNTIME_FLAG_CANCEL_RESCAN		(1UL << 3)
+#define BTRFS_QGROUP_RUNTIME_FLAG_NO_ACCOUNTING		(1UL << 4)
 
 /*
  * Record a dirty extent, and info qgroup to update quota on it
@@ -223,14 +228,26 @@ struct btrfs_qgroup {
 	 */
 	u64 old_refcnt;
 	u64 new_refcnt;
+
+	/*
+	 * Sysfs kobjectid
+	 */
+	struct kobject kobj;
 };
+
+static inline u64 btrfs_qgroup_subvolid(u64 qgroupid)
+{
+	return (qgroupid & ((1ULL << BTRFS_QGROUP_LEVEL_SHIFT) - 1));
+}
 
 /*
  * For qgroup event trace points only
  */
-#define QGROUP_RESERVE		(1<<0)
-#define QGROUP_RELEASE		(1<<1)
-#define QGROUP_FREE		(1<<2)
+enum {
+	ENUM_BIT(QGROUP_RESERVE),
+	ENUM_BIT(QGROUP_RELEASE),
+	ENUM_BIT(QGROUP_FREE),
+};
 
 int btrfs_quota_enable(struct btrfs_fs_info *fs_info);
 int btrfs_quota_disable(struct btrfs_fs_info *fs_info);
@@ -287,7 +304,7 @@ int btrfs_qgroup_trace_extent_nolock(
  * using current root, then we can move all expensive backref walk out of
  * transaction committing, but not now as qgroup accounting will be wrong again.
  */
-int btrfs_qgroup_trace_extent_post(struct btrfs_fs_info *fs_info,
+int btrfs_qgroup_trace_extent_post(struct btrfs_trans_handle *trans,
 				   struct btrfs_qgroup_extent_record *qrecord);
 
 /*
@@ -304,7 +321,7 @@ int btrfs_qgroup_trace_extent_post(struct btrfs_fs_info *fs_info,
  * (NULL trans)
  */
 int btrfs_qgroup_trace_extent(struct btrfs_trans_handle *trans, u64 bytenr,
-			      u64 num_bytes, gfp_t gfp_flag);
+			      u64 num_bytes);
 
 /*
  * Inform qgroup to trace all leaf items of data
@@ -344,26 +361,32 @@ int btrfs_verify_qgroup_counts(struct btrfs_fs_info *fs_info, u64 qgroupid,
 #endif
 
 /* New io_tree based accurate qgroup reserve API */
-int btrfs_qgroup_reserve_data(struct inode *inode,
+int btrfs_qgroup_reserve_data(struct btrfs_inode *inode,
 			struct extent_changeset **reserved, u64 start, u64 len);
-int btrfs_qgroup_release_data(struct inode *inode, u64 start, u64 len);
-int btrfs_qgroup_free_data(struct inode *inode,
-			struct extent_changeset *reserved, u64 start, u64 len);
-
+int btrfs_qgroup_release_data(struct btrfs_inode *inode, u64 start, u64 len);
+int btrfs_qgroup_free_data(struct btrfs_inode *inode,
+			   struct extent_changeset *reserved, u64 start,
+			   u64 len);
+int btrfs_qgroup_reserve_meta(struct btrfs_root *root, int num_bytes,
+			      enum btrfs_qgroup_rsv_type type, bool enforce);
 int __btrfs_qgroup_reserve_meta(struct btrfs_root *root, int num_bytes,
-				enum btrfs_qgroup_rsv_type type, bool enforce);
+				enum btrfs_qgroup_rsv_type type, bool enforce,
+				bool noflush);
 /* Reserve metadata space for pertrans and prealloc type */
 static inline int btrfs_qgroup_reserve_meta_pertrans(struct btrfs_root *root,
 				int num_bytes, bool enforce)
 {
 	return __btrfs_qgroup_reserve_meta(root, num_bytes,
-			BTRFS_QGROUP_RSV_META_PERTRANS, enforce);
+					   BTRFS_QGROUP_RSV_META_PERTRANS,
+					   enforce, false);
 }
 static inline int btrfs_qgroup_reserve_meta_prealloc(struct btrfs_root *root,
-				int num_bytes, bool enforce)
+						     int num_bytes, bool enforce,
+						     bool noflush)
 {
 	return __btrfs_qgroup_reserve_meta(root, num_bytes,
-			BTRFS_QGROUP_RSV_META_PREALLOC, enforce);
+					   BTRFS_QGROUP_RSV_META_PREALLOC,
+					   enforce, noflush);
 }
 
 void __btrfs_qgroup_free_meta(struct btrfs_root *root, int num_bytes,
@@ -399,7 +422,7 @@ void btrfs_qgroup_free_meta_all_pertrans(struct btrfs_root *root);
  */
 void btrfs_qgroup_convert_reserved_meta(struct btrfs_root *root, int num_bytes);
 
-void btrfs_qgroup_check_reserved_leak(struct inode *inode);
+void btrfs_qgroup_check_reserved_leak(struct btrfs_inode *inode);
 
 /* btrfs_qgroup_swapped_blocks related functions */
 void btrfs_qgroup_init_swapped_blocks(
@@ -414,5 +437,7 @@ int btrfs_qgroup_add_swapped_blocks(struct btrfs_trans_handle *trans,
 		u64 last_snapshot);
 int btrfs_qgroup_trace_subtree_after_cow(struct btrfs_trans_handle *trans,
 		struct btrfs_root *root, struct extent_buffer *eb);
+void btrfs_qgroup_destroy_extent_records(struct btrfs_transaction *trans);
+bool btrfs_check_quota_leak(struct btrfs_fs_info *fs_info);
 
 #endif

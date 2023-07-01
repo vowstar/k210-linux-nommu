@@ -10,22 +10,21 @@ struct {
 	__uint(value_size, sizeof(__u32));
 } jmp_table SEC(".maps");
 
-static volatile int count;
+int count = 0;
 
-SEC("classifier/0")
-int bpf_func_0(struct __sk_buff *skb)
+SEC("tc")
+int classifier_0(struct __sk_buff *skb)
 {
 	count++;
-	bpf_tail_call(skb, &jmp_table, 0);
+	bpf_tail_call_static(skb, &jmp_table, 0);
 	return 1;
 }
 
-SEC("classifier")
+SEC("tc")
 int entry(struct __sk_buff *skb)
 {
-	bpf_tail_call(skb, &jmp_table, 0);
+	bpf_tail_call_static(skb, &jmp_table, 0);
 	return 0;
 }
 
 char __license[] SEC("license") = "GPL";
-int _version SEC("version") = 1;

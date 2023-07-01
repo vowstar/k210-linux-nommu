@@ -181,8 +181,7 @@ static void max8907_power_off(void)
 			MAX8907_MASK_POWER_OFF, MAX8907_MASK_POWER_OFF);
 }
 
-static int max8907_i2c_probe(struct i2c_client *i2c,
-				       const struct i2c_device_id *id)
+static int max8907_i2c_probe(struct i2c_client *i2c)
 {
 	struct max8907 *max8907;
 	int ret;
@@ -228,11 +227,9 @@ static int max8907_i2c_probe(struct i2c_client *i2c,
 		goto err_regmap_rtc;
 	}
 
-	irq_set_status_flags(max8907->i2c_gen->irq, IRQ_NOAUTOEN);
-
 	ret = regmap_add_irq_chip(max8907->regmap_gen, max8907->i2c_gen->irq,
-				  IRQF_ONESHOT | IRQF_SHARED, -1,
-				  &max8907_chg_irq_chip,
+				  IRQF_ONESHOT | IRQF_SHARED,
+				  -1, &max8907_chg_irq_chip,
 				  &max8907->irqc_chg);
 	if (ret != 0) {
 		dev_err(&i2c->dev, "failed to add chg irq chip: %d\n", ret);
@@ -254,8 +251,6 @@ static int max8907_i2c_probe(struct i2c_client *i2c,
 		dev_err(&i2c->dev, "failed to add rtc irq chip: %d\n", ret);
 		goto err_irqc_rtc;
 	}
-
-	enable_irq(max8907->i2c_gen->irq);
 
 	ret = mfd_add_devices(max8907->dev, -1, max8907_cells,
 			      ARRAY_SIZE(max8907_cells), NULL, 0, NULL);
@@ -286,7 +281,7 @@ err_alloc_drvdata:
 	return ret;
 }
 
-static int max8907_i2c_remove(struct i2c_client *i2c)
+static void max8907_i2c_remove(struct i2c_client *i2c)
 {
 	struct max8907 *max8907 = i2c_get_clientdata(i2c);
 
@@ -297,8 +292,6 @@ static int max8907_i2c_remove(struct i2c_client *i2c)
 	regmap_del_irq_chip(max8907->i2c_gen->irq, max8907->irqc_chg);
 
 	i2c_unregister_device(max8907->i2c_rtc);
-
-	return 0;
 }
 
 #ifdef CONFIG_OF
@@ -320,7 +313,7 @@ static struct i2c_driver max8907_i2c_driver = {
 		.name = "max8907",
 		.of_match_table = of_match_ptr(max8907_of_match),
 	},
-	.probe = max8907_i2c_probe,
+	.probe_new = max8907_i2c_probe,
 	.remove = max8907_i2c_remove,
 	.id_table = max8907_i2c_id,
 };

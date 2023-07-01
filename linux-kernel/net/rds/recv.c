@@ -35,6 +35,7 @@
 #include <net/sock.h>
 #include <linux/in.h>
 #include <linux/export.h>
+#include <linux/sched/clock.h>
 #include <linux/time.h>
 #include <linux/rds.h>
 
@@ -450,12 +451,13 @@ static int rds_still_queued(struct rds_sock *rs, struct rds_incoming *inc,
 int rds_notify_queue_get(struct rds_sock *rs, struct msghdr *msghdr)
 {
 	struct rds_notifier *notifier;
-	struct rds_rdma_notify cmsg = { 0 }; /* fill holes with zero */
+	struct rds_rdma_notify cmsg;
 	unsigned int count = 0, max_messages = ~0U;
 	unsigned long flags;
 	LIST_HEAD(copy);
 	int err = 0;
 
+	memset(&cmsg, 0, sizeof(cmsg));	/* fill holes with zero */
 
 	/* put_cmsg copies to user space and thus may sleep. We can't do this
 	 * with rs_lock held, so first grab as many notifications as we can stuff
@@ -713,7 +715,7 @@ int rds_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 
 		if (rds_cmsg_recv(inc, msg, rs)) {
 			ret = -EFAULT;
-			goto out;
+			break;
 		}
 		rds_recvmsg_zcookie(rs, msg);
 
@@ -721,8 +723,6 @@ int rds_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 
 		if (msg->msg_name) {
 			if (ipv6_addr_v4mapped(&inc->i_saddr)) {
-				sin = (struct sockaddr_in *)msg->msg_name;
-
 				sin->sin_family = AF_INET;
 				sin->sin_port = inc->i_hdr.h_sport;
 				sin->sin_addr.s_addr =
@@ -730,8 +730,6 @@ int rds_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 				memset(sin->sin_zero, 0, sizeof(sin->sin_zero));
 				msg->msg_namelen = sizeof(*sin);
 			} else {
-				sin6 = (struct sockaddr_in6 *)msg->msg_name;
-
 				sin6->sin6_family = AF_INET6;
 				sin6->sin6_port = inc->i_hdr.h_sport;
 				sin6->sin6_addr = inc->i_saddr;

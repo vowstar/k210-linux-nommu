@@ -368,7 +368,7 @@ static int pipe_do_rcv(struct sock *sk, struct sk_buff *skb)
 			err = -EINVAL;
 			goto out;
 		}
-		/* fall through */
+		fallthrough;
 	case PNS_PEP_DISABLE_REQ:
 		atomic_set(&pn->tx_credits, 0);
 		pep_reply(sk, skb, PN_PIPE_NO_ERROR, NULL, 0, GFP_ATOMIC);
@@ -385,7 +385,7 @@ static int pipe_do_rcv(struct sock *sk, struct sk_buff *skb)
 
 	case PNS_PIPE_ALIGNED_DATA:
 		__skb_pull(skb, 1);
-		/* fall through */
+		fallthrough;
 	case PNS_PIPE_DATA:
 		__skb_pull(skb, 3); /* Pipe data header */
 		if (!pn_flow_safe(pn->rx_fc)) {
@@ -417,11 +417,11 @@ static int pipe_do_rcv(struct sock *sk, struct sk_buff *skb)
 		err = pipe_rcv_created(sk, skb);
 		if (err)
 			break;
-		/* fall through */
+		fallthrough;
 	case PNS_PIPE_RESET_IND:
 		if (!pn->init_enable)
 			break;
-		/* fall through */
+		fallthrough;
 	case PNS_PIPE_ENABLED_IND:
 		if (!pn_flow_safe(pn->tx_fc)) {
 			atomic_set(&pn->tx_credits, 1);
@@ -555,7 +555,7 @@ static int pipe_handler_do_rcv(struct sock *sk, struct sk_buff *skb)
 	switch (hdr->message_id) {
 	case PNS_PIPE_ALIGNED_DATA:
 		__skb_pull(skb, 1);
-		/* fall through */
+		fallthrough;
 	case PNS_PIPE_DATA:
 		__skb_pull(skb, 3); /* Pipe data header */
 		if (!pn_flow_safe(pn->rx_fc)) {
@@ -772,7 +772,8 @@ static struct sock *pep_sock_accept(struct sock *sk, int flags, int *errp,
 	u8 pipe_handle, enabled, n_sb;
 	u8 aligned = 0;
 
-	skb = skb_recv_datagram(sk, 0, flags & O_NONBLOCK, errp);
+	skb = skb_recv_datagram(sk, (flags & O_NONBLOCK) ? MSG_DONTWAIT : 0,
+				errp);
 	if (!skb)
 		return NULL;
 
@@ -868,6 +869,7 @@ static struct sock *pep_sock_accept(struct sock *sk, int flags, int *errp,
 
 	err = pep_accept_conn(newsk, skb);
 	if (err) {
+		__sock_put(sk);
 		sock_put(newsk);
 		newsk = NULL;
 		goto drop;
@@ -946,6 +948,8 @@ static int pep_ioctl(struct sock *sk, int cmd, unsigned long arg)
 			ret =  -EBUSY;
 		else if (sk->sk_state == TCP_ESTABLISHED)
 			ret = -EISCONN;
+		else if (!pn->pn_sk.sobject)
+			ret = -EADDRNOTAVAIL;
 		else
 			ret = pep_sock_enable(sk, NULL, 0);
 		release_sock(sk);
@@ -975,7 +979,7 @@ static int pep_init(struct sock *sk)
 }
 
 static int pep_setsockopt(struct sock *sk, int level, int optname,
-				char __user *optval, unsigned int optlen)
+			  sockptr_t optval, unsigned int optlen)
 {
 	struct pep_sock *pn = pep_sk(sk);
 	int val = 0, err = 0;
@@ -983,7 +987,7 @@ static int pep_setsockopt(struct sock *sk, int level, int optname,
 	if (level != SOL_PNPIPE)
 		return -ENOPROTOOPT;
 	if (optlen >= sizeof(int)) {
-		if (get_user(val, (int __user *) optval))
+		if (copy_from_sockptr(&val, optval, sizeof(int)))
 			return -EFAULT;
 	}
 
@@ -1235,7 +1239,7 @@ struct sk_buff *pep_read(struct sock *sk)
 }
 
 static int pep_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
-		       int noblock, int flags, int *addr_len)
+		       int flags, int *addr_len)
 {
 	struct sk_buff *skb;
 	int err;
@@ -1264,7 +1268,7 @@ static int pep_recvmsg(struct sock *sk, struct msghdr *msg, size_t len,
 			return -EINVAL;
 	}
 
-	skb = skb_recv_datagram(sk, flags, noblock, &err);
+	skb = skb_recv_datagram(sk, flags, &err);
 	lock_sock(sk);
 	if (skb == NULL) {
 		if (err == -ENOTCONN && sk->sk_state == TCP_CLOSE_WAIT)

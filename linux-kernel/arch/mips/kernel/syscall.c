@@ -106,7 +106,7 @@ static inline int mips_atomic_set(unsigned long addr, unsigned long new)
 	if (unlikely(!access_ok((const void __user *)addr, 4)))
 		return -EINVAL;
 
-	if (cpu_has_llsc && R10000_LLSC_WAR) {
+	if (cpu_has_llsc && IS_ENABLED(CONFIG_WAR_R10000_LLSC)) {
 		__asm__ __volatile__ (
 		"	.set	push					\n"
 		"	.set	arch=r4000				\n"
@@ -122,8 +122,8 @@ static inline int mips_atomic_set(unsigned long addr, unsigned long new)
 		"	j	3b					\n"
 		"	.previous					\n"
 		"	.section __ex_table,\"a\"			\n"
-		"	"STR(PTR)"	1b, 4b				\n"
-		"	"STR(PTR)"	2b, 4b				\n"
+		"	"STR(PTR_WD)"	1b, 4b				\n"
+		"	"STR(PTR_WD)"	2b, 4b				\n"
 		"	.previous					\n"
 		"	.set	pop					\n"
 		: [old] "=&r" (old),
@@ -152,8 +152,8 @@ static inline int mips_atomic_set(unsigned long addr, unsigned long new)
 		"	j	3b					\n"
 		"	.previous					\n"
 		"	.section __ex_table,\"a\"			\n"
-		"	"STR(PTR)"	1b, 5b				\n"
-		"	"STR(PTR)"	2b, 5b				\n"
+		"	"STR(PTR_WD)"	1b, 5b				\n"
+		"	"STR(PTR_WD)"	2b, 5b				\n"
 		"	.previous					\n"
 		"	.set	pop					\n"
 		: [old] "=&r" (old),
@@ -239,13 +239,4 @@ SYSCALL_DEFINE3(sysmips, long, cmd, long, arg1, long, arg2)
 SYSCALL_DEFINE3(cachectl, char *, addr, int, nbytes, int, op)
 {
 	return -ENOSYS;
-}
-
-/*
- * If we ever come here the user sp is bad.  Zap the process right away.
- * Due to the bad stack signaling wouldn't work.
- */
-asmlinkage void bad_stack(void)
-{
-	do_exit(SIGSEGV);
 }

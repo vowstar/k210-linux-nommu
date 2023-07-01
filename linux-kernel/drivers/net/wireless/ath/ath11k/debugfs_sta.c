@@ -5,14 +5,16 @@
 
 #include <linux/vmalloc.h>
 
+#include "debugfs_sta.h"
 #include "core.h"
 #include "peer.h"
 #include "debug.h"
+#include "dp_tx.h"
+#include "debugfs_htt_stats.h"
 
-void
-ath11k_accumulate_per_peer_tx_stats(struct ath11k_sta *arsta,
-				    struct ath11k_per_peer_tx_stats *peer_stats,
-				    u8 legacy_rate_idx)
+void ath11k_debugfs_sta_add_tx_stats(struct ath11k_sta *arsta,
+				     struct ath11k_per_peer_tx_stats *peer_stats,
+				     u8 legacy_rate_idx)
 {
 	struct rate_info *txrate = &arsta->txrate;
 	struct ath11k_htt_tx_stats *tx_stats;
@@ -24,7 +26,7 @@ ath11k_accumulate_per_peer_tx_stats(struct ath11k_sta *arsta,
 	tx_stats = arsta->tx_stats;
 	gi = FIELD_GET(RATE_INFO_FLAGS_SHORT_GI, arsta->txrate.flags);
 	mcs = txrate->mcs;
-	bw = txrate->bw;
+	bw = ath11k_mac_mac80211_bw_to_ath11k_bw(txrate->bw);
 	nss = txrate->nss - 1;
 
 #define STATS_OP_FMT(name) tx_stats->stats[ATH11K_STATS_TYPE_##name]
@@ -123,85 +125,10 @@ ath11k_accumulate_per_peer_tx_stats(struct ath11k_sta *arsta,
 	tx_stats->tx_duration += peer_stats->duration;
 }
 
-void ath11k_update_per_peer_stats_from_txcompl(struct ath11k *ar,
-					       struct sk_buff *msdu,
-					       struct hal_tx_status *ts)
+void ath11k_debugfs_sta_update_txcompl(struct ath11k *ar,
+				       struct hal_tx_status *ts)
 {
-	struct ath11k_base *ab = ar->ab;
-	struct ath11k_per_peer_tx_stats *peer_stats = &ar->cached_stats;
-	enum hal_tx_rate_stats_pkt_type pkt_type;
-	enum hal_tx_rate_stats_sgi sgi;
-	enum hal_tx_rate_stats_bw bw;
-	struct ath11k_peer *peer;
-	struct ath11k_sta *arsta;
-	struct ieee80211_sta *sta;
-	u16 rate;
-	u8 rate_idx;
-	int ret;
-	u8 mcs;
-
-	rcu_read_lock();
-	spin_lock_bh(&ab->base_lock);
-	peer = ath11k_peer_find_by_id(ab, ts->peer_id);
-	if (!peer || !peer->sta) {
-		ath11k_warn(ab, "failed to find the peer\n");
-		spin_unlock_bh(&ab->base_lock);
-		rcu_read_unlock();
-		return;
-	}
-
-	sta = peer->sta;
-	arsta = (struct ath11k_sta *)sta->drv_priv;
-
-	memset(&arsta->txrate, 0, sizeof(arsta->txrate));
-	pkt_type = FIELD_GET(HAL_TX_RATE_STATS_INFO0_PKT_TYPE,
-			     ts->rate_stats);
-	mcs = FIELD_GET(HAL_TX_RATE_STATS_INFO0_MCS,
-			ts->rate_stats);
-	sgi = FIELD_GET(HAL_TX_RATE_STATS_INFO0_SGI,
-			ts->rate_stats);
-	bw = FIELD_GET(HAL_TX_RATE_STATS_INFO0_BW, ts->rate_stats);
-
-	if (pkt_type == HAL_TX_RATE_STATS_PKT_TYPE_11A ||
-	    pkt_type == HAL_TX_RATE_STATS_PKT_TYPE_11B) {
-		ret = ath11k_mac_hw_ratecode_to_legacy_rate(mcs,
-							    pkt_type,
-							    &rate_idx,
-							    &rate);
-		if (ret < 0)
-			goto err_out;
-		arsta->txrate.legacy = rate;
-	} else if (pkt_type == HAL_TX_RATE_STATS_PKT_TYPE_11N) {
-		if (mcs > 7) {
-			ath11k_warn(ab, "Invalid HT mcs index %d\n", mcs);
-			goto err_out;
-		}
-
-		arsta->txrate.mcs = mcs + 8 * (arsta->last_txrate.nss - 1);
-		arsta->txrate.flags = RATE_INFO_FLAGS_MCS;
-		if (sgi)
-			arsta->txrate.flags |= RATE_INFO_FLAGS_SHORT_GI;
-	} else if (pkt_type == HAL_TX_RATE_STATS_PKT_TYPE_11AC) {
-		if (mcs > 9) {
-			ath11k_warn(ab, "Invalid VHT mcs index %d\n", mcs);
-			goto err_out;
-		}
-
-		arsta->txrate.mcs = mcs;
-		arsta->txrate.flags = RATE_INFO_FLAGS_VHT_MCS;
-		if (sgi)
-			arsta->txrate.flags |= RATE_INFO_FLAGS_SHORT_GI;
-	} else if (pkt_type == HAL_TX_RATE_STATS_PKT_TYPE_11AX) {
-		/* TODO */
-	}
-
-	arsta->txrate.nss = arsta->last_txrate.nss;
-	arsta->txrate.bw = ath11k_mac_bw_to_mac80211_bw(bw);
-
-	ath11k_accumulate_per_peer_tx_stats(arsta, peer_stats, rate_idx);
-err_out:
-	spin_unlock_bh(&ab->base_lock);
-	rcu_read_unlock();
+	ath11k_dp_tx_update_txcompl(ar, ts);
 }
 
 static ssize_t ath11k_dbg_sta_dump_tx_stats(struct file *file,
@@ -218,6 +145,9 @@ static ssize_t ath11k_dbg_sta_dump_tx_stats(struct file *file,
 	int len = 0, i, j, k, retval = 0;
 	const int size = 2 * 4096;
 	char *buf;
+
+	if (!arsta->tx_stats)
+		return -ENOENT;
 
 	buf = kzalloc(size, GFP_KERNEL);
 	if (!buf)
@@ -379,6 +309,13 @@ static ssize_t ath11k_dbg_sta_dump_rx_stats(struct file *file,
 		len += scnprintf(buf + len, size - len, "%llu ", rx_stats->nss_count[i]);
 	len += scnprintf(buf + len, size - len, "\nRX Duration:%llu ",
 			 rx_stats->rx_duration);
+	len += scnprintf(buf + len, size - len,
+			 "\nDCM: %llu\nRU: 26 %llu 52: %llu 106: %llu 242: %llu 484: %llu 996: %llu\n",
+			 rx_stats->dcm_count, rx_stats->ru_alloc_cnt[0],
+			 rx_stats->ru_alloc_cnt[1], rx_stats->ru_alloc_cnt[2],
+			 rx_stats->ru_alloc_cnt[3], rx_stats->ru_alloc_cnt[4],
+			 rx_stats->ru_alloc_cnt[5]);
+
 	len += scnprintf(buf + len, size - len, "\n");
 
 	spin_unlock_bh(&ar->ab->base_lock);
@@ -406,7 +343,13 @@ ath11k_dbg_sta_open_htt_peer_stats(struct inode *inode, struct file *file)
 	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
 	struct ath11k *ar = arsta->arvif->ar;
 	struct debug_htt_stats_req *stats_req;
+	int type = ar->debug.htt_stats.type;
 	int ret;
+
+	if ((type != ATH11K_DBG_HTT_EXT_STATS_PEER_INFO &&
+	     type != ATH11K_DBG_HTT_EXT_STATS_PEER_CTRL_PATH_TXRX_STATS) ||
+	    type == ATH11K_DBG_HTT_EXT_STATS_RESET)
+		return -EPERM;
 
 	stats_req = vzalloc(sizeof(*stats_req) + ATH11K_HTT_STATS_BUF_SIZE);
 	if (!stats_req)
@@ -414,9 +357,9 @@ ath11k_dbg_sta_open_htt_peer_stats(struct inode *inode, struct file *file)
 
 	mutex_lock(&ar->conf_mutex);
 	ar->debug.htt_stats.stats_req = stats_req;
-	stats_req->type = ATH11K_DBG_HTT_EXT_STATS_PEER_INFO;
+	stats_req->type = type;
 	memcpy(stats_req->peer_addr, sta->addr, ETH_ALEN);
-	ret = ath11k_dbg_htt_stats_req(ar);
+	ret = ath11k_debugfs_htt_stats_req(ar);
 	mutex_unlock(&ar->conf_mutex);
 	if (ret < 0)
 		goto out;
@@ -425,13 +368,22 @@ ath11k_dbg_sta_open_htt_peer_stats(struct inode *inode, struct file *file)
 	return 0;
 out:
 	vfree(stats_req);
+	ar->debug.htt_stats.stats_req = NULL;
 	return ret;
 }
 
 static int
 ath11k_dbg_sta_release_htt_peer_stats(struct inode *inode, struct file *file)
 {
+	struct ieee80211_sta *sta = inode->i_private;
+	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
+	struct ath11k *ar = arsta->arvif->ar;
+
+	mutex_lock(&ar->conf_mutex);
 	vfree(file->private_data);
+	ar->debug.htt_stats.stats_req = NULL;
+	mutex_unlock(&ar->conf_mutex);
+
 	return 0;
 }
 
@@ -523,15 +475,387 @@ static const struct file_operations fops_peer_pktlog = {
 	.llseek = default_llseek,
 };
 
-void ath11k_sta_add_debugfs(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
-			    struct ieee80211_sta *sta, struct dentry *dir)
+static ssize_t ath11k_dbg_sta_write_delba(struct file *file,
+					  const char __user *user_buf,
+					  size_t count, loff_t *ppos)
+{
+	struct ieee80211_sta *sta = file->private_data;
+	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
+	struct ath11k *ar = arsta->arvif->ar;
+	u32 tid, initiator, reason;
+	int ret;
+	char buf[64] = {0};
+
+	ret = simple_write_to_buffer(buf, sizeof(buf) - 1, ppos,
+				     user_buf, count);
+	if (ret <= 0)
+		return ret;
+
+	ret = sscanf(buf, "%u %u %u", &tid, &initiator, &reason);
+	if (ret != 3)
+		return -EINVAL;
+
+	/* Valid TID values are 0 through 15 */
+	if (tid > HAL_DESC_REO_NON_QOS_TID - 1)
+		return -EINVAL;
+
+	mutex_lock(&ar->conf_mutex);
+	if (ar->state != ATH11K_STATE_ON ||
+	    arsta->aggr_mode != ATH11K_DBG_AGGR_MODE_MANUAL) {
+		ret = count;
+		goto out;
+	}
+
+	ret = ath11k_wmi_delba_send(ar, arsta->arvif->vdev_id, sta->addr,
+				    tid, initiator, reason);
+	if (ret) {
+		ath11k_warn(ar->ab, "failed to send delba: vdev_id %u peer %pM tid %u initiator %u reason %u\n",
+			    arsta->arvif->vdev_id, sta->addr, tid, initiator,
+			    reason);
+	}
+	ret = count;
+out:
+	mutex_unlock(&ar->conf_mutex);
+	return ret;
+}
+
+static const struct file_operations fops_delba = {
+	.write = ath11k_dbg_sta_write_delba,
+	.open = simple_open,
+	.owner = THIS_MODULE,
+	.llseek = default_llseek,
+};
+
+static ssize_t ath11k_dbg_sta_write_addba_resp(struct file *file,
+					       const char __user *user_buf,
+					       size_t count, loff_t *ppos)
+{
+	struct ieee80211_sta *sta = file->private_data;
+	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
+	struct ath11k *ar = arsta->arvif->ar;
+	u32 tid, status;
+	int ret;
+	char buf[64] = {0};
+
+	ret = simple_write_to_buffer(buf, sizeof(buf) - 1, ppos,
+				     user_buf, count);
+	if (ret <= 0)
+		return ret;
+
+	ret = sscanf(buf, "%u %u", &tid, &status);
+	if (ret != 2)
+		return -EINVAL;
+
+	/* Valid TID values are 0 through 15 */
+	if (tid > HAL_DESC_REO_NON_QOS_TID - 1)
+		return -EINVAL;
+
+	mutex_lock(&ar->conf_mutex);
+	if (ar->state != ATH11K_STATE_ON ||
+	    arsta->aggr_mode != ATH11K_DBG_AGGR_MODE_MANUAL) {
+		ret = count;
+		goto out;
+	}
+
+	ret = ath11k_wmi_addba_set_resp(ar, arsta->arvif->vdev_id, sta->addr,
+					tid, status);
+	if (ret) {
+		ath11k_warn(ar->ab, "failed to send addba response: vdev_id %u peer %pM tid %u status%u\n",
+			    arsta->arvif->vdev_id, sta->addr, tid, status);
+	}
+	ret = count;
+out:
+	mutex_unlock(&ar->conf_mutex);
+	return ret;
+}
+
+static const struct file_operations fops_addba_resp = {
+	.write = ath11k_dbg_sta_write_addba_resp,
+	.open = simple_open,
+	.owner = THIS_MODULE,
+	.llseek = default_llseek,
+};
+
+static ssize_t ath11k_dbg_sta_write_addba(struct file *file,
+					  const char __user *user_buf,
+					  size_t count, loff_t *ppos)
+{
+	struct ieee80211_sta *sta = file->private_data;
+	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
+	struct ath11k *ar = arsta->arvif->ar;
+	u32 tid, buf_size;
+	int ret;
+	char buf[64] = {0};
+
+	ret = simple_write_to_buffer(buf, sizeof(buf) - 1, ppos,
+				     user_buf, count);
+	if (ret <= 0)
+		return ret;
+
+	ret = sscanf(buf, "%u %u", &tid, &buf_size);
+	if (ret != 2)
+		return -EINVAL;
+
+	/* Valid TID values are 0 through 15 */
+	if (tid > HAL_DESC_REO_NON_QOS_TID - 1)
+		return -EINVAL;
+
+	mutex_lock(&ar->conf_mutex);
+	if (ar->state != ATH11K_STATE_ON ||
+	    arsta->aggr_mode != ATH11K_DBG_AGGR_MODE_MANUAL) {
+		ret = count;
+		goto out;
+	}
+
+	ret = ath11k_wmi_addba_send(ar, arsta->arvif->vdev_id, sta->addr,
+				    tid, buf_size);
+	if (ret) {
+		ath11k_warn(ar->ab, "failed to send addba request: vdev_id %u peer %pM tid %u buf_size %u\n",
+			    arsta->arvif->vdev_id, sta->addr, tid, buf_size);
+	}
+
+	ret = count;
+out:
+	mutex_unlock(&ar->conf_mutex);
+	return ret;
+}
+
+static const struct file_operations fops_addba = {
+	.write = ath11k_dbg_sta_write_addba,
+	.open = simple_open,
+	.owner = THIS_MODULE,
+	.llseek = default_llseek,
+};
+
+static ssize_t ath11k_dbg_sta_read_aggr_mode(struct file *file,
+					     char __user *user_buf,
+					     size_t count, loff_t *ppos)
+{
+	struct ieee80211_sta *sta = file->private_data;
+	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
+	struct ath11k *ar = arsta->arvif->ar;
+	char buf[64];
+	int len = 0;
+
+	mutex_lock(&ar->conf_mutex);
+	len = scnprintf(buf, sizeof(buf) - len,
+			"aggregation mode: %s\n\n%s\n%s\n",
+			(arsta->aggr_mode == ATH11K_DBG_AGGR_MODE_AUTO) ?
+			"auto" : "manual", "auto = 0", "manual = 1");
+	mutex_unlock(&ar->conf_mutex);
+
+	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
+}
+
+static ssize_t ath11k_dbg_sta_write_aggr_mode(struct file *file,
+					      const char __user *user_buf,
+					      size_t count, loff_t *ppos)
+{
+	struct ieee80211_sta *sta = file->private_data;
+	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
+	struct ath11k *ar = arsta->arvif->ar;
+	u32 aggr_mode;
+	int ret;
+
+	if (kstrtouint_from_user(user_buf, count, 0, &aggr_mode))
+		return -EINVAL;
+
+	if (aggr_mode >= ATH11K_DBG_AGGR_MODE_MAX)
+		return -EINVAL;
+
+	mutex_lock(&ar->conf_mutex);
+	if (ar->state != ATH11K_STATE_ON ||
+	    aggr_mode == arsta->aggr_mode) {
+		ret = count;
+		goto out;
+	}
+
+	ret = ath11k_wmi_addba_clear_resp(ar, arsta->arvif->vdev_id, sta->addr);
+	if (ret) {
+		ath11k_warn(ar->ab, "failed to clear addba session ret: %d\n",
+			    ret);
+		goto out;
+	}
+
+	arsta->aggr_mode = aggr_mode;
+out:
+	mutex_unlock(&ar->conf_mutex);
+	return ret;
+}
+
+static const struct file_operations fops_aggr_mode = {
+	.read = ath11k_dbg_sta_read_aggr_mode,
+	.write = ath11k_dbg_sta_write_aggr_mode,
+	.open = simple_open,
+	.owner = THIS_MODULE,
+	.llseek = default_llseek,
+};
+
+static ssize_t
+ath11k_write_htt_peer_stats_reset(struct file *file,
+				  const char __user *user_buf,
+				  size_t count, loff_t *ppos)
+{
+	struct ieee80211_sta *sta = file->private_data;
+	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
+	struct ath11k *ar = arsta->arvif->ar;
+	struct htt_ext_stats_cfg_params cfg_params = { 0 };
+	int ret;
+	u8 type;
+
+	ret = kstrtou8_from_user(user_buf, count, 0, &type);
+	if (ret)
+		return ret;
+
+	if (!type)
+		return ret;
+
+	mutex_lock(&ar->conf_mutex);
+	cfg_params.cfg0 = HTT_STAT_PEER_INFO_MAC_ADDR;
+	cfg_params.cfg0 |= FIELD_PREP(GENMASK(15, 1),
+				HTT_PEER_STATS_REQ_MODE_FLUSH_TQM);
+
+	cfg_params.cfg1 = HTT_STAT_DEFAULT_PEER_REQ_TYPE;
+
+	cfg_params.cfg2 |= FIELD_PREP(GENMASK(7, 0), sta->addr[0]);
+	cfg_params.cfg2 |= FIELD_PREP(GENMASK(15, 8), sta->addr[1]);
+	cfg_params.cfg2 |= FIELD_PREP(GENMASK(23, 16), sta->addr[2]);
+	cfg_params.cfg2 |= FIELD_PREP(GENMASK(31, 24), sta->addr[3]);
+
+	cfg_params.cfg3 |= FIELD_PREP(GENMASK(7, 0), sta->addr[4]);
+	cfg_params.cfg3 |= FIELD_PREP(GENMASK(15, 8), sta->addr[5]);
+
+	cfg_params.cfg3 |= ATH11K_HTT_PEER_STATS_RESET;
+
+	ret = ath11k_dp_tx_htt_h2t_ext_stats_req(ar,
+						 ATH11K_DBG_HTT_EXT_STATS_PEER_INFO,
+						 &cfg_params,
+						 0ULL);
+	if (ret) {
+		ath11k_warn(ar->ab, "failed to send htt peer stats request: %d\n", ret);
+		mutex_unlock(&ar->conf_mutex);
+		return ret;
+	}
+
+	mutex_unlock(&ar->conf_mutex);
+
+	ret = count;
+
+	return ret;
+}
+
+static const struct file_operations fops_htt_peer_stats_reset = {
+	.write = ath11k_write_htt_peer_stats_reset,
+	.open = simple_open,
+	.owner = THIS_MODULE,
+	.llseek = default_llseek,
+};
+
+static ssize_t ath11k_dbg_sta_read_peer_ps_state(struct file *file,
+						 char __user *user_buf,
+						 size_t count, loff_t *ppos)
+{
+	struct ieee80211_sta *sta = file->private_data;
+	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
+	struct ath11k *ar = arsta->arvif->ar;
+	char buf[20];
+	int len;
+
+	spin_lock_bh(&ar->data_lock);
+
+	len = scnprintf(buf, sizeof(buf), "%d\n", arsta->peer_ps_state);
+
+	spin_unlock_bh(&ar->data_lock);
+
+	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
+}
+
+static const struct file_operations fops_peer_ps_state = {
+	.open = simple_open,
+	.read = ath11k_dbg_sta_read_peer_ps_state,
+	.owner = THIS_MODULE,
+	.llseek = default_llseek,
+};
+
+static ssize_t ath11k_dbg_sta_read_current_ps_duration(struct file *file,
+						       char __user *user_buf,
+						       size_t count,
+						       loff_t *ppos)
+{
+	struct ieee80211_sta *sta = file->private_data;
+	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
+	struct ath11k *ar = arsta->arvif->ar;
+	u64 time_since_station_in_power_save;
+	char buf[20];
+	int len;
+
+	spin_lock_bh(&ar->data_lock);
+
+	if (arsta->peer_ps_state == WMI_PEER_PS_STATE_ON &&
+	    arsta->peer_current_ps_valid)
+		time_since_station_in_power_save = jiffies_to_msecs(jiffies
+						- arsta->ps_start_jiffies);
+	else
+		time_since_station_in_power_save = 0;
+
+	len = scnprintf(buf, sizeof(buf), "%llu\n",
+			time_since_station_in_power_save);
+	spin_unlock_bh(&ar->data_lock);
+
+	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
+}
+
+static const struct file_operations fops_current_ps_duration = {
+	.open = simple_open,
+	.read = ath11k_dbg_sta_read_current_ps_duration,
+	.owner = THIS_MODULE,
+	.llseek = default_llseek,
+};
+
+static ssize_t ath11k_dbg_sta_read_total_ps_duration(struct file *file,
+						     char __user *user_buf,
+						     size_t count, loff_t *ppos)
+{
+	struct ieee80211_sta *sta = file->private_data;
+	struct ath11k_sta *arsta = (struct ath11k_sta *)sta->drv_priv;
+	struct ath11k *ar = arsta->arvif->ar;
+	char buf[20];
+	u64 power_save_duration;
+	int len;
+
+	spin_lock_bh(&ar->data_lock);
+
+	if (arsta->peer_ps_state == WMI_PEER_PS_STATE_ON &&
+	    arsta->peer_current_ps_valid)
+		power_save_duration = jiffies_to_msecs(jiffies
+						- arsta->ps_start_jiffies)
+						+ arsta->ps_total_duration;
+	else
+		power_save_duration = arsta->ps_total_duration;
+
+	len = scnprintf(buf, sizeof(buf), "%llu\n", power_save_duration);
+
+	spin_unlock_bh(&ar->data_lock);
+
+	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
+}
+
+static const struct file_operations fops_total_ps_duration = {
+	.open = simple_open,
+	.read = ath11k_dbg_sta_read_total_ps_duration,
+	.owner = THIS_MODULE,
+	.llseek = default_llseek,
+};
+
+void ath11k_debugfs_sta_op_add(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+			       struct ieee80211_sta *sta, struct dentry *dir)
 {
 	struct ath11k *ar = hw->priv;
 
-	if (ath11k_debug_is_extd_tx_stats_enabled(ar))
+	if (ath11k_debugfs_is_extd_tx_stats_enabled(ar))
 		debugfs_create_file("tx_stats", 0400, dir, sta,
 				    &fops_tx_stats);
-	if (ath11k_debug_is_extd_rx_stats_enabled(ar))
+	if (ath11k_debugfs_is_extd_rx_stats_enabled(ar))
 		debugfs_create_file("rx_stats", 0400, dir, sta,
 				    &fops_rx_stats);
 
@@ -540,4 +864,25 @@ void ath11k_sta_add_debugfs(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 
 	debugfs_create_file("peer_pktlog", 0644, dir, sta,
 			    &fops_peer_pktlog);
+
+	debugfs_create_file("aggr_mode", 0644, dir, sta, &fops_aggr_mode);
+	debugfs_create_file("addba", 0200, dir, sta, &fops_addba);
+	debugfs_create_file("addba_resp", 0200, dir, sta, &fops_addba_resp);
+	debugfs_create_file("delba", 0200, dir, sta, &fops_delba);
+
+	if (test_bit(WMI_TLV_SERVICE_PER_PEER_HTT_STATS_RESET,
+		     ar->ab->wmi_ab.svc_map))
+		debugfs_create_file("htt_peer_stats_reset", 0600, dir, sta,
+				    &fops_htt_peer_stats_reset);
+
+	debugfs_create_file("peer_ps_state", 0400, dir, sta,
+			    &fops_peer_ps_state);
+
+	if (test_bit(WMI_TLV_SERVICE_PEER_POWER_SAVE_DURATION_SUPPORT,
+		     ar->ab->wmi_ab.svc_map)) {
+		debugfs_create_file("current_ps_duration", 0440, dir, sta,
+				    &fops_current_ps_duration);
+		debugfs_create_file("total_ps_duration", 0440, dir, sta,
+				    &fops_total_ps_duration);
+	}
 }

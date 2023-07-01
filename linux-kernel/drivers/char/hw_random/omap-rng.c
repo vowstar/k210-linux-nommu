@@ -22,6 +22,7 @@
 #include <linux/platform_device.h>
 #include <linux/hw_random.h>
 #include <linux/delay.h>
+#include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/pm_runtime.h>
 #include <linux/of.h>
@@ -29,8 +30,7 @@
 #include <linux/of_address.h>
 #include <linux/interrupt.h>
 #include <linux/clk.h>
-
-#include <asm/io.h>
+#include <linux/io.h>
 
 #define RNG_REG_STATUS_RDY			(1 << 0)
 
@@ -243,7 +243,6 @@ static struct omap_rng_pdata omap2_rng_pdata = {
 	.cleanup	= omap2_rng_cleanup,
 };
 
-#if defined(CONFIG_OF)
 static inline u32 omap4_rng_data_present(struct omap_rng_dev *priv)
 {
 	return omap_rng_read(priv, RNG_STATUS_REG) & RNG_REG_STATUS_RDY;
@@ -358,7 +357,7 @@ static struct omap_rng_pdata eip76_rng_pdata = {
 	.cleanup	= omap4_rng_cleanup,
 };
 
-static const struct of_device_id omap_rng_of_match[] = {
+static const struct of_device_id omap_rng_of_match[] __maybe_unused = {
 		{
 			.compatible	= "ti,omap2-rng",
 			.data		= &omap2_rng_pdata,
@@ -378,25 +377,19 @@ MODULE_DEVICE_TABLE(of, omap_rng_of_match);
 static int of_get_omap_rng_device_details(struct omap_rng_dev *priv,
 					  struct platform_device *pdev)
 {
-	const struct of_device_id *match;
 	struct device *dev = &pdev->dev;
 	int irq, err;
 
-	match = of_match_device(of_match_ptr(omap_rng_of_match), dev);
-	if (!match) {
-		dev_err(dev, "no compatible OF match\n");
-		return -EINVAL;
-	}
-	priv->pdata = match->data;
+	priv->pdata = of_device_get_match_data(dev);
+	if (!priv->pdata)
+		return -ENODEV;
+
 
 	if (of_device_is_compatible(dev->of_node, "ti,omap4-rng") ||
 	    of_device_is_compatible(dev->of_node, "inside-secure,safexcel-eip76")) {
 		irq = platform_get_irq(pdev, 0);
-		if (irq < 0) {
-			dev_err(dev, "%s: error getting IRQ resource - %d\n",
-				__func__, irq);
+		if (irq < 0)
 			return irq;
-		}
 
 		err = devm_request_irq(dev, irq, omap4_rng_irq,
 				       IRQF_TRIGGER_NONE, dev_name(dev), priv);
@@ -421,13 +414,6 @@ static int of_get_omap_rng_device_details(struct omap_rng_dev *priv,
 	}
 	return 0;
 }
-#else
-static int of_get_omap_rng_device_details(struct omap_rng_dev *omap_rng,
-					  struct platform_device *pdev)
-{
-	return -EINVAL;
-}
-#endif
 
 static int get_omap_rng_device_details(struct omap_rng_dev *omap_rng)
 {
@@ -468,10 +454,9 @@ static int omap_rng_probe(struct platform_device *pdev)
 	}
 
 	pm_runtime_enable(&pdev->dev);
-	ret = pm_runtime_get_sync(&pdev->dev);
+	ret = pm_runtime_resume_and_get(&pdev->dev);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Failed to runtime_get device: %d\n", ret);
-		pm_runtime_put_noidle(&pdev->dev);
 		goto err_ioremap;
 	}
 
@@ -557,10 +542,9 @@ static int __maybe_unused omap_rng_resume(struct device *dev)
 	struct omap_rng_dev *priv = dev_get_drvdata(dev);
 	int ret;
 
-	ret = pm_runtime_get_sync(dev);
+	ret = pm_runtime_resume_and_get(dev);
 	if (ret < 0) {
 		dev_err(dev, "Failed to runtime_get device: %d\n", ret);
-		pm_runtime_put_noidle(dev);
 		return ret;
 	}
 

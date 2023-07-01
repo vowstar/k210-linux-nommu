@@ -22,20 +22,23 @@ static inline void ceph_set_cached_acl(struct inode *inode,
 	struct ceph_inode_info *ci = ceph_inode(inode);
 
 	spin_lock(&ci->i_ceph_lock);
-	if (__ceph_caps_issued_mask(ci, CEPH_CAP_XATTR_SHARED, 0))
+	if (__ceph_caps_issued_mask_metric(ci, CEPH_CAP_XATTR_SHARED, 0))
 		set_cached_acl(inode, type, acl);
 	else
 		forget_cached_acl(inode, type);
 	spin_unlock(&ci->i_ceph_lock);
 }
 
-struct posix_acl *ceph_get_acl(struct inode *inode, int type)
+struct posix_acl *ceph_get_acl(struct inode *inode, int type, bool rcu)
 {
 	int size;
 	unsigned int retry_cnt = 0;
 	const char *name;
 	char *value = NULL;
 	struct posix_acl *acl;
+
+	if (rcu)
+		return ERR_PTR(-ECHILD);
 
 	switch (type) {
 	case ACL_TYPE_ACCESS:
@@ -82,12 +85,14 @@ retry:
 	return acl;
 }
 
-int ceph_set_acl(struct inode *inode, struct posix_acl *acl, int type)
+int ceph_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
+		 struct posix_acl *acl, int type)
 {
 	int ret = 0, size = 0;
 	const char *name = NULL;
 	char *value = NULL;
 	struct iattr newattrs;
+	struct inode *inode = d_inode(dentry);
 	struct timespec64 old_ctime = inode->i_ctime;
 	umode_t new_mode = inode->i_mode, old_mode = inode->i_mode;
 
@@ -100,7 +105,8 @@ int ceph_set_acl(struct inode *inode, struct posix_acl *acl, int type)
 	case ACL_TYPE_ACCESS:
 		name = XATTR_NAME_POSIX_ACL_ACCESS;
 		if (acl) {
-			ret = posix_acl_update_mode(inode, &new_mode, &acl);
+			ret = posix_acl_update_mode(&nop_mnt_idmap, inode,
+						    &new_mode, &acl);
 			if (ret)
 				goto out;
 		}

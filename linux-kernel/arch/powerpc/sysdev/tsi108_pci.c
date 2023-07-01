@@ -12,7 +12,9 @@
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/irq.h>
+#include <linux/irqdomain.h>
 #include <linux/interrupt.h>
+#include <linux/of_address.h>
 
 #include <asm/byteorder.h>
 #include <asm/io.h>
@@ -23,7 +25,6 @@
 #include <asm/tsi108.h>
 #include <asm/tsi108_pci.h>
 #include <asm/tsi108_irq.h>
-#include <asm/prom.h>
 
 #undef DEBUG
 #ifdef DEBUG
@@ -257,7 +258,7 @@ static void tsi108_pci_int_unmask(u_int irq)
 	mb();
 }
 
-static void init_pci_source(void)
+static void __init init_pci_source(void)
 {
 	tsi108_write_reg(TSI108_PCI_OFFSET + TSI108_PCI_IRP_CFG_CTL,
 			0x0000ff00);
@@ -404,7 +405,8 @@ void __init tsi108_pci_int_init(struct device_node *node)
 {
 	DBG("Tsi108_pci_int_init: initializing PCI interrupts\n");
 
-	pci_irq_host = irq_domain_add_legacy_isa(node, &pci_irq_domain_ops, NULL);
+	pci_irq_host = irq_domain_add_legacy(node, NR_IRQS_LEGACY, 0, 0,
+					     &pci_irq_domain_ops, NULL);
 	if (pci_irq_host == NULL) {
 		printk(KERN_ERR "pci_irq_host: failed to allocate irq domain!\n");
 		return;

@@ -1,6 +1,5 @@
+/* SPDX-License-Identifier: MIT */
 /*
- * SPDX-License-Identifier: MIT
- *
  * Copyright © 2019 Intel Corporation
  */
 
@@ -22,31 +21,21 @@
 #include "i915_pmu.h"
 #include "i915_priolist_types.h"
 #include "i915_selftest.h"
-#include "intel_engine_pool_types.h"
 #include "intel_sseu.h"
 #include "intel_timeline_types.h"
+#include "intel_uncore.h"
 #include "intel_wakeref.h"
 #include "intel_workarounds_types.h"
 
-/* Legacy HW Engine ID */
-
-#define RCS0_HW		0
-#define VCS0_HW		1
-#define BCS0_HW		2
-#define VECS0_HW	3
-#define VCS1_HW		4
-#define VCS2_HW		6
-#define VCS3_HW		7
-#define VECS1_HW	12
-
-/* Gen11+ HW Engine class + instance */
+/* HW Engine class + instance */
 #define RENDER_CLASS		0
 #define VIDEO_DECODE_CLASS	1
 #define VIDEO_ENHANCEMENT_CLASS	2
 #define COPY_ENGINE_CLASS	3
 #define OTHER_CLASS		4
-#define MAX_ENGINE_CLASS	4
-#define MAX_ENGINE_INSTANCE	3
+#define COMPUTE_CLASS		5
+#define MAX_ENGINE_CLASS	5
+#define MAX_ENGINE_INSTANCE	8
 
 #define I915_MAX_SLICES	3
 #define I915_MAX_SUBSLICES 8
@@ -59,14 +48,17 @@ struct drm_i915_reg_table;
 struct i915_gem_context;
 struct i915_request;
 struct i915_sched_attr;
+struct i915_sched_engine;
 struct intel_gt;
 struct intel_ring;
 struct intel_uncore;
+struct intel_breadcrumbs;
 
-typedef u8 intel_engine_mask_t;
+typedef u32 intel_engine_mask_t;
 #define ALL_ENGINES ((intel_engine_mask_t)~0ul)
 
 struct intel_hw_status_page {
+	struct list_head timelines;
 	struct i915_vma *vma;
 	u32 *addr;
 };
@@ -75,8 +67,12 @@ struct intel_instdone {
 	u32 instdone;
 	/* The following exist only in the RCS engine */
 	u32 slice_common;
-	u32 sampler[I915_MAX_SLICES][I915_MAX_SUBSLICES];
-	u32 row[I915_MAX_SLICES][I915_MAX_SUBSLICES];
+	u32 slice_common_extra[2];
+	u32 sampler[GEN_MAX_GSLICES][I915_MAX_SUBSLICES];
+	u32 row[GEN_MAX_GSLICES][I915_MAX_SUBSLICES];
+
+	/* Added in XeHPG */
+	u32 geom_svg[GEN_MAX_GSLICES][I915_MAX_SUBSLICES];
 };
 
 /*
@@ -98,8 +94,12 @@ struct i915_ctx_workarounds {
 	struct i915_vma *vma;
 };
 
-#define I915_MAX_VCS	4
-#define I915_MAX_VECS	2
+#define I915_MAX_VCS	8
+#define I915_MAX_VECS	4
+#define I915_MAX_SFC	(I915_MAX_VCS / 2)
+#define I915_MAX_CCS	4
+#define I915_MAX_RCS	1
+#define I915_MAX_BCS	9
 
 /*
  * Engine IDs definitions.
@@ -108,14 +108,35 @@ struct i915_ctx_workarounds {
 enum intel_engine_id {
 	RCS0 = 0,
 	BCS0,
+	BCS1,
+	BCS2,
+	BCS3,
+	BCS4,
+	BCS5,
+	BCS6,
+	BCS7,
+	BCS8,
+#define _BCS(n) (BCS0 + (n))
 	VCS0,
 	VCS1,
 	VCS2,
 	VCS3,
+	VCS4,
+	VCS5,
+	VCS6,
+	VCS7,
 #define _VCS(n) (VCS0 + (n))
 	VECS0,
 	VECS1,
+	VECS2,
+	VECS3,
 #define _VECS(n) (VECS0 + (n))
+	CCS0,
+	CCS1,
+	CCS2,
+	CCS3,
+#define _CCS(n) (CCS0 + (n))
+	GSC0,
 	I915_NUM_ENGINES
 #define INVALID_ENGINE ((enum intel_engine_id)-1)
 };
@@ -126,7 +147,6 @@ DECLARE_EWMA(_engine_latency, 6, 4)
 struct st_preempt_hang {
 	struct completion completion;
 	unsigned int count;
-	bool inject_hang;
 };
 
 /**
@@ -136,11 +156,6 @@ struct st_preempt_hang {
  * driver and the hardware state for execlist mode of submission.
  */
 struct intel_engine_execlists {
-	/**
-	 * @tasklet: softirq tasklet for bottom handler
-	 */
-	struct tasklet_struct tasklet;
-
 	/**
 	 * @timer: kick the current context if its timeslice expires
 	 */
@@ -152,14 +167,53 @@ struct intel_engine_execlists {
 	struct timer_list preempt;
 
 	/**
-	 * @default_priolist: priority list for I915_PRIORITY_NORMAL
+	 * @preempt_target: active request at the time of the preemption request
+	 *
+	 * We force a preemption to occur if the pending contexts have not
+	 * been promoted to active upon receipt of the CS ack event within
+	 * the timeout. This timeout maybe chosen based on the target,
+	 * using a very short timeout if the context is no longer schedulable.
+	 * That short timeout may not be applicable to other contexts, so
+	 * if a context switch should happen within before the preemption
+	 * timeout, we may shoot early at an innocent context. To prevent this,
+	 * we record which context was active at the time of the preemption
+	 * request and only reset that context upon the timeout.
 	 */
-	struct i915_priolist default_priolist;
+	const struct i915_request *preempt_target;
 
 	/**
-	 * @no_priolist: priority lists disabled
+	 * @ccid: identifier for contexts submitted to this engine
 	 */
-	bool no_priolist;
+	u32 ccid;
+
+	/**
+	 * @yield: CCID at the time of the last semaphore-wait interrupt.
+	 *
+	 * Instead of leaving a semaphore busy-spinning on an engine, we would
+	 * like to switch to another ready context, i.e. yielding the semaphore
+	 * timeslice.
+	 */
+	u32 yield;
+
+	/**
+	 * @error_interrupt: CS Master EIR
+	 *
+	 * The CS generates an interrupt when it detects an error. We capture
+	 * the first error interrupt, record the EIR and schedule the tasklet.
+	 * In the tasklet, we process the pending CS events to ensure we have
+	 * the guilty request, and then reset the engine.
+	 *
+	 * Low 16b are used by HW, with the upper 16b used as the enabling mask.
+	 * Reserve the upper 16b for tracking internal errors.
+	 */
+	u32 error_interrupt;
+#define ERROR_CSB	BIT(31)
+#define ERROR_PREEMPT	BIT(30)
+
+	/**
+	 * @reset_ccid: Active CCID [EXECLISTS_STATUS_HI] at the time of reset
+	 */
+	u32 reset_ccid;
 
 	/**
 	 * @submit_reg: gen-specific execlist submission register
@@ -203,33 +257,10 @@ struct intel_engine_execlists {
 	unsigned int port_mask;
 
 	/**
-	 * @switch_priority_hint: Second context priority.
-	 *
-	 * We submit multiple contexts to the HW simultaneously and would
-	 * like to occasionally switch between them to emulate timeslicing.
-	 * To know when timeslicing is suitable, we track the priority of
-	 * the context submitted second.
+	 * @virtual: Queue of requets on a virtual engine, sorted by priority.
+	 * Each RB entry is a struct i915_priolist containing a list of requests
+	 * of the same priority.
 	 */
-	int switch_priority_hint;
-
-	/**
-	 * @queue_priority_hint: Highest pending priority.
-	 *
-	 * When we add requests into the queue, or adjust the priority of
-	 * executing requests, we compute the maximum priority of those
-	 * pending requests. We can then use this value to determine if
-	 * we need to preempt the executing requests to service the queue.
-	 * However, since the we may have recorded the priority of an inflight
-	 * request we wanted to preempt but since completed, at the time of
-	 * dequeuing the priority hint may no longer may match the highest
-	 * available request priority.
-	 */
-	int queue_priority_hint;
-
-	/**
-	 * @queue: queue of requests, in priority lists
-	 */
-	struct rb_root_cached queue;
 	struct rb_root_cached virtual;
 
 	/**
@@ -244,7 +275,7 @@ struct intel_engine_execlists {
 	 *
 	 * Note these register may be either mmio or HWSP shadow.
 	 */
-	u32 *csb_status;
+	u64 *csb_status;
 
 	/**
 	 * @csb_size: context status buffer FIFO size
@@ -261,6 +292,55 @@ struct intel_engine_execlists {
 
 #define INTEL_ENGINE_CS_MAX_NAME 8
 
+struct intel_engine_execlists_stats {
+	/**
+	 * @active: Number of contexts currently scheduled in.
+	 */
+	unsigned int active;
+
+	/**
+	 * @lock: Lock protecting the below fields.
+	 */
+	seqcount_t lock;
+
+	/**
+	 * @total: Total time this engine was busy.
+	 *
+	 * Accumulated time not counting the most recent block in cases where
+	 * engine is currently busy (active > 0).
+	 */
+	ktime_t total;
+
+	/**
+	 * @start: Timestamp of the last idle to active transition.
+	 *
+	 * Idle is defined as active == 0, active is active > 0.
+	 */
+	ktime_t start;
+};
+
+struct intel_engine_guc_stats {
+	/**
+	 * @running: Active state of the engine when busyness was last sampled.
+	 */
+	bool running;
+
+	/**
+	 * @prev_total: Previous value of total runtime clock cycles.
+	 */
+	u32 prev_total;
+
+	/**
+	 * @total_gt_clks: Total gt clock cycles this engine was busy.
+	 */
+	u64 total_gt_clks;
+
+	/**
+	 * @start_gt_clk: GT clock time of last idle to active transition.
+	 */
+	u64 start_gt_clk;
+};
+
 struct intel_engine_cs {
 	struct drm_i915_private *i915;
 	struct intel_gt *gt;
@@ -270,10 +350,17 @@ struct intel_engine_cs {
 	enum intel_engine_id id;
 	enum intel_engine_id legacy_idx;
 
-	unsigned int hw_id;
 	unsigned int guc_id;
 
 	intel_engine_mask_t mask;
+	u32 reset_domain;
+	/**
+	 * @logical_mask: logical mask of engine, reported to user space via
+	 * query IOCTL and used to communicate with the GuC in logical space.
+	 * The logical instance of a physical engine can change based on product
+	 * and fusing.
+	 */
+	intel_engine_mask_t logical_mask;
 
 	u8 class;
 	u8 instance;
@@ -285,35 +372,53 @@ struct intel_engine_cs {
 	u32 context_size;
 	u32 mmio_base;
 
-	unsigned int context_tag;
-#define NUM_CONTEXT_TAG roundup_pow_of_two(2 * EXECLIST_MAX_PORTS)
+	/*
+	 * Some w/a require forcewake to be held (which prevents RC6) while
+	 * a particular engine is active. If so, we set fw_domain to which
+	 * domains need to be held for the duration of request activity,
+	 * and 0 if none. We try to limit the duration of the hold as much
+	 * as possible.
+	 */
+	enum forcewake_domains fw_domain;
+	unsigned int fw_active;
+
+	unsigned long context_tag;
 
 	struct rb_node uabi_node;
 
 	struct intel_sseu sseu;
 
-	struct {
-		spinlock_t lock;
-		struct list_head requests;
-	} active;
+	struct i915_sched_engine *sched_engine;
+
+	/* keep a request in reserve for a [pm] barrier under oom */
+	struct i915_request *request_pool;
+
+	struct intel_context *hung_ce;
 
 	struct llist_head barrier_tasks;
 
 	struct intel_context *kernel_context; /* pinned */
+
+	/**
+	 * pinned_contexts_list: List of pinned contexts. This list is only
+	 * assumed to be manipulated during driver load- or unload time and
+	 * does therefore not have any additional protection.
+	 */
+	struct list_head pinned_contexts_list;
 
 	intel_engine_mask_t saturated; /* submitting semaphores too late? */
 
 	struct {
 		struct delayed_work work;
 		struct i915_request *systole;
+		unsigned long blocked;
 	} heartbeat;
 
 	unsigned long serial;
 
 	unsigned long wakeref_serial;
 	struct intel_wakeref wakeref;
-	struct drm_i915_gem_object *default_state;
-	void *pinned_default_state;
+	struct file *default_state;
 
 	struct {
 		struct intel_ring *ring;
@@ -327,32 +432,8 @@ struct intel_engine_cs {
 	 */
 	struct ewma__engine_latency latency;
 
-	/* Rather than have every client wait upon all user interrupts,
-	 * with the herd waking after every interrupt and each doing the
-	 * heavyweight seqno dance, we delegate the task (of being the
-	 * bottom-half of the user interrupt) to the first client. After
-	 * every interrupt, we wake up one client, who does the heavyweight
-	 * coherent seqno read and either goes back to sleep (if incomplete),
-	 * or wakes up all the completed clients in parallel, before then
-	 * transferring the bottom-half status to the next client in the queue.
-	 *
-	 * Compared to walking the entire list of waiters in a single dedicated
-	 * bottom-half, we reduce the latency of the first waiter by avoiding
-	 * a context switch, but incur additional coherent seqno reads when
-	 * following the chain of request breadcrumbs. Since it is most likely
-	 * that we have a single client waiting on each seqno, then reducing
-	 * the overhead of waking that client is much preferred.
-	 */
-	struct intel_breadcrumbs {
-		spinlock_t irq_lock;
-		struct list_head signalers;
-
-		struct irq_work irq_work; /* for use from inside irq_lock */
-
-		unsigned int irq_enabled;
-
-		bool irq_armed;
-	} breadcrumbs;
+	/* Keep track of all the seqno used, a trail of breadcrumbs */
+	struct intel_breadcrumbs *breadcrumbs;
 
 	struct intel_engine_pmu {
 		/**
@@ -378,13 +459,6 @@ struct intel_engine_cs {
 		struct i915_pmu_sample sample[I915_ENGINE_SAMPLE_COUNT];
 	} pmu;
 
-	/*
-	 * A pool of objects to use as shadow copies of client batch buffers
-	 * when the command parser is enabled. Prevents the client from
-	 * modifying the batch contents after software parsing.
-	 */
-	struct intel_engine_pool pool;
-
 	struct intel_hw_status_page status_page;
 	struct i915_ctx_workarounds wa_ctx;
 	struct i915_wa_list ctx_wa_list;
@@ -395,7 +469,9 @@ struct intel_engine_cs {
 	u32		irq_enable_mask; /* bitmask to enable ring interrupt */
 	void		(*irq_enable)(struct intel_engine_cs *engine);
 	void		(*irq_disable)(struct intel_engine_cs *engine);
+	void		(*irq_handler)(struct intel_engine_cs *engine, u16 iir);
 
+	void		(*sanitize)(struct intel_engine_cs *engine);
 	int		(*resume)(struct intel_engine_cs *engine);
 
 	struct {
@@ -409,6 +485,8 @@ struct intel_engine_cs {
 
 	void		(*park)(struct intel_engine_cs *engine);
 	void		(*unpark)(struct intel_engine_cs *engine);
+
+	void		(*bump_serial)(struct intel_engine_cs *engine);
 
 	void		(*set_default_submission)(struct intel_engine_cs *engine);
 
@@ -438,22 +516,19 @@ struct intel_engine_cs {
 	 */
 	void		(*submit_request)(struct i915_request *rq);
 
-	/*
-	 * Called on signaling of a SUBMIT_FENCE, passing along the signaling
-	 * request down to the bonded pairs.
-	 */
-	void            (*bond_execute)(struct i915_request *rq,
-					struct dma_fence *signal);
-
-	/*
-	 * Call when the priority on a request has changed and it and its
-	 * dependencies may need rescheduling. Note the request itself may
-	 * not be ready to run!
-	 */
-	void		(*schedule)(struct i915_request *request,
-				    const struct i915_sched_attr *attr);
-
 	void		(*release)(struct intel_engine_cs *engine);
+
+	/*
+	 * Add / remove request from engine active tracking
+	 */
+	void		(*add_active_request)(struct i915_request *rq);
+	void		(*remove_active_request)(struct i915_request *rq);
+
+	/*
+	 * Get engine busyness and the time at which the busyness was sampled.
+	 */
+	ktime_t		(*busyness)(struct intel_engine_cs *engine,
+				    ktime_t *now);
 
 	struct intel_engine_execlists execlists;
 
@@ -472,10 +547,15 @@ struct intel_engine_cs {
 #define I915_ENGINE_SUPPORTS_STATS   BIT(1)
 #define I915_ENGINE_HAS_PREEMPTION   BIT(2)
 #define I915_ENGINE_HAS_SEMAPHORES   BIT(3)
-#define I915_ENGINE_NEEDS_BREADCRUMB_TASKLET BIT(4)
+#define I915_ENGINE_HAS_TIMESLICES   BIT(4)
 #define I915_ENGINE_IS_VIRTUAL       BIT(5)
 #define I915_ENGINE_HAS_RELATIVE_MMIO BIT(6)
 #define I915_ENGINE_REQUIRES_CMD_PARSER BIT(7)
+#define I915_ENGINE_WANT_FORCED_PREEMPTION BIT(8)
+#define I915_ENGINE_HAS_RCS_REG_STATE  BIT(9)
+#define I915_ENGINE_HAS_EU_PRIORITY    BIT(10)
+#define I915_ENGINE_FIRST_RENDER_COMPUTE BIT(11)
+#define I915_ENGINE_USES_WA_HOLD_CCS_SWITCHOUT BIT(12)
 	unsigned int flags;
 
 	/*
@@ -503,43 +583,26 @@ struct intel_engine_cs {
 	u32 (*get_cmd_length_mask)(u32 cmd_header);
 
 	struct {
+		union {
+			struct intel_engine_execlists_stats execlists;
+			struct intel_engine_guc_stats guc;
+		};
+
 		/**
-		 * @lock: Lock protecting the below fields.
+		 * @rps: Utilisation at last RPS sampling.
 		 */
-		seqlock_t lock;
-		/**
-		 * @enabled: Reference count indicating number of listeners.
-		 */
-		unsigned int enabled;
-		/**
-		 * @active: Number of contexts currently scheduled in.
-		 */
-		unsigned int active;
-		/**
-		 * @enabled_at: Timestamp when busy stats were enabled.
-		 */
-		ktime_t enabled_at;
-		/**
-		 * @start: Timestamp of the last idle to active transition.
-		 *
-		 * Idle is defined as active == 0, active is active > 0.
-		 */
-		ktime_t start;
-		/**
-		 * @total: Total time this engine was busy.
-		 *
-		 * Accumulated time not counting the most recent block in cases
-		 * where engine is currently busy (active > 0).
-		 */
-		ktime_t total;
+		ktime_t rps;
 	} stats;
 
 	struct {
 		unsigned long heartbeat_interval_ms;
+		unsigned long max_busywait_duration_ns;
 		unsigned long preempt_timeout_ms;
 		unsigned long stop_timeout_ms;
 		unsigned long timeslice_duration_ms;
-	} props;
+	} props, defaults;
+
+	I915_SELFTEST_DECLARE(struct fault_attr reset_timeout);
 };
 
 static inline bool
@@ -573,9 +636,12 @@ intel_engine_has_semaphores(const struct intel_engine_cs *engine)
 }
 
 static inline bool
-intel_engine_needs_breadcrumb_tasklet(const struct intel_engine_cs *engine)
+intel_engine_has_timeslices(const struct intel_engine_cs *engine)
 {
-	return engine->flags & I915_ENGINE_NEEDS_BREADCRUMB_TASKLET;
+	if (!CONFIG_DRM_I915_TIMESLICE_DURATION)
+		return false;
+
+	return engine->flags & I915_ENGINE_HAS_TIMESLICES;
 }
 
 static inline bool
@@ -590,18 +656,11 @@ intel_engine_has_relative_mmio(const struct intel_engine_cs * const engine)
 	return engine->flags & I915_ENGINE_HAS_RELATIVE_MMIO;
 }
 
-#define instdone_has_slice(dev_priv___, sseu___, slice___) \
-	((IS_GEN(dev_priv___, 7) ? 1 : ((sseu___)->slice_mask)) & BIT(slice___))
+/* Wa_14014475959:dg2 */
+static inline bool
+intel_engine_uses_wa_hold_ccs_switchout(struct intel_engine_cs *engine)
+{
+	return engine->flags & I915_ENGINE_USES_WA_HOLD_CCS_SWITCHOUT;
+}
 
-#define instdone_has_subslice(dev_priv__, sseu__, slice__, subslice__) \
-	(IS_GEN(dev_priv__, 7) ? (1 & BIT(subslice__)) : \
-	 intel_sseu_has_subslice(sseu__, 0, subslice__))
-
-#define for_each_instdone_slice_subslice(dev_priv_, sseu_, slice_, subslice_) \
-	for ((slice_) = 0, (subslice_) = 0; (slice_) < I915_MAX_SLICES; \
-	     (subslice_) = ((subslice_) + 1) % I915_MAX_SUBSLICES, \
-	     (slice_) += ((subslice_) == 0)) \
-		for_each_if((instdone_has_slice(dev_priv_, sseu_, slice_)) && \
-			    (instdone_has_subslice(dev_priv_, sseu_, slice_, \
-						    subslice_)))
 #endif /* __INTEL_ENGINE_TYPES_H__ */

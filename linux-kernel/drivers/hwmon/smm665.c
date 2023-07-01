@@ -265,7 +265,7 @@ static struct smm665_data *smm665_update_device(struct device *dev)
 			data->adc[i] = val;
 		}
 		data->last_updated = jiffies;
-		data->valid = 1;
+		data->valid = true;
 	}
 abort:
 	mutex_unlock(&data->update_lock);
@@ -351,7 +351,7 @@ static ssize_t smm665_show_crit_alarm(struct device *dev,
 	if (data->faults & (1 << attr->index))
 		val = 1;
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", val);
+	return sysfs_emit(buf, "%d\n", val);
 }
 
 static ssize_t smm665_show_input(struct device *dev,
@@ -366,7 +366,7 @@ static ssize_t smm665_show_input(struct device *dev,
 		return PTR_ERR(data);
 
 	val = smm665_convert(data->adc[adc], adc);
-	return snprintf(buf, PAGE_SIZE, "%d\n", val);
+	return sysfs_emit(buf, "%d\n", val);
 }
 
 #define SMM665_SHOW(what) \
@@ -562,8 +562,9 @@ static struct attribute *smm665_attrs[] = {
 
 ATTRIBUTE_GROUPS(smm665);
 
-static int smm665_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static const struct i2c_device_id smm665_id[];
+
+static int smm665_probe(struct i2c_client *client)
 {
 	struct i2c_adapter *adapter = client->adapter;
 	struct smm665_data *data;
@@ -585,7 +586,7 @@ static int smm665_probe(struct i2c_client *client,
 	mutex_init(&data->update_lock);
 
 	data->client = client;
-	data->type = id->driver_data;
+	data->type = i2c_match_id(smm665_id, client)->driver_data;
 	data->cmdreg = i2c_new_dummy_device(adapter, (client->addr & ~SMM665_REGMASK)
 				     | SMM665_CMDREG_BASE);
 	if (IS_ERR(data->cmdreg))
@@ -670,12 +671,11 @@ out_unregister:
 	return ret;
 }
 
-static int smm665_remove(struct i2c_client *client)
+static void smm665_remove(struct i2c_client *client)
 {
 	struct smm665_data *data = i2c_get_clientdata(client);
 
 	i2c_unregister_device(data->cmdreg);
-	return 0;
 }
 
 static const struct i2c_device_id smm665_id[] = {
@@ -694,7 +694,7 @@ static struct i2c_driver smm665_driver = {
 	.driver = {
 		   .name = "smm665",
 		   },
-	.probe = smm665_probe,
+	.probe_new = smm665_probe,
 	.remove = smm665_remove,
 	.id_table = smm665_id,
 };

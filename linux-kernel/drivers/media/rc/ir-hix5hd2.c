@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2014 Linaro Ltd.
- * Copyright (c) 2014 Hisilicon Limited.
+ * Copyright (c) 2014 HiSilicon Limited.
  */
 
 #include <linux/clk.h>
@@ -194,7 +194,7 @@ static irqreturn_t hix5hd2_ir_rx_interrupt(int irq, void *data)
 		 * IR_INTS availably since logic would not clear
 		 * fifo when overflow, drv do the job
 		 */
-		ir_raw_event_reset(priv->rdev);
+		ir_raw_event_overflow(priv->rdev);
 		symb_num = readl_relaxed(priv->base + IR_DATAH);
 		for (i = 0; i < symb_num; i++)
 			readl_relaxed(priv->base + IR_DATAL);
@@ -214,12 +214,12 @@ static irqreturn_t hix5hd2_ir_rx_interrupt(int irq, void *data)
 			data_h =  ((symb_val >> 16) & 0xffff) * 10;
 			symb_time = (data_l + data_h) / 10;
 
-			ev.duration = US_TO_NS(data_l);
+			ev.duration = data_l;
 			ev.pulse = true;
 			ir_raw_event_store(priv->rdev, &ev);
 
 			if (symb_time < IR_CFG_SYMBOL_MAXWIDTH) {
-				ev.duration = US_TO_NS(data_h);
+				ev.duration = data_h;
 				ev.pulse = false;
 				ir_raw_event_store(priv->rdev, &ev);
 			} else {
@@ -249,7 +249,6 @@ static int hix5hd2_ir_probe(struct platform_device *pdev)
 {
 	struct rc_dev *rdev;
 	struct device *dev = &pdev->dev;
-	struct resource *res;
 	struct hix5hd2_ir_priv *priv;
 	struct device_node *node = pdev->dev.of_node;
 	const struct of_device_id *of_id;
@@ -274,8 +273,7 @@ static int hix5hd2_ir_probe(struct platform_device *pdev)
 		priv->regmap = NULL;
 	}
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	priv->base = devm_ioremap_resource(dev, res);
+	priv->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(priv->base))
 		return PTR_ERR(priv->base);
 
@@ -311,8 +309,8 @@ static int hix5hd2_ir_probe(struct platform_device *pdev)
 	rdev->input_id.vendor = 0x0001;
 	rdev->input_id.product = 0x0001;
 	rdev->input_id.version = 0x0100;
-	rdev->rx_resolution = US_TO_NS(10);
-	rdev->timeout = US_TO_NS(IR_CFG_SYMBOL_MAXWIDTH * 10);
+	rdev->rx_resolution = 10;
+	rdev->timeout = IR_CFG_SYMBOL_MAXWIDTH * 10;
 
 	ret = rc_register_device(rdev);
 	if (ret < 0)

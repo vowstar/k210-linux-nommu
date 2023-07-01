@@ -25,8 +25,15 @@
 #include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/pci.h>
+#include <linux/dma-map-ops.h>
 #include <linux/scatterlist.h>
 #include <linux/iommu-helper.h>
+/*
+ * The semantics of 64 register access on 32bit systems can't be guaranteed
+ * by the C standard, we hope the _lo_hi() macros defining readq and writeq
+ * here will behave as expected.
+ */
+#include <linux/io-64-nonatomic-lo-hi.h>
 
 #include <asm/byteorder.h>
 #include <asm/io.h>
@@ -342,8 +349,7 @@ sba_search_bitmap(struct ioc *ioc, struct device *dev,
 	unsigned long shift;
 	int ret;
 
-	boundary_size = ALIGN((unsigned long long)dma_get_seg_boundary(dev) + 1,
-			      1ULL << IOVP_SHIFT) >> IOVP_SHIFT;
+	boundary_size = dma_get_seg_boundary_nr_pages(dev, IOVP_SHIFT);
 
 #if defined(ZX1_SUPPORT)
 	BUG_ON(ioc->ibase & ~IOVP_MASK);
@@ -666,7 +672,7 @@ sba_mark_invalid(struct ioc *ioc, dma_addr_t iova, size_t byte_cnt)
  * @dev: instance of PCI owned by the driver that's asking
  * @mask:  number of address bits this PCI device can handle
  *
- * See Documentation/DMA-API-HOWTO.txt
+ * See Documentation/core-api/dma-api-howto.rst
  */
 static int sba_dma_supported( struct device *dev, u64 mask)
 {
@@ -698,7 +704,7 @@ static int sba_dma_supported( struct device *dev, u64 mask)
  * @size:  number of bytes to map in driver buffer.
  * @direction:  R/W or both.
  *
- * See Documentation/DMA-API-HOWTO.txt
+ * See Documentation/core-api/dma-api-howto.rst
  */
 static dma_addr_t
 sba_map_single(struct device *dev, void *addr, size_t size,
@@ -788,7 +794,7 @@ sba_map_page(struct device *dev, struct page *page, unsigned long offset,
  * @size:  number of bytes mapped in driver buffer.
  * @direction:  R/W or both.
  *
- * See Documentation/DMA-API-HOWTO.txt
+ * See Documentation/core-api/dma-api-howto.rst
  */
 static void
 sba_unmap_page(struct device *dev, dma_addr_t iova, size_t size,
@@ -867,7 +873,7 @@ sba_unmap_page(struct device *dev, dma_addr_t iova, size_t size,
  * @size:  number of bytes mapped in driver buffer.
  * @dma_handle:  IOVA of new buffer.
  *
- * See Documentation/DMA-API-HOWTO.txt
+ * See Documentation/core-api/dma-api-howto.rst
  */
 static void *sba_alloc(struct device *hwdev, size_t size, dma_addr_t *dma_handle,
 		gfp_t gfp, unsigned long attrs)
@@ -898,7 +904,7 @@ static void *sba_alloc(struct device *hwdev, size_t size, dma_addr_t *dma_handle
  * @vaddr:  virtual address IOVA of "consistent" buffer.
  * @dma_handler:  IO virtual address of "consistent" buffer.
  *
- * See Documentation/DMA-API-HOWTO.txt
+ * See Documentation/core-api/dma-api-howto.rst
  */
 static void
 sba_free(struct device *hwdev, size_t size, void *vaddr,
@@ -933,7 +939,7 @@ int dump_run_sg = 0;
  * @nents:  number of entries in list
  * @direction:  R/W or both.
  *
- * See Documentation/DMA-API-HOWTO.txt
+ * See Documentation/core-api/dma-api-howto.rst
  */
 static int
 sba_map_sg(struct device *dev, struct scatterlist *sglist, int nents,
@@ -947,7 +953,7 @@ sba_map_sg(struct device *dev, struct scatterlist *sglist, int nents,
 
 	ioc = GET_IOC(dev);
 	if (!ioc)
-		return 0;
+		return -EINVAL;
 
 	/* Fast path single entry scatterlists. */
 	if (nents == 1) {
@@ -1017,7 +1023,7 @@ sba_map_sg(struct device *dev, struct scatterlist *sglist, int nents,
  * @nents:  number of entries in list
  * @direction:  R/W or both.
  *
- * See Documentation/DMA-API-HOWTO.txt
+ * See Documentation/core-api/dma-api-howto.rst
  */
 static void 
 sba_unmap_sg(struct device *dev, struct scatterlist *sglist, int nents,
@@ -1047,7 +1053,7 @@ sba_unmap_sg(struct device *dev, struct scatterlist *sglist, int nents,
 	spin_unlock_irqrestore(&ioc->res_lock, flags);
 #endif
 
-	while (sg_dma_len(sglist) && nents--) {
+	while (nents && sg_dma_len(sglist)) {
 
 		sba_unmap_page(dev, sg_dma_address(sglist), sg_dma_len(sglist),
 				direction, 0);
@@ -1056,6 +1062,7 @@ sba_unmap_sg(struct device *dev, struct scatterlist *sglist, int nents,
 		ioc->usingle_calls--;	/* kluge since call is unmap_sg() */
 #endif
 		++sglist;
+		nents--;
 	}
 
 	DBG_RUN_SG("%s() DONE (nents %d)\n", __func__,  nents);
@@ -1077,6 +1084,8 @@ static const struct dma_map_ops sba_ops = {
 	.map_sg =		sba_map_sg,
 	.unmap_sg =		sba_unmap_sg,
 	.get_sgtable =		dma_common_get_sgtable,
+	.alloc_pages =		dma_common_alloc_pages,
+	.free_pages =		dma_common_free_pages,
 };
 
 
@@ -1270,7 +1279,7 @@ sba_ioc_init_pluto(struct parisc_device *sba, struct ioc *ioc, int ioc_num)
 	** (one that doesn't overlap memory or LMMIO space) in the
 	** IBASE and IMASK registers.
 	*/
-	ioc->ibase = READ_REG(ioc->ioc_hpa + IOC_IBASE);
+	ioc->ibase = READ_REG(ioc->ioc_hpa + IOC_IBASE) & ~0x1fffffULL;
 	iova_space_size = ~(READ_REG(ioc->ioc_hpa + IOC_IMASK) & 0xFFFFFFFFUL) + 1;
 
 	if ((ioc->ibase < 0xfed00000UL) && ((ioc->ibase + iova_space_size) > 0xfee00000UL)) {

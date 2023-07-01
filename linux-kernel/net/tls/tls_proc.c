@@ -6,6 +6,8 @@
 #include <net/snmp.h>
 #include <net/tls.h>
 
+#include "tls.h"
+
 #ifdef CONFIG_PROC_FS
 static const struct snmp_mib tls_mib_list[] = {
 	SNMP_MIB_ITEM("TlsCurrTxSw", LINUX_MIB_TLSCURRTXSW),
@@ -18,6 +20,8 @@ static const struct snmp_mib tls_mib_list[] = {
 	SNMP_MIB_ITEM("TlsRxDevice", LINUX_MIB_TLSRXDEVICE),
 	SNMP_MIB_ITEM("TlsDecryptError", LINUX_MIB_TLSDECRYPTERROR),
 	SNMP_MIB_ITEM("TlsRxDeviceResync", LINUX_MIB_TLSRXDEVICERESYNC),
+	SNMP_MIB_ITEM("TlsDecryptRetry", LINUX_MIB_TLSDECRYPTRETRY),
+	SNMP_MIB_ITEM("TlsRxNoPadViolation", LINUX_MIB_TLSRXNOPADVIOL),
 	SNMP_MIB_SENTINEL
 };
 
@@ -37,9 +41,12 @@ static int tls_statistics_seq_show(struct seq_file *seq, void *v)
 
 int __net_init tls_proc_init(struct net *net)
 {
+#ifdef CONFIG_PROC_FS
 	if (!proc_create_net_single("tls_stat", 0444, net->proc_net,
 				    tls_statistics_seq_show, NULL))
 		return -ENOMEM;
+#endif /* CONFIG_PROC_FS */
+
 	return 0;
 }
 

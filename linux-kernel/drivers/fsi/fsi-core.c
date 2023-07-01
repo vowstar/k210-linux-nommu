@@ -24,9 +24,6 @@
 
 #include "fsi-master.h"
 
-#define CREATE_TRACE_POINTS
-#include <trace/events/fsi.h>
-
 #define FSI_SLAVE_CONF_NEXT_MASK	GENMASK(31, 31)
 #define FSI_SLAVE_CONF_SLOTS_MASK	GENMASK(23, 16)
 #define FSI_SLAVE_CONF_SLOTS_SHIFT	16
@@ -50,6 +47,7 @@ static const int engine_page_size = 0x400;
 #define FSI_SMODE		0x0	/* R/W: Mode register */
 #define FSI_SISC		0x8	/* R/W: Interrupt condition */
 #define FSI_SSTAT		0x14	/* R  : Slave status */
+#define FSI_SLBUS		0x30	/* W  : LBUS Ownership */
 #define FSI_LLMODE		0x100	/* R/W: Link layer mode register */
 
 /*
@@ -65,6 +63,11 @@ static const int engine_page_size = 0x400;
 #define FSI_SMODE_SD_MASK	0xf		/* Send delay mask */
 #define FSI_SMODE_LBCRR_SHIFT	8		/* Clk ratio shift */
 #define FSI_SMODE_LBCRR_MASK	0xf		/* Clk ratio mask */
+
+/*
+ * SLBUS fields
+ */
+#define FSI_SLBUS_FORCE		0x80000000	/* Force LBUS ownership */
 
 /*
  * LLMODE fields
@@ -88,6 +91,9 @@ struct fsi_slave {
 	u8			t_send_delay;
 	u8			t_echo_delay;
 };
+
+#define CREATE_TRACE_POINTS
+#include <trace/events/fsi.h>
 
 #define to_fsi_master(d) container_of(d, struct fsi_master, dev)
 #define to_fsi_slave(d) container_of(d, struct fsi_slave, dev)
@@ -386,8 +392,8 @@ int fsi_slave_write(struct fsi_slave *slave, uint32_t addr,
 }
 EXPORT_SYMBOL_GPL(fsi_slave_write);
 
-extern int fsi_slave_claim_range(struct fsi_slave *slave,
-		uint32_t addr, uint32_t size)
+int fsi_slave_claim_range(struct fsi_slave *slave,
+			  uint32_t addr, uint32_t size)
 {
 	if (addr + size < addr)
 		return -EINVAL;
@@ -400,8 +406,8 @@ extern int fsi_slave_claim_range(struct fsi_slave *slave,
 }
 EXPORT_SYMBOL_GPL(fsi_slave_claim_range);
 
-extern void fsi_slave_release_range(struct fsi_slave *slave,
-		uint32_t addr, uint32_t size)
+void fsi_slave_release_range(struct fsi_slave *slave,
+			     uint32_t addr, uint32_t size)
 {
 }
 EXPORT_SYMBOL_GPL(fsi_slave_release_range);
@@ -517,6 +523,8 @@ static int fsi_slave_scan(struct fsi_slave *slave)
 			dev->unit = i;
 			dev->addr = engine_addr;
 			dev->size = slots * engine_page_size;
+
+			trace_fsi_dev_init(dev);
 
 			dev_dbg(&slave->dev,
 			"engine[%i]: type %x, version %x, addr %x size %x\n",
@@ -718,7 +726,7 @@ static ssize_t cfam_read(struct file *filep, char __user *buf, size_t count,
 	rc = count;
  fail:
 	*offset = off;
-	return count;
+	return rc;
 }
 
 static ssize_t cfam_write(struct file *filep, const char __user *buf,
@@ -755,7 +763,7 @@ static ssize_t cfam_write(struct file *filep, const char __user *buf,
 	rc = count;
  fail:
 	*offset = off;
-	return count;
+	return rc;
 }
 
 static loff_t cfam_llseek(struct file *file, loff_t offset, int whence)
@@ -889,10 +897,10 @@ static const struct attribute_group *cfam_attr_groups[] = {
 	NULL,
 };
 
-static char *cfam_devnode(struct device *dev, umode_t *mode,
+static char *cfam_devnode(const struct device *dev, umode_t *mode,
 			  kuid_t *uid, kgid_t *gid)
 {
-	struct fsi_slave *slave = to_fsi_slave(dev);
+	const struct fsi_slave *slave = to_fsi_slave(dev);
 
 #ifdef CONFIG_FSI_NEW_DEV_NODE
 	return kasprintf(GFP_KERNEL, "fsi/cfam%d", slave->cdev_idx);
@@ -907,7 +915,7 @@ static const struct device_type cfam_type = {
 	.groups = cfam_attr_groups
 };
 
-static char *fsi_cdev_devnode(struct device *dev, umode_t *mode,
+static char *fsi_cdev_devnode(const struct device *dev, umode_t *mode,
 			      kuid_t *uid, kgid_t *gid)
 {
 #ifdef CONFIG_FSI_NEW_DEV_NODE
@@ -981,7 +989,7 @@ static int fsi_slave_init(struct fsi_master *master, int link, uint8_t id)
 	uint32_t cfam_id;
 	struct fsi_slave *slave;
 	uint8_t crc;
-	__be32 data, llmode;
+	__be32 data, llmode, slbus;
 	int rc;
 
 	/* Currently, we only support single slaves on a link, and use the
@@ -1000,6 +1008,7 @@ static int fsi_slave_init(struct fsi_master *master, int link, uint8_t id)
 
 	crc = crc4(0, cfam_id, 32);
 	if (crc) {
+		trace_fsi_slave_invalid_cfam(master, link, cfam_id);
 		dev_warn(&master->dev, "slave %02x:%02x invalid cfam id CRC!\n",
 				link, id);
 		return -EIO;
@@ -1052,6 +1061,14 @@ static int fsi_slave_init(struct fsi_master *master, int link, uint8_t id)
 
 	}
 
+	slbus = cpu_to_be32(FSI_SLBUS_FORCE);
+	rc = fsi_master_write(master, link, id, FSI_SLAVE_BASE + FSI_SLBUS,
+			      &slbus, sizeof(slbus));
+	if (rc)
+		dev_warn(&master->dev,
+			 "can't set slbus on slave:%02x:%02x %d\n", link, id,
+			 rc);
+
 	rc = fsi_slave_set_smode(slave);
 	if (rc) {
 		dev_warn(&master->dev,
@@ -1065,6 +1082,8 @@ static int fsi_slave_init(struct fsi_master *master, int link, uint8_t id)
 				 &slave->cdev_idx);
 	if (rc)
 		goto err_free;
+
+	trace_fsi_slave_init(slave);
 
 	/* Create chardev for userspace access */
 	cdev_init(&slave->cdev, &cfam_fops);
@@ -1154,10 +1173,18 @@ static int fsi_master_write(struct fsi_master *master, int link,
 	return rc;
 }
 
+static int fsi_master_link_disable(struct fsi_master *master, int link)
+{
+	if (master->link_enable)
+		return master->link_enable(master, link, false);
+
+	return 0;
+}
+
 static int fsi_master_link_enable(struct fsi_master *master, int link)
 {
 	if (master->link_enable)
-		return master->link_enable(master, link);
+		return master->link_enable(master, link, true);
 
 	return 0;
 }
@@ -1192,12 +1219,15 @@ static int fsi_master_scan(struct fsi_master *master)
 		}
 		rc = fsi_master_break(master, link);
 		if (rc) {
+			fsi_master_link_disable(master, link);
 			dev_dbg(&master->dev,
 				"break to link %d failed: %d\n", link, rc);
 			continue;
 		}
 
-		fsi_slave_init(master, link, 0);
+		rc = fsi_slave_init(master, link, 0);
+		if (rc)
+			fsi_master_link_disable(master, link);
 	}
 
 	return 0;
@@ -1284,6 +1314,9 @@ int fsi_master_register(struct fsi_master *master)
 
 	mutex_init(&master->scan_lock);
 	master->idx = ida_simple_get(&master_ida, 0, INT_MAX, GFP_KERNEL);
+	if (master->idx < 0)
+		return master->idx;
+
 	dev_set_name(&master->dev, "fsi%d", master->idx);
 	master->dev.class = &fsi_master_class;
 

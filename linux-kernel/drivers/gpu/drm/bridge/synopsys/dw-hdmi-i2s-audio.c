@@ -45,7 +45,7 @@ static int dw_hdmi_i2s_hw_params(struct device *dev, void *data,
 	u8 inputclkfs = 0;
 
 	/* it cares I2S only */
-	if (fmt->bit_clk_master | fmt->frame_clk_master) {
+	if (fmt->bit_clk_provider | fmt->frame_clk_provider) {
 		dev_err(dev, "unsupported clock settings\n");
 		return -EINVAL;
 	}
@@ -61,10 +61,10 @@ static int dw_hdmi_i2s_hw_params(struct device *dev, void *data,
 	switch (hparms->channels) {
 	case 7 ... 8:
 		conf0 |= HDMI_AUD_CONF0_I2S_EN3;
-		/* Fall-thru */
+		fallthrough;
 	case 5 ... 6:
 		conf0 |= HDMI_AUD_CONF0_I2S_EN2;
-		/* Fall-thru */
+		fallthrough;
 	case 3 ... 4:
 		conf0 |= HDMI_AUD_CONF0_I2S_EN1;
 		/* Fall-thru */
@@ -135,8 +135,15 @@ static int dw_hdmi_i2s_get_eld(struct device *dev, void *data, uint8_t *buf,
 			       size_t len)
 {
 	struct dw_hdmi_i2s_audio_data *audio = data;
+	u8 *eld;
 
-	memcpy(buf, audio->eld, min_t(size_t, MAX_ELD_BYTES, len));
+	eld = audio->get_eld(audio->hdmi);
+	if (eld)
+		memcpy(buf, eld, min_t(size_t, MAX_ELD_BYTES, len));
+	else
+		/* Pass en empty ELD if connector not available */
+		memset(buf, 0, len);
+
 	return 0;
 }
 
@@ -170,7 +177,7 @@ static int dw_hdmi_i2s_hook_plugged_cb(struct device *dev, void *data,
 	return dw_hdmi_set_plugged_cb(hdmi, fn, codec_dev);
 }
 
-static struct hdmi_codec_ops dw_hdmi_i2s_ops = {
+static const struct hdmi_codec_ops dw_hdmi_i2s_ops = {
 	.hw_params	= dw_hdmi_i2s_hw_params,
 	.audio_startup  = dw_hdmi_i2s_audio_startup,
 	.audio_shutdown	= dw_hdmi_i2s_audio_shutdown,
@@ -186,6 +193,7 @@ static int snd_dw_hdmi_probe(struct platform_device *pdev)
 	struct hdmi_codec_pdata pdata;
 	struct platform_device *platform;
 
+	memset(&pdata, 0, sizeof(pdata));
 	pdata.ops		= &dw_hdmi_i2s_ops;
 	pdata.i2s		= 1;
 	pdata.max_i2s_channels	= 8;

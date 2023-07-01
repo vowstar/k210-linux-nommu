@@ -47,11 +47,12 @@ static int xbof = -1;
 static int  ir_startup (struct usb_serial *serial);
 static int ir_write(struct tty_struct *tty, struct usb_serial_port *port,
 		const unsigned char *buf, int count);
-static int ir_write_room(struct tty_struct *tty);
+static unsigned int ir_write_room(struct tty_struct *tty);
 static void ir_write_bulk_callback(struct urb *urb);
 static void ir_process_read_urb(struct urb *urb);
 static void ir_set_termios(struct tty_struct *tty,
-		struct usb_serial_port *port, struct ktermios *old_termios);
+			   struct usb_serial_port *port,
+			   const struct ktermios *old_termios);
 
 /* Not that this lot means you can only have one per system */
 static u8 ir_baud;
@@ -339,10 +340,10 @@ static void ir_write_bulk_callback(struct urb *urb)
 	usb_serial_port_softint(port);
 }
 
-static int ir_write_room(struct tty_struct *tty)
+static unsigned int ir_write_room(struct tty_struct *tty)
 {
 	struct usb_serial_port *port = tty->driver_data;
-	int count = 0;
+	unsigned int count = 0;
 
 	if (port->bulk_out_size == 0)
 		return 0;
@@ -376,7 +377,8 @@ static void ir_process_read_urb(struct urb *urb)
 }
 
 static void ir_set_termios(struct tty_struct *tty,
-		struct usb_serial_port *port, struct ktermios *old_termios)
+			   struct usb_serial_port *port,
+			   const struct ktermios *old_termios)
 {
 	struct usb_device *udev = port->serial->dev;
 	unsigned char *transfer_buffer;
@@ -448,7 +450,7 @@ static void ir_set_termios(struct tty_struct *tty,
 			usb_sndbulkpipe(udev, port->bulk_out_endpointAddress),
 			transfer_buffer, 1, &actual_length, 5000);
 	if (ret || actual_length != 1) {
-		if (actual_length != 1)
+		if (!ret)
 			ret = -EIO;
 		dev_err(&port->dev, "failed to change line speed: %d\n", ret);
 	}

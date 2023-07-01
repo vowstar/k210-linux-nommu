@@ -55,11 +55,13 @@ static int parse_ipv6(void *data, u64 nh_off, void *data_end)
 	return ip6h->nexthdr;
 }
 
-SEC("xdp1")
+#define XDPBUFSIZE	64
+SEC("xdp.frags")
 int xdp_prog1(struct xdp_md *ctx)
 {
-	void *data_end = (void *)(long)ctx->data_end;
-	void *data = (void *)(long)ctx->data;
+	__u8 pkt[XDPBUFSIZE] = {};
+	void *data_end = &pkt[XDPBUFSIZE-1];
+	void *data = pkt;
 	struct ethhdr *eth = data;
 	int rc = XDP_DROP;
 	long *value;
@@ -67,12 +69,16 @@ int xdp_prog1(struct xdp_md *ctx)
 	u64 nh_off;
 	u32 ipproto;
 
+	if (bpf_xdp_load_bytes(ctx, 0, pkt, sizeof(pkt)))
+		return rc;
+
 	nh_off = sizeof(*eth);
 	if (data + nh_off > data_end)
 		return rc;
 
 	h_proto = eth->h_proto;
 
+	/* Handle VLAN tagged packet */
 	if (h_proto == htons(ETH_P_8021Q) || h_proto == htons(ETH_P_8021AD)) {
 		struct vlan_hdr *vhdr;
 
@@ -82,6 +88,7 @@ int xdp_prog1(struct xdp_md *ctx)
 			return rc;
 		h_proto = vhdr->h_vlan_encapsulated_proto;
 	}
+	/* Handle double VLAN tagged packet */
 	if (h_proto == htons(ETH_P_8021Q) || h_proto == htons(ETH_P_8021AD)) {
 		struct vlan_hdr *vhdr;
 
@@ -105,6 +112,10 @@ int xdp_prog1(struct xdp_md *ctx)
 
 	if (ipproto == IPPROTO_UDP) {
 		swap_src_dst_mac(data);
+
+		if (bpf_xdp_store_bytes(ctx, 0, pkt, sizeof(pkt)))
+			return rc;
+
 		rc = XDP_TX;
 	}
 

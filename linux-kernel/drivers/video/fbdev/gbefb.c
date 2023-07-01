@@ -198,7 +198,7 @@ static void gbe_reset(void)
 static void gbe_turn_off(void)
 {
 	int i;
-	unsigned int val, x, y, vpixen_off;
+	unsigned int val, y, vpixen_off;
 
 	gbe_turned_on = 0;
 
@@ -249,7 +249,6 @@ static void gbe_turn_off(void)
 
 	for (i = 0; i < 100000; i++) {
 		val = gbe->vt_xy;
-		x = GET_GBE_FIELD(VT_XY, X, val);
 		y = GET_GBE_FIELD(VT_XY, Y, val);
 		if (y < vpixen_off)
 			break;
@@ -260,7 +259,6 @@ static void gbe_turn_off(void)
 		       "gbefb: wait for vpixen_off timed out\n");
 	for (i = 0; i < 10000; i++) {
 		val = gbe->vt_xy;
-		x = GET_GBE_FIELD(VT_XY, X, val);
 		y = GET_GBE_FIELD(VT_XY, Y, val);
 		if (y > vpixen_off)
 			break;
@@ -1062,29 +1060,24 @@ static const struct fb_ops gbefb_ops = {
 
 static ssize_t gbefb_show_memsize(struct device *dev, struct device_attribute *attr, char *buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%u\n", gbe_mem_size);
+	return sysfs_emit(buf, "%u\n", gbe_mem_size);
 }
 
 static DEVICE_ATTR(size, S_IRUGO, gbefb_show_memsize, NULL);
 
 static ssize_t gbefb_show_rev(struct device *device, struct device_attribute *attr, char *buf)
 {
-	return snprintf(buf, PAGE_SIZE, "%d\n", gbe_revision);
+	return sysfs_emit(buf, "%d\n", gbe_revision);
 }
 
 static DEVICE_ATTR(revision, S_IRUGO, gbefb_show_rev, NULL);
 
-static void gbefb_remove_sysfs(struct device *dev)
-{
-	device_remove_file(dev, &dev_attr_size);
-	device_remove_file(dev, &dev_attr_revision);
-}
-
-static void gbefb_create_sysfs(struct device *dev)
-{
-	device_create_file(dev, &dev_attr_size);
-	device_create_file(dev, &dev_attr_revision);
-}
+static struct attribute *gbefb_attrs[] = {
+	&dev_attr_size.attr,
+	&dev_attr_revision.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(gbefb);
 
 /*
  * Initialization
@@ -1223,7 +1216,6 @@ static int gbefb_probe(struct platform_device *p_dev)
 	}
 
 	platform_set_drvdata(p_dev, info);
-	gbefb_create_sysfs(&p_dev->dev);
 
 	fb_info(info, "%s rev %d @ 0x%08x using %dkB memory\n",
 		info->fix.id, gbe_revision, (unsigned)GBE_BASE,
@@ -1250,7 +1242,6 @@ static int gbefb_remove(struct platform_device* p_dev)
 	gbe_turn_off();
 	arch_phys_wc_del(par->wc_cookie);
 	release_mem_region(GBE_BASE, sizeof(struct sgi_gbe));
-	gbefb_remove_sysfs(&p_dev->dev);
 	framebuffer_release(info);
 
 	return 0;
@@ -1261,6 +1252,7 @@ static struct platform_driver gbefb_driver = {
 	.remove = gbefb_remove,
 	.driver	= {
 		.name = "gbefb",
+		.dev_groups	= gbefb_groups,
 	},
 };
 
@@ -1269,7 +1261,7 @@ static struct platform_device *gbefb_device;
 static int __init gbefb_init(void)
 {
 	int ret = platform_driver_register(&gbefb_driver);
-	if (!ret) {
+	if (IS_ENABLED(CONFIG_SGI_IP32) && !ret) {
 		gbefb_device = platform_device_alloc("gbefb", 0);
 		if (gbefb_device) {
 			ret = platform_device_add(gbefb_device);

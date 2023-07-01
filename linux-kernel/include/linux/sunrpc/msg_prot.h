@@ -10,9 +10,6 @@
 
 #define RPC_VERSION 2
 
-/* size of an XDR encoding unit in bytes, i.e. 32bit */
-#define XDR_UNIT	(4)
-
 /* spec defines authentication flavor as an unsigned 32 bit integer */
 typedef u32	rpc_authflavor_t;
 
@@ -23,6 +20,7 @@ enum rpc_auth_flavors {
 	RPC_AUTH_DES   = 3,
 	RPC_AUTH_KRB   = 4,
 	RPC_AUTH_GSS   = 6,
+	RPC_AUTH_TLS   = 7,
 	RPC_AUTH_MAXFLAVOR = 8,
 	/* pseudoflavors: */
 	RPC_AUTH_GSS_KRB5  = 390003,
@@ -35,6 +33,11 @@ enum rpc_auth_flavors {
 	RPC_AUTH_GSS_SPKMI = 390010,
 	RPC_AUTH_GSS_SPKMP = 390011,
 };
+
+/* Maximum size (in octets) of the machinename in an AUTH_UNIX
+ * credential (per RFC 5531 Appendix A)
+ */
+#define RPC_MAX_MACHINENAME	(255)
 
 /* Maximum size (in bytes) of an rpc credential or verifier */
 #define RPC_MAX_AUTH_SIZE (400)
@@ -143,7 +146,7 @@ typedef __be32	rpc_fraghdr;
 /*
  * Well-known netids. See:
  *
- *   http://www.iana.org/assignments/rpc-netids/rpc-netids.xhtml
+ *   https://www.iana.org/assignments/rpc-netids/rpc-netids.xhtml
  */
 #define RPCBIND_NETID_UDP	"udp"
 #define RPCBIND_NETID_TCP	"tcp"

@@ -118,7 +118,7 @@
 #define SDA_HOLD_TIME		0x90
 
 /**
- * axxia_i2c_dev - I2C device context
+ * struct axxia_i2c_dev - I2C device context
  * @base: pointer to register struct
  * @msg: pointer to current message
  * @msg_r: pointer to current read message (sequence transfer)
@@ -199,7 +199,7 @@ static int axxia_i2c_init(struct axxia_i2c_dev *idev)
 	/* Enable Master Mode */
 	writel(0x1, idev->base + GLOBAL_CONTROL);
 
-	if (idev->bus_clk_rate <= 100000) {
+	if (idev->bus_clk_rate <= I2C_MAX_STANDARD_MODE_FREQ) {
 		/* Standard mode SCL 50/50, tSU:DAT = 250 ns */
 		t_high = divisor * 1 / 2;
 		t_low = divisor * 1 / 2;
@@ -734,7 +734,6 @@ static int axxia_i2c_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
 	struct axxia_i2c_dev *idev = NULL;
-	struct resource *res;
 	void __iomem *base;
 	int ret = 0;
 
@@ -742,16 +741,13 @@ static int axxia_i2c_probe(struct platform_device *pdev)
 	if (!idev)
 		return -ENOMEM;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	base = devm_ioremap_resource(&pdev->dev, res);
+	base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
 	idev->irq = platform_get_irq(pdev, 0);
-	if (idev->irq < 0) {
-		dev_err(&pdev->dev, "missing interrupt resource\n");
+	if (idev->irq < 0)
 		return idev->irq;
-	}
 
 	idev->i2c_clk = devm_clk_get(&pdev->dev, "i2c");
 	if (IS_ERR(idev->i2c_clk)) {
@@ -765,7 +761,7 @@ static int axxia_i2c_probe(struct platform_device *pdev)
 
 	of_property_read_u32(np, "clock-frequency", &idev->bus_clk_rate);
 	if (idev->bus_clk_rate == 0)
-		idev->bus_clk_rate = 100000;	/* default clock rate */
+		idev->bus_clk_rate = I2C_MAX_STANDARD_MODE_FREQ;	/* default clock rate */
 
 	ret = clk_prepare_enable(idev->i2c_clk);
 	if (ret) {
@@ -787,7 +783,7 @@ static int axxia_i2c_probe(struct platform_device *pdev)
 	}
 
 	i2c_set_adapdata(&idev->adapter, idev);
-	strlcpy(idev->adapter.name, pdev->name, sizeof(idev->adapter.name));
+	strscpy(idev->adapter.name, pdev->name, sizeof(idev->adapter.name));
 	idev->adapter.owner = THIS_MODULE;
 	idev->adapter.algo = &axxia_i2c_algo;
 	idev->adapter.bus_recovery_info = &axxia_i2c_recovery_info;

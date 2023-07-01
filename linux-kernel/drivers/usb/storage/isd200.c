@@ -326,7 +326,7 @@ struct isd200_info {
 
 	/* maximum number of LUNs supported */
 	unsigned char MaxLUNs;
-	unsigned char cmnd[BLK_MAX_CDB];
+	unsigned char cmnd[MAX_COMMAND_SIZE];
 	struct scsi_cmnd srb;
 	struct scatterlist sg;
 };
@@ -485,7 +485,7 @@ static int isd200_action( struct us_data *us, int action,
 	int status;
 
 	memset(&ata, 0, sizeof(ata));
-	srb->cmnd = info->cmnd;
+	memcpy(srb->cmnd, info->cmnd, MAX_COMMAND_SIZE);
 	srb->device = &srb_dev;
 
 	ata.generic.SignatureByte0 = info->ConfigData.ATAMajorCommand;
@@ -1383,7 +1383,7 @@ static int isd200_scsi_to_ata(struct scsi_cmnd *srb, struct us_data *us,
 				ATA_CMD_MEDIA_LOCK : ATA_CMD_MEDIA_UNLOCK;
 			isd200_srb_set_bufflen(srb, 0);
 		} else {
-			usb_stor_dbg(us, "   Not removeable media, just report okay\n");
+			usb_stor_dbg(us, "   Not removable media, just report okay\n");
 			srb->result = SAM_STAT_GOOD;
 			sendToTransport = 0;
 		}
@@ -1449,7 +1449,7 @@ static void isd200_free_info_ptrs(void *info_)
  * Allocates (if necessary) and initializes the driver structure.
  *
  * RETURNS:
- *    ISD status code
+ *    error status code
  */
 static int isd200_init_info(struct us_data *us)
 {
@@ -1457,7 +1457,7 @@ static int isd200_init_info(struct us_data *us)
 
 	info = kzalloc(sizeof(struct isd200_info), GFP_KERNEL);
 	if (!info)
-		return ISD200_ERROR;
+		return -ENOMEM;
 
 	info->id = kzalloc(ATA_ID_WORDS * 2, GFP_KERNEL);
 	info->RegsBuf = kmalloc(sizeof(info->ATARegs), GFP_KERNEL);
@@ -1466,13 +1466,13 @@ static int isd200_init_info(struct us_data *us)
 	if (!info->id || !info->RegsBuf || !info->srb.sense_buffer) {
 		isd200_free_info_ptrs(info);
 		kfree(info);
-		return ISD200_ERROR;
+		return -ENOMEM;
 	}
 
 	us->extra = info;
 	us->extra_destructor = isd200_free_info_ptrs;
 
-	return ISD200_GOOD;
+	return 0;
 }
 
 /**************************************************************************

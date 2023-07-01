@@ -34,7 +34,6 @@ int crypto_rng_reset(struct crypto_rng *tfm, const u8 *seed, unsigned int slen)
 	u8 *buf = NULL;
 	int err;
 
-	crypto_stats_get(alg);
 	if (!seed && slen) {
 		buf = kmalloc(slen, GFP_KERNEL);
 		if (!buf)
@@ -46,10 +45,11 @@ int crypto_rng_reset(struct crypto_rng *tfm, const u8 *seed, unsigned int slen)
 		seed = buf;
 	}
 
+	crypto_stats_get(alg);
 	err = crypto_rng_alg(tfm)->seed(tfm, seed, slen);
 	crypto_stats_rng_seed(alg, err);
 out:
-	kzfree(buf);
+	kfree_sensitive(buf);
 	return err;
 }
 EXPORT_SYMBOL_GPL(crypto_rng_reset);

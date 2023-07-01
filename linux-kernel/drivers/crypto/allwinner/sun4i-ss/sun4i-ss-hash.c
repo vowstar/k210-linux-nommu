@@ -9,6 +9,7 @@
  * You could find the datasheet in Documentation/arm/sunxi.rst
  */
 #include "sun4i-ss.h"
+#include <asm/unaligned.h>
 #include <linux/scatterlist.h>
 
 /* This is a totally arbitrary value */
@@ -26,7 +27,7 @@ int sun4i_hash_crainit(struct crypto_tfm *tfm)
 	algt = container_of(alg, struct sun4i_ss_alg_template, alg.hash);
 	op->ss = algt->ss;
 
-	err = pm_runtime_get_sync(op->ss->dev);
+	err = pm_runtime_resume_and_get(op->ss->dev);
 	if (err < 0)
 		return err;
 
@@ -190,13 +191,15 @@ static int sun4i_hash(struct ahash_request *areq)
 	u32 spaces, rx_cnt = SS_RX_DEFAULT, bf[32] = {0}, v, ivmode = 0;
 	struct sun4i_req_ctx *op = ahash_request_ctx(areq);
 	struct crypto_ahash *tfm = crypto_ahash_reqtfm(areq);
+	struct ahash_alg *alg = __crypto_ahash_alg(tfm->base.__crt_alg);
 	struct sun4i_tfm_ctx *tfmctx = crypto_ahash_ctx(tfm);
 	struct sun4i_ss_ctx *ss = tfmctx->ss;
+	struct sun4i_ss_alg_template *algt;
 	struct scatterlist *in_sg = areq->src;
 	struct sg_mapping_iter mi;
 	int in_r, err = 0;
 	size_t copied = 0;
-	__le32 wb = 0;
+	u32 wb = 0;
 
 	dev_dbg(ss->dev, "%s %s bc=%llu len=%u mode=%x wl=%u h0=%0x",
 		__func__, crypto_tfm_alg_name(areq->base.tfm),
@@ -397,6 +400,10 @@ static int sun4i_hash(struct ahash_request *areq)
  */
 
 hash_final:
+	if (IS_ENABLED(CONFIG_CRYPTO_DEV_SUN4I_SS_DEBUG)) {
+		algt = container_of(alg, struct sun4i_ss_alg_template, alg.hash);
+		algt->stat_req++;
+	}
 
 	/* write the remaining words of the wait buffer */
 	if (op->len) {
@@ -408,7 +415,7 @@ hash_final:
 
 		nbw = op->len - 4 * nwait;
 		if (nbw) {
-			wb = cpu_to_le32(*(u32 *)(op->buf + nwait * 4));
+			wb = le32_to_cpup((__le32 *)(op->buf + nwait * 4));
 			wb &= GENMASK((nbw * 8) - 1, 0);
 
 			op->byte_count += nbw;
@@ -417,7 +424,7 @@ hash_final:
 
 	/* write the remaining bytes of the nbw buffer */
 	wb |= ((1 << 7) << (nbw * 8));
-	bf[j++] = le32_to_cpu(wb);
+	((__le32 *)bf)[j++] = cpu_to_le32(wb);
 
 	/*
 	 * number of space to pad to obtain 64o minus 8(size) minus 4 (final 1)
@@ -479,16 +486,16 @@ hash_final:
 	/* Get the hash from the device */
 	if (op->mode == SS_OP_SHA1) {
 		for (i = 0; i < 5; i++) {
+			v = readl(ss->base + SS_MD0 + i * 4);
 			if (ss->variant->sha1_in_be)
-				v = cpu_to_le32(readl(ss->base + SS_MD0 + i * 4));
+				put_unaligned_le32(v, areq->result + i * 4);
 			else
-				v = cpu_to_be32(readl(ss->base + SS_MD0 + i * 4));
-			memcpy(areq->result + i * 4, &v, 4);
+				put_unaligned_be32(v, areq->result + i * 4);
 		}
 	} else {
 		for (i = 0; i < 4; i++) {
-			v = cpu_to_le32(readl(ss->base + SS_MD0 + i * 4));
-			memcpy(areq->result + i * 4, &v, 4);
+			v = readl(ss->base + SS_MD0 + i * 4);
+			put_unaligned_le32(v, areq->result + i * 4);
 		}
 	}
 

@@ -6,6 +6,8 @@
  *  Copyright (C) 2001, 2002 Paul Diefenbaugh <paul.s.diefenbaugh@intel.com>
  */
 
+#define pr_fmt(fmt) "ACPI: utils: " fmt
+
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -18,24 +20,12 @@
 #include "internal.h"
 #include "sleep.h"
 
-#define _COMPONENT		ACPI_BUS_COMPONENT
-ACPI_MODULE_NAME("utils");
-
 /* --------------------------------------------------------------------------
                             Object Evaluation Helpers
    -------------------------------------------------------------------------- */
-static void
-acpi_util_eval_error(acpi_handle h, acpi_string p, acpi_status s)
+static void acpi_util_eval_error(acpi_handle h, acpi_string p, acpi_status s)
 {
-#ifdef ACPI_DEBUG_OUTPUT
-	char prefix[80] = {'\0'};
-	struct acpi_buffer buffer = {sizeof(prefix), prefix};
-	acpi_get_name(h, ACPI_FULL_PATHNAME, &buffer);
-	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Evaluate [%s.%s]: %s\n",
-		(char *) prefix, p, acpi_format_exception(s)));
-#else
-	return;
-#endif
+	acpi_handle_debug(h, "Evaluate [%s]: %s\n", p, acpi_format_exception(s));
 }
 
 acpi_status
@@ -53,25 +43,24 @@ acpi_extract_package(union acpi_object *package,
 
 	if (!package || (package->type != ACPI_TYPE_PACKAGE)
 	    || (package->package.count < 1)) {
-		printk(KERN_WARNING PREFIX "Invalid package argument\n");
+		pr_debug("Invalid package argument\n");
 		return AE_BAD_PARAMETER;
 	}
 
 	if (!format || !format->pointer || (format->length < 1)) {
-		printk(KERN_WARNING PREFIX "Invalid format argument\n");
+		pr_debug("Invalid format argument\n");
 		return AE_BAD_PARAMETER;
 	}
 
 	if (!buffer) {
-		printk(KERN_WARNING PREFIX "Invalid buffer argument\n");
+		pr_debug("Invalid buffer argument\n");
 		return AE_BAD_PARAMETER;
 	}
 
 	format_count = (format->length / sizeof(char)) - 1;
 	if (format_count > package->package.count) {
-		printk(KERN_WARNING PREFIX "Format specifies more objects [%d]"
-			      " than exist in package [%d].\n",
-			      format_count, package->package.count);
+		pr_debug("Format specifies more objects [%d] than present [%d]\n",
+			 format_count, package->package.count);
 		return AE_BAD_DATA;
 	}
 
@@ -99,12 +88,9 @@ acpi_extract_package(union acpi_object *package,
 				tail_offset += sizeof(char *);
 				break;
 			default:
-				printk(KERN_WARNING PREFIX "Invalid package element"
-					      " [%d]: got number, expecting"
-					      " [%c]\n",
-					      i, format_string[i]);
+				pr_debug("Invalid package element [%d]: got number, expected [%c]\n",
+					 i, format_string[i]);
 				return AE_BAD_DATA;
-				break;
 			}
 			break;
 
@@ -124,12 +110,9 @@ acpi_extract_package(union acpi_object *package,
 				tail_offset += sizeof(u8 *);
 				break;
 			default:
-				printk(KERN_WARNING PREFIX "Invalid package element"
-					      " [%d] got string/buffer,"
-					      " expecting [%c]\n",
-					      i, format_string[i]);
+				pr_debug("Invalid package element [%d] got string/buffer, expected [%c]\n",
+					 i, format_string[i]);
 				return AE_BAD_DATA;
-				break;
 			}
 			break;
 		case ACPI_TYPE_LOCAL_REFERENCE:
@@ -139,23 +122,17 @@ acpi_extract_package(union acpi_object *package,
 				tail_offset += sizeof(void *);
 				break;
 			default:
-				printk(KERN_WARNING PREFIX "Invalid package element"
-					      " [%d] got reference,"
-					      " expecting [%c]\n",
-					      i, format_string[i]);
+				pr_debug("Invalid package element [%d] got reference, expected [%c]\n",
+					 i, format_string[i]);
 				return AE_BAD_DATA;
-				break;
 			}
 			break;
 
 		case ACPI_TYPE_PACKAGE:
 		default:
-			ACPI_DEBUG_PRINT((ACPI_DB_INFO,
-					  "Found unsupported element at index=%d\n",
-					  i));
+			pr_debug("Unsupported element at index=%d\n", i);
 			/* TBD: handle nested packages... */
 			return AE_SUPPORT;
-			break;
 		}
 	}
 
@@ -293,12 +270,64 @@ acpi_evaluate_integer(acpi_handle handle,
 
 	*data = element.integer.value;
 
-	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Return value [%llu]\n", *data));
+	acpi_handle_debug(handle, "Return value [%llu]\n", *data);
 
 	return AE_OK;
 }
 
 EXPORT_SYMBOL(acpi_evaluate_integer);
+
+int acpi_get_local_address(acpi_handle handle, u32 *addr)
+{
+	unsigned long long adr;
+	acpi_status status;
+
+	status = acpi_evaluate_integer(handle, METHOD_NAME__ADR, NULL, &adr);
+	if (ACPI_FAILURE(status))
+		return -ENODATA;
+
+	*addr = (u32)adr;
+	return 0;
+}
+EXPORT_SYMBOL(acpi_get_local_address);
+
+#define ACPI_MAX_SUB_BUF_SIZE	9
+
+const char *acpi_get_subsystem_id(acpi_handle handle)
+{
+	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
+	union acpi_object *obj;
+	acpi_status status;
+	const char *sub;
+	size_t len;
+
+	status = acpi_evaluate_object(handle, METHOD_NAME__SUB, NULL, &buffer);
+	if (ACPI_FAILURE(status)) {
+		acpi_handle_debug(handle, "Reading ACPI _SUB failed: %#x\n", status);
+		return ERR_PTR(-ENODATA);
+	}
+
+	obj = buffer.pointer;
+	if (obj->type == ACPI_TYPE_STRING) {
+		len = strlen(obj->string.pointer);
+		if (len < ACPI_MAX_SUB_BUF_SIZE && len > 0) {
+			sub = kstrdup(obj->string.pointer, GFP_KERNEL);
+			if (!sub)
+				sub = ERR_PTR(-ENOMEM);
+		} else {
+			acpi_handle_err(handle, "ACPI _SUB Length %zu is Invalid\n", len);
+			sub = ERR_PTR(-ENODATA);
+		}
+	} else {
+		acpi_handle_warn(handle, "Warning ACPI _SUB did not return a string\n");
+		sub = ERR_PTR(-ENODATA);
+	}
+
+	acpi_os_free(buffer.pointer);
+
+	return sub;
+}
+EXPORT_SYMBOL_GPL(acpi_get_subsystem_id);
 
 acpi_status
 acpi_evaluate_reference(acpi_handle handle,
@@ -367,8 +396,7 @@ acpi_evaluate_reference(acpi_handle handle,
 		/* Get the  acpi_handle. */
 
 		list->handles[i] = element->reference.handle;
-		ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Found reference [%p]\n",
-				  list->handles[i]));
+		acpi_handle_debug(list->handles[i], "Found in reference list\n");
 	}
 
       end:
@@ -536,6 +564,20 @@ EXPORT_SYMBOL(__acpi_handle_debug);
 #endif
 
 /**
+ * acpi_evaluation_failure_warn - Log evaluation failure warning.
+ * @handle: Parent object handle.
+ * @name: Name of the object whose evaluation has failed.
+ * @status: Status value returned by the failing object evaluation.
+ */
+void acpi_evaluation_failure_warn(acpi_handle handle, const char *name,
+				  acpi_status status)
+{
+	acpi_handle_warn(handle, "%s evaluation failed: %s\n", name,
+			 acpi_format_exception(status));
+}
+EXPORT_SYMBOL_GPL(acpi_evaluation_failure_warn);
+
+/**
  * acpi_has_method: Check whether @handle has a method named @name
  * @handle: ACPI device handle
  * @name: name of object or method
@@ -606,6 +648,31 @@ acpi_status acpi_evaluate_lck(acpi_handle handle, int lock)
 }
 
 /**
+ * acpi_evaluate_reg: Evaluate _REG method to register OpRegion presence
+ * @handle: ACPI device handle
+ * @space_id: ACPI address space id to register OpRegion presence for
+ * @function: Parameter to pass to _REG one of ACPI_REG_CONNECT or
+ *            ACPI_REG_DISCONNECT
+ *
+ * Evaluate device's _REG method to register OpRegion presence.
+ */
+acpi_status acpi_evaluate_reg(acpi_handle handle, u8 space_id, u32 function)
+{
+	struct acpi_object_list arg_list;
+	union acpi_object params[2];
+
+	params[0].type = ACPI_TYPE_INTEGER;
+	params[0].integer.value = space_id;
+	params[1].type = ACPI_TYPE_INTEGER;
+	params[1].integer.value = function;
+	arg_list.count = 2;
+	arg_list.pointer = params;
+
+	return acpi_evaluate_object(handle, "_REG", &arg_list, NULL);
+}
+EXPORT_SYMBOL(acpi_evaluate_reg);
+
+/**
  * acpi_evaluate_dsm - evaluate device's _DSM method
  * @handle: ACPI device handle
  * @guid: GUID of requested functions, should be 16 bytes
@@ -652,7 +719,7 @@ acpi_evaluate_dsm(acpi_handle handle, const guid_t *guid, u64 rev, u64 func,
 
 	if (ret != AE_NOT_FOUND)
 		acpi_handle_warn(handle,
-				"failed to evaluate _DSM (0x%x)\n", ret);
+				 "failed to evaluate _DSM %pUb (0x%x)\n", guid, ret);
 
 	return NULL;
 }
@@ -727,6 +794,30 @@ bool acpi_dev_hid_uid_match(struct acpi_device *adev,
 EXPORT_SYMBOL(acpi_dev_hid_uid_match);
 
 /**
+ * acpi_dev_uid_to_integer - treat ACPI device _UID as integer
+ * @adev: ACPI device to get _UID from
+ * @integer: output buffer for integer
+ *
+ * Considers _UID as integer and converts it to @integer.
+ *
+ * Returns 0 on success, or negative error code otherwise.
+ */
+int acpi_dev_uid_to_integer(struct acpi_device *adev, u64 *integer)
+{
+	const char *uid;
+
+	if (!adev)
+		return -ENODEV;
+
+	uid = acpi_device_uid(adev);
+	if (!uid)
+		return -ENODATA;
+
+	return kstrtou64(uid, 0, integer);
+}
+EXPORT_SYMBOL(acpi_dev_uid_to_integer);
+
+/**
  * acpi_dev_found - Detect presence of a given ACPI device in the namespace.
  * @hid: Hardware ID of the device.
  *
@@ -796,7 +887,7 @@ static int acpi_dev_match_cb(struct device *dev, const void *data)
  * Note that if the device is pluggable, it may since have disappeared.
  *
  * Note that unlike acpi_dev_found() this function checks the status
- * of the device. So for devices which are present in the dsdt, but
+ * of the device. So for devices which are present in the DSDT, but
  * which are disabled (their _STA callback returns 0) this function
  * will return false.
  *
@@ -811,7 +902,7 @@ bool acpi_dev_present(const char *hid, const char *uid, s64 hrv)
 	struct acpi_dev_match_info match = {};
 	struct device *dev;
 
-	strlcpy(match.hid[0].id, hid, sizeof(match.hid[0].id));
+	strscpy(match.hid[0].id, hid, sizeof(match.hid[0].id));
 	match.uid = uid;
 	match.hrv = hrv;
 
@@ -822,6 +913,39 @@ bool acpi_dev_present(const char *hid, const char *uid, s64 hrv)
 EXPORT_SYMBOL(acpi_dev_present);
 
 /**
+ * acpi_dev_get_next_match_dev - Return the next match of ACPI device
+ * @adev: Pointer to the previous ACPI device matching this @hid, @uid and @hrv
+ * @hid: Hardware ID of the device.
+ * @uid: Unique ID of the device, pass NULL to not check _UID
+ * @hrv: Hardware Revision of the device, pass -1 to not check _HRV
+ *
+ * Return the next match of ACPI device if another matching device was present
+ * at the moment of invocation, or NULL otherwise.
+ *
+ * The caller is responsible for invoking acpi_dev_put() on the returned device.
+ * On the other hand the function invokes  acpi_dev_put() on the given @adev
+ * assuming that its reference counter had been increased beforehand.
+ *
+ * See additional information in acpi_dev_present() as well.
+ */
+struct acpi_device *
+acpi_dev_get_next_match_dev(struct acpi_device *adev, const char *hid, const char *uid, s64 hrv)
+{
+	struct device *start = adev ? &adev->dev : NULL;
+	struct acpi_dev_match_info match = {};
+	struct device *dev;
+
+	strscpy(match.hid[0].id, hid, sizeof(match.hid[0].id));
+	match.uid = uid;
+	match.hrv = hrv;
+
+	dev = bus_find_device(&acpi_bus_type, start, &match, acpi_dev_match_cb);
+	acpi_dev_put(adev);
+	return dev ? to_acpi_device(dev) : NULL;
+}
+EXPORT_SYMBOL(acpi_dev_get_next_match_dev);
+
+/**
  * acpi_dev_get_first_match_dev - Return the first match of ACPI device
  * @hid: Hardware ID of the device.
  * @uid: Unique ID of the device, pass NULL to not check _UID
@@ -830,24 +954,27 @@ EXPORT_SYMBOL(acpi_dev_present);
  * Return the first match of ACPI device if a matching device was present
  * at the moment of invocation, or NULL otherwise.
  *
- * The caller is responsible to call put_device() on the returned device.
+ * The caller is responsible for invoking acpi_dev_put() on the returned device.
  *
  * See additional information in acpi_dev_present() as well.
  */
 struct acpi_device *
 acpi_dev_get_first_match_dev(const char *hid, const char *uid, s64 hrv)
 {
-	struct acpi_dev_match_info match = {};
-	struct device *dev;
-
-	strlcpy(match.hid[0].id, hid, sizeof(match.hid[0].id));
-	match.uid = uid;
-	match.hrv = hrv;
-
-	dev = bus_find_device(&acpi_bus_type, NULL, &match, acpi_dev_match_cb);
-	return dev ? to_acpi_device(dev) : NULL;
+	return acpi_dev_get_next_match_dev(NULL, hid, uid, hrv);
 }
 EXPORT_SYMBOL(acpi_dev_get_first_match_dev);
+
+/**
+ * acpi_reduced_hardware - Return if this is an ACPI-reduced-hw machine
+ *
+ * Return true when running on an ACPI-reduced-hw machine, false otherwise.
+ */
+bool acpi_reduced_hardware(void)
+{
+	return acpi_gbl_reduced_hardware;
+}
+EXPORT_SYMBOL_GPL(acpi_reduced_hardware);
 
 /*
  * acpi_backlight= handling, this is done here rather then in video_detect.c
@@ -858,7 +985,7 @@ EXPORT_SYMBOL(acpi_video_backlight_string);
 
 static int __init acpi_backlight(char *str)
 {
-	strlcpy(acpi_video_backlight_string, str,
+	strscpy(acpi_video_backlight_string, str,
 		sizeof(acpi_video_backlight_string));
 	return 1;
 }

@@ -7,7 +7,7 @@
 
 	amba {
 		/* The Versatile PB is using more SIC IRQ lines than the AB */
-		sic: intc@10003000 {
+		sic: interrupt-controller@10003000 {
 			clear-mask = <0xffffffff>;
 			/*
 			 * Valid interrupt lines mask according to
@@ -85,7 +85,7 @@
 				 */
 				interrupts-extended = <&sic 22 &sic 23>;
 			};
-			uart@9000 {
+			serial@9000 {
 				compatible = "arm,pl011", "arm,primecell";
 				reg = <0x9000 0x1000>;
 				interrupt-parent = <&sic>;

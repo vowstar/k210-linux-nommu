@@ -598,7 +598,6 @@ MODULE_DEVICE_TABLE(of, tegra_kbc_of_match);
 static int tegra_kbc_probe(struct platform_device *pdev)
 {
 	struct tegra_kbc *kbc;
-	struct resource *res;
 	int err;
 	int num_rows = 0;
 	unsigned int debounce_cnt;
@@ -642,8 +641,7 @@ static int tegra_kbc_probe(struct platform_device *pdev)
 
 	timer_setup(&kbc->timer, tegra_kbc_keypress_timer, 0);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	kbc->mmio = devm_ioremap_resource(&pdev->dev, res);
+	kbc->mmio = devm_platform_get_and_ioremap_resource(pdev, 0, NULL);
 	if (IS_ERR(kbc->mmio))
 		return PTR_ERR(kbc->mmio);
 
@@ -694,13 +692,12 @@ static int tegra_kbc_probe(struct platform_device *pdev)
 	input_set_drvdata(kbc->idev, kbc);
 
 	err = devm_request_irq(&pdev->dev, kbc->irq, tegra_kbc_isr,
-			       IRQF_TRIGGER_HIGH, pdev->name, kbc);
+			       IRQF_TRIGGER_HIGH | IRQF_NO_AUTOEN,
+			       pdev->name, kbc);
 	if (err) {
 		dev_err(&pdev->dev, "failed to request keyboard IRQ\n");
 		return err;
 	}
-
-	disable_irq(kbc->irq);
 
 	err = input_register_device(kbc->idev);
 	if (err) {
@@ -714,7 +711,6 @@ static int tegra_kbc_probe(struct platform_device *pdev)
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static void tegra_kbc_set_keypress_interrupt(struct tegra_kbc *kbc, bool enable)
 {
 	u32 val;
@@ -756,7 +752,7 @@ static int tegra_kbc_suspend(struct device *dev)
 		enable_irq(kbc->irq);
 		enable_irq_wake(kbc->irq);
 	} else {
-		if (kbc->idev->users)
+		if (input_device_enabled(kbc->idev))
 			tegra_kbc_stop(kbc);
 	}
 	mutex_unlock(&kbc->idev->mutex);
@@ -796,22 +792,22 @@ static int tegra_kbc_resume(struct device *dev)
 			input_sync(kbc->idev);
 		}
 	} else {
-		if (kbc->idev->users)
+		if (input_device_enabled(kbc->idev))
 			err = tegra_kbc_start(kbc);
 	}
 	mutex_unlock(&kbc->idev->mutex);
 
 	return err;
 }
-#endif
 
-static SIMPLE_DEV_PM_OPS(tegra_kbc_pm_ops, tegra_kbc_suspend, tegra_kbc_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(tegra_kbc_pm_ops,
+				tegra_kbc_suspend, tegra_kbc_resume);
 
 static struct platform_driver tegra_kbc_driver = {
 	.probe		= tegra_kbc_probe,
 	.driver	= {
 		.name	= "tegra-kbc",
-		.pm	= &tegra_kbc_pm_ops,
+		.pm	= pm_sleep_ptr(&tegra_kbc_pm_ops),
 		.of_match_table = tegra_kbc_of_match,
 	},
 };

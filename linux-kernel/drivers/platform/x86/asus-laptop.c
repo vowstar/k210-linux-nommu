@@ -640,22 +640,15 @@ static enum led_brightness asus_kled_cdev_get(struct led_classdev *led_cdev)
 
 static void asus_led_exit(struct asus_laptop *asus)
 {
-	if (!IS_ERR_OR_NULL(asus->wled.led.dev))
-		led_classdev_unregister(&asus->wled.led);
-	if (!IS_ERR_OR_NULL(asus->bled.led.dev))
-		led_classdev_unregister(&asus->bled.led);
-	if (!IS_ERR_OR_NULL(asus->mled.led.dev))
-		led_classdev_unregister(&asus->mled.led);
-	if (!IS_ERR_OR_NULL(asus->tled.led.dev))
-		led_classdev_unregister(&asus->tled.led);
-	if (!IS_ERR_OR_NULL(asus->pled.led.dev))
-		led_classdev_unregister(&asus->pled.led);
-	if (!IS_ERR_OR_NULL(asus->rled.led.dev))
-		led_classdev_unregister(&asus->rled.led);
-	if (!IS_ERR_OR_NULL(asus->gled.led.dev))
-		led_classdev_unregister(&asus->gled.led);
-	if (!IS_ERR_OR_NULL(asus->kled.led.dev))
-		led_classdev_unregister(&asus->kled.led);
+	led_classdev_unregister(&asus->wled.led);
+	led_classdev_unregister(&asus->bled.led);
+	led_classdev_unregister(&asus->mled.led);
+	led_classdev_unregister(&asus->tled.led);
+	led_classdev_unregister(&asus->pled.led);
+	led_classdev_unregister(&asus->rled.led);
+	led_classdev_unregister(&asus->gled.led);
+	led_classdev_unregister(&asus->kled.led);
+
 	if (asus->led_workqueue) {
 		destroy_workqueue(asus->led_workqueue);
 		asus->led_workqueue = NULL;
@@ -868,7 +861,7 @@ static ssize_t infos_show(struct device *dev, struct device_attribute *attr,
 	 * The significance of others is yet to be found.
 	 */
 	rv = acpi_evaluate_integer(asus->handle, "SFUN", NULL, &temp);
-	if (!ACPI_FAILURE(rv))
+	if (ACPI_SUCCESS(rv))
 		len += sprintf(page + len, "SFUN value         : %#x\n",
 			       (uint) temp);
 	/*
@@ -880,7 +873,7 @@ static ssize_t infos_show(struct device *dev, struct device_attribute *attr,
 	 * takes several seconds to run on some systems.
 	 */
 	rv = acpi_evaluate_integer(asus->handle, "HWRS", NULL, &temp);
-	if (!ACPI_FAILURE(rv))
+	if (ACPI_SUCCESS(rv))
 		len += sprintf(page + len, "HWRS value         : %#x\n",
 			       (uint) temp);
 	/*
@@ -891,7 +884,7 @@ static ssize_t infos_show(struct device *dev, struct device_attribute *attr,
 	 * silently ignored.
 	 */
 	rv = acpi_evaluate_integer(asus->handle, "ASYM", NULL, &temp);
-	if (!ACPI_FAILURE(rv))
+	if (ACPI_SUCCESS(rv))
 		len += sprintf(page + len, "ASYM value         : %#x\n",
 			       (uint) temp);
 	if (asus->dsdt_info) {
@@ -1576,7 +1569,7 @@ static umode_t asus_sysfs_is_visible(struct kobject *kobj,
 				    struct attribute *attr,
 				    int idx)
 {
-	struct device *dev = container_of(kobj, struct device, kobj);
+	struct device *dev = kobj_to_dev(kobj);
 	struct asus_laptop *asus = dev_get_drvdata(dev);
 	acpi_handle handle = asus->handle;
 	bool supported;
@@ -1640,7 +1633,7 @@ static int asus_platform_init(struct asus_laptop *asus)
 {
 	int result;
 
-	asus->platform_device = platform_device_alloc(ASUS_LAPTOP_FILE, -1);
+	asus->platform_device = platform_device_alloc(ASUS_LAPTOP_FILE, PLATFORM_DEVID_NONE);
 	if (!asus->platform_device)
 		return -ENOMEM;
 	platform_set_drvdata(asus->platform_device, asus);
@@ -1908,7 +1901,7 @@ fail_platform:
 	return result;
 }
 
-static int asus_acpi_remove(struct acpi_device *device)
+static void asus_acpi_remove(struct acpi_device *device)
 {
 	struct asus_laptop *asus = acpi_driver_data(device);
 
@@ -1921,7 +1914,6 @@ static int asus_acpi_remove(struct acpi_device *device)
 
 	kfree(asus->name);
 	kfree(asus);
-	return 0;
 }
 
 static const struct acpi_device_id asus_device_ids[] = {

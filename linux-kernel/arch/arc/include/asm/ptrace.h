@@ -8,6 +8,7 @@
 #define __ASM_ARC_PTRACE_H
 
 #include <uapi/asm/ptrace.h>
+#include <linux/compiler.h>
 
 #ifndef __ASSEMBLY__
 
@@ -15,11 +16,6 @@
 
 #ifdef CONFIG_ISA_ARCOMPACT
 struct pt_regs {
-
-#ifdef CONFIG_ARC_PLAT_EZNPS
-	unsigned long eflags;	/* Extended FLAGS */
-	unsigned long gpa1;	/* General Purpose Aux */
-#endif
 
 	/* Real registers */
 	unsigned long bta;	/* bta_l1, bta_l2, erbta */
@@ -59,6 +55,9 @@ struct pt_regs {
 
 	unsigned long user_r25;
 };
+
+#define MAX_REG_OFFSET offsetof(struct pt_regs, user_r25)
+
 #else
 
 struct pt_regs {
@@ -91,6 +90,9 @@ struct pt_regs {
 #ifdef CONFIG_ARC_HAS_ACCL_REGS
 	unsigned long r58, r59;	/* ACCL/ACCH used by FPU / DSP MPY */
 #endif
+#ifdef CONFIG_ARC_DSP_SAVE_RESTORE_REGS
+	unsigned long DSP_CTRL;
+#endif
 
 	/*------- Below list auto saved by h/w -----------*/
 	unsigned long r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11;
@@ -103,6 +105,8 @@ struct pt_regs {
 	unsigned long ret;
 	unsigned long status32;
 };
+
+#define MAX_REG_OFFSET offsetof(struct pt_regs, status32)
 
 #endif
 
@@ -149,6 +153,32 @@ struct callee_regs {
 static inline long regs_return_value(struct pt_regs *regs)
 {
 	return (long)regs->r0;
+}
+
+static inline void instruction_pointer_set(struct pt_regs *regs,
+					   unsigned long val)
+{
+	instruction_pointer(regs) = val;
+}
+
+static inline unsigned long kernel_stack_pointer(struct pt_regs *regs)
+{
+	return regs->sp;
+}
+
+extern int regs_query_register_offset(const char *name);
+extern const char *regs_query_register_name(unsigned int offset);
+extern bool regs_within_kernel_stack(struct pt_regs *regs, unsigned long addr);
+extern unsigned long regs_get_kernel_stack_nth(struct pt_regs *regs,
+					       unsigned int n);
+
+static inline unsigned long regs_get_register(struct pt_regs *regs,
+					      unsigned int offset)
+{
+	if (unlikely(offset > MAX_REG_OFFSET))
+		return 0;
+
+	return *(unsigned long *)((unsigned long)regs + offset);
 }
 
 #endif /* !__ASSEMBLY__ */

@@ -7,40 +7,16 @@
 #include "dpu_hw_top.h"
 #include "dpu_kms.h"
 
-#define SSPP_SPARE                        0x28
-#define UBWC_STATIC                       0x144
-
 #define FLD_SPLIT_DISPLAY_CMD             BIT(1)
 #define FLD_SMART_PANEL_FREE_RUN          BIT(2)
 #define FLD_INTF_1_SW_TRG_MUX             BIT(4)
 #define FLD_INTF_2_SW_TRG_MUX             BIT(8)
 #define FLD_TE_LINE_INTER_WATERLEVEL_MASK 0xFFFF
 
-#define DANGER_STATUS                     0x360
-#define SAFE_STATUS                       0x364
-
-#define TE_LINE_INTERVAL                  0x3F4
-
 #define TRAFFIC_SHAPER_EN                 BIT(31)
 #define TRAFFIC_SHAPER_RD_CLIENT(num)     (0x030 + (num * 4))
 #define TRAFFIC_SHAPER_WR_CLIENT(num)     (0x060 + (num * 4))
 #define TRAFFIC_SHAPER_FIXPOINT_FACTOR    4
-
-#define MDP_WD_TIMER_0_CTL                0x380
-#define MDP_WD_TIMER_0_CTL2               0x384
-#define MDP_WD_TIMER_0_LOAD_VALUE         0x388
-#define MDP_WD_TIMER_1_CTL                0x390
-#define MDP_WD_TIMER_1_CTL2               0x394
-#define MDP_WD_TIMER_1_LOAD_VALUE         0x398
-#define MDP_WD_TIMER_2_CTL                0x420
-#define MDP_WD_TIMER_2_CTL2               0x424
-#define MDP_WD_TIMER_2_LOAD_VALUE         0x428
-#define MDP_WD_TIMER_3_CTL                0x430
-#define MDP_WD_TIMER_3_CTL2               0x434
-#define MDP_WD_TIMER_3_LOAD_VALUE         0x438
-#define MDP_WD_TIMER_4_CTL                0x440
-#define MDP_WD_TIMER_4_CTL2               0x444
-#define MDP_WD_TIMER_4_LOAD_VALUE         0x448
 
 #define MDP_TICK_COUNT                    16
 #define XO_CLK_RATE                       19200
@@ -48,8 +24,6 @@
 
 #define CALCULATE_WD_LOAD_VALUE(fps) \
 	((uint32_t)((MS_TICKS_IN_SEC * XO_CLK_RATE)/(MDP_TICK_COUNT * fps)))
-
-#define DCE_SEL                           0x450
 
 static void dpu_hw_setup_split_pipe(struct dpu_hw_mdp *mdp,
 		struct split_pipe_cfg *cfg)
@@ -249,22 +223,6 @@ static void dpu_hw_get_safe_status(struct dpu_hw_mdp *mdp,
 	status->sspp[SSPP_CURSOR1] = (value >> 26) & 0x1;
 }
 
-static void dpu_hw_reset_ubwc(struct dpu_hw_mdp *mdp, struct dpu_mdss_cfg *m)
-{
-	struct dpu_hw_blk_reg_map c;
-
-	if (!mdp || !m)
-		return;
-
-	if (!IS_UBWC_20_SUPPORTED(m->caps->ubwc_version))
-		return;
-
-	/* force blk offset to zero to access beginning of register region */
-	c = mdp->hw;
-	c.blk_off = 0x0;
-	DPU_REG_WRITE(&c, UBWC_STATIC, m->mdp[0].ubwc_static);
-}
-
 static void dpu_hw_intf_audio_select(struct dpu_hw_mdp *mdp)
 {
 	struct dpu_hw_blk_reg_map *c;
@@ -285,8 +243,9 @@ static void _setup_mdp_ops(struct dpu_hw_mdp_ops *ops,
 	ops->get_danger_status = dpu_hw_get_danger_status;
 	ops->setup_vsync_source = dpu_hw_setup_vsync_source;
 	ops->get_safe_status = dpu_hw_get_safe_status;
-	ops->reset_ubwc = dpu_hw_reset_ubwc;
-	ops->intf_audio_select = dpu_hw_intf_audio_select;
+
+	if (cap & BIT(DPU_MDP_AUDIO_SELECT))
+		ops->intf_audio_select = dpu_hw_intf_audio_select;
 }
 
 static const struct dpu_mdp_cfg *_top_offset(enum dpu_mdp mdp,
@@ -301,10 +260,7 @@ static const struct dpu_mdp_cfg *_top_offset(enum dpu_mdp mdp,
 
 	for (i = 0; i < m->mdp_count; i++) {
 		if (mdp == m->mdp[i].id) {
-			b->base_off = addr;
-			b->blk_off = m->mdp[i].base;
-			b->length = m->mdp[i].len;
-			b->hwversion = m->hwversion;
+			b->blk_addr = addr + m->mdp[i].base;
 			b->log_mask = DPU_DBG_MASK_TOP;
 			return &m->mdp[i];
 		}
@@ -312,8 +268,6 @@ static const struct dpu_mdp_cfg *_top_offset(enum dpu_mdp mdp,
 
 	return ERR_PTR(-EINVAL);
 }
-
-static struct dpu_hw_blk_ops dpu_hw_ops;
 
 struct dpu_hw_mdp *dpu_hw_mdptop_init(enum dpu_mdp idx,
 		void __iomem *addr,
@@ -342,15 +296,11 @@ struct dpu_hw_mdp *dpu_hw_mdptop_init(enum dpu_mdp idx,
 	mdp->caps = cfg;
 	_setup_mdp_ops(&mdp->ops, mdp->caps->features);
 
-	dpu_hw_blk_init(&mdp->base, DPU_HW_BLK_TOP, idx, &dpu_hw_ops);
-
 	return mdp;
 }
 
 void dpu_hw_mdp_destroy(struct dpu_hw_mdp *mdp)
 {
-	if (mdp)
-		dpu_hw_blk_destroy(&mdp->base);
 	kfree(mdp);
 }
 

@@ -12,6 +12,7 @@
 #include <linux/spinlock.h>
 #include <linux/delay.h>
 #include <linux/file.h>
+#include <linux/irqdomain.h>
 #include <asm/uaccess.h>
 #include <asm/kvm_book3s.h>
 #include <asm/kvm_ppc.h>
@@ -19,7 +20,6 @@
 #include <asm/xive.h>
 #include <asm/xive-regs.h>
 #include <asm/debug.h>
-#include <asm/debugfs.h>
 #include <asm/opal.h>
 
 #include <linux/debugfs.h>
@@ -31,8 +31,11 @@ static u8 xive_vm_esb_load(struct xive_irq_data *xd, u32 offset)
 {
 	u64 val;
 
-	if (xd->flags & XIVE_IRQ_FLAG_SHIFT_BUG)
-		offset |= offset << 4;
+	/*
+	 * The KVM XIVE native device does not use the XIVE_ESB_SET_PQ_10
+	 * load operation, so there is no need to enforce load-after-store
+	 * ordering.
+	 */
 
 	val = in_be64(xd->eoi_mmio + offset);
 	return (u8)val;
@@ -89,9 +92,8 @@ void kvmppc_xive_native_cleanup_vcpu(struct kvm_vcpu *vcpu)
 	for (i = 0; i < KVMPPC_XIVE_Q_COUNT; i++) {
 		/* Free the escalation irq */
 		if (xc->esc_virq[i]) {
-			if (xc->xive->single_escalation)
-				xive_cleanup_single_escalation(vcpu, xc,
-							xc->esc_virq[i]);
+			if (kvmppc_xive_has_single_escalation(xc->xive))
+				xive_cleanup_single_escalation(vcpu, xc->esc_virq[i]);
 			free_irq(xc->esc_virq[i], vcpu);
 			irq_dispose_mapping(xc->esc_virq[i]);
 			kfree(xc->esc_virq_names[i]);
@@ -164,11 +166,17 @@ int kvmppc_xive_native_connect_vcpu(struct kvm_device *dev,
 		goto bail;
 	}
 
+	if (!kvmppc_xive_check_save_restore(vcpu)) {
+		pr_err("inconsistent save-restore setup for VCPU %d\n", server_num);
+		rc = -EIO;
+		goto bail;
+	}
+
 	/*
 	 * Enable the VP first as the single escalation mode will
 	 * affect escalation interrupts numbering
 	 */
-	rc = xive_native_enable_vp(xc->vp_id, xive->single_escalation);
+	rc = xive_native_enable_vp(xc->vp_id, kvmppc_xive_has_single_escalation(xive));
 	if (rc) {
 		pr_err("Failed to enable VP in OPAL: %d\n", rc);
 		goto bail;
@@ -200,7 +208,7 @@ static int kvmppc_xive_native_reset_mapped(struct kvm *kvm, unsigned long irq)
 
 	/*
 	 * Clear the ESB pages of the IRQ number being mapped (or
-	 * unmapped) into the guest and let the the VM fault handler
+	 * unmapped) into the guest and let the VM fault handler
 	 * repopulate with the appropriate ESB pages (device or IC)
 	 */
 	pr_debug("clearing esb pages for girq 0x%lx\n", irq);
@@ -245,6 +253,13 @@ static vm_fault_t xive_native_esb_fault(struct vm_fault *vmf)
 	}
 
 	state = &sb->irq_state[src];
+
+	/* Some sanity checking */
+	if (!state->valid) {
+		pr_devel("%s: source %lx invalid !\n", __func__, irq);
+		return VM_FAULT_SIGBUS;
+	}
+
 	kvmppc_xive_select_irq(state, &hw_num, &xd);
 
 	arch_spin_lock(&sb->lock);
@@ -309,7 +324,7 @@ static int kvmppc_xive_native_mmap(struct kvm_device *dev,
 		return -EINVAL;
 	}
 
-	vma->vm_flags |= VM_IO | VM_PFNMAP;
+	vm_flags_set(vma, VM_IO | VM_PFNMAP);
 	vma->vm_page_prot = pgprot_noncached_wc(vma->vm_page_prot);
 
 	/*
@@ -682,7 +697,7 @@ static int kvmppc_xive_native_set_queue_config(struct kvmppc_xive *xive,
 	}
 
 	rc = kvmppc_xive_attach_escalation(vcpu, priority,
-					   xive->single_escalation);
+					   kvmppc_xive_has_single_escalation(xive));
 error:
 	if (rc)
 		kvmppc_xive_native_cleanup_queue(vcpu, priority);
@@ -791,7 +806,7 @@ static int kvmppc_xive_reset(struct kvmppc_xive *xive)
 {
 	struct kvm *kvm = xive->kvm;
 	struct kvm_vcpu *vcpu;
-	unsigned int i;
+	unsigned long i;
 
 	pr_devel("%s\n", __func__);
 
@@ -809,7 +824,7 @@ static int kvmppc_xive_reset(struct kvmppc_xive *xive)
 		for (prio = 0; prio < KVMPPC_XIVE_Q_COUNT; prio++) {
 
 			/* Single escalation, no queue 7 */
-			if (prio == 7 && xive->single_escalation)
+			if (prio == 7 && kvmppc_xive_has_single_escalation(xive))
 				break;
 
 			if (xc->esc_virq[prio]) {
@@ -900,7 +915,7 @@ static int kvmppc_xive_native_eq_sync(struct kvmppc_xive *xive)
 {
 	struct kvm *kvm = xive->kvm;
 	struct kvm_vcpu *vcpu;
-	unsigned int i;
+	unsigned long i;
 
 	pr_devel("%s\n", __func__);
 
@@ -1001,7 +1016,7 @@ static void kvmppc_xive_native_release(struct kvm_device *dev)
 	struct kvmppc_xive *xive = dev->private;
 	struct kvm *kvm = xive->kvm;
 	struct kvm_vcpu *vcpu;
-	int i;
+	unsigned long i;
 
 	pr_devel("Releasing xive native device\n");
 
@@ -1100,7 +1115,12 @@ static int kvmppc_xive_native_create(struct kvm_device *dev, u32 type)
 	 */
 	xive->nr_servers = KVM_MAX_VCPUS;
 
-	xive->single_escalation = xive_native_has_single_escalation();
+	if (xive_native_has_single_escalation())
+		xive->flags |= KVMPPC_XIVE_FLAG_SINGLE_ESCALATION;
+
+	if (xive_native_has_save_restore())
+		xive->flags |= KVMPPC_XIVE_FLAG_SAVE_RESTORE;
+
 	xive->ops = &kvmppc_xive_native_ops;
 
 	kvm->arch.xive = xive;
@@ -1193,7 +1213,7 @@ static int xive_native_debug_show(struct seq_file *m, void *private)
 	struct kvmppc_xive *xive = m->private;
 	struct kvm *kvm = xive->kvm;
 	struct kvm_vcpu *vcpu;
-	unsigned int i;
+	unsigned long i;
 
 	if (!kvm)
 		return 0;
@@ -1206,53 +1226,47 @@ static int xive_native_debug_show(struct seq_file *m, void *private)
 		if (!xc)
 			continue;
 
-		seq_printf(m, "cpu server %#x VP=%#x NSR=%02x CPPR=%02x IBP=%02x PIPR=%02x w01=%016llx w2=%08x\n",
-			   xc->server_num, xc->vp_id,
+		seq_printf(m, "VCPU %d: VP=%#x/%02x\n"
+			   "    NSR=%02x CPPR=%02x IBP=%02x PIPR=%02x w01=%016llx w2=%08x\n",
+			   xc->server_num, xc->vp_id, xc->vp_chip_id,
 			   vcpu->arch.xive_saved_state.nsr,
 			   vcpu->arch.xive_saved_state.cppr,
 			   vcpu->arch.xive_saved_state.ipb,
 			   vcpu->arch.xive_saved_state.pipr,
-			   vcpu->arch.xive_saved_state.w01,
-			   (u32) vcpu->arch.xive_cam_word);
+			   be64_to_cpu(vcpu->arch.xive_saved_state.w01),
+			   be32_to_cpu(vcpu->arch.xive_cam_word));
 
 		kvmppc_xive_debug_show_queues(m, vcpu);
+	}
+
+	seq_puts(m, "=========\nSources\n=========\n");
+
+	for (i = 0; i <= xive->max_sbid; i++) {
+		struct kvmppc_xive_src_block *sb = xive->src_blocks[i];
+
+		if (sb) {
+			arch_spin_lock(&sb->lock);
+			kvmppc_xive_debug_show_sources(m, sb);
+			arch_spin_unlock(&sb->lock);
+		}
 	}
 
 	return 0;
 }
 
-static int xive_native_debug_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, xive_native_debug_show, inode->i_private);
-}
-
-static const struct file_operations xive_native_debug_fops = {
-	.open = xive_native_debug_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release,
-};
+DEFINE_SHOW_ATTRIBUTE(xive_native_debug);
 
 static void xive_native_debugfs_init(struct kvmppc_xive *xive)
 {
-	char *name;
-
-	name = kasprintf(GFP_KERNEL, "kvm-xive-%p", xive);
-	if (!name) {
-		pr_err("%s: no memory for name\n", __func__);
-		return;
-	}
-
-	xive->dentry = debugfs_create_file(name, 0444, powerpc_debugfs_root,
+	xive->dentry = debugfs_create_file("xive", 0444, xive->kvm->debugfs_dentry,
 					   xive, &xive_native_debug_fops);
 
-	pr_debug("%s: created %s\n", __func__, name);
-	kfree(name);
+	pr_debug("%s: created\n", __func__);
 }
 
 static void kvmppc_xive_native_init(struct kvm_device *dev)
 {
-	struct kvmppc_xive *xive = (struct kvmppc_xive *)dev->private;
+	struct kvmppc_xive *xive = dev->private;
 
 	/* Register some debug interfaces */
 	xive_native_debugfs_init(xive);
@@ -1268,13 +1282,3 @@ struct kvm_device_ops kvm_xive_native_ops = {
 	.has_attr = kvmppc_xive_native_has_attr,
 	.mmap = kvmppc_xive_native_mmap,
 };
-
-void kvmppc_xive_native_init_module(void)
-{
-	;
-}
-
-void kvmppc_xive_native_exit_module(void)
-{
-	;
-}

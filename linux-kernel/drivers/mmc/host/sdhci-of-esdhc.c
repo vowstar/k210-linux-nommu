@@ -4,6 +4,7 @@
  *
  * Copyright (c) 2007, 2010, 2012 Freescale Semiconductor, Inc.
  * Copyright (c) 2009 MontaVista Software, Inc.
+ * Copyright 2020 NXP
  *
  * Authors: Xiaobo Xie <X.Xie@freescale.com>
  *	    Anton Vorontsov <avorontsov@ru.mvista.com>
@@ -19,6 +20,7 @@
 #include <linux/clk.h>
 #include <linux/ktime.h>
 #include <linux/dma-mapping.h>
+#include <linux/iopoll.h>
 #include <linux/mmc/host.h>
 #include <linux/mmc/mmc.h>
 #include "sdhci-pltfm.h"
@@ -38,6 +40,12 @@ static const struct esdhc_clk_fixup ls1021a_esdhc_clk = {
 	.sd_dflt_max_clk = 25000000,
 	.max_clk[MMC_TIMING_MMC_HS] = 46500000,
 	.max_clk[MMC_TIMING_SD_HS] = 46500000,
+};
+
+static const struct esdhc_clk_fixup ls1043a_esdhc_clk = {
+	.sd_dflt_max_clk = 25000000,
+	.max_clk[MMC_TIMING_UHS_SDR104] = 116700000,
+	.max_clk[MMC_TIMING_MMC_HS200] = 116700000,
 };
 
 static const struct esdhc_clk_fixup ls1046a_esdhc_clk = {
@@ -61,6 +69,7 @@ static const struct esdhc_clk_fixup p1010_esdhc_clk = {
 
 static const struct of_device_id sdhci_esdhc_of_match[] = {
 	{ .compatible = "fsl,ls1021a-esdhc", .data = &ls1021a_esdhc_clk},
+	{ .compatible = "fsl,ls1043a-esdhc", .data = &ls1043a_esdhc_clk},
 	{ .compatible = "fsl,ls1046a-esdhc", .data = &ls1046a_esdhc_clk},
 	{ .compatible = "fsl,ls1012a-esdhc", .data = &ls1012a_esdhc_clk},
 	{ .compatible = "fsl,p1010-esdhc",   .data = &p1010_esdhc_clk},
@@ -81,6 +90,7 @@ struct sdhci_esdhc {
 	bool quirk_tuning_erratum_type2;
 	bool quirk_ignore_data_inhibit;
 	bool quirk_delay_before_data_reset;
+	bool quirk_trans_complete_erratum;
 	bool in_sw_tuning;
 	unsigned int peripheral_clock;
 	const struct esdhc_clk_fixup *clk_fixup;
@@ -88,7 +98,7 @@ struct sdhci_esdhc {
 };
 
 /**
- * esdhc_read*_fixup - Fixup the value read from incompatible eSDHC register
+ * esdhc_readl_fixup - Fixup the value read from incompatible eSDHC register
  *		       to make it compatible with SD spec.
  *
  * @host: pointer to sdhci_host
@@ -213,7 +223,7 @@ static u8 esdhc_readb_fixup(struct sdhci_host *host,
 }
 
 /**
- * esdhc_write*_fixup - Fixup the SD spec register value so that it could be
+ * esdhc_writel_fixup - Fixup the SD spec register value so that it could be
  *			written into eSDHC register.
  *
  * @host: pointer to sdhci_host
@@ -521,12 +531,16 @@ static void esdhc_of_adma_workaround(struct sdhci_host *host, u32 intmask)
 
 static int esdhc_of_enable_dma(struct sdhci_host *host)
 {
+	int ret;
 	u32 value;
 	struct device *dev = mmc_dev(host->mmc);
 
 	if (of_device_is_compatible(dev->of_node, "fsl,ls1043a-esdhc") ||
-	    of_device_is_compatible(dev->of_node, "fsl,ls1046a-esdhc"))
-		dma_set_mask_and_coherent(dev, DMA_BIT_MASK(40));
+	    of_device_is_compatible(dev->of_node, "fsl,ls1046a-esdhc")) {
+		ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(40));
+		if (ret)
+			return ret;
+	}
 
 	value = sdhci_readl(host, ESDHC_DMA_SYSCTL);
 
@@ -742,6 +756,21 @@ static void esdhc_of_set_clock(struct sdhci_host *host, unsigned int clock)
 		if (host->mmc->actual_clock == MMC_HS200_MAX_DTR)
 			temp |= ESDHC_DLL_FREQ_SEL;
 		sdhci_writel(host, temp, ESDHC_DLLCFG0);
+
+		temp |= ESDHC_DLL_RESET;
+		sdhci_writel(host, temp, ESDHC_DLLCFG0);
+		udelay(1);
+		temp &= ~ESDHC_DLL_RESET;
+		sdhci_writel(host, temp, ESDHC_DLLCFG0);
+
+		/* Wait max 20 ms */
+		if (read_poll_timeout(sdhci_readl, temp,
+				      temp & ESDHC_DLL_STS_SLV_LOCK,
+				      10, 20000, false,
+				      host, ESDHC_DLLSTAT0))
+			pr_err("%s: timeout for delay chain lock.\n",
+			       mmc_hostname(host->mmc));
+
 		temp = sdhci_readl(host, ESDHC_TBCTL);
 		sdhci_writel(host, temp | ESDHC_HS400_WNDW_ADJUST, ESDHC_TBCTL);
 
@@ -882,6 +911,7 @@ static int esdhc_signal_voltage_switch(struct mmc_host *mmc,
 		scfg_node = of_find_matching_node(NULL, scfg_device_ids);
 		if (scfg_node)
 			scfg_base = of_iomap(scfg_node, 0);
+		of_node_put(scfg_node);
 		if (scfg_base) {
 			sdhciovselcr = SDHCIOVSELCR_TGLEN |
 				       SDHCIOVSELCR_VSELVAL;
@@ -912,7 +942,7 @@ static struct soc_device_attribute soc_tuning_erratum_type1[] = {
 	{ .family = "QorIQ T1040", },
 	{ .family = "QorIQ T2080", },
 	{ .family = "QorIQ LS1021A", },
-	{ },
+	{ /* sentinel */ }
 };
 
 static struct soc_device_attribute soc_tuning_erratum_type2[] = {
@@ -922,7 +952,7 @@ static struct soc_device_attribute soc_tuning_erratum_type2[] = {
 	{ .family = "QorIQ LS1080A", },
 	{ .family = "QorIQ LS2080A", },
 	{ .family = "QorIQ LA1575A", },
-	{ },
+	{ /* sentinel */ }
 };
 
 static void esdhc_tuning_block_enable(struct sdhci_host *host, bool enable)
@@ -1051,6 +1081,17 @@ static int esdhc_execute_tuning(struct mmc_host *mmc, u32 opcode)
 
 	esdhc_tuning_block_enable(host, true);
 
+	/*
+	 * The eSDHC controller takes the data timeout value into account
+	 * during tuning. If the SD card is too slow sending the response, the
+	 * timer will expire and a "Buffer Read Ready" interrupt without data
+	 * is triggered. This leads to tuning errors.
+	 *
+	 * Just set the timeout to the maximum value because the core will
+	 * already take care of it in sdhci_send_tuning().
+	 */
+	sdhci_writeb(host, 0xe, SDHCI_TIMEOUT_CONTROL);
+
 	hs400_tuning = host->flags & SDHCI_HS400_TUNING;
 
 	do {
@@ -1135,6 +1176,40 @@ static int esdhc_execute_tuning(struct mmc_host *mmc, u32 opcode)
 static void esdhc_set_uhs_signaling(struct sdhci_host *host,
 				   unsigned int timing)
 {
+	u32 val;
+
+	/*
+	 * There are specific registers setting for HS400 mode.
+	 * Clean all of them if controller is in HS400 mode to
+	 * exit HS400 mode before re-setting any speed mode.
+	 */
+	val = sdhci_readl(host, ESDHC_TBCTL);
+	if (val & ESDHC_HS400_MODE) {
+		val = sdhci_readl(host, ESDHC_SDTIMNGCTL);
+		val &= ~ESDHC_FLW_CTL_BG;
+		sdhci_writel(host, val, ESDHC_SDTIMNGCTL);
+
+		val = sdhci_readl(host, ESDHC_SDCLKCTL);
+		val &= ~ESDHC_CMD_CLK_CTL;
+		sdhci_writel(host, val, ESDHC_SDCLKCTL);
+
+		esdhc_clock_enable(host, false);
+		val = sdhci_readl(host, ESDHC_TBCTL);
+		val &= ~ESDHC_HS400_MODE;
+		sdhci_writel(host, val, ESDHC_TBCTL);
+		esdhc_clock_enable(host, true);
+
+		val = sdhci_readl(host, ESDHC_DLLCFG0);
+		val &= ~(ESDHC_DLL_ENABLE | ESDHC_DLL_FREQ_SEL);
+		sdhci_writel(host, val, ESDHC_DLLCFG0);
+
+		val = sdhci_readl(host, ESDHC_TBCTL);
+		val &= ~ESDHC_HS400_WNDW_ADJUST;
+		sdhci_writel(host, val, ESDHC_TBCTL);
+
+		esdhc_tuning_block_enable(host, false);
+	}
+
 	if (timing == MMC_TIMING_MMC_HS400)
 		esdhc_tuning_block_enable(host, true);
 	else
@@ -1143,10 +1218,11 @@ static void esdhc_set_uhs_signaling(struct sdhci_host *host,
 
 static u32 esdhc_irq(struct sdhci_host *host, u32 intmask)
 {
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct sdhci_esdhc *esdhc = sdhci_pltfm_priv(pltfm_host);
 	u32 command;
 
-	if (of_find_compatible_node(NULL, NULL,
-				"fsl,p2020-esdhc")) {
+	if (esdhc->quirk_trans_complete_erratum) {
 		command = SDHCI_GET_CMD(sdhci_readw(host,
 					SDHCI_COMMAND));
 		if (command == MMC_WRITE_MULTIPLE_BLOCK &&
@@ -1248,19 +1324,21 @@ static const struct sdhci_pltfm_data sdhci_esdhc_le_pdata = {
 static struct soc_device_attribute soc_incorrect_hostver[] = {
 	{ .family = "QorIQ T4240", .revision = "1.0", },
 	{ .family = "QorIQ T4240", .revision = "2.0", },
-	{ },
+	{ /* sentinel */ }
 };
 
 static struct soc_device_attribute soc_fixup_sdhc_clkdivs[] = {
 	{ .family = "QorIQ LX2160A", .revision = "1.0", },
 	{ .family = "QorIQ LX2160A", .revision = "2.0", },
 	{ .family = "QorIQ LS1028A", .revision = "1.0", },
-	{ },
+	{ /* sentinel */ }
 };
 
 static struct soc_device_attribute soc_unreliable_pulse_detection[] = {
 	{ .family = "QorIQ LX2160A", .revision = "1.0", },
-	{ },
+	{ .family = "QorIQ LX2160A", .revision = "2.0", },
+	{ .family = "QorIQ LS1028A", .revision = "1.0", },
+	{ /* sentinel */ }
 };
 
 static void esdhc_init(struct platform_device *pdev, struct sdhci_host *host)
@@ -1300,8 +1378,10 @@ static void esdhc_init(struct platform_device *pdev, struct sdhci_host *host)
 		esdhc->clk_fixup = match->data;
 	np = pdev->dev.of_node;
 
-	if (of_device_is_compatible(np, "fsl,p2020-esdhc"))
+	if (of_device_is_compatible(np, "fsl,p2020-esdhc")) {
 		esdhc->quirk_delay_before_data_reset = true;
+		esdhc->quirk_trans_complete_erratum = true;
+	}
 
 	clk = of_clk_get(np, 0);
 	if (!IS_ERR(clk)) {
@@ -1322,13 +1402,19 @@ static void esdhc_init(struct platform_device *pdev, struct sdhci_host *host)
 		clk_put(clk);
 	}
 
-	if (esdhc->peripheral_clock) {
-		esdhc_clock_enable(host, false);
-		val = sdhci_readl(host, ESDHC_DMA_SYSCTL);
+	esdhc_clock_enable(host, false);
+	val = sdhci_readl(host, ESDHC_DMA_SYSCTL);
+	/*
+	 * This bit is not able to be reset by SDHCI_RESET_ALL. Need to
+	 * initialize it as 1 or 0 once, to override the different value
+	 * which may be configured in bootloader.
+	 */
+	if (esdhc->peripheral_clock)
 		val |= ESDHC_PERIPHERAL_CLK_SEL;
-		sdhci_writel(host, val, ESDHC_DMA_SYSCTL);
-		esdhc_clock_enable(host, true);
-	}
+	else
+		val &= ~ESDHC_PERIPHERAL_CLK_SEL;
+	sdhci_writel(host, val, ESDHC_DMA_SYSCTL);
+	esdhc_clock_enable(host, true);
 }
 
 static int esdhc_hs400_prepare_ddr(struct mmc_host *mmc)
@@ -1340,7 +1426,7 @@ static int esdhc_hs400_prepare_ddr(struct mmc_host *mmc)
 static int sdhci_esdhc_probe(struct platform_device *pdev)
 {
 	struct sdhci_host *host;
-	struct device_node *np;
+	struct device_node *np, *tp;
 	struct sdhci_pltfm_host *pltfm_host;
 	struct sdhci_esdhc *esdhc;
 	int ret;
@@ -1385,7 +1471,9 @@ static int sdhci_esdhc_probe(struct platform_device *pdev)
 	if (esdhc->vendor_ver > VENDOR_V_22)
 		host->quirks &= ~SDHCI_QUIRK_NO_BUSY_IRQ;
 
-	if (of_find_compatible_node(NULL, NULL, "fsl,p2020-esdhc")) {
+	tp = of_find_compatible_node(NULL, NULL, "fsl,p2020-esdhc");
+	if (tp) {
+		of_node_put(tp);
 		host->quirks |= SDHCI_QUIRK_RESET_AFTER_REQUEST;
 		host->quirks |= SDHCI_QUIRK_BROKEN_TIMEOUT_VAL;
 	}
@@ -1415,7 +1503,7 @@ static int sdhci_esdhc_probe(struct platform_device *pdev)
 	if (ret)
 		goto err;
 
-	mmc_of_parse_voltage(np, &host->ocr_mask);
+	mmc_of_parse_voltage(host->mmc, &host->ocr_mask);
 
 	ret = sdhci_add_host(host);
 	if (ret)
@@ -1430,6 +1518,7 @@ static int sdhci_esdhc_probe(struct platform_device *pdev)
 static struct platform_driver sdhci_esdhc_driver = {
 	.driver = {
 		.name = "sdhci-esdhc",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = sdhci_esdhc_of_match,
 		.pm = &esdhc_of_dev_pm_ops,
 	},

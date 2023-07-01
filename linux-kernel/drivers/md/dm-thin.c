@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2011-2012 Red Hat UK.
  *
@@ -32,7 +33,7 @@
 #define COMMIT_PERIOD HZ
 #define NO_SPACE_TIMEOUT_SECS 60
 
-static unsigned no_space_timeout_secs = NO_SPACE_TIMEOUT_SECS;
+static unsigned int no_space_timeout_secs = NO_SPACE_TIMEOUT_SECS;
 
 DECLARE_DM_KCOPYD_THROTTLE_WITH_MODULE_PARM(snapshot_copy_throttle,
 		"A percentage of time allocated for copy on write");
@@ -161,7 +162,7 @@ static void throttle_work_start(struct throttle *t)
 
 static void throttle_work_update(struct throttle *t)
 {
-	if (!t->throttle_applied && jiffies > t->threshold) {
+	if (!t->throttle_applied && time_is_before_jiffies(t->threshold)) {
 		down_write(&t->lock);
 		t->throttle_applied = true;
 	}
@@ -254,7 +255,7 @@ struct pool {
 	struct delayed_work no_space_timeout;
 
 	unsigned long last_commit_jiffies;
-	unsigned ref_count;
+	unsigned int ref_count;
 
 	spinlock_t lock;
 	struct bio_list deferred_flush_bios;
@@ -282,8 +283,6 @@ struct pool {
 	struct dm_bio_prison_cell **cell_sort_array;
 
 	mempool_t mapping_pool;
-
-	struct bio flush_bio;
 };
 
 static void metadata_operation_failed(struct pool *pool, const char *op, int r);
@@ -295,7 +294,7 @@ static enum pool_mode get_pool_mode(struct pool *pool)
 
 static void notify_of_pool_mode_change(struct pool *pool)
 {
-	const char *descs[] = {
+	static const char *descs[] = {
 		"write",
 		"out-of-data-space",
 		"read-only",
@@ -326,7 +325,6 @@ struct pool_c {
 	struct pool *pool;
 	struct dm_dev *data_dev;
 	struct dm_dev *metadata_dev;
-	struct dm_target_callbacks callbacks;
 
 	dm_block_t low_water_blocks;
 	struct pool_features requested_pf; /* Features requested during table load */
@@ -401,8 +399,8 @@ static int issue_discard(struct discard_op *op, dm_block_t data_b, dm_block_t da
 	sector_t s = block_to_sectors(tc->pool, data_b);
 	sector_t len = block_to_sectors(tc->pool, data_e - data_b);
 
-	return __blkdev_issue_discard(tc->pool_dev->bdev, s, len,
-				      GFP_NOWAIT, 0, &op->bio);
+	return __blkdev_issue_discard(tc->pool_dev->bdev, s, len, GFP_NOWAIT,
+				      &op->bio);
 }
 
 static void end_discard(struct discard_op *op, int r)
@@ -413,7 +411,7 @@ static void end_discard(struct discard_op *op, int r)
 		 * need to wait for the chain to complete.
 		 */
 		bio_chain(op->bio, op->parent_bio);
-		bio_set_op_attrs(op->bio, REQ_OP_DISCARD, 0);
+		op->bio->bi_opf = REQ_OP_DISCARD;
 		submit_bio(op->bio);
 	}
 
@@ -758,7 +756,7 @@ static void issue(struct thin_c *tc, struct bio *bio)
 	struct pool *pool = tc->pool;
 
 	if (!bio_triggers_commit(tc, bio)) {
-		generic_make_request(bio);
+		dm_submit_bio_remap(bio, NULL);
 		return;
 	}
 
@@ -1040,6 +1038,7 @@ out:
 static void free_discard_mapping(struct dm_thin_new_mapping *m)
 {
 	struct thin_c *tc = m->tc;
+
 	if (m->cell)
 		cell_defer_no_holder(tc, m->cell);
 	mempool_free(m, &tc->pool->mapping_pool);
@@ -1180,25 +1179,17 @@ static void process_prepared_discard_passdown_pt1(struct dm_thin_new_mapping *m)
 		return;
 	}
 
-	discard_parent = bio_alloc(GFP_NOIO, 1);
-	if (!discard_parent) {
-		DMWARN("%s: unable to allocate top level discard bio for passdown. Skipping passdown.",
-		       dm_device_name(tc->pool->pool_md));
-		queue_passdown_pt2(m);
+	discard_parent = bio_alloc(NULL, 1, 0, GFP_NOIO);
+	discard_parent->bi_end_io = passdown_endio;
+	discard_parent->bi_private = m;
+	if (m->maybe_shared)
+		passdown_double_checking_shared_status(m, discard_parent);
+	else {
+		struct discard_op op;
 
-	} else {
-		discard_parent->bi_end_io = passdown_endio;
-		discard_parent->bi_private = m;
-
-		if (m->maybe_shared)
-			passdown_double_checking_shared_status(m, discard_parent);
-		else {
-			struct discard_op op;
-
-			begin_discard(&op, tc, discard_parent);
-			r = issue_discard(&op, m->data_block, data_end);
-			end_discard(&op, r);
-		}
+		begin_discard(&op, tc, discard_parent);
+		r = issue_discard(&op, m->data_block, data_end);
+		end_discard(&op, r);
 	}
 }
 
@@ -2170,7 +2161,7 @@ static void process_thin_deferred_bios(struct thin_c *tc)
 	struct bio *bio;
 	struct bio_list bios;
 	struct blk_plug plug;
-	unsigned count = 0;
+	unsigned int count = 0;
 
 	if (tc->requeue_mode) {
 		error_thin_bio_list(tc, &tc->deferred_bio_list,
@@ -2218,6 +2209,7 @@ static void process_thin_deferred_bios(struct thin_c *tc)
 			throttle_work_update(&pool->throttle);
 			dm_pool_issue_prefetches(pool->pmd);
 		}
+		cond_resched();
 	}
 	blk_finish_plug(&plug);
 }
@@ -2239,9 +2231,9 @@ static int cmp_cells(const void *lhs, const void *rhs)
 	return 0;
 }
 
-static unsigned sort_cells(struct pool *pool, struct list_head *cells)
+static unsigned int sort_cells(struct pool *pool, struct list_head *cells)
 {
-	unsigned count = 0;
+	unsigned int count = 0;
 	struct dm_bio_prison_cell *cell, *tmp;
 
 	list_for_each_entry_safe(cell, tmp, cells, user_list) {
@@ -2262,7 +2254,7 @@ static void process_thin_deferred_cells(struct thin_c *tc)
 	struct pool *pool = tc->pool;
 	struct list_head cells;
 	struct dm_bio_prison_cell *cell;
-	unsigned i, j, count;
+	unsigned int i, j, count;
 
 	INIT_LIST_HEAD(&cells);
 
@@ -2300,6 +2292,7 @@ static void process_thin_deferred_cells(struct thin_c *tc)
 			else
 				pool->process_cell(tc, cell);
 		}
+		cond_resched();
 	} while (!list_empty(&cells));
 }
 
@@ -2394,7 +2387,7 @@ static void process_deferred_bios(struct pool *pool)
 		if (bio->bi_opf & REQ_PREFLUSH)
 			bio_endio(bio);
 		else
-			generic_make_request(bio);
+			dm_submit_bio_remap(bio, NULL);
 	}
 }
 
@@ -2422,6 +2415,7 @@ static void do_worker(struct work_struct *ws)
 static void do_waker(struct work_struct *ws)
 {
 	struct pool *pool = container_of(to_delayed_work(ws), struct pool, waker);
+
 	wake_worker(pool);
 	queue_delayed_work(pool->wq, &pool->waker, COMMIT_PERIOD);
 }
@@ -2484,6 +2478,7 @@ static struct noflush_work *to_noflush(struct work_struct *ws)
 static void do_noflush_start(struct work_struct *ws)
 {
 	struct noflush_work *w = to_noflush(ws);
+
 	w->tc->requeue_mode = true;
 	requeue_io(w->tc);
 	pool_work_complete(&w->pw);
@@ -2492,6 +2487,7 @@ static void do_noflush_start(struct work_struct *ws)
 static void do_noflush_stop(struct work_struct *ws)
 {
 	struct noflush_work *w = to_noflush(ws);
+
 	w->tc->requeue_mode = false;
 	pool_work_complete(&w->pw);
 }
@@ -2796,18 +2792,6 @@ static int thin_bio_map(struct dm_target *ti, struct bio *bio)
 	}
 }
 
-static int pool_is_congested(struct dm_target_callbacks *cb, int bdi_bits)
-{
-	struct pool_c *pt = container_of(cb, struct pool_c, callbacks);
-	struct request_queue *q;
-
-	if (get_pool_mode(pt->pool) == PM_OUT_OF_DATA_SPACE)
-		return 1;
-
-	q = bdev_get_queue(pt->data_dev->bdev);
-	return bdi_congested(q->backing_dev_info, bdi_bits);
-}
-
 static void requeue_bios(struct pool *pool)
 {
 	struct thin_c *tc;
@@ -2822,16 +2806,11 @@ static void requeue_bios(struct pool *pool)
 	rcu_read_unlock();
 }
 
-/*----------------------------------------------------------------
+/*
+ *--------------------------------------------------------------
  * Binding of control targets to a pool object
- *--------------------------------------------------------------*/
-static bool data_dev_supports_discard(struct pool_c *pt)
-{
-	struct request_queue *q = bdev_get_queue(pt->data_dev->bdev);
-
-	return q && blk_queue_discard(q);
-}
-
+ *--------------------------------------------------------------
+ */
 static bool is_factor(sector_t block_size, uint32_t n)
 {
 	return !sector_div(block_size, n);
@@ -2847,19 +2826,18 @@ static void disable_passdown_if_not_supported(struct pool_c *pt)
 	struct block_device *data_bdev = pt->data_dev->bdev;
 	struct queue_limits *data_limits = &bdev_get_queue(data_bdev)->limits;
 	const char *reason = NULL;
-	char buf[BDEVNAME_SIZE];
 
 	if (!pt->adjusted_pf.discard_passdown)
 		return;
 
-	if (!data_dev_supports_discard(pt))
+	if (!bdev_max_discard_sectors(pt->data_dev->bdev))
 		reason = "discard unsupported";
 
 	else if (data_limits->max_discard_sectors < pool->sectors_per_block)
 		reason = "max discard sectors smaller than a block";
 
 	if (reason) {
-		DMWARN("Data device (%s) %s: Disabling discard passdown.", bdevname(data_bdev, buf), reason);
+		DMWARN("Data device (%pg) %s: Disabling discard passdown.", data_bdev, reason);
 		pt->adjusted_pf.discard_passdown = false;
 	}
 }
@@ -2896,9 +2874,11 @@ static void unbind_control_target(struct pool *pool, struct dm_target *ti)
 		pool->ti = NULL;
 }
 
-/*----------------------------------------------------------------
+/*
+ *--------------------------------------------------------------
  * Pool creation
- *--------------------------------------------------------------*/
+ *--------------------------------------------------------------
+ */
 /* Initialize pool features. */
 static void pool_features_init(struct pool_features *pf)
 {
@@ -2920,13 +2900,14 @@ static void __pool_destroy(struct pool *pool)
 	dm_bio_prison_destroy(pool->prison);
 	dm_kcopyd_client_destroy(pool->copier);
 
+	cancel_delayed_work_sync(&pool->waker);
+	cancel_delayed_work_sync(&pool->no_space_timeout);
 	if (pool->wq)
 		destroy_workqueue(pool->wq);
 
 	if (pool->next_mapping)
 		mempool_free(pool->next_mapping, &pool->mapping_pool);
 	mempool_exit(&pool->mapping_pool);
-	bio_uninit(&pool->flush_bio);
 	dm_deferred_set_destroy(pool->shared_read_ds);
 	dm_deferred_set_destroy(pool->all_io_ds);
 	kfree(pool);
@@ -3007,7 +2988,6 @@ static struct pool *pool_create(struct mapped_device *pool_md,
 	pool->low_water_triggered = false;
 	pool->suspended = true;
 	pool->out_of_data_space = false;
-	bio_init(&pool->flush_bio, NULL, 0);
 
 	pool->shared_read_ds = dm_deferred_set_create();
 	if (!pool->shared_read_ds) {
@@ -3122,9 +3102,11 @@ static struct pool *__pool_find(struct mapped_device *pool_md,
 	return pool;
 }
 
-/*----------------------------------------------------------------
+/*
+ *--------------------------------------------------------------
  * Pool target methods
- *--------------------------------------------------------------*/
+ *--------------------------------------------------------------
+ */
 static void pool_dtr(struct dm_target *ti)
 {
 	struct pool_c *pt = ti->private;
@@ -3144,7 +3126,7 @@ static int parse_pool_features(struct dm_arg_set *as, struct pool_features *pf,
 			       struct dm_target *ti)
 {
 	int r;
-	unsigned argc;
+	unsigned int argc;
 	const char *arg_name;
 
 	static const struct dm_arg _args[] = {
@@ -3214,28 +3196,22 @@ static void metadata_low_callback(void *context)
 static int metadata_pre_commit_callback(void *context)
 {
 	struct pool *pool = context;
-	struct bio *flush_bio = &pool->flush_bio;
 
-	bio_reset(flush_bio);
-	bio_set_dev(flush_bio, pool->data_dev);
-	flush_bio->bi_opf = REQ_OP_WRITE | REQ_PREFLUSH;
-
-	return submit_bio_wait(flush_bio);
+	return blkdev_issue_flush(pool->data_dev);
 }
 
 static sector_t get_dev_size(struct block_device *bdev)
 {
-	return i_size_read(bdev->bd_inode) >> SECTOR_SHIFT;
+	return bdev_nr_sectors(bdev);
 }
 
 static void warn_if_metadata_device_too_big(struct block_device *bdev)
 {
 	sector_t metadata_dev_size = get_dev_size(bdev);
-	char buffer[BDEVNAME_SIZE];
 
 	if (metadata_dev_size > THIN_METADATA_MAX_SECTORS_WARNING)
-		DMWARN("Metadata device %s is larger than %u sectors: excess space will not be used.",
-		       bdevname(bdev, buffer), THIN_METADATA_MAX_SECTORS);
+		DMWARN("Metadata device %pg is larger than %u sectors: excess space will not be used.",
+		       bdev, THIN_METADATA_MAX_SECTORS);
 }
 
 static sector_t get_metadata_dev_size(struct block_device *bdev)
@@ -3271,6 +3247,7 @@ static dm_block_t calc_metadata_threshold(struct pool_c *pt)
 	 * delete after you've grown the device).
 	 */
 	dm_block_t quarter = get_metadata_dev_size_in_blocks(pt->metadata_dev->bdev) / 4;
+
 	return min((dm_block_t)1024ULL /* 4M */, quarter);
 }
 
@@ -3287,7 +3264,7 @@ static dm_block_t calc_metadata_threshold(struct pool_c *pt)
  *	     read_only: Don't allow any changes to be made to the pool metadata.
  *	     error_if_no_space: error IOs, instead of queueing, if no space.
  */
-static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
+static int pool_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
 	int r, pool_created = 0;
 	struct pool_c *pt;
@@ -3392,6 +3369,7 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 	pt->low_water_blocks = low_water_blocks;
 	pt->adjusted_pf = pt->requested_pf = pf;
 	ti->num_flush_bios = 1;
+	ti->limit_swap_bios = true;
 
 	/*
 	 * Only need to enable discards if the pool should pass
@@ -3414,14 +3392,13 @@ static int pool_ctr(struct dm_target *ti, unsigned argc, char **argv)
 						calc_metadata_threshold(pt),
 						metadata_low_callback,
 						pool);
-	if (r)
+	if (r) {
+		ti->error = "Error registering metadata threshold";
 		goto out_flags_changed;
+	}
 
 	dm_pool_register_pre_commit_callback(pool->pmd,
 					     metadata_pre_commit_callback, pool);
-
-	pt->callbacks.congested_fn = pool_is_congested;
-	dm_table_add_target_callbacks(ti->table, &pt->callbacks);
 
 	mutex_unlock(&dm_thin_pool_table.mutex);
 
@@ -3580,20 +3557,28 @@ static int pool_preresume(struct dm_target *ti)
 	 */
 	r = bind_control_target(pool, ti);
 	if (r)
-		return r;
+		goto out;
 
 	r = maybe_resize_data_dev(ti, &need_commit1);
 	if (r)
-		return r;
+		goto out;
 
 	r = maybe_resize_metadata_dev(ti, &need_commit2);
 	if (r)
-		return r;
+		goto out;
 
 	if (need_commit1 || need_commit2)
 		(void) commit(pool);
+out:
+	/*
+	 * When a thin-pool is PM_FAIL, it cannot be rebuilt if
+	 * bio is in deferred list. Therefore need to return 0
+	 * to allow pool_resume() to flush IO.
+	 */
+	if (r && get_pool_mode(pool) == PM_FAIL)
+		r = 0;
 
-	return 0;
+	return r;
 }
 
 static void pool_suspend_active_thins(struct pool *pool)
@@ -3675,7 +3660,7 @@ static void pool_postsuspend(struct dm_target *ti)
 	(void) commit(pool);
 }
 
-static int check_arg_count(unsigned argc, unsigned args_required)
+static int check_arg_count(unsigned int argc, unsigned int args_required)
 {
 	if (argc != args_required) {
 		DMWARN("Message received with %u arguments instead of %u.",
@@ -3698,7 +3683,7 @@ static int read_dev_id(char *arg, dm_thin_id *dev_id, int warning)
 	return -EINVAL;
 }
 
-static int process_create_thin_mesg(unsigned argc, char **argv, struct pool *pool)
+static int process_create_thin_mesg(unsigned int argc, char **argv, struct pool *pool)
 {
 	dm_thin_id dev_id;
 	int r;
@@ -3721,7 +3706,7 @@ static int process_create_thin_mesg(unsigned argc, char **argv, struct pool *poo
 	return 0;
 }
 
-static int process_create_snap_mesg(unsigned argc, char **argv, struct pool *pool)
+static int process_create_snap_mesg(unsigned int argc, char **argv, struct pool *pool)
 {
 	dm_thin_id dev_id;
 	dm_thin_id origin_dev_id;
@@ -3749,7 +3734,7 @@ static int process_create_snap_mesg(unsigned argc, char **argv, struct pool *poo
 	return 0;
 }
 
-static int process_delete_mesg(unsigned argc, char **argv, struct pool *pool)
+static int process_delete_mesg(unsigned int argc, char **argv, struct pool *pool)
 {
 	dm_thin_id dev_id;
 	int r;
@@ -3769,7 +3754,7 @@ static int process_delete_mesg(unsigned argc, char **argv, struct pool *pool)
 	return r;
 }
 
-static int process_set_transaction_id_mesg(unsigned argc, char **argv, struct pool *pool)
+static int process_set_transaction_id_mesg(unsigned int argc, char **argv, struct pool *pool)
 {
 	dm_thin_id old_id, new_id;
 	int r;
@@ -3798,7 +3783,7 @@ static int process_set_transaction_id_mesg(unsigned argc, char **argv, struct po
 	return 0;
 }
 
-static int process_reserve_metadata_snap_mesg(unsigned argc, char **argv, struct pool *pool)
+static int process_reserve_metadata_snap_mesg(unsigned int argc, char **argv, struct pool *pool)
 {
 	int r;
 
@@ -3815,7 +3800,7 @@ static int process_reserve_metadata_snap_mesg(unsigned argc, char **argv, struct
 	return r;
 }
 
-static int process_release_metadata_snap_mesg(unsigned argc, char **argv, struct pool *pool)
+static int process_release_metadata_snap_mesg(unsigned int argc, char **argv, struct pool *pool)
 {
 	int r;
 
@@ -3839,8 +3824,8 @@ static int process_release_metadata_snap_mesg(unsigned argc, char **argv, struct
  *   reserve_metadata_snap
  *   release_metadata_snap
  */
-static int pool_message(struct dm_target *ti, unsigned argc, char **argv,
-			char *result, unsigned maxlen)
+static int pool_message(struct dm_target *ti, unsigned int argc, char **argv,
+			char *result, unsigned int maxlen)
 {
 	int r = -EINVAL;
 	struct pool_c *pt = ti->private;
@@ -3880,9 +3865,9 @@ static int pool_message(struct dm_target *ti, unsigned argc, char **argv,
 }
 
 static void emit_flags(struct pool_features *pf, char *result,
-		       unsigned sz, unsigned maxlen)
+		       unsigned int sz, unsigned int maxlen)
 {
-	unsigned count = !pf->zero_new_blocks + !pf->discard_enabled +
+	unsigned int count = !pf->zero_new_blocks + !pf->discard_enabled +
 		!pf->discard_passdown + (pf->mode == PM_READ_ONLY) +
 		pf->error_if_no_space;
 	DMEMIT("%u ", count);
@@ -3910,10 +3895,10 @@ static void emit_flags(struct pool_features *pf, char *result,
  *    <pool mode> <discard config> <no space config> <needs_check>
  */
 static void pool_status(struct dm_target *ti, status_type_t type,
-			unsigned status_flags, char *result, unsigned maxlen)
+			unsigned int status_flags, char *result, unsigned int maxlen)
 {
 	int r;
-	unsigned sz = 0;
+	unsigned int sz = 0;
 	uint64_t transaction_id;
 	dm_block_t nr_free_blocks_data;
 	dm_block_t nr_free_blocks_metadata;
@@ -4028,6 +4013,10 @@ static void pool_status(struct dm_target *ti, status_type_t type,
 		       (unsigned long long)pt->low_water_blocks);
 		emit_flags(&pt->requested_pf, result, sz, maxlen);
 		break;
+
+	case STATUSTYPE_IMA:
+		*result = '\0';
+		break;
 	}
 	return;
 
@@ -4088,8 +4077,6 @@ static void pool_io_hints(struct dm_target *ti, struct queue_limits *limits)
 		/*
 		 * Must explicitly disallow stacking discard limits otherwise the
 		 * block layer will stack them if pool's data device has support.
-		 * QUEUE_FLAG_DISCARD wouldn't be set but there is no way for the
-		 * user to see that, so make sure to set all discard limits to 0.
 		 */
 		limits->discard_granularity = 0;
 		return;
@@ -4123,9 +4110,11 @@ static struct target_type pool_target = {
 	.io_hints = pool_io_hints,
 };
 
-/*----------------------------------------------------------------
+/*
+ *--------------------------------------------------------------
  * Thin target methods
- *--------------------------------------------------------------*/
+ *--------------------------------------------------------------
+ */
 static void thin_get(struct thin_c *tc)
 {
 	refcount_inc(&tc->refcount);
@@ -4173,7 +4162,7 @@ static void thin_dtr(struct dm_target *ti)
  * If the pool device has discards disabled, they get disabled for the thin
  * device as well.
  */
-static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
+static int thin_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
 	int r;
 	struct thin_c *tc;
@@ -4261,7 +4250,9 @@ static int thin_ctr(struct dm_target *ti, unsigned argc, char **argv)
 		goto bad;
 
 	ti->num_flush_bios = 1;
+	ti->limit_swap_bios = true;
 	ti->flush_supported = true;
+	ti->accounts_remapped_io = true;
 	ti->per_io_data_size = sizeof(struct dm_thin_endio_hook);
 
 	/* In case the pool supports discards, pass them on. */
@@ -4394,7 +4385,7 @@ static int thin_preresume(struct dm_target *ti)
  * <nr mapped sectors> <highest mapped sector>
  */
 static void thin_status(struct dm_target *ti, status_type_t type,
-			unsigned status_flags, char *result, unsigned maxlen)
+			unsigned int status_flags, char *result, unsigned int maxlen)
 {
 	int r;
 	ssize_t sz = 0;
@@ -4438,6 +4429,10 @@ static void thin_status(struct dm_target *ti, status_type_t type,
 			       (unsigned long) tc->dev_id);
 			if (tc->origin_dev)
 				DMEMIT(" %s", format_dev_t(buf, tc->origin_dev->bdev->bd_dev));
+			break;
+
+		case STATUSTYPE_IMA:
+			*result = '\0';
 			break;
 		}
 	}
@@ -4541,7 +4536,7 @@ static void dm_thin_exit(void)
 module_init(dm_thin_init);
 module_exit(dm_thin_exit);
 
-module_param_named(no_space_timeout, no_space_timeout_secs, uint, S_IRUGO | S_IWUSR);
+module_param_named(no_space_timeout, no_space_timeout_secs, uint, 0644);
 MODULE_PARM_DESC(no_space_timeout, "Out of data space queue IO timeout in seconds");
 
 MODULE_DESCRIPTION(DM_NAME " thin provisioning target");

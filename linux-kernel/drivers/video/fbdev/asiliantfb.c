@@ -29,6 +29,7 @@
  *  more details.
  */
 
+#include <linux/aperture.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -110,7 +111,7 @@ static const struct fb_ops asiliantfb_ops = {
 static void asiliant_calc_dclk2(u32 *ppixclock, u8 *dclk2_m, u8 *dclk2_n, u8 *dclk2_div)
 {
 	unsigned pixclock = *ppixclock;
-	unsigned Ftarget = 1000000 * (1000000 / pixclock);
+	unsigned Ftarget;
 	unsigned n;
 	unsigned best_error = 0xffffffff;
 	unsigned best_m = 0xffffffff,
@@ -226,6 +227,9 @@ static int asiliantfb_check_var(struct fb_var_screeninfo *var,
 			     struct fb_info *p)
 {
 	unsigned long Ftarget, ratio, remainder;
+
+	if (!var->pixclock)
+		return -EINVAL;
 
 	ratio = 1000000 / var->pixclock;
 	remainder = 1000000 % var->pixclock;
@@ -542,6 +546,10 @@ static int asiliantfb_pci_init(struct pci_dev *dp,
 	struct fb_info *p;
 	int err;
 
+	err = aperture_remove_conflicting_pci_devices(dp, "asiliantfb");
+	if (err)
+		return err;
+
 	if ((dp->resource[0].flags & IORESOURCE_MEM) == 0)
 		return -ENODEV;
 	addr = pci_resource_start(dp, 0);
@@ -608,6 +616,9 @@ static struct pci_driver asiliantfb_driver = {
 
 static int __init asiliantfb_init(void)
 {
+	if (fb_modesetting_disabled("asiliantfb"))
+		return -ENODEV;
+
 	if (fb_get_options("asiliantfb", NULL))
 		return -ENODEV;
 

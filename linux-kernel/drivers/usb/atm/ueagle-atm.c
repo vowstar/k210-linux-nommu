@@ -9,7 +9,7 @@
  * HISTORY : some part of the code was base on ueagle 1.3 BSD driver,
  * Damien Bergamini agree to put his code under a DUAL GPL/BSD license.
  *
- * The rest of the code was was rewritten from scratch.
+ * The rest of the code was rewritten from scratch.
  */
 
 #include <linux/module.h>
@@ -350,7 +350,7 @@ struct l1_code {
 	u8 string_header[E4_L1_STRING_HEADER];
 	u8 page_number_to_block_index[E4_MAX_PAGE_NUMBER];
 	struct block_index page_header[E4_NO_SWAPPAGE_HEADERS];
-	u8 code[0];
+	u8 code[];
 } __packed;
 
 /* structures describing a block within a DSP page */
@@ -570,7 +570,7 @@ MODULE_PARM_DESC(annex,
 #define LOAD_INTERNAL     0xA0
 #define F8051_USBCS       0x7f92
 
-/**
+/*
  * uea_send_modem_cmd - Send a command for pre-firmware devices.
  */
 static int uea_send_modem_cmd(struct usb_device *usb,
@@ -672,7 +672,7 @@ err:
 	uea_leaves(usb);
 }
 
-/**
+/*
  * uea_load_firmware - Load usb firmware for pre-firmware devices.
  */
 static int uea_load_firmware(struct usb_device *usb, unsigned int ver)

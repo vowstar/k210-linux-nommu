@@ -28,11 +28,11 @@
 
 #include "virtgpu_drv.h"
 
-int virtio_gpu_gem_create(struct drm_file *file,
-			  struct drm_device *dev,
-			  struct virtio_gpu_object_params *params,
-			  struct drm_gem_object **obj_p,
-			  uint32_t *handle_p)
+static int virtio_gpu_gem_create(struct drm_file *file,
+				 struct drm_device *dev,
+				 struct virtio_gpu_object_params *params,
+				 struct drm_gem_object **obj_p,
+				 uint32_t *handle_p)
 {
 	struct virtio_gpu_device *vgdev = dev->dev_private;
 	struct virtio_gpu_object *obj;
@@ -52,7 +52,7 @@ int virtio_gpu_gem_create(struct drm_file *file,
 	*obj_p = &obj->base.base;
 
 	/* drop reference from allocate - handle holds it now */
-	drm_gem_object_put_unlocked(&obj->base.base);
+	drm_gem_object_put(&obj->base.base);
 
 	*handle_p = handle;
 	return 0;
@@ -64,6 +64,7 @@ int virtio_gpu_mode_dumb_create(struct drm_file *file_priv,
 {
 	struct drm_gem_object *gobj;
 	struct virtio_gpu_object_params params = { 0 };
+	struct virtio_gpu_device *vgdev = dev->dev_private;
 	int ret;
 	uint32_t pitch;
 
@@ -79,6 +80,13 @@ int virtio_gpu_mode_dumb_create(struct drm_file *file_priv,
 	params.height = args->height;
 	params.size = args->size;
 	params.dumb = true;
+
+	if (vgdev->has_resource_blob && !vgdev->has_virgl_3d) {
+		params.blob_mem = VIRTGPU_BLOB_MEM_GUEST;
+		params.blob_flags = VIRTGPU_BLOB_FLAG_USE_SHAREABLE;
+		params.blob = true;
+	}
+
 	ret = virtio_gpu_gem_create(file_priv, dev, &params, &gobj,
 				    &args->handle);
 	if (ret)
@@ -102,7 +110,7 @@ int virtio_gpu_mode_dumb_mmap(struct drm_file *file_priv,
 	if (gobj == NULL)
 		return -ENOENT;
 	*offset_p = drm_vma_node_offset_addr(&gobj->vma_node);
-	drm_gem_object_put_unlocked(gobj);
+	drm_gem_object_put(gobj);
 	return 0;
 }
 
@@ -114,7 +122,12 @@ int virtio_gpu_gem_object_open(struct drm_gem_object *obj,
 	struct virtio_gpu_object_array *objs;
 
 	if (!vgdev->has_virgl_3d)
-		return 0;
+		goto out_notify;
+
+	/* the context might still be missing when the first ioctl is
+	 * DRM_IOCTL_MODE_CREATE_DUMB or DRM_IOCTL_PRIME_FD_TO_HANDLE
+	 */
+	virtio_gpu_create_context(obj->dev, file);
 
 	objs = virtio_gpu_array_alloc(1);
 	if (!objs)
@@ -123,6 +136,8 @@ int virtio_gpu_gem_object_open(struct drm_gem_object *obj,
 
 	virtio_gpu_cmd_context_attach_resource(vgdev, vfpriv->ctx_id,
 					       objs);
+out_notify:
+	virtio_gpu_notify(vgdev);
 	return 0;
 }
 
@@ -143,14 +158,14 @@ void virtio_gpu_gem_object_close(struct drm_gem_object *obj,
 
 	virtio_gpu_cmd_context_detach_resource(vgdev, vfpriv->ctx_id,
 					       objs);
+	virtio_gpu_notify(vgdev);
 }
 
 struct virtio_gpu_object_array *virtio_gpu_array_alloc(u32 nents)
 {
 	struct virtio_gpu_object_array *objs;
-	size_t size = sizeof(*objs) + sizeof(objs->objs[0]) * nents;
 
-	objs = kmalloc(size, GFP_KERNEL);
+	objs = kmalloc(struct_size(objs, objs, nents), GFP_KERNEL);
 	if (!objs)
 		return NULL;
 
@@ -199,6 +214,7 @@ void virtio_gpu_array_add_obj(struct virtio_gpu_object_array *objs,
 
 int virtio_gpu_array_lock_resv(struct virtio_gpu_object_array *objs)
 {
+	unsigned int i;
 	int ret;
 
 	if (objs->nents == 1) {
@@ -206,6 +222,16 @@ int virtio_gpu_array_lock_resv(struct virtio_gpu_object_array *objs)
 	} else {
 		ret = drm_gem_lock_reservations(objs->objs, objs->nents,
 						&objs->ticket);
+	}
+	if (ret)
+		return ret;
+
+	for (i = 0; i < objs->nents; ++i) {
+		ret = dma_resv_reserve_fences(objs->objs[i]->resv, 1);
+		if (ret) {
+			virtio_gpu_array_unlock_resv(objs);
+			return ret;
+		}
 	}
 	return ret;
 }
@@ -226,15 +252,19 @@ void virtio_gpu_array_add_fence(struct virtio_gpu_object_array *objs,
 	int i;
 
 	for (i = 0; i < objs->nents; i++)
-		dma_resv_add_excl_fence(objs->objs[i]->resv, fence);
+		dma_resv_add_fence(objs->objs[i]->resv, fence,
+				   DMA_RESV_USAGE_WRITE);
 }
 
 void virtio_gpu_array_put_free(struct virtio_gpu_object_array *objs)
 {
 	u32 i;
 
+	if (!objs)
+		return;
+
 	for (i = 0; i < objs->nents; i++)
-		drm_gem_object_put_unlocked(objs->objs[i]);
+		drm_gem_object_put(objs->objs[i]);
 	virtio_gpu_array_free(objs);
 }
 

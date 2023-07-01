@@ -2,7 +2,7 @@
 /*
  * Random Number Generator driver for the Keystone SOC
  *
- * Copyright (C) 2016 Texas Instruments Incorporated - http://www.ti.com
+ * Copyright (C) 2016 Texas Instruments Incorporated - https://www.ti.com
  *
  * Authors:	Sandeep Nair
  *		Vitaly Andrianov
@@ -241,7 +241,7 @@ static int ks_sa_rng_probe(struct platform_device *pdev)
 	}
 
 	pm_runtime_enable(dev);
-	ret = pm_runtime_get_sync(dev);
+	ret = pm_runtime_resume_and_get(dev);
 	if (ret < 0) {
 		dev_err(dev, "Failed to enable SA power-domain\n");
 		pm_runtime_disable(dev);

@@ -131,21 +131,19 @@ static const struct attribute_group haps_attr_group = {
  */
 static void toshiba_haps_notify(struct acpi_device *device, u32 event)
 {
-	pr_debug("Received event: 0x%x", event);
+	pr_debug("Received event: 0x%x\n", event);
 
 	acpi_bus_generate_netlink_event(device->pnp.device_class,
 					dev_name(&device->dev),
 					event, 0);
 }
 
-static int toshiba_haps_remove(struct acpi_device *device)
+static void toshiba_haps_remove(struct acpi_device *device)
 {
 	sysfs_remove_group(&device->dev.kobj, &haps_attr_group);
 
 	if (toshiba_haps)
 		toshiba_haps = NULL;
-
-	return 0;
 }
 
 /* Helper function */

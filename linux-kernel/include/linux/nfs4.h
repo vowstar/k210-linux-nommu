@@ -38,7 +38,7 @@ struct nfs4_ace {
 
 struct nfs4_acl {
 	uint32_t	naces;
-	struct nfs4_ace	aces[0];
+	struct nfs4_ace	aces[];
 };
 
 #define NFS4_MAXLABELLEN	2048
@@ -150,6 +150,12 @@ enum nfs_opnum4 {
 	OP_WRITE_SAME = 70,
 	OP_CLONE = 71,
 
+	/* xattr support (RFC8726) */
+	OP_GETXATTR                = 72,
+	OP_SETXATTR                = 73,
+	OP_LISTXATTRS              = 74,
+	OP_REMOVEXATTR             = 75,
+
 	OP_ILLEGAL = 10044,
 };
 
@@ -159,7 +165,7 @@ Needs to be updated if more operations are defined in future.*/
 #define FIRST_NFS4_OP	OP_ACCESS
 #define LAST_NFS40_OP	OP_RELEASE_LOCKOWNER
 #define LAST_NFS41_OP	OP_RECLAIM_COMPLETE
-#define LAST_NFS42_OP	OP_CLONE
+#define LAST_NFS42_OP	OP_REMOVEXATTR
 #define LAST_NFS4_OP	LAST_NFS42_OP
 
 enum nfsstat4 {
@@ -280,7 +286,15 @@ enum nfsstat4 {
 	NFS4ERR_WRONG_LFS = 10092,
 	NFS4ERR_BADLABEL = 10093,
 	NFS4ERR_OFFLOAD_NO_REQS = 10094,
+
+	/* xattr (RFC8276) */
+	NFS4ERR_NOXATTR        = 10095,
+	NFS4ERR_XATTR2BIG      = 10096,
 };
+
+/* error codes for internal client use */
+#define NFS4ERR_RESET_TO_MDS   12001
+#define NFS4ERR_RESET_TO_PNFS  12002
 
 static inline bool seqid_mutating_err(u32 err)
 {
@@ -295,7 +309,7 @@ static inline bool seqid_mutating_err(u32 err)
 	case NFS4ERR_NOFILEHANDLE:
 	case NFS4ERR_MOVED:
 		return false;
-	};
+	}
 	return true;
 }
 
@@ -375,13 +389,6 @@ enum lock_type4 {
 	NFS4_WRITEW_LT = 4
 };
 
-enum change_attr_type4 {
-	NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR = 0,
-	NFS4_CHANGE_TYPE_IS_VERSION_COUNTER = 1,
-	NFS4_CHANGE_TYPE_IS_VERSION_COUNTER_NOPNFS = 2,
-	NFS4_CHANGE_TYPE_IS_TIME_METADATA = 3,
-	NFS4_CHANGE_TYPE_IS_UNDEFINED = 4
-};
 
 /* Mandatory Attributes */
 #define FATTR4_WORD0_SUPPORTED_ATTRS    (1UL << 0)
@@ -444,6 +451,8 @@ enum change_attr_type4 {
 #define FATTR4_WORD1_TIME_MODIFY        (1UL << 21)
 #define FATTR4_WORD1_TIME_MODIFY_SET    (1UL << 22)
 #define FATTR4_WORD1_MOUNTED_ON_FILEID  (1UL << 23)
+#define FATTR4_WORD1_DACL               (1UL << 26)
+#define FATTR4_WORD1_SACL               (1UL << 27)
 #define FATTR4_WORD1_FS_LAYOUT_TYPES    (1UL << 30)
 #define FATTR4_WORD2_LAYOUT_TYPES       (1UL << 0)
 #define FATTR4_WORD2_LAYOUT_BLKSIZE     (1UL << 1)
@@ -452,6 +461,7 @@ enum change_attr_type4 {
 #define FATTR4_WORD2_CHANGE_ATTR_TYPE	(1UL << 15)
 #define FATTR4_WORD2_SECURITY_LABEL     (1UL << 16)
 #define FATTR4_WORD2_MODE_UMASK		(1UL << 17)
+#define FATTR4_WORD2_XATTR_SUPPORT	(1UL << 18)
 
 /* MDS threshold bitmap bits */
 #define THRESHOLD_RD                    (1UL << 0)
@@ -540,8 +550,13 @@ enum {
 
 	NFSPROC4_CLNT_LOOKUPP,
 	NFSPROC4_CLNT_LAYOUTERROR,
-
 	NFSPROC4_CLNT_COPY_NOTIFY,
+
+	NFSPROC4_CLNT_GETXATTR,
+	NFSPROC4_CLNT_SETXATTR,
+	NFSPROC4_CLNT_LISTXATTRS,
+	NFSPROC4_CLNT_REMOVEXATTR,
+	NFSPROC4_CLNT_READ_PLUS,
 };
 
 /* nfs41 types */
@@ -700,4 +715,34 @@ struct nl4_server {
 		struct nfs42_netaddr	nl4_addr; /* NL4_NETADDR */
 	} u;
 };
+
+enum nfs4_change_attr_type {
+	NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR = 0,
+	NFS4_CHANGE_TYPE_IS_VERSION_COUNTER = 1,
+	NFS4_CHANGE_TYPE_IS_VERSION_COUNTER_NOPNFS = 2,
+	NFS4_CHANGE_TYPE_IS_TIME_METADATA = 3,
+	NFS4_CHANGE_TYPE_IS_UNDEFINED = 4,
+};
+
+/*
+ * Options for setxattr. These match the flags for setxattr(2).
+ */
+enum nfs4_setxattr_options {
+	SETXATTR4_EITHER	= 0,
+	SETXATTR4_CREATE	= 1,
+	SETXATTR4_REPLACE	= 2,
+};
+
+enum {
+	RCA4_TYPE_MASK_RDATA_DLG	= 0,
+	RCA4_TYPE_MASK_WDATA_DLG	= 1,
+	RCA4_TYPE_MASK_DIR_DLG		= 2,
+	RCA4_TYPE_MASK_FILE_LAYOUT	= 3,
+	RCA4_TYPE_MASK_BLK_LAYOUT	= 4,
+	RCA4_TYPE_MASK_OBJ_LAYOUT_MIN	= 8,
+	RCA4_TYPE_MASK_OBJ_LAYOUT_MAX	= 9,
+	RCA4_TYPE_MASK_OTHER_LAYOUT_MIN	= 12,
+	RCA4_TYPE_MASK_OTHER_LAYOUT_MAX	= 15,
+};
+
 #endif

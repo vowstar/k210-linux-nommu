@@ -24,6 +24,8 @@
 #ifndef _TA_RAS_IF_H
 #define _TA_RAS_IF_H
 
+#define RAS_TA_HOST_IF_VER	0
+
 /* Responses have bit 31 set */
 #define RSP_ID_MASK (1U << 31)
 #define RSP_ID(cmdId) (((uint32_t)(cmdId)) | RSP_ID_MASK)
@@ -37,17 +39,33 @@ enum ras_command {
 };
 
 enum ta_ras_status {
-	TA_RAS_STATUS__SUCCESS				= 0x00,
-	TA_RAS_STATUS__RESET_NEEDED			= 0x01,
-	TA_RAS_STATUS__ERROR_INVALID_PARAMETER		= 0x02,
-	TA_RAS_STATUS__ERROR_RAS_NOT_AVAILABLE		= 0x03,
-	TA_RAS_STATUS__ERROR_RAS_DUPLICATE_CMD		= 0x04,
-	TA_RAS_STATUS__ERROR_INJECTION_FAILED		= 0x05,
-	TA_RAS_STATUS__ERROR_ASD_READ_WRITE		= 0x06,
-	TA_RAS_STATUS__ERROR_TOGGLE_DF_CSTATE		= 0x07,
-	TA_RAS_STATUS__ERROR_TIMEOUT			= 0x08,
-	TA_RAS_STATUS__ERROR_BLOCK_DISABLED		= 0x09,
-	TA_RAS_STATUS__ERROR_GENERIC			= 0x10,
+	TA_RAS_STATUS__SUCCESS                          = 0x0000,
+	TA_RAS_STATUS__RESET_NEEDED                     = 0xA001,
+	TA_RAS_STATUS__ERROR_INVALID_PARAMETER          = 0xA002,
+	TA_RAS_STATUS__ERROR_RAS_NOT_AVAILABLE          = 0xA003,
+	TA_RAS_STATUS__ERROR_RAS_DUPLICATE_CMD          = 0xA004,
+	TA_RAS_STATUS__ERROR_INJECTION_FAILED           = 0xA005,
+	TA_RAS_STATUS__ERROR_ASD_READ_WRITE             = 0xA006,
+	TA_RAS_STATUS__ERROR_TOGGLE_DF_CSTATE           = 0xA007,
+	TA_RAS_STATUS__ERROR_TIMEOUT                    = 0xA008,
+	TA_RAS_STATUS__ERROR_BLOCK_DISABLED             = 0XA009,
+	TA_RAS_STATUS__ERROR_GENERIC                    = 0xA00A,
+	TA_RAS_STATUS__ERROR_RAS_MMHUB_INIT             = 0xA00B,
+	TA_RAS_STATUS__ERROR_GET_DEV_INFO               = 0xA00C,
+	TA_RAS_STATUS__ERROR_UNSUPPORTED_DEV            = 0xA00D,
+	TA_RAS_STATUS__ERROR_NOT_INITIALIZED            = 0xA00E,
+	TA_RAS_STATUS__ERROR_TEE_INTERNAL               = 0xA00F,
+	TA_RAS_STATUS__ERROR_UNSUPPORTED_FUNCTION       = 0xA010,
+	TA_RAS_STATUS__ERROR_SYS_DRV_REG_ACCESS         = 0xA011,
+	TA_RAS_STATUS__ERROR_RAS_READ_WRITE             = 0xA012,
+	TA_RAS_STATUS__ERROR_NULL_PTR                   = 0xA013,
+	TA_RAS_STATUS__ERROR_UNSUPPORTED_IP             = 0xA014,
+	TA_RAS_STATUS__ERROR_PCS_STATE_QUIET            = 0xA015,
+	TA_RAS_STATUS__ERROR_PCS_STATE_ERROR            = 0xA016,
+	TA_RAS_STATUS__ERROR_PCS_STATE_HANG             = 0xA017,
+	TA_RAS_STATUS__ERROR_PCS_STATE_UNKNOWN          = 0xA018,
+	TA_RAS_STATUS__ERROR_UNSUPPORTED_ERROR_INJ      = 0xA019,
+	TA_RAS_STATUS__TEE_ERROR_ACCESS_DENIED          = 0xA01A
 };
 
 enum ta_ras_block {
@@ -65,7 +83,16 @@ enum ta_ras_block {
 	TA_RAS_BLOCK__MP0,
 	TA_RAS_BLOCK__MP1,
 	TA_RAS_BLOCK__FUSE,
+	TA_RAS_BLOCK__MCA,
 	TA_NUM_BLOCK_MAX
+};
+
+enum ta_ras_mca_block {
+	TA_RAS_MCA_BLOCK__MP0   = 0,
+	TA_RAS_MCA_BLOCK__MP1   = 1,
+	TA_RAS_MCA_BLOCK__MPIO  = 2,
+	TA_RAS_MCA_BLOCK__IOHC  = 3,
+	TA_MCA_NUM_BLOCK_MAX
 };
 
 enum ta_ras_error_type {
@@ -97,22 +124,43 @@ struct ta_ras_trigger_error_input {
 	uint64_t		value;			// method if error injection. i.e persistent, coherent etc.
 };
 
+struct ta_ras_init_flags {
+	uint8_t poison_mode_en;
+	uint8_t dgpu_mode;
+};
+
+struct ta_ras_output_flags {
+	uint8_t ras_init_success_flag;
+	uint8_t err_inject_switch_disable_flag;
+	uint8_t reg_access_failure_flag;
+};
+
 /* Common input structure for RAS callbacks */
 /**********************************************************/
 union ta_ras_cmd_input {
+	struct ta_ras_init_flags		init_flags;
 	struct ta_ras_enable_features_input	enable_features;
 	struct ta_ras_disable_features_input	disable_features;
 	struct ta_ras_trigger_error_input	trigger_error;
+
+	uint32_t reserve_pad[256];
+};
+
+union ta_ras_cmd_output {
+	struct ta_ras_output_flags flags;
+
+	uint32_t reserve_pad[256];
 };
 
 /* Shared Memory structures */
 /**********************************************************/
 struct ta_ras_shared_memory {
-	uint32_t		cmd_id;
-	uint32_t		resp_id;
-	enum ta_ras_status	ras_status;
-	uint32_t		reserved;
-	union ta_ras_cmd_input	ras_in_message;
+	uint32_t		    cmd_id;
+	uint32_t		    resp_id;
+	uint32_t	    	    ras_status;
+	uint32_t		    if_version;
+	union ta_ras_cmd_input	    ras_in_message;
+	union ta_ras_cmd_output     ras_out_message;
 };
 
 #endif // TL_RAS_IF_H_

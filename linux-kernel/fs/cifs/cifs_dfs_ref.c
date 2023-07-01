@@ -21,8 +21,8 @@
 #include "cifsfs.h"
 #include "dns_resolve.h"
 #include "cifs_debug.h"
-#include "cifs_unicode.h"
-#include "dfs_cache.h"
+#include "dfs.h"
+#include "fs_context.h"
 
 static LIST_HEAD(cifs_dfs_automount_list);
 
@@ -59,7 +59,7 @@ void cifs_dfs_release_automount_timer(void)
  * Returns pointer to the built string, or a ERR_PTR. Caller is responsible
  * for freeing the returned string.
  */
-static char *
+char *
 cifs_build_devname(char *nodename, const char *prepath)
 {
 	size_t pplen;
@@ -118,192 +118,34 @@ cifs_build_devname(char *nodename, const char *prepath)
 	return dev;
 }
 
-
-/**
- * cifs_compose_mount_options	-	creates mount options for referral
- * @sb_mountdata:	parent/root DFS mount options (template)
- * @fullpath:		full path in UNC format
- * @ref:		optional server's referral
- * @devname:		optional pointer for saving device name
- *
- * creates mount options for submount based on template options sb_mountdata
- * and replacing unc,ip,prefixpath options with ones we've got form ref_unc.
- *
- * Returns: pointer to new mount options or ERR_PTR.
- * Caller is responsible for freeing returned value if it is not error.
- */
-char *cifs_compose_mount_options(const char *sb_mountdata,
-				   const char *fullpath,
-				   const struct dfs_info3_param *ref,
-				   char **devname)
+static int set_dest_addr(struct smb3_fs_context *ctx, const char *full_path)
 {
+	struct sockaddr *addr = (struct sockaddr *)&ctx->dstaddr;
 	int rc;
-	char *name;
-	char *mountdata = NULL;
-	const char *prepath = NULL;
-	int md_len;
-	char *tkn_e;
-	char *srvIP = NULL;
-	char sep = ',';
-	int off, noff;
 
-	if (sb_mountdata == NULL)
-		return ERR_PTR(-EINVAL);
-
-	if (ref) {
-		if (strlen(fullpath) - ref->path_consumed) {
-			prepath = fullpath + ref->path_consumed;
-			/* skip initial delimiter */
-			if (*prepath == '/' || *prepath == '\\')
-				prepath++;
-		}
-
-		name = cifs_build_devname(ref->node_name, prepath);
-		if (IS_ERR(name)) {
-			rc = PTR_ERR(name);
-			name = NULL;
-			goto compose_mount_options_err;
-		}
-	} else {
-		name = cifs_build_devname((char *)fullpath, NULL);
-		if (IS_ERR(name)) {
-			rc = PTR_ERR(name);
-			name = NULL;
-			goto compose_mount_options_err;
-		}
-	}
-
-	rc = dns_resolve_server_name_to_ip(name, &srvIP);
-	if (rc < 0) {
-		cifs_dbg(FYI, "%s: Failed to resolve server part of %s to IP: %d\n",
-			 __func__, name, rc);
-		goto compose_mount_options_err;
-	}
-
-	/*
-	 * In most cases, we'll be building a shorter string than the original,
-	 * but we do have to assume that the address in the ip= option may be
-	 * much longer than the original. Add the max length of an address
-	 * string to the length of the original string to allow for worst case.
-	 */
-	md_len = strlen(sb_mountdata) + INET6_ADDRSTRLEN;
-	mountdata = kzalloc(md_len + sizeof("ip=") + 1, GFP_KERNEL);
-	if (mountdata == NULL) {
-		rc = -ENOMEM;
-		goto compose_mount_options_err;
-	}
-
-	/* copy all options except of unc,ip,prefixpath */
-	off = 0;
-	if (strncmp(sb_mountdata, "sep=", 4) == 0) {
-			sep = sb_mountdata[4];
-			strncpy(mountdata, sb_mountdata, 5);
-			off += 5;
-	}
-
-	do {
-		tkn_e = strchr(sb_mountdata + off, sep);
-		if (tkn_e == NULL)
-			noff = strlen(sb_mountdata + off);
-		else
-			noff = tkn_e - (sb_mountdata + off) + 1;
-
-		if (strncasecmp(sb_mountdata + off, "unc=", 4) == 0) {
-			off += noff;
-			continue;
-		}
-		if (strncasecmp(sb_mountdata + off, "ip=", 3) == 0) {
-			off += noff;
-			continue;
-		}
-		if (strncasecmp(sb_mountdata + off, "prefixpath=", 11) == 0) {
-			off += noff;
-			continue;
-		}
-		strncat(mountdata, sb_mountdata + off, noff);
-		off += noff;
-	} while (tkn_e);
-	strcat(mountdata, sb_mountdata + off);
-	mountdata[md_len] = '\0';
-
-	/* copy new IP and ref share name */
-	if (mountdata[strlen(mountdata) - 1] != sep)
-		strncat(mountdata, &sep, 1);
-	strcat(mountdata, "ip=");
-	strcat(mountdata, srvIP);
-
-	if (devname)
-		*devname = name;
-	else
-		kfree(name);
-
-	/*cifs_dbg(FYI, "%s: parent mountdata: %s\n", __func__, sb_mountdata);*/
-	/*cifs_dbg(FYI, "%s: submount mountdata: %s\n", __func__, mountdata );*/
-
-compose_mount_options_out:
-	kfree(srvIP);
-	return mountdata;
-
-compose_mount_options_err:
-	kfree(mountdata);
-	mountdata = ERR_PTR(rc);
-	kfree(name);
-	goto compose_mount_options_out;
-}
-
-/**
- * cifs_dfs_do_mount - mounts specified path using DFS full path
- *
- * Always pass down @fullpath to smb3_do_mount() so we can use the root server
- * to perform failover in case we failed to connect to the first target in the
- * referral.
- *
- * @cifs_sb:		parent/root superblock
- * @fullpath:		full path in UNC format
- */
-static struct vfsmount *cifs_dfs_do_mount(struct dentry *mntpt,
-					  struct cifs_sb_info *cifs_sb,
-					  const char *fullpath)
-{
-	struct vfsmount *mnt;
-	char *mountdata;
-	char *devname;
-
-	devname = kstrndup(fullpath, strlen(fullpath), GFP_KERNEL);
-	if (!devname)
-		return ERR_PTR(-ENOMEM);
-
-	convert_delimiter(devname, '/');
-
-	/* strip first '\' from fullpath */
-	mountdata = cifs_compose_mount_options(cifs_sb->mountdata,
-					       fullpath + 1, NULL, NULL);
-	if (IS_ERR(mountdata)) {
-		kfree(devname);
-		return (struct vfsmount *)mountdata;
-	}
-
-	mnt = vfs_submount(mntpt, &cifs_fs_type, devname, mountdata);
-	kfree(mountdata);
-	kfree(devname);
-	return mnt;
+	rc = dns_resolve_server_name_to_ip(full_path, addr, NULL);
+	if (!rc)
+		cifs_set_port(addr, ctx->port);
+	return rc;
 }
 
 /*
  * Create a vfsmount that we can automount
  */
-static struct vfsmount *cifs_dfs_do_automount(struct dentry *mntpt)
+static struct vfsmount *cifs_dfs_do_automount(struct path *path)
 {
-	struct cifs_sb_info *cifs_sb;
-	struct cifs_ses *ses;
-	struct cifs_tcon *tcon;
-	char *full_path, *root_path;
-	unsigned int xid;
 	int rc;
+	struct dentry *mntpt = path->dentry;
+	struct fs_context *fc;
+	struct cifs_sb_info *cifs_sb;
+	void *page = NULL;
+	struct smb3_fs_context *ctx, *cur_ctx;
+	struct smb3_fs_context tmp;
+	char *full_path;
 	struct vfsmount *mnt;
 
-	cifs_dbg(FYI, "in %s\n", __func__);
-	BUG_ON(IS_ROOT(mntpt));
+	if (IS_ROOT(mntpt))
+		return ERR_PTR(-ESTALE);
 
 	/*
 	 * The MSDFS spec states that paths in DFS referral requests and
@@ -311,76 +153,53 @@ static struct vfsmount *cifs_dfs_do_automount(struct dentry *mntpt)
 	 * the double backslashes usually used in the UNC. This function
 	 * gives us the latter, so we must adjust the result.
 	 */
-	mnt = ERR_PTR(-ENOMEM);
-
 	cifs_sb = CIFS_SB(mntpt->d_sb);
-	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_NO_DFS) {
-		mnt = ERR_PTR(-EREMOTE);
-		goto cdda_exit;
+	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_NO_DFS)
+		return ERR_PTR(-EREMOTE);
+
+	cur_ctx = cifs_sb->ctx;
+
+	fc = fs_context_for_submount(path->mnt->mnt_sb->s_type, mntpt);
+	if (IS_ERR(fc))
+		return ERR_CAST(fc);
+
+	ctx = smb3_fc2context(fc);
+
+	page = alloc_dentry_path();
+	full_path = dfs_get_automount_devname(mntpt, page);
+	if (IS_ERR(full_path)) {
+		mnt = ERR_CAST(full_path);
+		goto out;
 	}
-
-	/* always use tree name prefix */
-	full_path = build_path_from_dentry_optional_prefix(mntpt, true);
-	if (full_path == NULL)
-		goto cdda_exit;
-
 	cifs_dbg(FYI, "%s: full_path: %s\n", __func__, full_path);
 
-	if (!cifs_sb_master_tlink(cifs_sb)) {
-		cifs_dbg(FYI, "%s: master tlink is NULL\n", __func__);
-		goto free_full_path;
-	}
+	tmp = *cur_ctx;
+	tmp.source = full_path;
+	tmp.leaf_fullpath = NULL;
+	tmp.UNC = tmp.prepath = NULL;
+	tmp.dfs_root_ses = NULL;
 
-	tcon = cifs_sb_master_tcon(cifs_sb);
-	if (!tcon) {
-		cifs_dbg(FYI, "%s: master tcon is NULL\n", __func__);
-		goto free_full_path;
-	}
-
-	root_path = kstrdup(tcon->treeName, GFP_KERNEL);
-	if (!root_path) {
-		mnt = ERR_PTR(-ENOMEM);
-		goto free_full_path;
-	}
-	cifs_dbg(FYI, "%s: root path: %s\n", __func__, root_path);
-
-	ses = tcon->ses;
-	xid = get_xid();
-
-	/*
-	 * If DFS root has been expired, then unconditionally fetch it again to
-	 * refresh DFS referral cache.
-	 */
-	rc = dfs_cache_find(xid, ses, cifs_sb->local_nls, cifs_remap(cifs_sb),
-			    root_path + 1, NULL, NULL);
-	if (!rc) {
-		rc = dfs_cache_find(xid, ses, cifs_sb->local_nls,
-				    cifs_remap(cifs_sb), full_path + 1,
-				    NULL, NULL);
-	}
-
-	free_xid(xid);
-
+	rc = smb3_fs_context_dup(ctx, &tmp);
 	if (rc) {
 		mnt = ERR_PTR(rc);
-		goto free_root_path;
+		goto out;
 	}
-	/*
-	 * OK - we were able to get and cache a referral for @full_path.
-	 *
-	 * Now, pass it down to cifs_mount() and it will retry every available
-	 * node server in case of failures - no need to do it here.
-	 */
-	mnt = cifs_dfs_do_mount(mntpt, cifs_sb, full_path);
-	cifs_dbg(FYI, "%s: cifs_dfs_do_mount:%s , mnt:%p\n", __func__,
-		 full_path + 1, mnt);
 
-free_root_path:
-	kfree(root_path);
-free_full_path:
-	kfree(full_path);
-cdda_exit:
-	cifs_dbg(FYI, "leaving %s\n" , __func__);
+	rc = set_dest_addr(ctx, full_path);
+	if (rc) {
+		mnt = ERR_PTR(rc);
+		goto out;
+	}
+
+	rc = smb3_parse_devname(full_path, ctx);
+	if (!rc)
+		mnt = fc_mount(fc);
+	else
+		mnt = ERR_PTR(rc);
+
+out:
+	put_fs_context(fc);
+	free_dentry_path(page);
 	return mnt;
 }
 
@@ -391,9 +210,9 @@ struct vfsmount *cifs_dfs_d_automount(struct path *path)
 {
 	struct vfsmount *newmnt;
 
-	cifs_dbg(FYI, "in %s\n", __func__);
+	cifs_dbg(FYI, "%s: %pd\n", __func__, path->dentry);
 
-	newmnt = cifs_dfs_do_automount(path->dentry);
+	newmnt = cifs_dfs_do_automount(path);
 	if (IS_ERR(newmnt)) {
 		cifs_dbg(FYI, "leaving %s [automount failed]\n" , __func__);
 		return newmnt;

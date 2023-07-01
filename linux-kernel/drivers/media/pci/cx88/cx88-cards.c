@@ -3206,7 +3206,7 @@ static int cx88_xc4000_tuner_callback(struct cx88_core *core,
 
 /*
  * Tuner callback function. Currently only needed for the Pinnacle
- * PCTV HD 800i with an xc5000 sillicon tuner. This is used for both
+ * PCTV HD 800i with an xc5000 silicon tuner. This is used for both
  * analog tuner attach (tuner-core.c) and dvb tuner attach (cx88-dvb.c)
  */
 static int cx88_xc5000_tuner_callback(struct cx88_core *core,
@@ -3499,7 +3499,7 @@ static void cx88_card_setup(struct cx88_core *core)
 		cx_clear(MO_GP0_IO, 0x00000040);
 		msleep(1000);
 		cx_set(MO_GP0_IO, 0x00004040);
-		/* FALLTHROUGH */
+		fallthrough;
 	case CX88_BOARD_DVICO_FUSIONHDTV_DVB_T1:
 	case CX88_BOARD_DVICO_FUSIONHDTV_DVB_T_PLUS:
 	case CX88_BOARD_DVICO_FUSIONHDTV_DVB_T_HYBRID:

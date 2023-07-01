@@ -25,13 +25,13 @@ stopstate="`grep 'End-test grace-period state: g' $i/console.log 2> /dev/null |
 	    tail -1 | sed -e 's/^\[[ 0-9.]*] //' |
 	    awk '{ print \"[\" $1 \" \" $5 \" \" $6 \" \" $7 \"]\"; }' |
 	    tr -d '\012\015'`"
-fwdprog="`grep 'rcu_torture_fwd_prog_cr Duration' $i/console.log 2> /dev/null | sed -e 's/^\[[^]]*] //' | sort -k15nr | head -1 | awk '{ print $14 " " $15 }'`"
+fwdprog="`grep 'rcu_torture_fwd_prog n_max_cbs: ' $i/console.log 2> /dev/null | sed -e 's/^\[[^]]*] //' | sort -k3nr | head -1 | awk '{ print $2 " " $3 }' | tr -d '\015'`"
 if test -z "$ngps"
 then
 	echo "$configfile ------- " $stopstate
 else
 	title="$configfile ------- $ngps GPs"
-	dur=`sed -e 's/^.* rcutorture.shutdown_secs=//' -e 's/ .*$//' < $i/qemu-cmd 2> /dev/null`
+	dur=`grep -v '^#' $i/qemu-cmd | sed -e 's/^.* rcutorture.shutdown_secs=//' -e 's/ .*$//'`
 	if test -z "$dur"
 	then
 		:
@@ -41,7 +41,21 @@ else
 		title="$title ($ngpsps/s)"
 	fi
 	echo $title $stopstate $fwdprog
-	nclosecalls=`grep --binary-files=text 'torture: Reader Batch' $i/console.log | tail -1 | awk '{for (i=NF-8;i<=NF;i++) sum+=$i; } END {print sum}'`
+	nclosecalls=`grep --binary-files=text 'torture: Reader Batch' $i/console.log | tail -1 | \
+		awk -v sum=0 '
+		{
+			for (i = 0; i <= NF; i++) {
+				sum += $i;
+				if ($i ~ /Batch:/) {
+					sum = 0;
+					i = i + 2;
+				}
+			}
+		}
+
+		END {
+			print sum
+		}'`
 	if test -z "$nclosecalls"
 	then
 		exit 0

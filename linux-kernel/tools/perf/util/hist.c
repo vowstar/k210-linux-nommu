@@ -10,6 +10,7 @@
 #include "mem-events.h"
 #include "session.h"
 #include "namespaces.h"
+#include "cgroup.h"
 #include "sort.h"
 #include "units.h"
 #include "evlist.h"
@@ -123,6 +124,7 @@ void hists__calc_col_len(struct hists *hists, struct hist_entry *h)
 		} else {
 			symlen = unresolved_col_width + 4 + 2;
 			hists__new_col_len(hists, HISTC_SYMBOL_FROM, symlen);
+			hists__new_col_len(hists, HISTC_ADDR_FROM, symlen);
 			hists__set_unres_dso_col_len(hists, HISTC_DSO_FROM);
 		}
 
@@ -137,6 +139,7 @@ void hists__calc_col_len(struct hists *hists, struct hist_entry *h)
 		} else {
 			symlen = unresolved_col_width + 4 + 2;
 			hists__new_col_len(hists, HISTC_SYMBOL_TO, symlen);
+			hists__new_col_len(hists, HISTC_ADDR_TO, symlen);
 			hists__set_unres_dso_col_len(hists, HISTC_DSO_TO);
 		}
 
@@ -187,6 +190,9 @@ void hists__calc_col_len(struct hists *hists, struct hist_entry *h)
 		hists__new_col_len(hists, HISTC_MEM_PHYS_DADDR,
 				   unresolved_col_width + 4 + 2);
 
+		hists__new_col_len(hists, HISTC_MEM_DATA_PAGE_SIZE,
+				   unresolved_col_width + 4 + 2);
+
 	} else {
 		symlen = unresolved_col_width + 4 + 2;
 		hists__new_col_len(hists, HISTC_MEM_DADDR_SYMBOL, symlen);
@@ -194,6 +200,7 @@ void hists__calc_col_len(struct hists *hists, struct hist_entry *h)
 		hists__set_unres_dso_col_len(hists, HISTC_MEM_DADDR_DSO);
 	}
 
+	hists__new_col_len(hists, HISTC_CGROUP, 6);
 	hists__new_col_len(hists, HISTC_CGROUP_ID, 20);
 	hists__new_col_len(hists, HISTC_CPU, 3);
 	hists__new_col_len(hists, HISTC_SOCKET, 6);
@@ -203,10 +210,18 @@ void hists__calc_col_len(struct hists *hists, struct hist_entry *h)
 	hists__new_col_len(hists, HISTC_MEM_LVL, 21 + 3);
 	hists__new_col_len(hists, HISTC_LOCAL_WEIGHT, 12);
 	hists__new_col_len(hists, HISTC_GLOBAL_WEIGHT, 12);
+	hists__new_col_len(hists, HISTC_MEM_BLOCKED, 10);
+	hists__new_col_len(hists, HISTC_LOCAL_INS_LAT, 13);
+	hists__new_col_len(hists, HISTC_GLOBAL_INS_LAT, 13);
+	hists__new_col_len(hists, HISTC_LOCAL_P_STAGE_CYC, 13);
+	hists__new_col_len(hists, HISTC_GLOBAL_P_STAGE_CYC, 13);
+	hists__new_col_len(hists, HISTC_ADDR, BITS_PER_LONG / 4 + 2);
+
 	if (symbol_conf.nanosecs)
 		hists__new_col_len(hists, HISTC_TIME, 16);
 	else
 		hists__new_col_len(hists, HISTC_TIME, 12);
+	hists__new_col_len(hists, HISTC_CODE_PAGE_SIZE, 6);
 
 	if (h->srcline) {
 		len = MAX(strlen(h->srcline), strlen(sort_srcline.se_header));
@@ -222,6 +237,16 @@ void hists__calc_col_len(struct hists *hists, struct hist_entry *h)
 
 	if (h->trace_output)
 		hists__new_col_len(hists, HISTC_TRACE, strlen(h->trace_output));
+
+	if (h->cgroup) {
+		const char *cgrp_name = "unknown";
+		struct cgroup *cgrp = cgroup__find(h->ms.maps->machine->env,
+						   h->cgroup);
+		if (cgrp != NULL)
+			cgrp_name = cgrp->name;
+
+		hists__new_col_len(hists, HISTC_CGROUP, strlen(cgrp_name));
+	}
 }
 
 void hists__output_recalc_col_len(struct hists *hists, int max_rows)
@@ -269,12 +294,9 @@ static long hist_time(unsigned long htime)
 	return htime;
 }
 
-static void he_stat__add_period(struct he_stat *he_stat, u64 period,
-				u64 weight)
+static void he_stat__add_period(struct he_stat *he_stat, u64 period)
 {
-
 	he_stat->period		+= period;
-	he_stat->weight		+= weight;
 	he_stat->nr_events	+= 1;
 }
 
@@ -286,7 +308,6 @@ static void he_stat__add_stat(struct he_stat *dest, struct he_stat *src)
 	dest->period_guest_sys	+= src->period_guest_sys;
 	dest->period_guest_us	+= src->period_guest_us;
 	dest->nr_events		+= src->nr_events;
-	dest->weight		+= src->weight;
 }
 
 static void he_stat__decay(struct he_stat *he_stat)
@@ -574,7 +595,6 @@ static struct hist_entry *hists__findnew_entry(struct hists *hists,
 	struct hist_entry *he;
 	int64_t cmp;
 	u64 period = entry->stat.period;
-	u64 weight = entry->stat.weight;
 	bool leftmost = true;
 
 	p = &hists->entries_in->rb_root.rb_node;
@@ -593,11 +613,11 @@ static struct hist_entry *hists__findnew_entry(struct hists *hists,
 
 		if (!cmp) {
 			if (sample_self) {
-				he_stat__add_period(&he->stat, period, weight);
+				he_stat__add_period(&he->stat, period);
 				hist_entry__add_callchain_period(he, period);
 			}
 			if (symbol_conf.cumulate_callchain)
-				he_stat__add_period(he->stat_acc, period, weight);
+				he_stat__add_period(he->stat_acc, period);
 
 			/*
 			 * This mem info was allocated from sample__resolve_mem
@@ -691,6 +711,7 @@ __hists__add_entry(struct hists *hists,
 			.dev = ns ? ns->link_info[CGROUP_NS_INDEX].dev : 0,
 			.ino = ns ? ns->link_info[CGROUP_NS_INDEX].ino : 0,
 		},
+		.cgroup = sample->cgroup,
 		.ms = {
 			.maps	= al->maps,
 			.map	= al->map,
@@ -702,10 +723,10 @@ __hists__add_entry(struct hists *hists,
 		.cpumode = al->cpumode,
 		.ip	 = al->addr,
 		.level	 = al->level,
+		.code_page_size = sample->code_page_size,
 		.stat = {
 			.nr_events = 1,
 			.period	= sample->period,
-			.weight = sample->weight,
 		},
 		.parent = sym_parent,
 		.filtered = symbol__parent_filter(sym_parent) | al->filtered,
@@ -718,6 +739,9 @@ __hists__add_entry(struct hists *hists,
 		.raw_size = sample->raw_size,
 		.ops = ops,
 		.time = hist_time(sample->time),
+		.weight = sample->weight,
+		.ins_lat = sample->ins_lat,
+		.p_stage_cyc = sample->p_stage_cyc,
 	}, *he = hists__findnew_entry(hists, &entry, al, sample_self);
 
 	if (!hists->has_callchains && he && he->callchain_size != 0)
@@ -1057,6 +1081,20 @@ iter_next_cumulative_entry(struct hist_entry_iter *iter,
 	return fill_callchain_info(al, node, iter->hide_unresolved);
 }
 
+static bool
+hist_entry__fast__sym_diff(struct hist_entry *left,
+			   struct hist_entry *right)
+{
+	struct symbol *sym_l = left->ms.sym;
+	struct symbol *sym_r = right->ms.sym;
+
+	if (!sym_l && !sym_r)
+		return left->ip != right->ip;
+
+	return !!_sort__sym_cmp(sym_l, sym_r);
+}
+
+
 static int
 iter_add_next_cumulative_entry(struct hist_entry_iter *iter,
 			       struct addr_location *al)
@@ -1083,6 +1121,7 @@ iter_add_next_cumulative_entry(struct hist_entry_iter *iter,
 	};
 	int i;
 	struct callchain_cursor cursor;
+	bool fast = hists__has(he_tmp.hists, sym);
 
 	callchain_cursor_snapshot(&cursor, &callchain_cursor);
 
@@ -1093,6 +1132,14 @@ iter_add_next_cumulative_entry(struct hist_entry_iter *iter,
 	 * It's possible that it has cycles or recursive calls.
 	 */
 	for (i = 0; i < iter->curr; i++) {
+		/*
+		 * For most cases, there are no duplicate entries in callchain.
+		 * The symbols are usually different. Do a quick check for
+		 * symbols first.
+		 */
+		if (fast && hist_entry__fast__sym_diff(he_cache[i], &he_tmp))
+			continue;
+
 		if (hist_entry__cmp(he_cache[i], &he_tmp) == 0) {
 			/* to avoid calling callback function */
 			iter->he = NULL;
@@ -1576,13 +1623,13 @@ struct rb_root_cached *hists__get_rotate_entries_in(struct hists *hists)
 {
 	struct rb_root_cached *root;
 
-	pthread_mutex_lock(&hists->lock);
+	mutex_lock(&hists->lock);
 
 	root = hists->entries_in;
 	if (++hists->entries_in > &hists->entries_in_array[1])
 		hists->entries_in = &hists->entries_in_array[0];
 
-	pthread_mutex_unlock(&hists->lock);
+	mutex_unlock(&hists->lock);
 
 	return root;
 }
@@ -1734,8 +1781,8 @@ static void hierarchy_insert_output_entry(struct rb_root_cached *root,
 
 	/* update column width of dynamic entry */
 	perf_hpp_list__for_each_sort_list(he->hpp_list, fmt) {
-		if (perf_hpp__is_dynamic_entry(fmt))
-			fmt->sort(fmt, he, NULL);
+		if (fmt->init)
+			fmt->init(fmt, he);
 	}
 }
 
@@ -1832,10 +1879,10 @@ static void __hists__insert_output_entry(struct rb_root_cached *entries,
 	rb_link_node(&he->rb_node, parent, p);
 	rb_insert_color_cached(&he->rb_node, entries, leftmost);
 
+	/* update column width of dynamic entries */
 	perf_hpp_list__for_each_sort_list(&perf_hpp_list, fmt) {
-		if (perf_hpp__is_dynamic_entry(fmt) &&
-		    perf_hpp__defined_dynamic_entry(fmt, he->hists))
-			fmt->sort(fmt, he, NULL);  /* update column width */
+		if (fmt->init)
+			fmt->init(fmt, he);
 	}
 }
 
@@ -1894,8 +1941,8 @@ static void output_resort(struct hists *hists, struct ui_progress *prog,
 	}
 }
 
-void perf_evsel__output_resort_cb(struct evsel *evsel, struct ui_progress *prog,
-				  hists__resort_cb_t cb, void *cb_arg)
+void evsel__output_resort_cb(struct evsel *evsel, struct ui_progress *prog,
+			     hists__resort_cb_t cb, void *cb_arg)
 {
 	bool use_callchain;
 
@@ -1909,9 +1956,9 @@ void perf_evsel__output_resort_cb(struct evsel *evsel, struct ui_progress *prog,
 	output_resort(evsel__hists(evsel), prog, use_callchain, cb, cb_arg);
 }
 
-void perf_evsel__output_resort(struct evsel *evsel, struct ui_progress *prog)
+void evsel__output_resort(struct evsel *evsel, struct ui_progress *prog)
 {
-	return perf_evsel__output_resort_cb(evsel, prog, NULL, NULL);
+	return evsel__output_resort_cb(evsel, prog, NULL, NULL);
 }
 
 void hists__output_resort(struct hists *hists, struct ui_progress *prog)
@@ -2272,16 +2319,26 @@ void events_stats__inc(struct events_stats *stats, u32 type)
 	++stats->nr_events[type];
 }
 
-void hists__inc_nr_events(struct hists *hists, u32 type)
+static void hists_stats__inc(struct hists_stats *stats)
 {
-	events_stats__inc(&hists->stats, type);
+	++stats->nr_samples;
+}
+
+void hists__inc_nr_events(struct hists *hists)
+{
+	hists_stats__inc(&hists->stats);
 }
 
 void hists__inc_nr_samples(struct hists *hists, bool filtered)
 {
-	events_stats__inc(&hists->stats, PERF_RECORD_SAMPLE);
+	hists_stats__inc(&hists->stats);
 	if (!filtered)
 		hists->stats.nr_non_filtered_samples++;
+}
+
+void hists__inc_nr_lost_samples(struct hists *hists, u32 lost)
+{
+	hists->stats.nr_lost_samples += lost;
 }
 
 static struct hist_entry *hists__add_dummy_entry(struct hists *hists,
@@ -2584,9 +2641,10 @@ void hist__account_cycles(struct branch_stack *bs, struct addr_location *al,
 			  u64 *total_cycles)
 {
 	struct branch_info *bi;
+	struct branch_entry *entries = perf_sample__branch_entries(sample);
 
 	/* If we have branch cycles always annotate them. */
-	if (bs && bs->nr && bs->entries[0].flags.cycles) {
+	if (bs && bs->nr && entries[0].flags.cycles) {
 		int i;
 
 		bi = sample__resolve_bstack(sample, al);
@@ -2617,14 +2675,25 @@ void hist__account_cycles(struct branch_stack *bs, struct addr_location *al,
 	}
 }
 
-size_t perf_evlist__fprintf_nr_events(struct evlist *evlist, FILE *fp)
+size_t evlist__fprintf_nr_events(struct evlist *evlist, FILE *fp,
+				 bool skip_empty)
 {
 	struct evsel *pos;
 	size_t ret = 0;
 
 	evlist__for_each_entry(evlist, pos) {
-		ret += fprintf(fp, "%s stats:\n", perf_evsel__name(pos));
-		ret += events_stats__fprintf(&evsel__hists(pos)->stats, fp);
+		struct hists *hists = evsel__hists(pos);
+
+		if (skip_empty && !hists->stats.nr_samples && !hists->stats.nr_lost_samples)
+			continue;
+
+		ret += fprintf(fp, "%s stats:\n", evsel__name(pos));
+		if (hists->stats.nr_samples)
+			ret += fprintf(fp, "%16s events: %10d\n",
+				       "SAMPLE", hists->stats.nr_samples);
+		if (hists->stats.nr_lost_samples)
+			ret += fprintf(fp, "%16s events: %10d\n",
+				       "LOST_SAMPLES", hists->stats.nr_lost_samples);
 	}
 
 	return ret;
@@ -2644,10 +2713,10 @@ int __hists__scnprintf_title(struct hists *hists, char *bf, size_t size, bool sh
 	const struct dso *dso = hists->dso_filter;
 	struct thread *thread = hists->thread_filter;
 	int socket_id = hists->socket_filter;
-	unsigned long nr_samples = hists->stats.nr_events[PERF_RECORD_SAMPLE];
+	unsigned long nr_samples = hists->stats.nr_samples;
 	u64 nr_events = hists->stats.total_period;
 	struct evsel *evsel = hists_to_evsel(hists);
-	const char *ev_name = perf_evsel__name(evsel);
+	const char *ev_name = evsel__name(evsel);
 	char buf[512], sample_freq_str[64] = "";
 	size_t buflen = sizeof(buf);
 	char ref[30] = " show reference callgraph, ";
@@ -2658,10 +2727,10 @@ int __hists__scnprintf_title(struct hists *hists, char *bf, size_t size, bool sh
 		nr_events = hists->stats.total_non_filtered_period;
 	}
 
-	if (perf_evsel__is_group_event(evsel)) {
+	if (evsel__is_group_event(evsel)) {
 		struct evsel *pos;
 
-		perf_evsel__group_desc(evsel, buf, buflen);
+		evsel__group_desc(evsel, buf, buflen);
 		ev_name = buf;
 
 		for_each_group_member(pos, evsel) {
@@ -2671,7 +2740,7 @@ int __hists__scnprintf_title(struct hists *hists, char *bf, size_t size, bool sh
 				nr_samples += pos_hists->stats.nr_non_filtered_samples;
 				nr_events += pos_hists->stats.total_non_filtered_period;
 			} else {
-				nr_samples += pos_hists->stats.nr_events[PERF_RECORD_SAMPLE];
+				nr_samples += pos_hists->stats.nr_samples;
 				nr_events += pos_hists->stats.total_period;
 			}
 		}
@@ -2746,7 +2815,7 @@ int __hists__init(struct hists *hists, struct perf_hpp_list *hpp_list)
 	hists->entries_in = &hists->entries_in_array[0];
 	hists->entries_collapsed = RB_ROOT_CACHED;
 	hists->entries = RB_ROOT_CACHED;
-	pthread_mutex_init(&hists->lock, NULL);
+	mutex_init(&hists->lock);
 	hists->socket_filter = -1;
 	hists->hpp_list = hpp_list;
 	INIT_LIST_HEAD(&hists->hpp_formats);
@@ -2808,9 +2877,8 @@ static int hists_evsel__init(struct evsel *evsel)
 
 int hists__init(void)
 {
-	int err = perf_evsel__object_config(sizeof(struct hists_evsel),
-					    hists_evsel__init,
-					    hists_evsel__exit);
+	int err = evsel__object_config(sizeof(struct hists_evsel),
+				       hists_evsel__init, hists_evsel__exit);
 	if (err)
 		fputs("FATAL ERROR: Couldn't setup hists class\n", stderr);
 

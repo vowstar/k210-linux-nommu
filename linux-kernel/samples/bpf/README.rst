@@ -37,8 +37,8 @@ user, simply call::
 
  make headers_install
 
-This will creates a local "usr/include" directory in the git/build top
-level directory, that the make system automatically pickup first.
+This will create a local "usr/include" directory in the git/build top
+level directory, that the make system will automatically pick up first.
 
 Compiling
 =========
@@ -62,26 +62,32 @@ To generate a smaller llc binary one can use::
 
  -DLLVM_TARGETS_TO_BUILD="BPF"
 
-Quick sniplet for manually compiling LLVM and clang
-(build dependencies are cmake and gcc-c++)::
+We recommend that developers who want the fastest incremental builds
+use the Ninja build system, you can find it in your system's package
+manager, usually the package is ninja or ninja-build.
 
- $ git clone http://llvm.org/git/llvm.git
- $ cd llvm/tools
- $ git clone --depth 1 http://llvm.org/git/clang.git
- $ cd ..; mkdir build; cd build
- $ cmake .. -DLLVM_TARGETS_TO_BUILD="BPF;X86"
- $ make -j $(getconf _NPROCESSORS_ONLN)
+Quick sniplet for manually compiling LLVM and clang
+(build dependencies are ninja, cmake and gcc-c++)::
+
+ $ git clone https://github.com/llvm/llvm-project.git
+ $ mkdir -p llvm-project/llvm/build
+ $ cd llvm-project/llvm/build
+ $ cmake .. -G "Ninja" -DLLVM_TARGETS_TO_BUILD="BPF;X86" \
+            -DLLVM_ENABLE_PROJECTS="clang"    \
+            -DCMAKE_BUILD_TYPE=Release        \
+            -DLLVM_BUILD_RUNTIME=OFF
+ $ ninja
 
 It is also possible to point make to the newly compiled 'llc' or
 'clang' command via redefining LLC or CLANG on the make command line::
 
- make M=samples/bpf LLC=~/git/llvm/build/bin/llc CLANG=~/git/llvm/build/bin/clang
+ make M=samples/bpf LLC=~/git/llvm-project/llvm/build/bin/llc CLANG=~/git/llvm-project/llvm/build/bin/clang
 
 Cross compiling samples
 -----------------------
 In order to cross-compile, say for arm64 targets, export CROSS_COMPILE and ARCH
 environment variables before calling make. But do this before clean,
-cofiguration and header install steps described above. This will direct make to
+configuration and header install steps described above. This will direct make to
 build samples for the cross target::
 
  export ARCH=arm64

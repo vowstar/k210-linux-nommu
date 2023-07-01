@@ -6,8 +6,9 @@
  */
 
 struct usbmix_dB_map {
-	u32 min;
-	u32 max;
+	int min;
+	int max;
+	bool min_mute;
 };
 
 struct usbmix_name_map {
@@ -27,7 +28,7 @@ struct usbmix_ctl_map {
 	u32 id;
 	const struct usbmix_name_map *map;
 	const struct usbmix_selector_map *selector_map;
-	int ignore_ctl_error;
+	const struct usbmix_connector_map *connector_map;
 };
 
 /*
@@ -232,7 +233,7 @@ static const struct usbmix_name_map maya44_map[] = {
 };
 
 /* Section "justlink_map" below added by James Courtier-Dutton <James@superbug.demon.co.uk>
- * sourced from Maplin Electronics (http://www.maplin.co.uk), part number A56AK
+ * sourced from Maplin Electronics (https://www.maplin.co.uk), part number A56AK
  * Part has 2 connectors that act as a single output. (TOSLINK Optical for digital out, and 3.5mm Jack for Analogue out.)
  * The USB Mixer publishes a Microphone and extra Volume controls for it, but none exist on the device,
  * so this map removes all unwanted sliders from alsamixer
@@ -336,6 +337,20 @@ static const struct usbmix_name_map bose_companion5_map[] = {
 	{ 0 }	/* terminator */
 };
 
+/* Bose Revolve+ SoundLink, correction of dB maps */
+static const struct usbmix_dB_map bose_soundlink_dB = {-8283, -0, true};
+static const struct usbmix_name_map bose_soundlink_map[] = {
+	{ 2, NULL, .dB = &bose_soundlink_dB },
+	{ 0 }	/* terminator */
+};
+
+/* Sennheiser Communications Headset [PC 8], the dB value is reported as -6 negative maximum  */
+static const struct usbmix_dB_map sennheiser_pc8_dB = {-9500, 0};
+static const struct usbmix_name_map sennheiser_pc8_map[] = {
+	{ 9, NULL, .dB = &sennheiser_pc8_dB },
+	{ 0 }   /* terminator */
+};
+
 /*
  * Dell usb dock with ALC4020 codec had a firmware problem where it got
  * screwed up when zero volume is passed; just skip it as a workaround
@@ -359,6 +374,111 @@ static const struct usbmix_name_map corsair_virtuoso_map[] = {
 	{ 0 }
 };
 
+/* ASUS ROG Zenith II with Realtek ALC1220-VB */
+static const struct usbmix_name_map asus_zenith_ii_map[] = {
+	{ 19, NULL, 12 }, /* FU, Input Gain Pad - broken response, disabled */
+	{ 16, "Speaker" },		/* OT */
+	{ 22, "Speaker Playback" },	/* FU */
+	{ 7, "Line" },			/* IT */
+	{ 19, "Line Capture" },		/* FU */
+	{ 8, "Mic" },			/* IT */
+	{ 20, "Mic Capture" },		/* FU */
+	{ 9, "Front Mic" },		/* IT */
+	{ 21, "Front Mic Capture" },	/* FU */
+	{ 17, "IEC958" },		/* OT */
+	{ 23, "IEC958 Playback" },	/* FU */
+	{}
+};
+
+static const struct usbmix_connector_map asus_zenith_ii_connector_map[] = {
+	{ 10, 16 },	/* (Back) Speaker */
+	{ 11, 17 },	/* SPDIF */
+	{ 13, 7 },	/* Line */
+	{ 14, 8 },	/* Mic */
+	{ 15, 9 },	/* Front Mic */
+	{}
+};
+
+static const struct usbmix_name_map lenovo_p620_rear_map[] = {
+	{ 19, NULL, 12 }, /* FU, Input Gain Pad */
+	{}
+};
+
+/* TRX40 mobos with Realtek ALC1220-VB */
+static const struct usbmix_name_map trx40_mobo_map[] = {
+	{ 18, NULL }, /* OT, IEC958 - broken response, disabled */
+	{ 19, NULL, 12 }, /* FU, Input Gain Pad - broken response, disabled */
+	{ 16, "Speaker" },		/* OT */
+	{ 22, "Speaker Playback" },	/* FU */
+	{ 7, "Line" },			/* IT */
+	{ 19, "Line Capture" },		/* FU */
+	{ 17, "Front Headphone" },	/* OT */
+	{ 23, "Front Headphone Playback" },	/* FU */
+	{ 8, "Mic" },			/* IT */
+	{ 20, "Mic Capture" },		/* FU */
+	{ 9, "Front Mic" },		/* IT */
+	{ 21, "Front Mic Capture" },	/* FU */
+	{ 24, "IEC958 Playback" },	/* FU */
+	{}
+};
+
+static const struct usbmix_connector_map trx40_mobo_connector_map[] = {
+	{ 10, 16 },	/* (Back) Speaker */
+	{ 11, 17 },	/* Front Headphone */
+	{ 13, 7 },	/* Line */
+	{ 14, 8 },	/* Mic */
+	{ 15, 9 },	/* Front Mic */
+	{}
+};
+
+/* Rear panel + front mic on Gigabyte TRX40 Aorus Master with ALC1220-VB */
+static const struct usbmix_name_map aorus_master_alc1220vb_map[] = {
+	{ 17, NULL },			/* OT, IEC958?, disabled */
+	{ 19, NULL, 12 }, /* FU, Input Gain Pad - broken response, disabled */
+	{ 16, "Line Out" },		/* OT */
+	{ 22, "Line Out Playback" },	/* FU */
+	{ 7, "Line" },			/* IT */
+	{ 19, "Line Capture" },		/* FU */
+	{ 8, "Mic" },			/* IT */
+	{ 20, "Mic Capture" },		/* FU */
+	{ 9, "Front Mic" },		/* IT */
+	{ 21, "Front Mic Capture" },	/* FU */
+	{}
+};
+
+/* MSI MPG X570S Carbon Max Wifi with ALC4080  */
+static const struct usbmix_name_map msi_mpg_x570s_carbon_max_wifi_alc4080_map[] = {
+	{ 29, "Speaker Playback" },
+	{ 30, "Front Headphone Playback" },
+	{ 32, "IEC958 Playback" },
+	{}
+};
+
+/* Gigabyte B450/550 Mobo */
+static const struct usbmix_name_map gigabyte_b450_map[] = {
+	{ 24, NULL },			/* OT, IEC958?, disabled */
+	{ 21, "Speaker" },		/* OT */
+	{ 29, "Speaker Playback" },	/* FU */
+	{ 22, "Headphone" },		/* OT */
+	{ 30, "Headphone Playback" },	/* FU */
+	{ 11, "Line" },			/* IT */
+	{ 27, "Line Capture" },		/* FU */
+	{ 12, "Mic" },			/* IT */
+	{ 28, "Mic Capture" },		/* FU */
+	{ 9, "Front Mic" },		/* IT */
+	{ 25, "Front Mic Capture" },	/* FU */
+	{}
+};
+
+static const struct usbmix_connector_map gigabyte_b450_connector_map[] = {
+	{ 13, 21 },	/* Speaker */
+	{ 14, 22 },	/* Headphone */
+	{ 19, 11 },	/* Line */
+	{ 20, 12 },	/* Mic */
+	{ 17, 9 },	/* Front Mic */
+	{}
+};
+
 /*
  * Control map entries
  */
@@ -367,7 +487,6 @@ static const struct usbmix_ctl_map usbmix_ctl_maps[] = {
 	{
 		.id = USB_ID(0x041e, 0x3000),
 		.map = extigy_map,
-		.ignore_ctl_error = 1,
 	},
 	{
 		.id = USB_ID(0x041e, 0x3010),
@@ -387,27 +506,9 @@ static const struct usbmix_ctl_map usbmix_ctl_maps[] = {
 		.map = audigy2nx_map,
 		.selector_map = audigy2nx_selectors,
 	},
-	{	/* Logitech, Inc. QuickCam Pro for Notebooks */
-		.id = USB_ID(0x046d, 0x0991),
-		.ignore_ctl_error = 1,
-	},
-	{	/* Logitech, Inc. QuickCam E 3500 */
-		.id = USB_ID(0x046d, 0x09a4),
-		.ignore_ctl_error = 1,
-	},
 	{	/* Plantronics GameCom 780 */
 		.id = USB_ID(0x047f, 0xc010),
 		.map = gamecom780_map,
-	},
-	{
-		/* Hercules DJ Console (Windows Edition) */
-		.id = USB_ID(0x06f8, 0xb000),
-		.ignore_ctl_error = 1,
-	},
-	{
-		/* Hercules DJ Console (Macintosh Edition) */
-		.id = USB_ID(0x06f8, 0xd002),
-		.ignore_ctl_error = 1,
 	},
 	{
 		/* Hercules Gamesurround Muse Pocket LT
@@ -427,7 +528,6 @@ static const struct usbmix_ctl_map usbmix_ctl_maps[] = {
 	{
 		.id = USB_ID(0x08bb, 0x2702),
 		.map = linex_map,
-		.ignore_ctl_error = 1,
 	},
 	{
 		.id = USB_ID(0x0a92, 0x0091),
@@ -452,7 +552,6 @@ static const struct usbmix_ctl_map usbmix_ctl_maps[] = {
 	{
 		.id = USB_ID(0x13e5, 0x0001),
 		.map = scratch_live_map,
-		.ignore_ctl_error = 1,
 	},
 	{
 		.id = USB_ID(0x200c, 0x1018),
@@ -479,6 +578,31 @@ static const struct usbmix_ctl_map usbmix_ctl_maps[] = {
 		.map = bose_companion5_map,
 	},
 	{
+		/* Bose Revolve+ SoundLink */
+		.id = USB_ID(0x05a7, 0x40fa),
+		.map = bose_soundlink_map,
+	},
+	{
+		/* Corsair Virtuoso SE Latest (wired mode) */
+		.id = USB_ID(0x1b1c, 0x0a3f),
+		.map = corsair_virtuoso_map,
+	},
+	{
+		/* Corsair Virtuoso SE Latest (wireless mode) */
+		.id = USB_ID(0x1b1c, 0x0a40),
+		.map = corsair_virtuoso_map,
+	},
+	{
+		/* Corsair Virtuoso SE (wired mode) */
+		.id = USB_ID(0x1b1c, 0x0a3d),
+		.map = corsair_virtuoso_map,
+	},
+	{
+		/* Corsair Virtuoso SE (wireless mode) */
+		.id = USB_ID(0x1b1c, 0x0a3e),
+		.map = corsair_virtuoso_map,
+	},
+	{
 		/* Corsair Virtuoso (wired mode) */
 		.id = USB_ID(0x1b1c, 0x0a41),
 		.map = corsair_virtuoso_map,
@@ -487,6 +611,62 @@ static const struct usbmix_ctl_map usbmix_ctl_maps[] = {
 		/* Corsair Virtuoso (wireless mode) */
 		.id = USB_ID(0x1b1c, 0x0a42),
 		.map = corsair_virtuoso_map,
+	},
+	{	/* Gigabyte TRX40 Aorus Master (rear panel + front mic) */
+		.id = USB_ID(0x0414, 0xa001),
+		.map = aorus_master_alc1220vb_map,
+	},
+	{	/* Gigabyte TRX40 Aorus Pro WiFi */
+		.id = USB_ID(0x0414, 0xa002),
+		.map = trx40_mobo_map,
+		.connector_map = trx40_mobo_connector_map,
+	},
+	{	/* Gigabyte B450/550 Mobo */
+		.id = USB_ID(0x0414, 0xa00d),
+		.map = gigabyte_b450_map,
+		.connector_map = gigabyte_b450_connector_map,
+	},
+	{	/* ASUS ROG Zenith II (main audio) */
+		.id = USB_ID(0x0b05, 0x1916),
+		.map = asus_zenith_ii_map,
+		.connector_map = asus_zenith_ii_connector_map,
+	},
+	{	/* ASUS ROG Strix */
+		.id = USB_ID(0x0b05, 0x1917),
+		.map = trx40_mobo_map,
+		.connector_map = trx40_mobo_connector_map,
+	},
+	{	/* MSI TRX40 Creator */
+		.id = USB_ID(0x0db0, 0x0d64),
+		.map = trx40_mobo_map,
+		.connector_map = trx40_mobo_connector_map,
+	},
+	{	/* MSI MPG X570S Carbon Max Wifi */
+		.id = USB_ID(0x0db0, 0x419c),
+		.map = msi_mpg_x570s_carbon_max_wifi_alc4080_map,
+	},
+	{	/* MSI MAG X570S Torpedo Max */
+		.id = USB_ID(0x0db0, 0xa073),
+		.map = msi_mpg_x570s_carbon_max_wifi_alc4080_map,
+	},
+	{	/* MSI TRX40 */
+		.id = USB_ID(0x0db0, 0x543d),
+		.map = trx40_mobo_map,
+		.connector_map = trx40_mobo_connector_map,
+	},
+	{	/* Asrock TRX40 Creator */
+		.id = USB_ID(0x26ce, 0x0a01),
+		.map = trx40_mobo_map,
+		.connector_map = trx40_mobo_connector_map,
+	},
+	{	/* Lenovo ThinkStation P620 Rear */
+		.id = USB_ID(0x17aa, 0x1046),
+		.map = lenovo_p620_rear_map,
+	},
+	{
+		/* Sennheiser Communications Headset [PC 8] */
+		.id = USB_ID(0x1395, 0x0025),
+		.map = sennheiser_pc8_map,
 	},
 	{ 0 } /* terminator */
 };

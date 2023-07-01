@@ -16,6 +16,7 @@
 #include <linux/jiffies.h>
 #include <linux/mfd/da9062/registers.h>
 #include <linux/mfd/da9062/core.h>
+#include <linux/property.h>
 #include <linux/regmap.h>
 #include <linux/of.h>
 
@@ -31,7 +32,17 @@ static const unsigned int wdt_timeout[] = { 0, 2, 4, 8, 16, 32, 65, 131 };
 struct da9062_watchdog {
 	struct da9062 *hw;
 	struct watchdog_device wdtdev;
+	bool use_sw_pm;
 };
+
+static unsigned int da9062_wdt_read_timeout(struct da9062_watchdog *wdt)
+{
+	unsigned int val;
+
+	regmap_read(wdt->hw->regmap, DA9062AA_CONTROL_D, &val);
+
+	return wdt_timeout[val & DA9062AA_TWDSCALE_MASK];
+}
 
 static unsigned int da9062_wdt_timeout_to_sel(unsigned int secs)
 {
@@ -56,11 +67,6 @@ static int da9062_wdt_update_timeout_register(struct da9062_watchdog *wdt,
 					      unsigned int regval)
 {
 	struct da9062 *chip = wdt->hw;
-	int ret;
-
-	ret = da9062_reset_watchdog_timer(wdt);
-	if (ret)
-		return ret;
 
 	regmap_update_bits(chip->regmap,
 				  DA9062AA_CONTROL_D,
@@ -95,13 +101,6 @@ static int da9062_wdt_stop(struct watchdog_device *wdd)
 	struct da9062_watchdog *wdt = watchdog_get_drvdata(wdd);
 	int ret;
 
-	ret = da9062_reset_watchdog_timer(wdt);
-	if (ret) {
-		dev_err(wdt->hw->dev, "Failed to ping the watchdog (err = %d)\n",
-			ret);
-		return ret;
-	}
-
 	ret = regmap_update_bits(wdt->hw->regmap,
 				 DA9062AA_CONTROL_D,
 				 DA9062AA_TWDSCALE_MASK,
@@ -117,6 +116,13 @@ static int da9062_wdt_ping(struct watchdog_device *wdd)
 {
 	struct da9062_watchdog *wdt = watchdog_get_drvdata(wdd);
 	int ret;
+
+	/*
+	 * Prevent pings from occurring late in system poweroff/reboot sequence
+	 * and possibly locking out restart handler from accessing i2c bus.
+	 */
+	if (system_state > SYSTEM_RUNNING)
+		return 0;
 
 	ret = da9062_reset_watchdog_timer(wdt);
 	if (ret)
@@ -149,11 +155,20 @@ static int da9062_wdt_restart(struct watchdog_device *wdd, unsigned long action,
 {
 	struct da9062_watchdog *wdt = watchdog_get_drvdata(wdd);
 	struct i2c_client *client = to_i2c_client(wdt->hw->dev);
+	union i2c_smbus_data msg;
 	int ret;
 
-	/* Don't use regmap because it is not atomic safe */
-	ret = i2c_smbus_write_byte_data(client, DA9062AA_CONTROL_F,
-					DA9062AA_SHUTDOWN_MASK);
+	/*
+	 * Don't use regmap because it is not atomic safe. Additionally, use
+	 * unlocked flavor of i2c_smbus_xfer to avoid scenario where i2c bus
+	 * might be previously locked by some process unable to release the
+	 * lock due to interrupts already being disabled at this late stage.
+	 */
+	msg.byte = DA9062AA_SHUTDOWN_MASK;
+	ret = __i2c_smbus_xfer(client->adapter, client->addr, client->flags,
+			       I2C_SMBUS_WRITE, DA9062AA_CONTROL_F,
+			       I2C_SMBUS_BYTE_DATA, &msg);
+
 	if (ret < 0)
 		dev_alert(wdt->hw->dev, "Failed to shutdown (err = %d)\n",
 			  ret);
@@ -188,7 +203,7 @@ MODULE_DEVICE_TABLE(of, da9062_compatible_id_table);
 static int da9062_wdt_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	int ret;
+	unsigned int timeout;
 	struct da9062 *chip;
 	struct da9062_watchdog *wdt;
 
@@ -199,6 +214,8 @@ static int da9062_wdt_probe(struct platform_device *pdev)
 	wdt = devm_kzalloc(dev, sizeof(*wdt), GFP_KERNEL);
 	if (!wdt)
 		return -ENOMEM;
+
+	wdt->use_sw_pm = device_property_present(dev, "dlg,use-sw-pm");
 
 	wdt->hw = chip;
 
@@ -216,16 +233,28 @@ static int da9062_wdt_probe(struct platform_device *pdev)
 	watchdog_set_drvdata(&wdt->wdtdev, wdt);
 	dev_set_drvdata(dev, &wdt->wdtdev);
 
-	ret = devm_watchdog_register_device(dev, &wdt->wdtdev);
-	if (ret < 0)
-		return ret;
+	timeout = da9062_wdt_read_timeout(wdt);
+	if (timeout)
+		wdt->wdtdev.timeout = timeout;
 
-	return da9062_wdt_ping(&wdt->wdtdev);
+	/* Set timeout from DT value if available */
+	watchdog_init_timeout(&wdt->wdtdev, 0, dev);
+
+	if (timeout) {
+		da9062_wdt_set_timeout(&wdt->wdtdev, wdt->wdtdev.timeout);
+		set_bit(WDOG_HW_RUNNING, &wdt->wdtdev.status);
+	}
+
+	return devm_watchdog_register_device(dev, &wdt->wdtdev);
 }
 
 static int __maybe_unused da9062_wdt_suspend(struct device *dev)
 {
 	struct watchdog_device *wdd = dev_get_drvdata(dev);
+	struct da9062_watchdog *wdt = watchdog_get_drvdata(wdd);
+
+	if (!wdt->use_sw_pm)
+		return 0;
 
 	if (watchdog_active(wdd))
 		return da9062_wdt_stop(wdd);
@@ -236,6 +265,10 @@ static int __maybe_unused da9062_wdt_suspend(struct device *dev)
 static int __maybe_unused da9062_wdt_resume(struct device *dev)
 {
 	struct watchdog_device *wdd = dev_get_drvdata(dev);
+	struct da9062_watchdog *wdt = watchdog_get_drvdata(wdd);
+
+	if (!wdt->use_sw_pm)
+		return 0;
 
 	if (watchdog_active(wdd))
 		return da9062_wdt_start(wdd);

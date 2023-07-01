@@ -4,7 +4,7 @@ Freescale i.MX8 DDR Performance Monitoring Unit (PMU)
 
 There are no performance counters inside the DRAM controller, so performance
 signals are brought out to the edge of the controller where a set of 4 x 32 bit
-counters is implemented. This is controlled by the CSV modes programed in counter
+counters is implemented. This is controlled by the CSV modes programmed in counter
 control register which causes a large number of PERF signals to be generated.
 
 Selection of the value for each counter is done via the config registers. There
@@ -43,7 +43,8 @@ value 1 for supported.
 
   AXI_ID and AXI_MASKING are mapped on DPCR1 register in performance counter.
   When non-masked bits are matching corresponding AXI_ID bits then counter is
-  incremented. Perf counter is incremented if
+  incremented. Perf counter is incremented if::
+
         AxID && AXI_MASKING == AXI_ID && AXI_MASKING
 
   This filter doesn't support filter different AXI ID for axid-read and axid-write

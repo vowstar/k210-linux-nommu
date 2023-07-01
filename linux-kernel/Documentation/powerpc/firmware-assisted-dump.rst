@@ -112,13 +112,13 @@ to ensure that crash data is preserved to process later.
 
 -- On OPAL based machines (PowerNV), if the kernel is build with
    CONFIG_OPAL_CORE=y, OPAL memory at the time of crash is also
-   exported as /sys/firmware/opal/core file. This procfs file is
+   exported as /sys/firmware/opal/mpipl/core file. This procfs file is
    helpful in debugging OPAL crashes with GDB. The kernel memory
    used for exporting this procfs file can be released by echo'ing
-   '1' to /sys/kernel/fadump_release_opalcore node.
+   '1' to /sys/firmware/opal/mpipl/release_core node.
 
    e.g.
-     # echo 1 > /sys/kernel/fadump_release_opalcore
+     # echo 1 > /sys/firmware/opal/mpipl/release_core
 
 Implementation details:
 -----------------------
@@ -171,7 +171,7 @@ that were present in CMA region::
                                            (meta area)    |
                                                           |
                                                           |
-                      Metadata: This area holds a metadata struture whose
+                      Metadata: This area holds a metadata structure whose
                       address is registered with f/w and retrieved in the
                       second kernel after crash, on platforms that support
                       tags (OPAL). Having such structure with info needed
@@ -207,7 +207,7 @@ Currently the dump will be copied from /proc/vmcore to a new file upon
 user intervention. The dump data available through /proc/vmcore will be
 in ELF format. Hence the existing kdump infrastructure (kdump scripts)
 to save the dump works fine with minor modifications. KDump scripts on
-major Distro releases have already been modified to work seemlessly (no
+major Distro releases have already been modified to work seamlessly (no
 user intervention in saving the dump) when FADump is used, instead of
 KDump, as dump mechanism.
 
@@ -268,6 +268,11 @@ Here is the list of files under kernel sysfs:
     be handled and vmcore will not be captured. This interface can be
     easily integrated with kdump service start/stop.
 
+ /sys/kernel/fadump/mem_reserved
+
+   This is used to display the memory reserved by FADump for saving the
+   crash dump.
+
  /sys/kernel/fadump_release_mem
     This file is available only when FADump is active during
     second kernel. This is used to release the reserved memory
@@ -283,14 +288,29 @@ Here is the list of files under kernel sysfs:
     enhanced to use this interface to release the memory reserved for
     dump and continue without 2nd reboot.
 
- /sys/kernel/fadump_release_opalcore
+Note: /sys/kernel/fadump_release_opalcore sysfs has moved to
+      /sys/firmware/opal/mpipl/release_core
+
+ /sys/firmware/opal/mpipl/release_core
 
     This file is available only on OPAL based machines when FADump is
     active during capture kernel. This is used to release the memory
-    used by the kernel to export /sys/firmware/opal/core file. To
+    used by the kernel to export /sys/firmware/opal/mpipl/core file. To
     release this memory, echo '1' to it:
 
-    echo 1  > /sys/kernel/fadump_release_opalcore
+    echo 1  > /sys/firmware/opal/mpipl/release_core
+
+Note: The following FADump sysfs files are deprecated.
+
++----------------------------------+--------------------------------+
+| Deprecated                       | Alternative                    |
++----------------------------------+--------------------------------+
+| /sys/kernel/fadump_enabled       | /sys/kernel/fadump/enabled     |
++----------------------------------+--------------------------------+
+| /sys/kernel/fadump_registered    | /sys/kernel/fadump/registered  |
++----------------------------------+--------------------------------+
+| /sys/kernel/fadump_release_mem   | /sys/kernel/fadump/release_mem |
++----------------------------------+--------------------------------+
 
 Here is the list of files under powerpc debugfs:
 (Assuming debugfs is mounted on /sys/kernel/debug directory.)
@@ -324,7 +344,7 @@ Here is the list of files under powerpc debugfs:
 
 
 NOTE:
-      Please refer to Documentation/filesystems/debugfs.txt on
+      Please refer to Documentation/filesystems/debugfs.rst on
       how to mount the debugfs filesystem.
 
 

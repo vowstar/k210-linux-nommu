@@ -668,7 +668,7 @@ static inline int sht15_calc_humid(struct sht15_data *data)
 }
 
 /**
- * sht15_show_status() - show status information in sysfs
+ * sht15_status_show() - show status information in sysfs
  * @dev:	device.
  * @attr:	device attribute.
  * @buf:	sysfs buffer where information is written to.
@@ -690,7 +690,7 @@ static ssize_t sht15_status_show(struct device *dev,
 }
 
 /**
- * sht15_store_heater() - change heater state via sysfs
+ * sht15_status_store() - change heater state via sysfs
  * @dev:	device.
  * @attr:	device attribute.
  * @buf:	sysfs buffer to read the new heater state from.
@@ -725,7 +725,7 @@ static ssize_t sht15_status_store(struct device *dev,
 }
 
 /**
- * sht15_show_temp() - show temperature measurement value in sysfs
+ * sht15_temp_show() - show temperature measurement value in sysfs
  * @dev:	device.
  * @attr:	device attribute.
  * @buf:	sysfs buffer where measurement values are written to.
@@ -747,7 +747,7 @@ static ssize_t sht15_temp_show(struct device *dev,
 }
 
 /**
- * sht15_show_humidity() - show humidity measurement value in sysfs
+ * sht15_humidity_show() - show humidity measurement value in sysfs
  * @dev:	device.
  * @attr:	device attribute.
  * @buf:	sysfs buffer where measurement values are written to.
@@ -1020,24 +1020,19 @@ err_release_reg:
 static int sht15_remove(struct platform_device *pdev)
 {
 	struct sht15_data *data = platform_get_drvdata(pdev);
+	int ret;
 
-	/*
-	 * Make sure any reads from the device are done and
-	 * prevent new ones beginning
-	 */
-	mutex_lock(&data->read_lock);
-	if (sht15_soft_reset(data)) {
-		mutex_unlock(&data->read_lock);
-		return -EFAULT;
-	}
 	hwmon_device_unregister(data->hwmon_dev);
 	sysfs_remove_group(&pdev->dev.kobj, &sht15_attr_group);
+
+	ret = sht15_soft_reset(data);
+	if (ret)
+		dev_err(&pdev->dev, "Failed to reset device (%pe)\n", ERR_PTR(ret));
+
 	if (!IS_ERR(data->reg)) {
 		regulator_unregister_notifier(data->reg, &data->nb);
 		regulator_disable(data->reg);
 	}
-
-	mutex_unlock(&data->read_lock);
 
 	return 0;
 }

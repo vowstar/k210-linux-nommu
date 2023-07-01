@@ -32,20 +32,21 @@
 
 #include <linux/tc_act/tc_csum.h>
 #include <net/tc_act/tc_csum.h>
+#include <net/tc_wrapper.h>
 
 static const struct nla_policy csum_policy[TCA_CSUM_MAX + 1] = {
 	[TCA_CSUM_PARMS] = { .len = sizeof(struct tc_csum), },
 };
 
-static unsigned int csum_net_id;
 static struct tc_action_ops act_csum_ops;
 
 static int tcf_csum_init(struct net *net, struct nlattr *nla,
-			 struct nlattr *est, struct tc_action **a, int ovr,
-			 int bind, bool rtnl_held, struct tcf_proto *tp,
+			 struct nlattr *est, struct tc_action **a,
+			 struct tcf_proto *tp,
 			 u32 flags, struct netlink_ext_ack *extack)
 {
-	struct tc_action_net *tn = net_generic(net, csum_net_id);
+	struct tc_action_net *tn = net_generic(net, act_csum_ops.net_id);
+	bool bind = flags & TCA_ACT_FLAGS_BIND;
 	struct tcf_csum_params *params_new;
 	struct nlattr *tb[TCA_CSUM_MAX + 1];
 	struct tcf_chain *goto_ch = NULL;
@@ -78,7 +79,7 @@ static int tcf_csum_init(struct net *net, struct nlattr *nla,
 	} else if (err > 0) {
 		if (bind)/* dont override defaults */
 			return 0;
-		if (!ovr) {
+		if (!(flags & TCA_ACT_FLAGS_REPLACE)) {
 			tcf_idr_release(*a, bind);
 			return -EEXIST;
 		}
@@ -109,9 +110,6 @@ static int tcf_csum_init(struct net *net, struct nlattr *nla,
 		tcf_chain_put_by_act(goto_ch);
 	if (params_new)
 		kfree_rcu(params_new, rcu);
-
-	if (ret == ACT_P_CREATED)
-		tcf_idr_insert(tn, *a);
 
 	return ret;
 put_chain:
@@ -566,8 +564,9 @@ fail:
 	return 0;
 }
 
-static int tcf_csum_act(struct sk_buff *skb, const struct tc_action *a,
-			struct tcf_result *res)
+TC_INDIRECT_SCOPE int tcf_csum_act(struct sk_buff *skb,
+				   const struct tc_action *a,
+				   struct tcf_result *res)
 {
 	struct tcf_csum *p = to_tcf_csum(a);
 	bool orig_vlan_tag_present = false;
@@ -587,7 +586,7 @@ static int tcf_csum_act(struct sk_buff *skb, const struct tc_action *a,
 		goto drop;
 
 	update_flags = params->update_flags;
-	protocol = tc_skb_protocol(skb);
+	protocol = skb_protocol(skb, false);
 again:
 	switch (protocol) {
 	case cpu_to_be16(ETH_P_IP):
@@ -598,7 +597,8 @@ again:
 		if (!tcf_csum_ipv6(skb, update_flags))
 			goto drop;
 		break;
-	case cpu_to_be16(ETH_P_8021AD): /* fall through */
+	case cpu_to_be16(ETH_P_8021AD):
+		fallthrough;
 	case cpu_to_be16(ETH_P_8021Q):
 		if (skb_vlan_tag_present(skb) && !orig_vlan_tag_present) {
 			protocol = skb->protocol;
@@ -674,26 +674,28 @@ static void tcf_csum_cleanup(struct tc_action *a)
 		kfree_rcu(params, rcu);
 }
 
-static int tcf_csum_walker(struct net *net, struct sk_buff *skb,
-			   struct netlink_callback *cb, int type,
-			   const struct tc_action_ops *ops,
-			   struct netlink_ext_ack *extack)
-{
-	struct tc_action_net *tn = net_generic(net, csum_net_id);
-
-	return tcf_generic_walker(tn, skb, cb, type, ops, extack);
-}
-
-static int tcf_csum_search(struct net *net, struct tc_action **a, u32 index)
-{
-	struct tc_action_net *tn = net_generic(net, csum_net_id);
-
-	return tcf_idr_search(tn, a, index);
-}
-
 static size_t tcf_csum_get_fill_size(const struct tc_action *act)
 {
 	return nla_total_size(sizeof(struct tc_csum));
+}
+
+static int tcf_csum_offload_act_setup(struct tc_action *act, void *entry_data,
+				      u32 *index_inc, bool bind,
+				      struct netlink_ext_ack *extack)
+{
+	if (bind) {
+		struct flow_action_entry *entry = entry_data;
+
+		entry->id = FLOW_ACTION_CSUM;
+		entry->csum_flags = tcf_csum_update_flags(act);
+		*index_inc = 1;
+	} else {
+		struct flow_offload_action *fl_action = entry_data;
+
+		fl_action->id = FLOW_ACTION_CSUM;
+	}
+
+	return 0;
 }
 
 static struct tc_action_ops act_csum_ops = {
@@ -704,28 +706,27 @@ static struct tc_action_ops act_csum_ops = {
 	.dump		= tcf_csum_dump,
 	.init		= tcf_csum_init,
 	.cleanup	= tcf_csum_cleanup,
-	.walk		= tcf_csum_walker,
-	.lookup		= tcf_csum_search,
 	.get_fill_size  = tcf_csum_get_fill_size,
+	.offload_act_setup = tcf_csum_offload_act_setup,
 	.size		= sizeof(struct tcf_csum),
 };
 
 static __net_init int csum_init_net(struct net *net)
 {
-	struct tc_action_net *tn = net_generic(net, csum_net_id);
+	struct tc_action_net *tn = net_generic(net, act_csum_ops.net_id);
 
 	return tc_action_net_init(net, tn, &act_csum_ops);
 }
 
 static void __net_exit csum_exit_net(struct list_head *net_list)
 {
-	tc_action_net_exit(net_list, csum_net_id);
+	tc_action_net_exit(net_list, act_csum_ops.net_id);
 }
 
 static struct pernet_operations csum_net_ops = {
 	.init = csum_init_net,
 	.exit_batch = csum_exit_net,
-	.id   = &csum_net_id,
+	.id   = &act_csum_ops.net_id,
 	.size = sizeof(struct tc_action_net),
 };
 

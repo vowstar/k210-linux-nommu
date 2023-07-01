@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/thermal/allwinner,sun8i-a83t-ths.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Allwinner SUN8I Thermal Controller Device Tree Bindings
+title: Allwinner SUN8I Thermal Controller
 
 maintainers:
   - Vasily Khoruzhick <anarsoul@gmail.com>
@@ -17,19 +17,18 @@ properties:
       - allwinner,sun8i-h3-ths
       - allwinner,sun8i-r40-ths
       - allwinner,sun50i-a64-ths
+      - allwinner,sun50i-a100-ths
       - allwinner,sun50i-h5-ths
       - allwinner,sun50i-h6-ths
 
   clocks:
     minItems: 1
-    maxItems: 2
     items:
       - description: Bus Clock
       - description: Module Clock
 
   clock-names:
     minItems: 1
-    maxItems: 2
     items:
       - const: bus
       - const: mod
@@ -50,7 +49,7 @@ properties:
   nvmem-cell-names:
     const: calibration
 
-  # See ./thermal.txt for details
+  # See Documentation/devicetree/bindings/thermal/thermal-sensor.yaml for details
   "#thermal-sensor-cells":
     enum:
       - 0
@@ -61,7 +60,9 @@ allOf:
       properties:
         compatible:
           contains:
-            const: allwinner,sun50i-h6-ths
+            enum:
+              - allwinner,sun50i-a100-ths
+              - allwinner,sun50i-h6-ths
 
     then:
       properties:
@@ -100,11 +101,12 @@ allOf:
         compatible:
           contains:
             enum:
-              - const: allwinner,sun8i-h3-ths
-              - const: allwinner,sun8i-r40-ths
-              - const: allwinner,sun50i-a64-ths
-              - const: allwinner,sun50i-h5-ths
-              - const: allwinner,sun50i-h6-ths
+              - allwinner,sun8i-h3-ths
+              - allwinner,sun8i-r40-ths
+              - allwinner,sun50i-a64-ths
+              - allwinner,sun50i-a100-ths
+              - allwinner,sun50i-h5-ths
+              - allwinner,sun50i-h6-ths
 
     then:
       required:

@@ -8,11 +8,13 @@ snd-usb-audio-objs := 	card.o \
 			endpoint.o \
 			format.o \
 			helper.o \
+			implicit.o \
 			mixer.o \
 			mixer_quirks.o \
 			mixer_scarlett.o \
 			mixer_scarlett_gen2.o \
 			mixer_us16x08.o \
+			mixer_s1810c.o \
 			pcm.o \
 			power.o \
 			proc.o \

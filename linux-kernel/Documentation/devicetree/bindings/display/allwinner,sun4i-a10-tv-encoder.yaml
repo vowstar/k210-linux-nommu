@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/display/allwinner,sun4i-a10-tv-encoder.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Allwinner A10 TV Encoder Device Tree Bindings
+title: Allwinner A10 TV Encoder
 
 maintainers:
   - Chen-Yu Tsai <wens@csie.org>
@@ -24,11 +24,9 @@ properties:
     maxItems: 1
 
   port:
-    type: object
+    $ref: /schemas/graph.yaml#/properties/port
     description:
-      A port node with endpoint definitions as defined in
-      Documentation/devicetree/bindings/media/video-interfaces.txt. The
-      first port should be the input endpoint, usually coming from the
+      The first port should be the input endpoint, usually coming from the
       associated TCON.
 
 required:
@@ -49,11 +47,7 @@ examples:
         resets = <&tcon_ch0_clk 0>;
 
         port {
-            #address-cells = <1>;
-            #size-cells = <0>;
-
-            tve0_in_tcon0: endpoint@0 {
-                reg = <0>;
+            tve0_in_tcon0: endpoint {
                 remote-endpoint = <&tcon0_out_tve0>;
             };
         };

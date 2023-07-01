@@ -236,7 +236,7 @@ static int emu8k_pcm_open(struct snd_pcm_substream *subs)
 
 	/* use timer to update periods.. (specified in msec) */
 	snd_pcm_hw_constraint_minmax(runtime, SNDRV_PCM_HW_PARAM_PERIOD_TIME,
-				     (1000000 + HZ - 1) / HZ, UINT_MAX);
+				     DIV_ROUND_UP(1000000, HZ), UINT_MAX);
 
 	return 0;
 }
@@ -435,7 +435,7 @@ enum {
 #define LOOP_WRITE(rec, offset, _buf, count, mode)		\
 	do {							\
 		struct snd_emu8000 *emu = (rec)->emu;		\
-		unsigned short *buf = (unsigned short *)(_buf); \
+		unsigned short *buf = (__force unsigned short *)(_buf); \
 		snd_emu8000_write_wait(emu, 1);			\
 		EMU8000_SMALW_WRITE(emu, offset);		\
 		while (count > 0) {				\
@@ -492,7 +492,7 @@ static int emu8k_pcm_silence(struct snd_pcm_substream *subs,
 #define LOOP_WRITE(rec, pos, _buf, count, mode)				\
 	do {								\
 		struct snd_emu8000 *emu = rec->emu;			\
-		unsigned short *buf = (unsigned short *)(_buf);		\
+		unsigned short *buf = (__force unsigned short *)(_buf);	\
 		snd_emu8000_write_wait(emu, 1);				\
 		EMU8000_SMALW_WRITE(emu, pos + rec->loop_start[0]);	\
 		if (rec->voices > 1)					\
@@ -626,7 +626,8 @@ static int emu8k_pcm_prepare(struct snd_pcm_substream *subs)
 		int err, i, ch;
 
 		snd_emux_terminate_all(rec->emu->emu);
-		if ((err = emu8k_open_dram_for_pcm(rec->emu, rec->voices)) != 0)
+		err = emu8k_open_dram_for_pcm(rec->emu, rec->voices);
+		if (err)
 			return err;
 		rec->dram_opened = 1;
 
@@ -682,7 +683,8 @@ int snd_emu8000_pcm_new(struct snd_card *card, struct snd_emu8000 *emu, int inde
 	struct snd_pcm *pcm;
 	int err;
 
-	if ((err = snd_pcm_new(card, "Emu8000 PCM", index, 1, 0, &pcm)) < 0)
+	err = snd_pcm_new(card, "Emu8000 PCM", index, 1, 0, &pcm);
+	if (err < 0)
 		return err;
 	pcm->private_data = emu;
 	pcm->private_free = snd_emu8000_pcm_free;

@@ -32,6 +32,15 @@
 		};
 	};
 
+	leds {
+		compatible = "gpio-leds";
+
+		led-0 {
+			label = "a64-olinuxino:red:user";
+			gpios = <&pio 4 17 GPIO_ACTIVE_HIGH>; /* PE17 */
+		};
+	};
+
 	reg_usb1_vbus: usb1-vbus {
 		compatible = "regulator-fixed";
 		regulator-name = "usb1-vbus";
@@ -49,6 +58,15 @@
 	};
 };
 
+&codec {
+	status = "okay";
+};
+
+&codec_analog {
+	cpvdd-supply = <&reg_eldo1>;
+	status = "okay";
+};
+
 &cpu0 {
 	cpu-supply = <&reg_dcdc2>;
 };
@@ -63,6 +81,10 @@
 
 &cpu3 {
 	cpu-supply = <&reg_dcdc2>;
+};
+
+&dai {
+	status = "okay";
 };
 
 &de {
@@ -158,6 +180,17 @@
 	 */
 };
 
+&pio {
+	vcc-pa-supply = <&reg_dcdc1>;
+	vcc-pb-supply = <&reg_dcdc1>;
+	vcc-pc-supply = <&reg_dcdc1>;
+	vcc-pd-supply = <&reg_dcdc1>;
+	vcc-pe-supply = <&reg_aldo1>;
+	vcc-pf-supply = <&reg_dcdc1>;
+	vcc-pg-supply = <&reg_dldo4>;
+	vcc-ph-supply = <&reg_dcdc1>;
+};
+
 &r_rsb {
 	status = "okay";
 
@@ -165,10 +198,16 @@
 		compatible = "x-powers,axp803";
 		reg = <0x3a3>;
 		interrupt-parent = <&r_intc>;
-		interrupts = <0 IRQ_TYPE_LEVEL_LOW>;
+		interrupts = <GIC_SPI 32 IRQ_TYPE_LEVEL_LOW>;
 		x-powers,drive-vbus-en;	/* set N_VBUSEN as output pin */
 	};
 };
+
+/* VCC-PL is powered by aldo2 but we cannot add it as the RSB */
+/* interface used to talk to the PMIC in on the PL pins */
+/* &r_pio { */
+/*	vcc-pl-supply = <&reg_aldo2>; */
+/* }; */
 
 #include "axp803.dtsi"
 
@@ -300,6 +339,23 @@
 
 &simplefb_hdmi {
 	vcc-hdmi-supply = <&reg_dldo1>;
+};
+
+&sound {
+	simple-audio-card,aux-devs = <&codec_analog>;
+	simple-audio-card,widgets = "Microphone", "Microphone Jack Left",
+		    "Microphone", "Microphone Jack Right",
+		    "Headphone", "Headphone Jack";
+	simple-audio-card,routing = "Left DAC", "DACL",
+		    "Right DAC", "DACR",
+		    "Headphone Jack", "HP",
+		    "ADCL", "Left ADC",
+		    "ADCR", "Right ADC",
+		    "Microphone Jack Left", "MBIAS",
+		    "MIC1", "Microphone Jack Left",
+		    "Microphone Jack Right", "MBIAS",
+		    "MIC2", "Microphone Jack Right";
+	status = "okay";
 };
 
 &uart0 {

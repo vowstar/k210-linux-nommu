@@ -6,6 +6,7 @@
 obj-$(CONFIG_BT_HCIVHCI)	+= hci_vhci.o
 obj-$(CONFIG_BT_HCIUART)	+= hci_uart.o
 obj-$(CONFIG_BT_HCIBCM203X)	+= bcm203x.o
+obj-$(CONFIG_BT_HCIBCM4377)	+= hci_bcm4377.o
 obj-$(CONFIG_BT_HCIBPA10X)	+= bpa10x.o
 obj-$(CONFIG_BT_HCIBFUSB)	+= bfusb.o
 obj-$(CONFIG_BT_HCIDTL1)	+= dtl1_cs.o
@@ -25,6 +26,9 @@ obj-$(CONFIG_BT_QCOMSMD)	+= btqcomsmd.o
 obj-$(CONFIG_BT_BCM)		+= btbcm.o
 obj-$(CONFIG_BT_RTL)		+= btrtl.o
 obj-$(CONFIG_BT_QCA)		+= btqca.o
+obj-$(CONFIG_BT_MTK)		+= btmtk.o
+
+obj-$(CONFIG_BT_VIRTIO)		+= virtio_bt.o
 
 obj-$(CONFIG_BT_HCIUART_NOKIA)	+= hci_nokia.o
 

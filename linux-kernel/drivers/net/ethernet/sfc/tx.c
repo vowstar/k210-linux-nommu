@@ -59,13 +59,12 @@ u8 *efx_tx_get_copy_buffer_limited(struct efx_tx_queue *tx_queue,
 
 static void efx_tx_maybe_stop_queue(struct efx_tx_queue *txq1)
 {
-	/* We need to consider both queues that the net core sees as one */
-	struct efx_tx_queue *txq2 = efx_tx_queue_partner(txq1);
+	/* We need to consider all queues that the net core sees as one */
 	struct efx_nic *efx = txq1->efx;
+	struct efx_tx_queue *txq2;
 	unsigned int fill_level;
 
-	fill_level = max(txq1->insert_count - txq1->old_read_count,
-			 txq2->insert_count - txq2->old_read_count);
+	fill_level = efx_channel_tx_old_fill_level(txq1->channel);
 	if (likely(fill_level < efx->txq_stop_thresh))
 		return;
 
@@ -85,11 +84,10 @@ static void efx_tx_maybe_stop_queue(struct efx_tx_queue *txq1)
 	 */
 	netif_tx_stop_queue(txq1->core_txq);
 	smp_mb();
-	txq1->old_read_count = READ_ONCE(txq1->read_count);
-	txq2->old_read_count = READ_ONCE(txq2->read_count);
+	efx_for_each_channel_tx_queue(txq2, txq1->channel)
+		txq2->old_read_count = READ_ONCE(txq2->read_count);
 
-	fill_level = max(txq1->insert_count - txq1->old_read_count,
-			 txq2->insert_count - txq2->old_read_count);
+	fill_level = efx_channel_tx_old_fill_level(txq1->channel);
 	EFX_WARN_ON_ONCE_PARANOID(fill_level >= efx->txq_entries);
 	if (likely(fill_level < efx->txq_stop_thresh)) {
 		smp_mb();
@@ -209,11 +207,11 @@ static void efx_skb_copy_bits_to_pio(struct efx_nic *efx, struct sk_buff *skb,
 		skb_frag_t *f = &skb_shinfo(skb)->frags[i];
 		u8 *vaddr;
 
-		vaddr = kmap_atomic(skb_frag_page(f));
+		vaddr = kmap_local_page(skb_frag_page(f));
 
 		efx_memcpy_toio_aligned_cb(efx, piobuf, vaddr + skb_frag_off(f),
 					   skb_frag_size(f), copy_buf);
-		kunmap_atomic(vaddr);
+		kunmap_local(vaddr);
 	}
 
 	EFX_WARN_ON_ONCE_PARANOID(skb_shinfo(skb)->frag_list);
@@ -266,35 +264,43 @@ static int efx_enqueue_skb_pio(struct efx_tx_queue *tx_queue,
 	++tx_queue->insert_count;
 	return 0;
 }
+
+/* Decide whether we can use TX PIO, ie. write packet data directly into
+ * a buffer on the device.  This can reduce latency at the expense of
+ * throughput, so we only do this if both hardware and software TX rings
+ * are empty, including all queues for the channel.  This also ensures that
+ * only one packet at a time can be using the PIO buffer. If the xmit_more
+ * flag is set then we don't use this - there'll be another packet along
+ * shortly and we want to hold off the doorbell.
+ */
+static bool efx_tx_may_pio(struct efx_tx_queue *tx_queue)
+{
+	struct efx_channel *channel = tx_queue->channel;
+
+	if (!tx_queue->piobuf)
+		return false;
+
+	EFX_WARN_ON_ONCE_PARANOID(!channel->efx->type->option_descriptors);
+
+	efx_for_each_channel_tx_queue(tx_queue, channel)
+		if (!efx_nic_tx_is_empty(tx_queue, tx_queue->packet_write_count))
+			return false;
+
+	return true;
+}
 #endif /* EFX_USE_PIO */
 
-/*
- * Fallback to software TSO.
- *
- * This is used if we are unable to send a GSO packet through hardware TSO.
- * This should only ever happen due to per-queue restrictions - unsupported
- * packets should first be filtered by the feature flags.
- *
- * Returns 0 on success, error code otherwise.
+/* Send any pending traffic for a channel. xmit_more is shared across all
+ * queues for a channel, so we must check all of them.
  */
-static int efx_tx_tso_fallback(struct efx_tx_queue *tx_queue,
-			       struct sk_buff *skb)
+static void efx_tx_send_pending(struct efx_channel *channel)
 {
-	struct sk_buff *segments, *next;
+	struct efx_tx_queue *q;
 
-	segments = skb_gso_segment(skb, 0);
-	if (IS_ERR(segments))
-		return PTR_ERR(segments);
-
-	dev_consume_skb_any(skb);
-	skb = segments;
-
-	skb_list_walk_safe(skb, skb, next) {
-		skb_mark_not_on_list(skb);
-		efx_enqueue_skb(tx_queue, skb);
+	efx_for_each_channel_tx_queue(q, channel) {
+		if (q->xmit_pending)
+			efx_nic_push_buffers(q);
 	}
-
-	return 0;
 }
 
 /*
@@ -313,7 +319,7 @@ static int efx_tx_tso_fallback(struct efx_tx_queue *tx_queue,
  * Returns NETDEV_TX_OK.
  * You must hold netif_tx_lock() to call this function.
  */
-netdev_tx_t efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb)
+netdev_tx_t __efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb)
 {
 	unsigned int old_insert_count = tx_queue->insert_count;
 	bool xmit_more = netdev_xmit_more();
@@ -332,8 +338,18 @@ netdev_tx_t efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb)
 	 * size limit.
 	 */
 	if (segments) {
-		EFX_WARN_ON_ONCE_PARANOID(!tx_queue->handle_tso);
-		rc = tx_queue->handle_tso(tx_queue, skb, &data_mapped);
+		switch (tx_queue->tso_version) {
+		case 1:
+			rc = efx_enqueue_skb_tso(tx_queue, skb, &data_mapped);
+			break;
+		case 2:
+			rc = efx_ef10_tx_tso_desc(tx_queue, skb, &data_mapped);
+			break;
+		case 0: /* No TSO on this queue, SW fallback needed */
+		default:
+			rc = -EINVAL;
+			break;
+		}
 		if (rc == -EINVAL) {
 			rc = efx_tx_tso_fallback(tx_queue, skb);
 			tx_queue->tso_fallbacks++;
@@ -344,7 +360,7 @@ netdev_tx_t efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb)
 			goto err;
 #ifdef EFX_USE_PIO
 	} else if (skb_len <= efx_piobuf_size && !xmit_more &&
-		   efx_nic_may_tx_pio(tx_queue)) {
+		   efx_tx_may_pio(tx_queue)) {
 		/* Use PIO for short packets with an empty queue. */
 		if (efx_enqueue_skb_pio(tx_queue, skb))
 			goto err;
@@ -365,21 +381,11 @@ netdev_tx_t efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb)
 
 	efx_tx_maybe_stop_queue(tx_queue);
 
+	tx_queue->xmit_pending = true;
+
 	/* Pass off to hardware */
-	if (__netdev_tx_sent_queue(tx_queue->core_txq, skb_len, xmit_more)) {
-		struct efx_tx_queue *txq2 = efx_tx_queue_partner(tx_queue);
-
-		/* There could be packets left on the partner queue if
-		 * xmit_more was set. If we do not push those they
-		 * could be left for a long time and cause a netdev watchdog.
-		 */
-		if (txq2->xmit_more_available)
-			efx_nic_push_buffers(txq2);
-
-		efx_nic_push_buffers(tx_queue);
-	} else {
-		tx_queue->xmit_more_available = xmit_more;
-	}
+	if (__netdev_tx_sent_queue(tx_queue->core_txq, skb_len, xmit_more))
+		efx_tx_send_pending(tx_queue->channel);
 
 	if (segments) {
 		tx_queue->tso_bursts++;
@@ -400,24 +406,10 @@ err:
 	 * on this queue or a partner queue then we need to push here to get the
 	 * previous packets out.
 	 */
-	if (!xmit_more) {
-		struct efx_tx_queue *txq2 = efx_tx_queue_partner(tx_queue);
-
-		if (txq2->xmit_more_available)
-			efx_nic_push_buffers(txq2);
-
-		efx_nic_push_buffers(tx_queue);
-	}
+	if (!xmit_more)
+		efx_tx_send_pending(tx_queue->channel);
 
 	return NETDEV_TX_OK;
-}
-
-static void efx_xdp_return_frames(int n,  struct xdp_frame **xdpfs)
-{
-	int i;
-
-	for (i = 0; i < n; i++)
-		xdp_return_frame_rx_napi(xdpfs[i]);
 }
 
 /* Transmit a packet from an XDP buffer
@@ -436,23 +428,35 @@ int efx_xdp_tx_buffers(struct efx_nic *efx, int n, struct xdp_frame **xdpfs,
 	unsigned int len;
 	int space;
 	int cpu;
-	int i;
+	int i = 0;
+
+	if (unlikely(n && !xdpfs))
+		return -EINVAL;
+	if (unlikely(!n))
+		return 0;
 
 	cpu = raw_smp_processor_id();
-
-	if (!efx->xdp_tx_queue_count ||
-	    unlikely(cpu >= efx->xdp_tx_queue_count))
+	if (unlikely(cpu >= efx->xdp_tx_queue_count))
 		return -EINVAL;
 
 	tx_queue = efx->xdp_tx_queues[cpu];
 	if (unlikely(!tx_queue))
 		return -EINVAL;
 
-	if (unlikely(n && !xdpfs))
+	if (!tx_queue->initialised)
 		return -EINVAL;
 
-	if (!n)
-		return 0;
+	if (efx->xdp_txq_queues_mode != EFX_XDP_TX_QUEUES_DEDICATED)
+		HARD_TX_LOCK(efx->net_dev, tx_queue->core_txq, cpu);
+
+	/* If we're borrowing net stack queues we have to handle stop-restart
+	 * or we might block the queue and it will be considered as frozen
+	 */
+	if (efx->xdp_txq_queues_mode == EFX_XDP_TX_QUEUES_BORROWED) {
+		if (netif_tx_queue_stopped(tx_queue->core_txq))
+			goto unlock;
+		efx_tx_maybe_stop_queue(tx_queue);
+	}
 
 	/* Check for available space. We should never need multiple
 	 * descriptors per frame.
@@ -492,47 +496,104 @@ int efx_xdp_tx_buffers(struct efx_nic *efx, int n, struct xdp_frame **xdpfs,
 	if (flush && i > 0)
 		efx_nic_push_buffers(tx_queue);
 
-	if (i == 0)
-		return -EIO;
+unlock:
+	if (efx->xdp_txq_queues_mode != EFX_XDP_TX_QUEUES_DEDICATED)
+		HARD_TX_UNLOCK(efx->net_dev, tx_queue->core_txq);
 
-	efx_xdp_return_frames(n - i, xdpfs + i);
-
-	return i;
+	return i == 0 ? -EIO : i;
 }
 
 /* Initiate a packet transmission.  We use one channel per CPU
- * (sharing when we have more CPUs than channels).  On Falcon, the TX
- * completion events will be directed back to the CPU that transmitted
- * the packet, which should be cache-efficient.
+ * (sharing when we have more CPUs than channels).
  *
  * Context: non-blocking.
- * Note that returning anything other than NETDEV_TX_OK will cause the
- * OS to free the skb.
+ * Should always return NETDEV_TX_OK and consume the skb.
  */
 netdev_tx_t efx_hard_start_xmit(struct sk_buff *skb,
 				struct net_device *net_dev)
 {
-	struct efx_nic *efx = netdev_priv(net_dev);
+	struct efx_nic *efx = efx_netdev_priv(net_dev);
 	struct efx_tx_queue *tx_queue;
 	unsigned index, type;
 
 	EFX_WARN_ON_PARANOID(!netif_device_present(net_dev));
 
-	/* PTP "event" packet */
-	if (unlikely(efx_xmit_with_hwtstamp(skb)) &&
-	    unlikely(efx_ptp_is_ptp_tx(efx, skb))) {
-		return efx_ptp_tx(efx, skb);
-	}
-
 	index = skb_get_queue_mapping(skb);
-	type = skb->ip_summed == CHECKSUM_PARTIAL ? EFX_TXQ_TYPE_OFFLOAD : 0;
+	type = efx_tx_csum_type_skb(skb);
 	if (index >= efx->n_tx_channels) {
 		index -= efx->n_tx_channels;
 		type |= EFX_TXQ_TYPE_HIGHPRI;
 	}
-	tx_queue = efx_get_tx_queue(efx, index, type);
 
-	return efx_enqueue_skb(tx_queue, skb);
+	/* PTP "event" packet */
+	if (unlikely(efx_xmit_with_hwtstamp(skb)) &&
+	    ((efx_ptp_use_mac_tx_timestamps(efx) && efx->ptp_data) ||
+	    unlikely(efx_ptp_is_ptp_tx(efx, skb)))) {
+		/* There may be existing transmits on the channel that are
+		 * waiting for this packet to trigger the doorbell write.
+		 * We need to send the packets at this point.
+		 */
+		efx_tx_send_pending(efx_get_tx_channel(efx, index));
+		return efx_ptp_tx(efx, skb);
+	}
+
+	tx_queue = efx_get_tx_queue(efx, index, type);
+	if (WARN_ON_ONCE(!tx_queue)) {
+		/* We don't have a TXQ of the right type.
+		 * This should never happen, as we don't advertise offload
+		 * features unless we can support them.
+		 */
+		dev_kfree_skb_any(skb);
+		/* If we're not expecting another transmit and we had something to push
+		 * on this queue or a partner queue then we need to push here to get the
+		 * previous packets out.
+		 */
+		if (!netdev_xmit_more())
+			efx_tx_send_pending(efx_get_tx_channel(efx, index));
+		return NETDEV_TX_OK;
+	}
+
+	return __efx_enqueue_skb(tx_queue, skb);
+}
+
+void efx_xmit_done_single(struct efx_tx_queue *tx_queue)
+{
+	unsigned int pkts_compl = 0, bytes_compl = 0;
+	unsigned int efv_pkts_compl = 0;
+	unsigned int read_ptr;
+	bool finished = false;
+
+	read_ptr = tx_queue->read_count & tx_queue->ptr_mask;
+
+	while (!finished) {
+		struct efx_tx_buffer *buffer = &tx_queue->buffer[read_ptr];
+
+		if (!efx_tx_buffer_in_use(buffer)) {
+			struct efx_nic *efx = tx_queue->efx;
+
+			netif_err(efx, hw, efx->net_dev,
+				  "TX queue %d spurious single TX completion\n",
+				  tx_queue->queue);
+			efx_schedule_reset(efx, RESET_TYPE_TX_SKIP);
+			return;
+		}
+
+		/* Need to check the flag before dequeueing. */
+		if (buffer->flags & EFX_TX_BUF_SKB)
+			finished = true;
+		efx_dequeue_buffer(tx_queue, buffer, &pkts_compl, &bytes_compl,
+				   &efv_pkts_compl);
+
+		++tx_queue->read_count;
+		read_ptr = tx_queue->read_count & tx_queue->ptr_mask;
+	}
+
+	tx_queue->pkts_compl += pkts_compl;
+	tx_queue->bytes_compl += bytes_compl;
+
+	EFX_WARN_ON_PARANOID(pkts_compl + efv_pkts_compl != 1);
+
+	efx_xmit_done_check_empty(tx_queue);
 }
 
 void efx_init_tx_queue_core_txq(struct efx_tx_queue *tx_queue)
@@ -542,22 +603,23 @@ void efx_init_tx_queue_core_txq(struct efx_tx_queue *tx_queue)
 	/* Must be inverse of queue lookup in efx_hard_start_xmit() */
 	tx_queue->core_txq =
 		netdev_get_tx_queue(efx->net_dev,
-				    tx_queue->queue / EFX_TXQ_TYPES +
-				    ((tx_queue->queue & EFX_TXQ_TYPE_HIGHPRI) ?
+				    tx_queue->channel->channel +
+				    ((tx_queue->type & EFX_TXQ_TYPE_HIGHPRI) ?
 				     efx->n_tx_channels : 0));
 }
 
 int efx_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
 		 void *type_data)
 {
-	struct efx_nic *efx = netdev_priv(net_dev);
+	struct efx_nic *efx = efx_netdev_priv(net_dev);
 	struct tc_mqprio_qopt *mqprio = type_data;
-	struct efx_channel *channel;
-	struct efx_tx_queue *tx_queue;
 	unsigned tc, num_tc;
-	int rc;
 
 	if (type != TC_SETUP_QDISC_MQPRIO)
+		return -EOPNOTSUPP;
+
+	/* Only Siena supported highpri queues */
+	if (efx_nic_rev(efx) > EFX_REV_SIENA_A0)
 		return -EOPNOTSUPP;
 
 	num_tc = mqprio->num_tc;
@@ -575,40 +637,9 @@ int efx_setup_tc(struct net_device *net_dev, enum tc_setup_type type,
 		net_dev->tc_to_txq[tc].count = efx->n_tx_channels;
 	}
 
-	if (num_tc > net_dev->num_tc) {
-		/* Initialise high-priority queues as necessary */
-		efx_for_each_channel(channel, efx) {
-			efx_for_each_possible_channel_tx_queue(tx_queue,
-							       channel) {
-				if (!(tx_queue->queue & EFX_TXQ_TYPE_HIGHPRI))
-					continue;
-				if (!tx_queue->buffer) {
-					rc = efx_probe_tx_queue(tx_queue);
-					if (rc)
-						return rc;
-				}
-				if (!tx_queue->initialised)
-					efx_init_tx_queue(tx_queue);
-				efx_init_tx_queue_core_txq(tx_queue);
-			}
-		}
-	} else {
-		/* Reduce number of classes before number of queues */
-		net_dev->num_tc = num_tc;
-	}
-
-	rc = netif_set_real_num_tx_queues(net_dev,
-					  max_t(int, num_tc, 1) *
-					  efx->n_tx_channels);
-	if (rc)
-		return rc;
-
-	/* Do not destroy high-priority queues when they become
-	 * unused.  We would have to flush them first, and it is
-	 * fairly difficult to flush a subset of TX queues.  Leave
-	 * it to efx_fini_channels().
-	 */
-
 	net_dev->num_tc = num_tc;
-	return 0;
+
+	return netif_set_real_num_tx_queues(net_dev,
+					    max_t(int, num_tc, 1) *
+					    efx->n_tx_channels);
 }

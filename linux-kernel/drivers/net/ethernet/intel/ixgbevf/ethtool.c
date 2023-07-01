@@ -17,8 +17,6 @@
 
 #include "ixgbevf.h"
 
-#define IXGBE_ALL_RAR_ENTRIES 16
-
 enum {NETDEV_STATS, IXGBEVF_STATS};
 
 struct ixgbe_stats {
@@ -130,8 +128,6 @@ static void ixgbevf_set_msglevel(struct net_device *netdev, u32 data)
 	adapter->msg_enable = data;
 }
 
-#define IXGBE_GET_STAT(_A_, _R_) (_A_->stats._R_)
-
 static int ixgbevf_get_regs_len(struct net_device *netdev)
 {
 #define IXGBE_REGS_LEN 45
@@ -217,17 +213,17 @@ static void ixgbevf_get_drvinfo(struct net_device *netdev,
 {
 	struct ixgbevf_adapter *adapter = netdev_priv(netdev);
 
-	strlcpy(drvinfo->driver, ixgbevf_driver_name, sizeof(drvinfo->driver));
-	strlcpy(drvinfo->version, ixgbevf_driver_version,
-		sizeof(drvinfo->version));
-	strlcpy(drvinfo->bus_info, pci_name(adapter->pdev),
+	strscpy(drvinfo->driver, ixgbevf_driver_name, sizeof(drvinfo->driver));
+	strscpy(drvinfo->bus_info, pci_name(adapter->pdev),
 		sizeof(drvinfo->bus_info));
 
 	drvinfo->n_priv_flags = IXGBEVF_PRIV_FLAGS_STR_LEN;
 }
 
 static void ixgbevf_get_ringparam(struct net_device *netdev,
-				  struct ethtool_ringparam *ring)
+				  struct ethtool_ringparam *ring,
+				  struct kernel_ethtool_ringparam *kernel_ring,
+				  struct netlink_ext_ack *extack)
 {
 	struct ixgbevf_adapter *adapter = netdev_priv(netdev);
 
@@ -238,7 +234,9 @@ static void ixgbevf_get_ringparam(struct net_device *netdev,
 }
 
 static int ixgbevf_set_ringparam(struct net_device *netdev,
-				 struct ethtool_ringparam *ring)
+				 struct ethtool_ringparam *ring,
+				 struct kernel_ethtool_ringparam *kernel_ring,
+				 struct netlink_ext_ack *extack)
 {
 	struct ixgbevf_adapter *adapter = netdev_priv(netdev);
 	struct ixgbevf_ring *tx_ring = NULL, *rx_ring = NULL;
@@ -460,10 +458,10 @@ static void ixgbevf_get_ethtool_stats(struct net_device *netdev,
 		}
 
 		do {
-			start = u64_stats_fetch_begin_irq(&ring->syncp);
+			start = u64_stats_fetch_begin(&ring->syncp);
 			data[i]   = ring->stats.packets;
 			data[i + 1] = ring->stats.bytes;
-		} while (u64_stats_fetch_retry_irq(&ring->syncp, start));
+		} while (u64_stats_fetch_retry(&ring->syncp, start));
 		i += 2;
 	}
 
@@ -477,10 +475,10 @@ static void ixgbevf_get_ethtool_stats(struct net_device *netdev,
 		}
 
 		do {
-			start = u64_stats_fetch_begin_irq(&ring->syncp);
+			start = u64_stats_fetch_begin(&ring->syncp);
 			data[i] = ring->stats.packets;
 			data[i + 1] = ring->stats.bytes;
-		} while (u64_stats_fetch_retry_irq(&ring->syncp, start));
+		} while (u64_stats_fetch_retry(&ring->syncp, start));
 		i += 2;
 	}
 
@@ -494,10 +492,10 @@ static void ixgbevf_get_ethtool_stats(struct net_device *netdev,
 		}
 
 		do {
-			start = u64_stats_fetch_begin_irq(&ring->syncp);
+			start = u64_stats_fetch_begin(&ring->syncp);
 			data[i]   = ring->stats.packets;
 			data[i + 1] = ring->stats.bytes;
-		} while (u64_stats_fetch_retry_irq(&ring->syncp, start));
+		} while (u64_stats_fetch_retry(&ring->syncp, start));
 		i += 2;
 	}
 }
@@ -789,7 +787,9 @@ static int ixgbevf_nway_reset(struct net_device *netdev)
 }
 
 static int ixgbevf_get_coalesce(struct net_device *netdev,
-				struct ethtool_coalesce *ec)
+				struct ethtool_coalesce *ec,
+				struct kernel_ethtool_coalesce *kernel_coal,
+				struct netlink_ext_ack *extack)
 {
 	struct ixgbevf_adapter *adapter = netdev_priv(netdev);
 
@@ -813,7 +813,9 @@ static int ixgbevf_get_coalesce(struct net_device *netdev,
 }
 
 static int ixgbevf_set_coalesce(struct net_device *netdev,
-				struct ethtool_coalesce *ec)
+				struct ethtool_coalesce *ec,
+				struct kernel_ethtool_coalesce *kernel_coal,
+				struct netlink_ext_ack *extack)
 {
 	struct ixgbevf_adapter *adapter = netdev_priv(netdev);
 	struct ixgbevf_q_vector *q_vector;
@@ -968,6 +970,7 @@ static int ixgbevf_set_priv_flags(struct net_device *netdev, u32 priv_flags)
 }
 
 static const struct ethtool_ops ixgbevf_ethtool_ops = {
+	.supported_coalesce_params = ETHTOOL_COALESCE_USECS,
 	.get_drvinfo		= ixgbevf_get_drvinfo,
 	.get_regs_len		= ixgbevf_get_regs_len,
 	.get_regs		= ixgbevf_get_regs,

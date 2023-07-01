@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/**
+/*
  * Copyright (C) 2008, Creative Technology Ltd. All Rights Reserved.
  *
  * @File    ctatc.c
@@ -36,6 +36,7 @@
 			    | ((IEC958_AES3_CON_FS_48000) << 24))
 
 static const struct snd_pci_quirk subsys_20k1_list[] = {
+	SND_PCI_QUIRK(PCI_VENDOR_ID_CREATIVE, 0x0021, "SB046x", CTSB046X),
 	SND_PCI_QUIRK(PCI_VENDOR_ID_CREATIVE, 0x0022, "SB055x", CTSB055X),
 	SND_PCI_QUIRK(PCI_VENDOR_ID_CREATIVE, 0x002f, "SB055x", CTSB055X),
 	SND_PCI_QUIRK(PCI_VENDOR_ID_CREATIVE, 0x0029, "SB073x", CTSB073X),
@@ -64,6 +65,7 @@ static const struct snd_pci_quirk subsys_20k2_list[] = {
 
 static const char *ct_subsys_name[NUM_CTCARDS] = {
 	/* 20k1 models */
+	[CTSB046X]	= "SB046x",
 	[CTSB055X]	= "SB055x",
 	[CTSB073X]	= "SB073x",
 	[CTUAA]		= "UAA",
@@ -1282,7 +1284,7 @@ static int atc_identify_card(struct ct_atc *atc, unsigned int ssid)
 	if (p) {
 		if (p->value < 0) {
 			dev_err(atc->card->dev,
-				"Device %04x:%04x is black-listed\n",
+				"Device %04x:%04x is on the denylist\n",
 				vendor_id, device_id);
 			return -ENOENT;
 		}
@@ -1655,6 +1657,10 @@ static const struct ct_atc atc_preset = {
  *  ct_atc_create - create and initialize a hardware manager
  *  @card: corresponding alsa card object
  *  @pci: corresponding kernel pci device object
+ *  @rsr: reference sampling rate
+ *  @msr: master sampling rate
+ *  @chip_type: CHIPTYP enum values
+ *  @ssid: vendor ID (upper 16 bits) and device ID (lower 16 bits)
  *  @ratc: return created object address in it
  *
  *  Creates and initializes a hardware manager.

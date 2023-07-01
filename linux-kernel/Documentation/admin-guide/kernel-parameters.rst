@@ -3,8 +3,8 @@
 The kernel's command-line parameters
 ====================================
 
-The following is a consolidated list of the kernel parameters as
-implemented by the __setup(), core_param() and module_param() macros
+The following is a consolidated list of the kernel parameters as implemented
+by the __setup(), early_param(), core_param() and module_param() macros
 and sorted into English Dictionary order (defined as ignoring all
 punctuation and sorting digits before letters in a case insensitive
 manner), and with descriptions where known.
@@ -60,7 +60,7 @@ Note that for the special case of a range one can split the range into equal
 sized groups and for each group use some amount from the beginning of that
 group:
 
-	<cpu number>-cpu number>:<used size>/<group size>
+	<cpu number>-<cpu number>:<used size>/<group size>
 
 For example one can add to the command line following parameter:
 
@@ -68,7 +68,19 @@ For example one can add to the command line following parameter:
 
 where the final item represents CPUs 100,101,125,126,150,151,...
 
+The value "N" can be used to represent the numerically last CPU on the system,
+i.e "foo_cpus=16-N" would be equivalent to "16-31" on a 32 core system.
 
+Keep in mind that "N" is dynamic, so if system changes cause the bitmap width
+to change, such as less cores in the CPU list, then N and any ranges using N
+will also change.  Use the same on a small 4 core system, and "16-N" becomes
+"16-3" and now the same boot input will be flagged as invalid (start > end).
+
+The special case-tolerant group name "all" has a meaning of selecting all CPUs,
+so that "nohz_full=all" is the equivalent of "nohz_full=0-N".
+
+The semantics of "N" and "all" is supported on a level of bitmaps and holds for
+all users of bitmap_parse().
 
 This document may not be entirely up to date and comprehensive. The command
 "modinfo -p ${modulename}" shows a current list of all parameters of a loadable
@@ -87,6 +99,7 @@ parameter is applicable::
 	ALSA	ALSA sound support is enabled.
 	APIC	APIC support is enabled.
 	APM	Advanced Power Management support is enabled.
+	APPARMOR AppArmor support is enabled.
 	ARM	ARM architecture is enabled.
 	ARM64	ARM64 architecture is enabled.
 	AX25	Appropriate AX.25 support is enabled.
@@ -96,15 +109,15 @@ parameter is applicable::
 	DYNAMIC_DEBUG Build in debug messages and enable them at runtime
 	EDD	BIOS Enhanced Disk Drive Services (EDD) is enabled
 	EFI	EFI Partitioning (GPT) is enabled
-	EIDE	EIDE/ATAPI support is enabled.
 	EVM	Extended Verification Module
 	FB	The frame buffer device is enabled.
 	FTRACE	Function tracing enabled.
 	GCOV	GCOV profiling is enabled.
+	HIBERNATION HIBERNATION is enabled.
 	HW	Appropriate hardware is enabled.
+	HYPER_V HYPERV support is enabled.
 	IA-64	IA-64 architecture is enabled.
 	IMA     Integrity measurement architecture is enabled.
-	IOSCHED	More than one I/O scheduler is enabled.
 	IP_PNP	IP DHCP, BOOTP, or RARP is enabled.
 	IPV6	IPv6 support is enabled.
 	ISAPNP	ISA PnP code is enabled.
@@ -115,6 +128,7 @@ parameter is applicable::
 	KVM	Kernel Virtual Machine support is enabled.
 	LIBATA  Libata driver is enabled
 	LP	Printer support is enabled.
+	LOONGARCH LoongArch architecture is enabled.
 	LOOP	Loopback device support is enabled.
 	M68k	M68k architecture is enabled.
 			These options have more detailed description inside of
@@ -128,9 +142,7 @@ parameter is applicable::
 	NUMA	NUMA support is enabled.
 	NFS	Appropriate NFS support is enabled.
 	OF	Devicetree is enabled.
-	OSS	OSS sound support is enabled.
 	PV_OPS	A paravirtualized kernel is enabled.
-	PARIDE	The ParIDE (parallel port IDE) subsystem is enabled.
 	PARISC	The PA-RISC architecture is enabled.
 	PCI	PCI bus support is enabled.
 	PCIE	PCI Express support is enabled.
@@ -140,6 +152,7 @@ parameter is applicable::
 	PPT	Parallel port support is enabled.
 	PS2	Appropriate PS/2 support is enabled.
 	RAM	RAM disk support is enabled.
+	RISCV	RISCV architecture is enabled.
 	RDT	Intel Resource Director Technology.
 	S390	S390 architecture is enabled.
 	SCSI	Appropriate SCSI support is enabled.
@@ -147,7 +160,6 @@ parameter is applicable::
 			the Documentation/scsi/ sub-directory.
 	SECURITY Different security models are enabled.
 	SELINUX SELinux support is enabled.
-	APPARMOR AppArmor support is enabled.
 	SERIAL	Serial support is enabled.
 	SH	SuperH architecture is enabled.
 	SMP	The kernel is an SMP kernel.
@@ -155,7 +167,6 @@ parameter is applicable::
 	SWSUSP	Software suspend (hibernation) is enabled.
 	SUSPEND	System suspend states are enabled.
 	TPM	TPM drivers are enabled.
-	TS	Appropriate touchscreen support is enabled.
 	UMS	USB Mass Storage support is enabled.
 	USB	USB support is enabled.
 	USBHID	USB Human Interface Device support is enabled.
@@ -164,7 +175,6 @@ parameter is applicable::
 	VGA	The VGA console has been enabled.
 	VT	Virtual terminal support is enabled.
 	WDT	Watchdog support is enabled.
-	XT	IBM PC/XT MFM hard disk support is enabled.
 	X86-32	X86-32, aka i386 architecture is enabled.
 	X86-64	X86-64 architecture is enabled.
 			More X86-64 boot options can be found in
@@ -172,6 +182,7 @@ parameter is applicable::
 	X86	Either 32-bit or 64-bit x86 (same as X86-32+X86-64)
 	X86_UV	SGI UV support is enabled.
 	XEN	Xen support is enabled
+	XTENSA	xtensa architecture is enabled.
 
 In addition, the following text indicates that the option::
 
@@ -197,7 +208,7 @@ The number of kernel parameters is not limited, but the length of the
 complete command line (parameters including spaces etc.) is limited to
 a fixed number of characters. This limit depends on the architecture
 and is between 256 and 4096 characters. It is defined in the file
-./include/asm/setup.h as COMMAND_LINE_SIZE.
+./include/uapi/asm-generic/setup.h as COMMAND_LINE_SIZE.
 
 Finally, the [KMG] suffix is commonly described after a number of kernel
 parameter values. These 'K', 'M', and 'G' letters represent the _binary_

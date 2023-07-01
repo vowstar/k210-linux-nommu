@@ -546,7 +546,7 @@ static int vs6624_s_ctrl(struct v4l2_ctrl *ctrl)
 }
 
 static int vs6624_enum_mbus_code(struct v4l2_subdev *sd,
-		struct v4l2_subdev_pad_config *cfg,
+		struct v4l2_subdev_state *sd_state,
 		struct v4l2_subdev_mbus_code_enum *code)
 {
 	if (code->pad || code->index >= ARRAY_SIZE(vs6624_formats))
@@ -557,7 +557,7 @@ static int vs6624_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static int vs6624_set_fmt(struct v4l2_subdev *sd,
-		struct v4l2_subdev_pad_config *cfg,
+		struct v4l2_subdev_state *sd_state,
 		struct v4l2_subdev_format *format)
 {
 	struct v4l2_mbus_framefmt *fmt = &format->format;
@@ -587,7 +587,7 @@ static int vs6624_set_fmt(struct v4l2_subdev *sd,
 	fmt->colorspace = vs6624_formats[index].colorspace;
 
 	if (format->which == V4L2_SUBDEV_FORMAT_TRY) {
-		cfg->try_fmt = *fmt;
+		sd_state->pads->try_fmt = *fmt;
 		return 0;
 	}
 
@@ -637,7 +637,7 @@ static int vs6624_set_fmt(struct v4l2_subdev *sd,
 }
 
 static int vs6624_get_fmt(struct v4l2_subdev *sd,
-		struct v4l2_subdev_pad_config *cfg,
+		struct v4l2_subdev_state *sd_state,
 		struct v4l2_subdev_format *format)
 {
 	struct vs6624 *sensor = to_vs6624(sd);
@@ -738,8 +738,7 @@ static const struct v4l2_subdev_ops vs6624_ops = {
 	.pad = &vs6624_pad_ops,
 };
 
-static int vs6624_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int vs6624_probe(struct i2c_client *client)
 {
 	struct vs6624 *sensor;
 	struct v4l2_subdev *sd;
@@ -824,13 +823,12 @@ static int vs6624_probe(struct i2c_client *client,
 	return ret;
 }
 
-static int vs6624_remove(struct i2c_client *client)
+static void vs6624_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 
 	v4l2_device_unregister_subdev(sd);
 	v4l2_ctrl_handler_free(sd->ctrl_handler);
-	return 0;
 }
 
 static const struct i2c_device_id vs6624_id[] = {
@@ -844,7 +842,7 @@ static struct i2c_driver vs6624_driver = {
 	.driver = {
 		.name   = "vs6624",
 	},
-	.probe          = vs6624_probe,
+	.probe_new      = vs6624_probe,
 	.remove         = vs6624_remove,
 	.id_table       = vs6624_id,
 };

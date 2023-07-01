@@ -5,6 +5,7 @@
  * Copyright (C) 2014 Google, Inc.
  */
 
+#include <linux/dmi.h>
 #include <linux/kconfig.h>
 #include <linux/mfd/core.h>
 #include <linux/module.h>
@@ -24,7 +25,7 @@ static struct class cros_class = {
 };
 
 /**
- * cros_feature_to_name - CrOS feature id to name/short description.
+ * struct cros_feature_to_name - CrOS feature id to name/short description.
  * @id: The feature identifier.
  * @name: Device name associated with the feature id.
  * @desc: Short name that will be displayed.
@@ -36,7 +37,7 @@ struct cros_feature_to_name {
 };
 
 /**
- * cros_feature_to_cells - CrOS feature id to mfd cells association.
+ * struct cros_feature_to_cells - CrOS feature id to mfd cells association.
  * @id: The feature identifier.
  * @mfd_cells: Pointer to the array of mfd cells that needs to be added.
  * @num_cells: Number of mfd cells into the array.
@@ -112,8 +113,15 @@ static const struct cros_feature_to_cells cros_subdevices[] = {
 static const struct mfd_cell cros_ec_platform_cells[] = {
 	{ .name = "cros-ec-chardev", },
 	{ .name = "cros-ec-debugfs", },
-	{ .name = "cros-ec-lightbar", },
 	{ .name = "cros-ec-sysfs", },
+};
+
+static const struct mfd_cell cros_ec_pchg_cells[] = {
+	{ .name = "cros-ec-pchg", },
+};
+
+static const struct mfd_cell cros_ec_lightbar_cells[] = {
+	{ .name = "cros-ec-lightbar", }
 };
 
 static const struct mfd_cell cros_ec_vbc_cells[] = {
@@ -132,6 +140,7 @@ static int ec_device_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct cros_ec_platform *ec_platform = dev_get_platdata(dev);
 	struct cros_ec_dev *ec = kzalloc(sizeof(*ec), GFP_KERNEL);
+	struct ec_response_pchg_count pchg_count;
 	int i;
 
 	if (!ec)
@@ -141,8 +150,8 @@ static int ec_device_probe(struct platform_device *pdev)
 	ec->ec_dev = dev_get_drvdata(dev->parent);
 	ec->dev = dev;
 	ec->cmd_offset = ec_platform->cmd_offset;
-	ec->features[0] = -1U; /* Not cached yet */
-	ec->features[1] = -1U; /* Not cached yet */
+	ec->features.flags[0] = -1U; /* Not cached yet */
+	ec->features.flags[1] = -1U; /* Not cached yet */
 	device_initialize(&ec->class_dev);
 
 	for (i = 0; i < ARRAY_SIZE(cros_mcu_devices); i++) {
@@ -207,11 +216,25 @@ static int ec_device_probe(struct platform_device *pdev)
 	}
 
 	/*
+	 * Lightbar is a special case. Newer devices support autodetection,
+	 * but older ones do not.
+	 */
+	if (cros_ec_check_features(ec, EC_FEATURE_LIGHTBAR) ||
+	    dmi_match(DMI_PRODUCT_NAME, "Link")) {
+		retval = mfd_add_hotplug_devices(ec->dev,
+					cros_ec_lightbar_cells,
+					ARRAY_SIZE(cros_ec_lightbar_cells));
+		if (retval)
+			dev_warn(ec->dev, "failed to add lightbar: %d\n",
+				 retval);
+	}
+
+	/*
 	 * The PD notifier driver cell is separate since it only needs to be
 	 * explicitly added on platforms that don't have the PD notifier ACPI
 	 * device entry defined.
 	 */
-	if (IS_ENABLED(CONFIG_OF)) {
+	if (IS_ENABLED(CONFIG_OF) && ec->ec_dev->dev->of_node) {
 		if (cros_ec_check_features(ec, EC_FEATURE_USB_PD)) {
 			retval = mfd_add_hotplug_devices(ec->dev,
 					cros_usbpd_notify_cells,
@@ -221,6 +244,21 @@ static int ec_device_probe(struct platform_device *pdev)
 					"failed to add PD notify devices: %d\n",
 					retval);
 		}
+	}
+
+	/*
+	 * The PCHG device cannot be detected by sending EC_FEATURE_GET_CMD, but
+	 * it can be detected by querying the number of peripheral chargers.
+	 */
+	retval = cros_ec_cmd(ec->ec_dev, 0, EC_CMD_PCHG_COUNT, NULL, 0,
+			     &pchg_count, sizeof(pchg_count));
+	if (retval >= 0 && pchg_count.port_count) {
+		retval = mfd_add_hotplug_devices(ec->dev,
+					cros_ec_pchg_cells,
+					ARRAY_SIZE(cros_ec_pchg_cells));
+		if (retval)
+			dev_warn(ec->dev, "failed to add pchg: %d\n",
+				 retval);
 	}
 
 	/*
@@ -307,7 +345,6 @@ static void __exit cros_ec_dev_exit(void)
 module_init(cros_ec_dev_init);
 module_exit(cros_ec_dev_exit);
 
-MODULE_ALIAS("platform:" DRV_NAME);
 MODULE_AUTHOR("Bill Richardson <wfrichar@chromium.org>");
 MODULE_DESCRIPTION("Userspace interface to the Chrome OS Embedded Controller");
 MODULE_VERSION("1.0");

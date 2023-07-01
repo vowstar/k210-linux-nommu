@@ -485,7 +485,7 @@ static void tw68_buf_finish(struct vb2_buffer *vb)
 	struct tw68_dev *dev = vb2_get_drv_priv(vq);
 	struct tw68_buf *buf = container_of(vbuf, struct tw68_buf, vb);
 
-	pci_free_consistent(dev->pci, buf->size, buf->cpu, buf->dma);
+	dma_free_coherent(&dev->pci->dev, buf->size, buf->cpu, buf->dma);
 }
 
 static int tw68_start_streaming(struct vb2_queue *q, unsigned int count)
@@ -712,12 +712,9 @@ static int tw68_s_input(struct file *file, void *priv, unsigned int i)
 static int tw68_querycap(struct file *file, void  *priv,
 					struct v4l2_capability *cap)
 {
-	struct tw68_dev *dev = video_drvdata(file);
-
 	strscpy(cap->driver, "tw68", sizeof(cap->driver));
 	strscpy(cap->card, "Techwell Capture Card",
 		sizeof(cap->card));
-	sprintf(cap->bus_info, "PCI:%s", pci_name(dev->pci));
 	return 0;
 }
 
@@ -962,7 +959,7 @@ int tw68_video_init2(struct tw68_dev *dev, int video_nr)
 	dev->vdev.lock = &dev->lock;
 	dev->vdev.queue = &dev->vidq;
 	video_set_drvdata(&dev->vdev, dev);
-	return video_register_device(&dev->vdev, VFL_TYPE_GRABBER, video_nr);
+	return video_register_device(&dev->vdev, VFL_TYPE_VIDEO, video_nr);
 }
 
 /*

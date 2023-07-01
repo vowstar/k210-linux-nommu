@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/display/bridge/anx6345.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Analogix ANX6345 eDP Transmitter Device Tree Bindings
+title: Analogix ANX6345 eDP Transmitter
 
 maintainers:
   - Torsten Duwe <duwe@lst.de>
@@ -26,25 +26,23 @@ properties:
     description: GPIO connected to active low reset
 
   dvdd12-supply:
-    maxItems: 1
     description: Regulator for 1.2V digital core power.
 
   dvdd25-supply:
-    maxItems: 1
     description: Regulator for 2.5V digital core power.
 
   ports:
-    type: object
+    $ref: /schemas/graph.yaml#/properties/ports
 
     properties:
       port@0:
-        type: object
-        description: |
+        $ref: /schemas/graph.yaml#/properties/port
+        description:
           Video port for LVTTL input
 
       port@1:
-        type: object
-        description: |
+        $ref: /schemas/graph.yaml#/properties/port
+        description:
           Video port for eDP output (panel or connector).
           May be omitted if EDID works reliably.
 
@@ -79,21 +77,15 @@ examples:
           #size-cells = <0>;
 
           anx6345_in: port@0 {
-            #address-cells = <1>;
-            #size-cells = <0>;
             reg = <0>;
-            anx6345_in_tcon0: endpoint@0 {
-              reg = <0>;
+            anx6345_in_tcon0: endpoint {
               remote-endpoint = <&tcon0_out_anx6345>;
             };
           };
 
           anx6345_out: port@1 {
-            #address-cells = <1>;
-            #size-cells = <0>;
             reg = <1>;
-            anx6345_out_panel: endpoint@0 {
-              reg = <0>;
+            anx6345_out_panel: endpoint {
               remote-endpoint = <&panel_in_edp>;
             };
           };

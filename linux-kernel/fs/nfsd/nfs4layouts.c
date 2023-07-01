@@ -145,8 +145,9 @@ void nfsd4_setup_layout_type(struct svc_export *exp)
 #ifdef CONFIG_NFSD_SCSILAYOUT
 	if (sb->s_export_op->map_blocks &&
 	    sb->s_export_op->commit_blocks &&
-	    sb->s_bdev && sb->s_bdev->bd_disk->fops->pr_ops &&
-		blk_queue_scsi_passthrough(sb->s_bdev->bd_disk->queue))
+	    sb->s_bdev &&
+	    sb->s_bdev->bd_disk->fops->pr_ops &&
+	    sb->s_bdev->bd_disk->fops->get_unique_id)
 		exp->ex_layout_types |= 1 << LAYOUT_SCSI;
 #endif
 }
@@ -322,11 +323,11 @@ nfsd4_recall_file_layout(struct nfs4_layout_stateid *ls)
 	if (ls->ls_recalled)
 		goto out_unlock;
 
-	ls->ls_recalled = true;
-	atomic_inc(&ls->ls_stid.sc_file->fi_lo_recalls);
 	if (list_empty(&ls->ls_layouts))
 		goto out_unlock;
 
+	ls->ls_recalled = true;
+	atomic_inc(&ls->ls_stid.sc_file->fi_lo_recalls);
 	trace_nfsd_layout_recall(&ls->ls_stid.sc_stateid);
 
 	refcount_inc(&ls->ls_stid.sc_count);
@@ -421,7 +422,7 @@ nfsd4_insert_layout(struct nfsd4_layoutget *lgp, struct nfs4_layout_stateid *ls)
 	new = kmem_cache_alloc(nfs4_layout_cache, GFP_KERNEL);
 	if (!new)
 		return nfserr_jukebox;
-	memcpy(&new->lo_seg, seg, sizeof(lp->lo_seg));
+	memcpy(&new->lo_seg, seg, sizeof(new->lo_seg));
 	new->lo_state = ls;
 
 	spin_lock(&fp->fi_lock);
@@ -657,7 +658,7 @@ nfsd4_cb_layout_done(struct nfsd4_callback *cb, struct rpc_task *task)
 	ktime_t now, cutoff;
 	const struct nfsd4_layout_ops *ops;
 
-
+	trace_nfsd_cb_layout_done(&ls->ls_stid.sc_stateid, task);
 	switch (task->tk_status) {
 	case 0:
 	case -NFS4ERR_DELAY:
@@ -681,7 +682,7 @@ nfsd4_cb_layout_done(struct nfsd4_callback *cb, struct rpc_task *task)
 			rpc_delay(task, HZ/100); /* 10 mili-seconds */
 			return 0;
 		}
-		/* Fallthrough */
+		fallthrough;
 	default:
 		/*
 		 * Unknown error or non-responding client, we'll need to fence.

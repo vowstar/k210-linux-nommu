@@ -11,8 +11,10 @@ Human Interface Devices (HID)
    hidraw
    hid-sensor
    hid-transport
+   hid-bpf
 
    uhid
 
    hid-alps
    intel-ish-hid
+   amd-sfh-hid

@@ -6,6 +6,7 @@
 #ifndef __LINUX_SPI_H
 #define __LINUX_SPI_H
 
+#include <linux/bits.h>
 #include <linux/device.h>
 #include <linux/mod_devicetable.h>
 #include <linux/slab.h>
@@ -13,13 +14,19 @@
 #include <linux/completion.h>
 #include <linux/scatterlist.h>
 #include <linux/gpio/consumer.h>
-#include <linux/ptp_clock_kernel.h>
+
+#include <uapi/linux/spi/spi.h>
+#include <linux/acpi.h>
+#include <linux/u64_stats_sync.h>
 
 struct dma_chan;
-struct property_entry;
+struct software_node;
+struct ptp_system_timestamp;
 struct spi_controller;
 struct spi_transfer;
 struct spi_controller_mem_ops;
+struct spi_controller_mem_caps;
+struct spi_message;
 
 /*
  * INTERFACES between SPI master-side drivers and SPI slave protocol handlers,
@@ -29,7 +36,8 @@ extern struct bus_type spi_bus_type;
 
 /**
  * struct spi_statistics - statistics for spi transfers
- * @lock:          lock protecting this structure
+ * @syncp:         seqcount to protect members in this struct for per-cpu udate
+ *                 on 32-bit systems
  *
  * @messages:      number of spi-messages handled
  * @transfers:     number of spi_transfers handled
@@ -54,41 +62,48 @@ extern struct bus_type spi_bus_type;
  *                 maxsize limit
  */
 struct spi_statistics {
-	spinlock_t		lock; /* lock for the whole structure */
+	struct u64_stats_sync	syncp;
 
-	unsigned long		messages;
-	unsigned long		transfers;
-	unsigned long		errors;
-	unsigned long		timedout;
+	u64_stats_t		messages;
+	u64_stats_t		transfers;
+	u64_stats_t		errors;
+	u64_stats_t		timedout;
 
-	unsigned long		spi_sync;
-	unsigned long		spi_sync_immediate;
-	unsigned long		spi_async;
+	u64_stats_t		spi_sync;
+	u64_stats_t		spi_sync_immediate;
+	u64_stats_t		spi_async;
 
-	unsigned long long	bytes;
-	unsigned long long	bytes_rx;
-	unsigned long long	bytes_tx;
+	u64_stats_t		bytes;
+	u64_stats_t		bytes_rx;
+	u64_stats_t		bytes_tx;
 
 #define SPI_STATISTICS_HISTO_SIZE 17
-	unsigned long transfer_bytes_histo[SPI_STATISTICS_HISTO_SIZE];
+	u64_stats_t	transfer_bytes_histo[SPI_STATISTICS_HISTO_SIZE];
 
-	unsigned long transfers_split_maxsize;
+	u64_stats_t	transfers_split_maxsize;
 };
 
-void spi_statistics_add_transfer_stats(struct spi_statistics *stats,
-				       struct spi_transfer *xfer,
-				       struct spi_controller *ctlr);
-
-#define SPI_STATISTICS_ADD_TO_FIELD(stats, field, count)	\
-	do {							\
-		unsigned long flags;				\
-		spin_lock_irqsave(&(stats)->lock, flags);	\
-		(stats)->field += count;			\
-		spin_unlock_irqrestore(&(stats)->lock, flags);	\
+#define SPI_STATISTICS_ADD_TO_FIELD(pcpu_stats, field, count)		\
+	do {								\
+		struct spi_statistics *__lstats;			\
+		get_cpu();						\
+		__lstats = this_cpu_ptr(pcpu_stats);			\
+		u64_stats_update_begin(&__lstats->syncp);		\
+		u64_stats_add(&__lstats->field, count);			\
+		u64_stats_update_end(&__lstats->syncp);			\
+		put_cpu();						\
 	} while (0)
 
-#define SPI_STATISTICS_INCREMENT_FIELD(stats, field)	\
-	SPI_STATISTICS_ADD_TO_FIELD(stats, field, 1)
+#define SPI_STATISTICS_INCREMENT_FIELD(pcpu_stats, field)		\
+	do {								\
+		struct spi_statistics *__lstats;			\
+		get_cpu();						\
+		__lstats = this_cpu_ptr(pcpu_stats);			\
+		u64_stats_update_begin(&__lstats->syncp);		\
+		u64_stats_inc(&__lstats->field);			\
+		u64_stats_update_end(&__lstats->syncp);			\
+		put_cpu();						\
+	} while (0)
 
 /**
  * struct spi_delay - SPI delay information
@@ -105,6 +120,8 @@ struct spi_delay {
 
 extern int spi_delay_to_ns(struct spi_delay *_delay, struct spi_transfer *xfer);
 extern int spi_delay_exec(struct spi_delay *_delay, struct spi_transfer *xfer);
+extern void spi_transfer_cs_change_delay_exec(struct spi_message *msg,
+						  struct spi_transfer *xfer);
 
 /**
  * struct spi_device - Controller side proxy for an SPI slave device
@@ -135,15 +152,20 @@ extern int spi_delay_exec(struct spi_delay *_delay, struct spi_transfer *xfer);
  * @modalias: Name of the driver to use with this device, or an alias
  *	for that name.  This appears in the sysfs "modalias" attribute
  *	for driver coldplugging, and in uevents used for hotplugging
- * @cs_gpio: LEGACY: gpio number of the chipselect line (optional, -ENOENT when
- *	not using a GPIO line) use cs_gpiod in new drivers by opting in on
- *	the spi_master.
+ * @driver_override: If the name of a driver is written to this attribute, then
+ *	the device will bind to the named driver and only the named driver.
+ *	Do not set directly, because core frees it; use driver_set_override() to
+ *	set or clear it.
  * @cs_gpiod: gpio descriptor of the chipselect line (optional, NULL when
  *	not using a GPIO line)
  * @word_delay: delay to be inserted between consecutive
  *	words of a transfer
- *
- * @statistics: statistics for the spi_device
+ * @cs_setup: delay to be introduced by the controller after CS is asserted
+ * @cs_hold: delay to be introduced by the controller before CS is deasserted
+ * @cs_inactive: delay to be introduced by the controller after CS is
+ *	deasserted. If @cs_change_delay is used from @spi_transfer, then the
+ *	two delays will be added up.
+ * @pcpu_statistics: statistics for the spi_device
  *
  * A @spi_device is used to interchange data between an SPI slave
  * (usually a discrete chip) and CPU memory.
@@ -157,43 +179,38 @@ extern int spi_delay_exec(struct spi_delay *_delay, struct spi_transfer *xfer);
 struct spi_device {
 	struct device		dev;
 	struct spi_controller	*controller;
-	struct spi_controller	*master;	/* compatibility layer */
+	struct spi_controller	*master;	/* Compatibility layer */
 	u32			max_speed_hz;
 	u8			chip_select;
 	u8			bits_per_word;
 	bool			rt;
+#define SPI_NO_TX	BIT(31)		/* No transmit wire */
+#define SPI_NO_RX	BIT(30)		/* No receive wire */
+	/*
+	 * All bits defined above should be covered by SPI_MODE_KERNEL_MASK.
+	 * The SPI_MODE_KERNEL_MASK has the SPI_MODE_USER_MASK counterpart,
+	 * which is defined in 'include/uapi/linux/spi/spi.h'.
+	 * The bits defined here are from bit 31 downwards, while in
+	 * SPI_MODE_USER_MASK are from 0 upwards.
+	 * These bits must not overlap. A static assert check should make sure of that.
+	 * If adding extra bits, make sure to decrease the bit index below as well.
+	 */
+#define SPI_MODE_KERNEL_MASK	(~(BIT(30) - 1))
 	u32			mode;
-#define	SPI_CPHA	0x01			/* clock phase */
-#define	SPI_CPOL	0x02			/* clock polarity */
-#define	SPI_MODE_0	(0|0)			/* (original MicroWire) */
-#define	SPI_MODE_1	(0|SPI_CPHA)
-#define	SPI_MODE_2	(SPI_CPOL|0)
-#define	SPI_MODE_3	(SPI_CPOL|SPI_CPHA)
-#define	SPI_CS_HIGH	0x04			/* chipselect active high? */
-#define	SPI_LSB_FIRST	0x08			/* per-word bits-on-wire */
-#define	SPI_3WIRE	0x10			/* SI/SO signals shared */
-#define	SPI_LOOP	0x20			/* loopback mode */
-#define	SPI_NO_CS	0x40			/* 1 dev/bus, no chipselect */
-#define	SPI_READY	0x80			/* slave pulls low to pause */
-#define	SPI_TX_DUAL	0x100			/* transmit with 2 wires */
-#define	SPI_TX_QUAD	0x200			/* transmit with 4 wires */
-#define	SPI_RX_DUAL	0x400			/* receive with 2 wires */
-#define	SPI_RX_QUAD	0x800			/* receive with 4 wires */
-#define	SPI_CS_WORD	0x1000			/* toggle cs after each word */
-#define	SPI_TX_OCTAL	0x2000			/* transmit with 8 wires */
-#define	SPI_RX_OCTAL	0x4000			/* receive with 8 wires */
-#define	SPI_3WIRE_HIZ	0x8000			/* high impedance turnaround */
 	int			irq;
 	void			*controller_state;
 	void			*controller_data;
 	char			modalias[SPI_NAME_SIZE];
 	const char		*driver_override;
-	int			cs_gpio;	/* LEGACY: chip select gpio */
-	struct gpio_desc	*cs_gpiod;	/* chip select gpio desc */
-	struct spi_delay	word_delay; /* inter-word delay */
+	struct gpio_desc	*cs_gpiod;	/* Chip select gpio desc */
+	struct spi_delay	word_delay; /* Inter-word delay */
+	/* CS delays */
+	struct spi_delay	cs_setup;
+	struct spi_delay	cs_hold;
+	struct spi_delay	cs_inactive;
 
-	/* the statistics */
-	struct spi_statistics	statistics;
+	/* The statistics */
+	struct spi_statistics __percpu	*pcpu_statistics;
 
 	/*
 	 * likely need more hooks for more protocol options affecting how
@@ -205,12 +222,16 @@ struct spi_device {
 	 */
 };
 
-static inline struct spi_device *to_spi_device(struct device *dev)
+/* Make sure that SPI_MODE_KERNEL_MASK & SPI_MODE_USER_MASK don't overlap */
+static_assert((SPI_MODE_KERNEL_MASK & SPI_MODE_USER_MASK) == 0,
+	      "SPI_MODE_USER_MASK & SPI_MODE_KERNEL_MASK must not overlap");
+
+static inline struct spi_device *to_spi_device(const struct device *dev)
 {
 	return dev ? container_of(dev, struct spi_device, dev) : NULL;
 }
 
-/* most drivers won't need to care about device refcounting */
+/* Most drivers won't need to care about device refcounting */
 static inline struct spi_device *spi_dev_get(struct spi_device *spi)
 {
 	return (spi && get_device(&spi->dev)) ? spi : NULL;
@@ -233,7 +254,7 @@ static inline void spi_set_ctldata(struct spi_device *spi, void *state)
 	spi->controller_state = state;
 }
 
-/* device driver data */
+/* Device driver data */
 
 static inline void spi_set_drvdata(struct spi_device *spi, void *data)
 {
@@ -245,8 +266,25 @@ static inline void *spi_get_drvdata(struct spi_device *spi)
 	return dev_get_drvdata(&spi->dev);
 }
 
-struct spi_message;
-struct spi_transfer;
+static inline u8 spi_get_chipselect(struct spi_device *spi, u8 idx)
+{
+	return spi->chip_select;
+}
+
+static inline void spi_set_chipselect(struct spi_device *spi, u8 idx, u8 chipselect)
+{
+	spi->chip_select = chipselect;
+}
+
+static inline struct gpio_desc *spi_get_csgpiod(struct spi_device *spi, u8 idx)
+{
+	return spi->cs_gpiod;
+}
+
+static inline void spi_set_csgpiod(struct spi_device *spi, u8 idx, struct gpio_desc *csgpiod)
+{
+	spi->cs_gpiod = csgpiod;
+}
 
 /**
  * struct spi_driver - Host side "protocol" driver
@@ -276,7 +314,7 @@ struct spi_transfer;
 struct spi_driver {
 	const struct spi_device_id *id_table;
 	int			(*probe)(struct spi_device *spi);
-	int			(*remove)(struct spi_device *spi);
+	void			(*remove)(struct spi_device *spi);
 	void			(*shutdown)(struct spi_device *spi);
 	struct device_driver	driver;
 };
@@ -299,7 +337,9 @@ static inline void spi_unregister_driver(struct spi_driver *sdrv)
 		driver_unregister(&sdrv->driver);
 }
 
-/* use a define to avoid include chaining to get THIS_MODULE */
+extern struct spi_device *spi_new_ancillary_device(struct spi_device *spi, u8 chip_select);
+
+/* Use a define to avoid include chaining to get THIS_MODULE */
 #define spi_register_driver(driver) \
 	__spi_register_driver(THIS_MODULE, driver)
 
@@ -327,6 +367,7 @@ static inline void spi_unregister_driver(struct spi_driver *sdrv)
  *	every chipselect is connected to a slave.
  * @dma_alignment: SPI controller constraint on DMA buffers alignment.
  * @mode_bits: flags understood by this controller driver
+ * @buswidth_override_bits: flags to override for this controller driver
  * @bits_per_word_mask: A mask indicating which values of bits_per_word are
  *	supported by the driver. Bit n indicates that a bits_per_word n+1 is
  *	supported. If set, the SPI core will reject any transfer with an
@@ -336,11 +377,14 @@ static inline void spi_unregister_driver(struct spi_driver *sdrv)
  * @max_speed_hz: Highest supported transfer speed
  * @flags: other constraints relevant to this driver
  * @slave: indicates that this is an SPI slave controller
+ * @target: indicates that this is an SPI target controller
+ * @devm_allocated: whether the allocation of this struct is devres-managed
  * @max_transfer_size: function that returns the max transfer size for
  *	a &spi_device; may be %NULL, so the default %SIZE_MAX will be used.
  * @max_message_size: function that returns the max message size for
  *	a &spi_device; may be %NULL, so the default %SIZE_MAX will be used.
  * @io_mutex: mutex for physical bus access
+ * @add_lock: mutex to avoid adding devices to the same chipselect
  * @bus_lock_spinlock: spinlock for SPI bus locking
  * @bus_lock_mutex: mutex for exclusion of multiple callers
  * @bus_lock_flag: indicates that the SPI bus is locked for exclusive use
@@ -355,17 +399,26 @@ static inline void spi_unregister_driver(struct spi_driver *sdrv)
  * @transfer: adds a message to the controller's transfer queue.
  * @cleanup: frees controller-specific state
  * @can_dma: determine whether this controller supports DMA
+ * @dma_map_dev: device which can be used for DMA mapping
+ * @cur_rx_dma_dev: device which is currently used for RX DMA mapping
+ * @cur_tx_dma_dev: device which is currently used for TX DMA mapping
  * @queued: whether this controller is providing an internal message queue
- * @kworker: thread struct for message pump
- * @kworker_task: pointer to task for message pump kworker thread
+ * @kworker: pointer to thread struct for message pump
  * @pump_messages: work struct for scheduling work to the message pump
  * @queue_lock: spinlock to syncronise access to message queue
  * @queue: message queue
- * @idling: the device is entering idle state
  * @cur_msg: the currently in-flight message
- * @cur_msg_prepared: spi_prepare_message was called for the currently
- *                    in-flight message
+ * @cur_msg_completion: a completion for the current in-flight message
+ * @cur_msg_incomplete: Flag used internally to opportunistically skip
+ *	the @cur_msg_completion. This flag is used to check if the driver has
+ *	already called spi_finalize_current_message().
+ * @cur_msg_need_completion: Flag used internally to opportunistically skip
+ *	the @cur_msg_completion. This flag is used to signal the context that
+ *	is running spi_finalize_current_message() that it needs to complete()
  * @cur_msg_mapped: message has been mapped for DMA
+ * @last_cs: the last chip_select that is recorded by set_cs, -1 on non chip
+ *           selected
+ * @last_cs_mode_high: was (mode & SPI_CS_HIGH) true on the last call to set_cs.
  * @xfer_completion: used by core transfer_one_message()
  * @busy: message pump is busy
  * @running: message pump is running
@@ -392,6 +445,7 @@ static inline void spi_unregister_driver(struct spi_driver *sdrv)
  *                   for example doing DMA mapping.  Called from threaded
  *                   context.
  * @transfer_one: transfer a single spi_transfer.
+ *
  *                  - return 0 if the transfer is finished,
  *                  - return 1 if the transfer is still in progress. When
  *                    the driver is finished with this transfer it must
@@ -405,31 +459,23 @@ static inline void spi_unregister_driver(struct spi_driver *sdrv)
  * @mem_ops: optimized/dedicated operations for interactions with SPI memory.
  *	     This field is optional and should only be implemented if the
  *	     controller has native support for memory like operations.
+ * @mem_caps: controller capabilities for the handling of memory operations.
  * @unprepare_message: undo any work done by prepare_message().
  * @slave_abort: abort the ongoing transfer request on an SPI slave controller
- * @cs_setup: delay to be introduced by the controller after CS is asserted
- * @cs_hold: delay to be introduced by the controller before CS is deasserted
- * @cs_inactive: delay to be introduced by the controller after CS is
- *	deasserted. If @cs_change_delay is used from @spi_transfer, then the
- *	two delays will be added up.
- * @cs_gpios: LEGACY: array of GPIO descs to use as chip select lines; one per
- *	CS number. Any individual value may be -ENOENT for CS lines that
- *	are not GPIOs (driven by the SPI controller itself). Use the cs_gpiods
- *	in new drivers.
+ * @target_abort: abort the ongoing transfer request on an SPI target controller
  * @cs_gpiods: Array of GPIO descs to use as chip select lines; one per CS
  *	number. Any individual value may be NULL for CS lines that
  *	are not GPIOs (driven by the SPI controller itself).
  * @use_gpio_descriptors: Turns on the code in the SPI core to parse and grab
- *	GPIO descriptors rather than using global GPIO numbers grabbed by the
- *	driver. This will fill in @cs_gpiods and @cs_gpios should not be used,
- *	and SPI devices will have the cs_gpiod assigned rather than cs_gpio.
+ *	GPIO descriptors. This will fill in @cs_gpiods and SPI devices will have
+ *	the cs_gpiod assigned if a GPIO line is found for the chipselect.
  * @unused_native_cs: When cs_gpiods is used, spi_register_controller() will
  *	fill in this field with the first unused native CS, to be used by SPI
  *	controller drivers that need to drive a native CS when using GPIO CS.
  * @max_native_cs: When cs_gpiods is used, and this field is filled in,
  *	spi_register_controller() will validate all native CS (including the
  *	unused native CS) against this value.
- * @statistics: statistics for the spi_controller
+ * @pcpu_statistics: statistics for the spi_controller
  * @dma_tx: DMA transmit channel
  * @dma_rx: DMA receive channel
  * @dummy_rx: dummy receive buffer for full-duplex devices
@@ -443,6 +489,12 @@ static inline void spi_unregister_driver(struct spi_driver *sdrv)
  *	@spi_transfer->ptp_sts_word_post were transmitted.
  *	If the driver does not set this, the SPI core takes the snapshot as
  *	close to the driver hand-over as possible.
+ * @irq_flags: Interrupt enable state during PTP system timestamping
+ * @fallback: fallback to pio if dma transfer return failure with
+ *	SPI_TRANS_FAIL_NO_START.
+ * @queue_empty: signal green light for opportunistically skipping the queue
+ *	for spi_sync transfers.
+ * @must_async: disable all fast paths in the core
  *
  * Each SPI controller can communicate with one or more @spi_device
  * children.  These make a small bus, sharing MOSI, MISO and SCK signals
@@ -460,7 +512,7 @@ struct spi_controller {
 
 	struct list_head list;
 
-	/* other than negative (== assign one dynamically), bus_num is fully
+	/* Other than negative (== assign one dynamically), bus_num is fully
 	 * board-specific.  usually that simplifies to being SOC-specific.
 	 * example:  one SOC has three SPI controllers, numbered 0..2,
 	 * and one board's schematics might show it using SPI-2.  software
@@ -473,7 +525,7 @@ struct spi_controller {
 	 */
 	u16			num_chipselect;
 
-	/* some SPI controllers pose alignment requirements on DMAable
+	/* Some SPI controllers pose alignment requirements on DMAable
 	 * buffers; let protocol drivers know about these requirements.
 	 */
 	u16			dma_alignment;
@@ -481,27 +533,37 @@ struct spi_controller {
 	/* spi_device.mode flags understood by this controller driver */
 	u32			mode_bits;
 
-	/* bitmask of supported bits_per_word for transfers */
+	/* spi_device.mode flags override flags for this controller */
+	u32			buswidth_override_bits;
+
+	/* Bitmask of supported bits_per_word for transfers */
 	u32			bits_per_word_mask;
 #define SPI_BPW_MASK(bits) BIT((bits) - 1)
 #define SPI_BPW_RANGE_MASK(min, max) GENMASK((max) - 1, (min) - 1)
 
-	/* limits on transfer speed */
+	/* Limits on transfer speed */
 	u32			min_speed_hz;
 	u32			max_speed_hz;
 
-	/* other constraints relevant to this driver */
+	/* Other constraints relevant to this driver */
 	u16			flags;
-#define SPI_CONTROLLER_HALF_DUPLEX	BIT(0)	/* can't do full duplex */
-#define SPI_CONTROLLER_NO_RX		BIT(1)	/* can't do buffer read */
-#define SPI_CONTROLLER_NO_TX		BIT(2)	/* can't do buffer write */
-#define SPI_CONTROLLER_MUST_RX		BIT(3)	/* requires rx */
-#define SPI_CONTROLLER_MUST_TX		BIT(4)	/* requires tx */
+#define SPI_CONTROLLER_HALF_DUPLEX	BIT(0)	/* Can't do full duplex */
+#define SPI_CONTROLLER_NO_RX		BIT(1)	/* Can't do buffer read */
+#define SPI_CONTROLLER_NO_TX		BIT(2)	/* Can't do buffer write */
+#define SPI_CONTROLLER_MUST_RX		BIT(3)	/* Requires rx */
+#define SPI_CONTROLLER_MUST_TX		BIT(4)	/* Requires tx */
 
 #define SPI_MASTER_GPIO_SS		BIT(5)	/* GPIO CS must select slave */
 
-	/* flag indicating this is an SPI slave controller */
-	bool			slave;
+	/* Flag indicating if the allocation of this struct is devres-managed */
+	bool			devm_allocated;
+
+	union {
+		/* Flag indicating this is an SPI slave controller */
+		bool			slave;
+		/* Flag indicating this is an SPI target controller */
+		bool			target;
+	};
 
 	/*
 	 * on some hardware transfer / message size may be constrained
@@ -513,11 +575,14 @@ struct spi_controller {
 	/* I/O mutex */
 	struct mutex		io_mutex;
 
-	/* lock and mutex for SPI bus locking */
+	/* Used to avoid adding the same CS twice */
+	struct mutex		add_lock;
+
+	/* Lock and mutex for SPI bus locking */
 	spinlock_t		bus_lock_spinlock;
 	struct mutex		bus_lock_mutex;
 
-	/* flag indicating that the SPI bus is locked for exclusive use */
+	/* Flag indicating that the SPI bus is locked for exclusive use */
 	bool			bus_lock_flag;
 
 	/* Setup mode and clock, etc (spi driver may call many times).
@@ -536,10 +601,9 @@ struct spi_controller {
 	 * to configure specific CS timing through spi_set_cs_timing() after
 	 * spi_setup().
 	 */
-	int (*set_cs_timing)(struct spi_device *spi, struct spi_delay *setup,
-			     struct spi_delay *hold, struct spi_delay *inactive);
+	int (*set_cs_timing)(struct spi_device *spi);
 
-	/* bidirectional bulk transfers
+	/* Bidirectional bulk transfers
 	 *
 	 * + The transfer() method may not sleep; its main role is
 	 *   just to add the message to the queue.
@@ -561,7 +625,7 @@ struct spi_controller {
 	int			(*transfer)(struct spi_device *spi,
 						struct spi_message *mesg);
 
-	/* called on release() to free memory provided by spi_controller */
+	/* Called on release() to free memory provided by spi_controller */
 	void			(*cleanup)(struct spi_device *spi);
 
 	/*
@@ -574,6 +638,9 @@ struct spi_controller {
 	bool			(*can_dma)(struct spi_controller *ctlr,
 					   struct spi_device *spi,
 					   struct spi_transfer *xfer);
+	struct device *dma_map_dev;
+	struct device *cur_rx_dma_dev;
+	struct device *cur_tx_dma_dev;
 
 	/*
 	 * These hooks are for drivers that want to use the generic
@@ -582,19 +649,22 @@ struct spi_controller {
 	 * Over time we expect SPI drivers to be phased over to this API.
 	 */
 	bool				queued;
-	struct kthread_worker		kworker;
-	struct task_struct		*kworker_task;
+	struct kthread_worker		*kworker;
 	struct kthread_work		pump_messages;
 	spinlock_t			queue_lock;
 	struct list_head		queue;
 	struct spi_message		*cur_msg;
-	bool				idling;
+	struct completion               cur_msg_completion;
+	bool				cur_msg_incomplete;
+	bool				cur_msg_need_completion;
 	bool				busy;
 	bool				running;
 	bool				rt;
 	bool				auto_runtime_pm;
-	bool                            cur_msg_prepared;
 	bool				cur_msg_mapped;
+	char				last_cs;
+	bool				last_cs_mode_high;
+	bool                            fallback;
 	struct completion               xfer_completion;
 	size_t				max_dma_len;
 
@@ -606,11 +676,14 @@ struct spi_controller {
 			       struct spi_message *message);
 	int (*unprepare_message)(struct spi_controller *ctlr,
 				 struct spi_message *message);
-	int (*slave_abort)(struct spi_controller *ctlr);
+	union {
+		int (*slave_abort)(struct spi_controller *ctlr);
+		int (*target_abort)(struct spi_controller *ctlr);
+	};
 
 	/*
 	 * These hooks are for drivers that use a generic implementation
-	 * of transfer_one_message() provied by the core.
+	 * of transfer_one_message() provided by the core.
 	 */
 	void (*set_cs)(struct spi_device *spi, bool enable);
 	int (*transfer_one)(struct spi_controller *ctlr, struct spi_device *spi,
@@ -620,27 +693,22 @@ struct spi_controller {
 
 	/* Optimized handlers for SPI memory-like operations. */
 	const struct spi_controller_mem_ops *mem_ops;
-
-	/* CS delays */
-	struct spi_delay	cs_setup;
-	struct spi_delay	cs_hold;
-	struct spi_delay	cs_inactive;
+	const struct spi_controller_mem_caps *mem_caps;
 
 	/* gpio chip select */
-	int			*cs_gpios;
 	struct gpio_desc	**cs_gpiods;
 	bool			use_gpio_descriptors;
-	u8			unused_native_cs;
-	u8			max_native_cs;
+	s8			unused_native_cs;
+	s8			max_native_cs;
 
-	/* statistics */
-	struct spi_statistics	statistics;
+	/* Statistics */
+	struct spi_statistics __percpu	*pcpu_statistics;
 
 	/* DMA channels for use with core dmaengine helpers */
 	struct dma_chan		*dma_tx;
 	struct dma_chan		*dma_rx;
 
-	/* dummy data for full duplex devices */
+	/* Dummy data for full duplex devices */
 	void			*dummy_rx;
 	void			*dummy_tx;
 
@@ -654,6 +722,10 @@ struct spi_controller {
 
 	/* Interrupt enable state during PTP system timestamping */
 	unsigned long		irq_flags;
+
+	/* Flag for enabling opportunistic skipping of the queue in spi_sync */
+	bool			queue_empty;
+	bool			must_async;
 };
 
 static inline void *spi_controller_get_devdata(struct spi_controller *ctlr)
@@ -685,6 +757,11 @@ static inline bool spi_controller_is_slave(struct spi_controller *ctlr)
 	return IS_ENABLED(CONFIG_SPI_SLAVE) && ctlr->slave;
 }
 
+static inline bool spi_controller_is_target(struct spi_controller *ctlr)
+{
+	return IS_ENABLED(CONFIG_SPI_SLAVE) && ctlr->target;
+}
+
 /* PM calls that need to be issued by the driver */
 extern int spi_controller_suspend(struct spi_controller *ctlr);
 extern int spi_controller_resume(struct spi_controller *ctlr);
@@ -702,7 +779,7 @@ void spi_take_timestamp_post(struct spi_controller *ctlr,
 			     struct spi_transfer *xfer,
 			     size_t progress, bool irqs_off);
 
-/* the spi driver core manages memory for the spi_controller classdev */
+/* The spi driver core manages memory for the spi_controller classdev */
 extern struct spi_controller *__spi_alloc_controller(struct device *host,
 						unsigned int size, bool slave);
 
@@ -721,12 +798,66 @@ static inline struct spi_controller *spi_alloc_slave(struct device *host,
 	return __spi_alloc_controller(host, size, true);
 }
 
+static inline struct spi_controller *spi_alloc_host(struct device *dev,
+						    unsigned int size)
+{
+	return __spi_alloc_controller(dev, size, false);
+}
+
+static inline struct spi_controller *spi_alloc_target(struct device *dev,
+						      unsigned int size)
+{
+	if (!IS_ENABLED(CONFIG_SPI_SLAVE))
+		return NULL;
+
+	return __spi_alloc_controller(dev, size, true);
+}
+
+struct spi_controller *__devm_spi_alloc_controller(struct device *dev,
+						   unsigned int size,
+						   bool slave);
+
+static inline struct spi_controller *devm_spi_alloc_master(struct device *dev,
+							   unsigned int size)
+{
+	return __devm_spi_alloc_controller(dev, size, false);
+}
+
+static inline struct spi_controller *devm_spi_alloc_slave(struct device *dev,
+							  unsigned int size)
+{
+	if (!IS_ENABLED(CONFIG_SPI_SLAVE))
+		return NULL;
+
+	return __devm_spi_alloc_controller(dev, size, true);
+}
+
+static inline struct spi_controller *devm_spi_alloc_host(struct device *dev,
+							 unsigned int size)
+{
+	return __devm_spi_alloc_controller(dev, size, false);
+}
+
+static inline struct spi_controller *devm_spi_alloc_target(struct device *dev,
+							   unsigned int size)
+{
+	if (!IS_ENABLED(CONFIG_SPI_SLAVE))
+		return NULL;
+
+	return __devm_spi_alloc_controller(dev, size, true);
+}
+
 extern int spi_register_controller(struct spi_controller *ctlr);
 extern int devm_spi_register_controller(struct device *dev,
 					struct spi_controller *ctlr);
 extern void spi_unregister_controller(struct spi_controller *ctlr);
 
-extern struct spi_controller *spi_busnum_to_master(u16 busnum);
+#if IS_ENABLED(CONFIG_ACPI)
+extern struct spi_device *acpi_spi_device_alloc(struct spi_controller *ctlr,
+						struct acpi_device *adev,
+						int index);
+int acpi_spi_count_resources(struct acpi_device *adev);
+#endif
 
 /*
  * SPI resource management while processing a SPI message
@@ -748,17 +879,8 @@ typedef void (*spi_res_release_t)(struct spi_controller *ctlr,
 struct spi_res {
 	struct list_head        entry;
 	spi_res_release_t       release;
-	unsigned long long      data[]; /* guarantee ull alignment */
+	unsigned long long      data[]; /* Guarantee ull alignment */
 };
-
-extern void *spi_res_alloc(struct spi_device *spi,
-			   spi_res_release_t release,
-			   size_t size, gfp_t gfp);
-extern void spi_res_add(struct spi_message *message, void *res);
-extern void spi_res_free(void *res);
-
-extern void spi_res_release(struct spi_controller *ctlr,
-			    struct spi_message *message);
 
 /*---------------------------------------------------------------------------*/
 
@@ -794,13 +916,12 @@ extern void spi_res_release(struct spi_controller *ctlr,
  *      transfer. If 0 the default (from @spi_device) is used.
  * @bits_per_word: select a bits_per_word other than the device default
  *      for this transfer. If 0 the default (from @spi_device) is used.
+ * @dummy_data: indicates transfer is dummy bytes transfer.
+ * @cs_off: performs the transfer with chipselect off.
  * @cs_change: affects chipselect after this transfer completes
  * @cs_change_delay: delay between cs deassert and assert when
  *      @cs_change is set and @spi_transfer is not the last in @spi_message
  * @delay: delay to be introduced after this transfer before
- *	(optionally) changing the chipselect status, then starting
- *	the next transfer or completing this @spi_message.
- * @delay_usecs: microseconds to delay after this transfer before
  *	(optionally) changing the chipselect status, then starting
  *	the next transfer or completing this @spi_message.
  * @word_delay: inter word delay to be introduced after each word size
@@ -834,12 +955,8 @@ extern void spi_res_release(struct spi_controller *ctlr,
  *	processed the word, i.e. the "pre" timestamp should be taken before
  *	transmitting the "pre" word, and the "post" timestamp after receiving
  *	transmit confirmation from the controller for the "post" word.
- * @timestamped_pre: Set by the SPI controller driver to denote it has acted
- *	upon the @ptp_sts request. Not set when the SPI core has taken care of
- *	the task. SPI device drivers are free to print a warning if this comes
- *	back unset and they need the better resolution.
- * @timestamped_post: See above. The reason why both exist is that these
- *	booleans are also used to keep state in the core SPI logic.
+ * @timestamped: true if the transfer has been timestamped
+ * @error: Error status logged by spi controller driver.
  *
  * SPI transfers always write the same number of bytes as they read.
  * Protocol drivers should always provide @rx_buf and/or @tx_buf.
@@ -896,7 +1013,7 @@ extern void spi_res_release(struct spi_controller *ctlr,
  * and its transfers, ignore them until its completion callback.
  */
 struct spi_transfer {
-	/* it's ok if tx_buf == rx_buf (right?)
+	/* It's ok if tx_buf == rx_buf (right?)
 	 * for MicroWire, one buffer must be null
 	 * buffers must work with dma_*map_single() calls, unless
 	 *   spi_message.is_dma_mapped reports a pre-existing mapping
@@ -905,19 +1022,24 @@ struct spi_transfer {
 	void		*rx_buf;
 	unsigned	len;
 
+#define SPI_TRANS_FAIL_NO_START	BIT(0)
+	u16		error;
+
 	dma_addr_t	tx_dma;
 	dma_addr_t	rx_dma;
 	struct sg_table tx_sg;
 	struct sg_table rx_sg;
 
+	unsigned	dummy_data:1;
+	unsigned	cs_off:1;
 	unsigned	cs_change:1;
 	unsigned	tx_nbits:3;
 	unsigned	rx_nbits:3;
+	unsigned	timestamped:1;
 #define	SPI_NBITS_SINGLE	0x01 /* 1bit transfer */
 #define	SPI_NBITS_DUAL		0x02 /* 2bits transfer */
 #define	SPI_NBITS_QUAD		0x04 /* 4bits transfer */
 	u8		bits_per_word;
-	u16		delay_usecs;
 	struct spi_delay	delay;
 	struct spi_delay	cs_change_delay;
 	struct spi_delay	word_delay;
@@ -929,9 +1051,6 @@ struct spi_transfer {
 	unsigned int	ptp_sts_word_post;
 
 	struct ptp_system_timestamp *ptp_sts;
-
-	bool		timestamped_pre;
-	bool		timestamped_post;
 
 	struct list_head transfer_list;
 };
@@ -951,12 +1070,13 @@ struct spi_transfer {
  * @queue: for use by whichever driver currently owns the message
  * @state: for use by whichever driver currently owns the message
  * @resources: for resource management when the spi message is processed
+ * @prepared: spi_prepare_message was called for the this message
  *
  * A @spi_message is used to execute an atomic sequence of data transfers,
  * each represented by a struct spi_transfer.  The sequence is "atomic"
  * in the sense that no other spi_message may use that SPI bus until that
  * sequence completes.  On some systems, many such sequences can execute as
- * as single programmed DMA transfer.  On all systems, these messages are
+ * a single programmed DMA transfer.  On all systems, these messages are
  * queued, and might complete after transactions to other devices.  Messages
  * sent to a given spi_device are always executed in FIFO order.
  *
@@ -984,22 +1104,25 @@ struct spi_message {
 	 * tell them about such special cases.
 	 */
 
-	/* completion is reported through a callback */
+	/* Completion is reported through a callback */
 	void			(*complete)(void *context);
 	void			*context;
 	unsigned		frame_length;
 	unsigned		actual_length;
 	int			status;
 
-	/* for optional use by whatever driver currently owns the
+	/* For optional use by whatever driver currently owns the
 	 * spi_message ...  between calls to spi_async and then later
 	 * complete(), that's the spi_controller controller driver.
 	 */
 	struct list_head	queue;
 	void			*state;
 
-	/* list of spi_res reources when the spi message is processed */
+	/* List of spi_res reources when the spi message is processed */
 	struct list_head        resources;
+
+	/* spi_prepare_message() was called for this message */
+	bool			prepared;
 };
 
 static inline void spi_message_init_no_memset(struct spi_message *m)
@@ -1029,14 +1152,6 @@ spi_transfer_del(struct spi_transfer *t)
 static inline int
 spi_transfer_delay_exec(struct spi_transfer *t)
 {
-	struct spi_delay d;
-
-	if (t->delay_usecs) {
-		d.value = t->delay_usecs;
-		d.unit = SPI_DELAY_UNIT_USECS;
-		return spi_delay_exec(&d, NULL);
-	}
-
 	return spi_delay_exec(&t->delay, t);
 }
 
@@ -1087,16 +1202,10 @@ static inline void spi_message_free(struct spi_message *m)
 	kfree(m);
 }
 
-extern int spi_set_cs_timing(struct spi_device *spi,
-			     struct spi_delay *setup,
-			     struct spi_delay *hold,
-			     struct spi_delay *inactive);
-
 extern int spi_setup(struct spi_device *spi);
 extern int spi_async(struct spi_device *spi, struct spi_message *message);
-extern int spi_async_locked(struct spi_device *spi,
-			    struct spi_message *message);
 extern int spi_slave_abort(struct spi_device *spi);
+extern int spi_target_abort(struct spi_device *spi);
 
 static inline size_t
 spi_max_message_size(struct spi_device *spi)
@@ -1118,7 +1227,7 @@ spi_max_transfer_size(struct spi_device *spi)
 	if (ctlr->max_transfer_size)
 		tr_max = ctlr->max_transfer_size(spi);
 
-	/* transfer size limit must not be greater than messsage size limit */
+	/* Transfer size limit must not be greater than message size limit */
 	return min(tr_max, msg_max);
 }
 
@@ -1178,15 +1287,6 @@ struct spi_replaced_transfers {
 	struct spi_transfer inserted_transfers[];
 };
 
-extern struct spi_replaced_transfers *spi_replace_transfers(
-	struct spi_message *msg,
-	struct spi_transfer *xfer_first,
-	size_t remove,
-	size_t insert,
-	spi_replaced_release_t release,
-	size_t extradatasize,
-	gfp_t gfp);
-
 /*---------------------------------------------------------------------------*/
 
 /* SPI transfer transformation methods */
@@ -1219,7 +1319,7 @@ extern int spi_bus_unlock(struct spi_controller *ctlr);
  *
  * For more specific semantics see spi_sync().
  *
- * Return: Return: zero on success, else a negative error code.
+ * Return: zero on success, else a negative error code.
  */
 static inline int
 spi_sync_transfer(struct spi_device *spi, struct spi_transfer *xfers,
@@ -1278,7 +1378,7 @@ spi_read(struct spi_device *spi, void *buf, size_t len)
 	return spi_sync_transfer(spi, &t, 1);
 }
 
-/* this copies txbuf and rxbuf data; for small transfers only! */
+/* This copies txbuf and rxbuf data; for small transfers only! */
 extern int spi_write_then_read(struct spi_device *spi,
 		const void *txbuf, unsigned n_tx,
 		void *rxbuf, unsigned n_rx);
@@ -1301,7 +1401,7 @@ static inline ssize_t spi_w8r8(struct spi_device *spi, u8 cmd)
 
 	status = spi_write_then_read(spi, &cmd, 1, &result, 1);
 
-	/* return negative errno or unsigned value */
+	/* Return negative errno or unsigned value */
 	return (status < 0) ? status : result;
 }
 
@@ -1326,7 +1426,7 @@ static inline ssize_t spi_w8r16(struct spi_device *spi, u8 cmd)
 
 	status = spi_write_then_read(spi, &cmd, 1, &result, 2);
 
-	/* return negative errno or unsigned value */
+	/* Return negative errno or unsigned value */
 	return (status < 0) ? status : result;
 }
 
@@ -1378,7 +1478,7 @@ static inline ssize_t spi_w8r16be(struct spi_device *spi, u8 cmd)
  * @modalias: Initializes spi_device.modalias; identifies the driver.
  * @platform_data: Initializes spi_device.platform_data; the particular
  *	data stored there is driver-specific.
- * @properties: Additional device properties for the device.
+ * @swnode: Software node for the device.
  * @controller_data: Initializes spi_device.controller_data; some
  *	controllers need hints about hardware setup, e.g. for DMA.
  * @irq: Initializes spi_device.irq; depends on how the board is wired.
@@ -1406,21 +1506,20 @@ static inline ssize_t spi_w8r16be(struct spi_device *spi, u8 cmd)
  * are active in some dynamic board configuration models.
  */
 struct spi_board_info {
-	/* the device name and module name are coupled, like platform_bus;
+	/* The device name and module name are coupled, like platform_bus;
 	 * "modalias" is normally the driver name.
 	 *
 	 * platform_data goes to spi_device.dev.platform_data,
 	 * controller_data goes to spi_device.controller_data,
-	 * device properties are copied and attached to spi_device,
 	 * irq is copied too
 	 */
 	char		modalias[SPI_NAME_SIZE];
 	const void	*platform_data;
-	const struct property_entry *properties;
+	const struct software_node *swnode;
 	void		*controller_data;
 	int		irq;
 
-	/* slower signaling on noisy or low voltage boards */
+	/* Slower signaling on noisy or low voltage boards */
 	u32		max_speed_hz;
 
 
@@ -1449,7 +1548,7 @@ struct spi_board_info {
 extern int
 spi_register_board_info(struct spi_board_info const *info, unsigned n);
 #else
-/* board init code may ignore whether SPI is configured or not */
+/* Board init code may ignore whether SPI is configured or not */
 static inline int
 spi_register_board_info(struct spi_board_info const *info, unsigned n)
 	{ return 0; }
@@ -1461,7 +1560,7 @@ spi_register_board_info(struct spi_board_info const *info, unsigned n)
  * normally that would be handled by spi_unregister_controller().
  *
  * You can also use spi_alloc_device() and spi_add_device() to use a two
- * stage registration sequence for each spi_device.  This gives the caller
+ * stage registration sequence for each spi_device. This gives the caller
  * some more control over the spi_device structure before it is registered,
  * but requires that caller to initialize fields that would otherwise
  * be defined using the board info.
@@ -1480,28 +1579,14 @@ extern void spi_unregister_device(struct spi_device *spi);
 extern const struct spi_device_id *
 spi_get_device_id(const struct spi_device *sdev);
 
+extern const void *
+spi_get_device_match_data(const struct spi_device *sdev);
+
 static inline bool
 spi_transfer_is_last(struct spi_controller *ctlr, struct spi_transfer *xfer)
 {
 	return list_is_last(&xfer->transfer_list, &ctlr->cur_msg->transfers);
 }
-
-/* OF support code */
-#if IS_ENABLED(CONFIG_OF)
-
-/* must call put_device() when done with returned spi_device device */
-extern struct spi_device *
-of_find_spi_device_by_node(struct device_node *node);
-
-#else
-
-static inline struct spi_device *
-of_find_spi_device_by_node(struct device_node *node)
-{
-	return NULL;
-}
-
-#endif /* IS_ENABLED(CONFIG_OF) */
 
 /* Compatibility layer */
 #define spi_master			spi_controller

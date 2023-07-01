@@ -8,6 +8,7 @@
  * Copyright 2003 by Hans-Joerg Frieden and Thomas Frieden
  */
 
+#include <linux/irqdomain.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
@@ -66,6 +67,12 @@ static int __init amigaone_add_bridge(struct device_node *dev)
 
 void __init amigaone_setup_arch(void)
 {
+	if (ppc_md.progress)
+		ppc_md.progress("Linux/PPC "UTS_RELEASE"\n", 0);
+}
+
+static void __init amigaone_discover_phbs(void)
+{
 	struct device_node *np;
 	int phb = -ENODEV;
 
@@ -74,9 +81,6 @@ void __init amigaone_setup_arch(void)
 		phb = amigaone_add_bridge(np);
 
 	BUG_ON(phb != 0);
-
-	if (ppc_md.progress)
-		ppc_md.progress("Linux/PPC "UTS_RELEASE"\n", 0);
 }
 
 void __init amigaone_init_IRQ(void)
@@ -146,7 +150,6 @@ static int __init amigaone_probe(void)
 		 */
 		cur_cpu_spec->cpu_features &= ~CPU_FTR_NEED_COHERENT;
 
-		ISA_DMA_THRESHOLD = 0x00ffffff;
 		DMA_MODE_READ = 0x44;
 		DMA_MODE_WRITE = 0x48;
 
@@ -160,6 +163,7 @@ define_machine(amigaone) {
 	.name			= "AmigaOne",
 	.probe			= amigaone_probe,
 	.setup_arch		= amigaone_setup_arch,
+	.discover_phbs		= amigaone_discover_phbs,
 	.show_cpuinfo		= amigaone_show_cpuinfo,
 	.init_IRQ		= amigaone_init_IRQ,
 	.restart		= amigaone_restart,

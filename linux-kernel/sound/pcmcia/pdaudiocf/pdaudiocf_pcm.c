@@ -45,7 +45,7 @@ static int pdacf_pcm_trigger(struct snd_pcm_substream *subs, int cmd)
 	case SNDRV_PCM_TRIGGER_START:
 		chip->pcm_hwptr = 0;
 		chip->pcm_tdone = 0;
-		/* fall thru */
+		fallthrough;
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
 	case SNDRV_PCM_TRIGGER_RESUME:
 		mask = 0;
@@ -132,7 +132,7 @@ static int pdacf_pcm_prepare(struct snd_pcm_substream *subs)
 	case SNDRV_PCM_FORMAT_S24_3LE:
 	case SNDRV_PCM_FORMAT_S24_3BE:
 		chip->pcm_sample = 3;
-		/* fall through */
+		fallthrough;
 	default: /* 24-bit */
 		aval = AK4117_DIF_24R;
 		chip->pcm_frame = 3;
@@ -257,8 +257,7 @@ int snd_pdacf_pcm_new(struct snd_pdacf *chip)
 		return err;
 		
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &pdacf_pcm_capture_ops);
-	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_VMALLOC,
-				       snd_dma_continuous_data(GFP_KERNEL | GFP_DMA32),
+	snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_VMALLOC, NULL,
 				       0, 0);
 
 	pcm->private_data = chip;

@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright 2008 Cisco Systems, Inc.  All rights reserved.
  * Copyright 2007 Nuova Systems, Inc.  All rights reserved.
- *
- * This program is free software; you may redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
  */
 
 #include <linux/kernel.h>
@@ -254,7 +242,7 @@ void vnic_dev_free_desc_ring(struct vnic_dev *vdev, struct vnic_dev_ring *ring)
 	}
 }
 
-int vnic_dev_cmd1(struct vnic_dev *vdev, enum vnic_devcmd_cmd cmd, int wait)
+static int vnic_dev_cmd1(struct vnic_dev *vdev, enum vnic_devcmd_cmd cmd, int wait)
 {
 	struct vnic_devcmd __iomem *devcmd = vdev->devcmd;
 	int delay;
@@ -316,7 +304,7 @@ int vnic_dev_cmd1(struct vnic_dev *vdev, enum vnic_devcmd_cmd cmd, int wait)
 	return -ETIMEDOUT;
 }
 
-int vnic_dev_cmd2(struct vnic_dev *vdev, enum vnic_devcmd_cmd cmd,
+static int vnic_dev_cmd2(struct vnic_dev *vdev, enum vnic_devcmd_cmd cmd,
 		int wait)
 {
 	struct devcmd2_controller *dc2c = vdev->devcmd2;
@@ -411,7 +399,7 @@ int vnic_dev_cmd2(struct vnic_dev *vdev, enum vnic_devcmd_cmd cmd,
 }
 
 
-int vnic_dev_init_devcmd1(struct vnic_dev *vdev)
+static int vnic_dev_init_devcmd1(struct vnic_dev *vdev)
 {
 	vdev->devcmd = vnic_dev_get_res(vdev, RES_TYPE_DEVCMD, 0);
 	if (!vdev->devcmd)
@@ -422,7 +410,7 @@ int vnic_dev_init_devcmd1(struct vnic_dev *vdev)
 }
 
 
-int vnic_dev_init_devcmd2(struct vnic_dev *vdev)
+static int vnic_dev_init_devcmd2(struct vnic_dev *vdev)
 {
 	int err;
 	unsigned int fetch_index;
@@ -444,7 +432,8 @@ int vnic_dev_init_devcmd2(struct vnic_dev *vdev)
 	fetch_index = ioread32(&vdev->devcmd2->wq.ctrl->fetch_index);
 	if (fetch_index == 0xFFFFFFFF) { /* check for hardware gone  */
 		pr_err("error in devcmd2 init");
-		return -ENODEV;
+		err = -ENODEV;
+		goto err_free_wq;
 	}
 
 	/*
@@ -460,7 +449,7 @@ int vnic_dev_init_devcmd2(struct vnic_dev *vdev)
 	err = vnic_dev_alloc_desc_ring(vdev, &vdev->devcmd2->results_ring,
 			DEVCMD2_RING_SIZE, DEVCMD2_DESC_SIZE);
 	if (err)
-		goto err_free_wq;
+		goto err_disable_wq;
 
 	vdev->devcmd2->result =
 		(struct devcmd2_result *) vdev->devcmd2->results_ring.descs;
@@ -481,8 +470,9 @@ int vnic_dev_init_devcmd2(struct vnic_dev *vdev)
 
 err_free_desc_ring:
 	vnic_dev_free_desc_ring(vdev, &vdev->devcmd2->results_ring);
-err_free_wq:
+err_disable_wq:
 	vnic_wq_disable(&vdev->devcmd2->wq);
+err_free_wq:
 	vnic_wq_free(&vdev->devcmd2->wq);
 err_free_devcmd2:
 	kfree(vdev->devcmd2);
@@ -492,7 +482,7 @@ err_free_devcmd2:
 }
 
 
-void vnic_dev_deinit_devcmd2(struct vnic_dev *vdev)
+static void vnic_dev_deinit_devcmd2(struct vnic_dev *vdev)
 {
 	vnic_dev_free_desc_ring(vdev, &vdev->devcmd2->results_ring);
 	vnic_wq_disable(&vdev->devcmd2->wq);
@@ -503,7 +493,7 @@ void vnic_dev_deinit_devcmd2(struct vnic_dev *vdev)
 }
 
 
-int vnic_dev_cmd_no_proxy(struct vnic_dev *vdev,
+static int vnic_dev_cmd_no_proxy(struct vnic_dev *vdev,
 	enum vnic_devcmd_cmd cmd, u64 *a0, u64 *a1, int wait)
 {
 	int err;

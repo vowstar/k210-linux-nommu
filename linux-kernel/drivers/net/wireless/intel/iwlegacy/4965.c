@@ -25,7 +25,7 @@
 #include "common.h"
 #include "4965.h"
 
-/**
+/*
  * il_verify_inst_sparse - verify runtime uCode image in card vs. host,
  *   using sample data 100 bytes apart.  If these sample points are good,
  *   it's a pretty good bet that everything between them is good, too.
@@ -57,7 +57,7 @@ il4965_verify_inst_sparse(struct il_priv *il, __le32 * image, u32 len)
 	return ret;
 }
 
-/**
+/*
  * il4965_verify_inst_full - verify runtime uCode image in card vs. host,
  *     looking at all data.
  */
@@ -96,7 +96,7 @@ il4965_verify_inst_full(struct il_priv *il, __le32 * image, u32 len)
 	return ret;
 }
 
-/**
+/*
  * il4965_verify_ucode - determine which instruction image is in SRAM,
  *    and verify its contents
  */
@@ -292,7 +292,7 @@ il4965_verify_bsm(struct il_priv *il)
 	return 0;
 }
 
-/**
+/*
  * il4965_load_bsm - Load bootstrap instructions
  *
  * BSM operation:
@@ -402,7 +402,7 @@ il4965_load_bsm(struct il_priv *il)
 	return 0;
 }
 
-/**
+/*
  * il4965_set_ucode_ptrs - Set uCode address location
  *
  * Tell initialization uCode where to find runtime uCode.
@@ -416,7 +416,6 @@ il4965_set_ucode_ptrs(struct il_priv *il)
 {
 	dma_addr_t pinst;
 	dma_addr_t pdata;
-	int ret = 0;
 
 	/* bits 35:4 for 4965 */
 	pinst = il->ucode_code.p_addr >> 4;
@@ -433,10 +432,10 @@ il4965_set_ucode_ptrs(struct il_priv *il)
 		   il->ucode_code.len | BSM_DRAM_INST_LOAD);
 	D_INFO("Runtime uCode pointers are set.\n");
 
-	return ret;
+	return 0;
 }
 
-/**
+/*
  * il4965_init_alive_start - Called after N_ALIVE notification received
  *
  * Called after N_ALIVE notification received from "initialize" uCode.
@@ -568,7 +567,7 @@ il4965_math_div_round(s32 num, s32 denom, s32 * res)
 	return 1;
 }
 
-/**
+/*
  * il4965_get_voltage_compensation - Power supply voltage comp for txpower
  *
  * Determines power supply voltage compensation for txpower calculations.
@@ -655,7 +654,7 @@ il4965_interpolate_value(s32 x, s32 x1, s32 y1, s32 x2, s32 y2)
 	}
 }
 
-/**
+/*
  * il4965_interpolate_chan - Interpolate factory measurements for one channel
  *
  * Interpolates factory measurements from the two sample channels within a
@@ -1232,7 +1231,7 @@ il4965_fill_txpower_tbl(struct il_priv *il, u8 band, u16 channel, u8 is_ht40,
 	return 0;
 }
 
-/**
+/*
  * il4965_send_tx_power - Configure the TXPOWER level user limit
  *
  * Uses the active RXON for channel, band, and characteristics (ht40, high)
@@ -1529,7 +1528,7 @@ il4965_hw_channel_switch(struct il_priv *il,
 	return il_send_cmd_pdu(il, C_CHANNEL_SWITCH, sizeof(cmd), &cmd);
 }
 
-/**
+/*
  * il4965_txq_update_byte_cnt_tbl - Set up entry in Tx byte-count array
  */
 static void
@@ -1554,9 +1553,8 @@ il4965_txq_update_byte_cnt_tbl(struct il_priv *il, struct il_tx_queue *txq,
 		    bc_ent;
 }
 
-/**
+/*
  * il4965_hw_get_temperature - return the calibrated temperature (in Kelvin)
- * @stats: Provides the temperature reading from the uCode
  *
  * A return of <0 indicates bogus data in the stats
  */
@@ -1620,7 +1618,7 @@ il4965_hw_get_temperature(struct il_priv *il)
 /* Adjust Txpower only if temperature variance is greater than threshold. */
 #define IL_TEMPERATURE_THRESHOLD   3
 
-/**
+/*
  * il4965_is_temp_calib_needed - determines if new calibration is needed
  *
  * If the temperature changed has changed sufficiently, then a recalibration
@@ -1758,9 +1756,9 @@ il4965_post_associate(struct il_priv *il)
 	if (il->ops->set_rxon_chain)
 		il->ops->set_rxon_chain(il);
 
-	il->staging.assoc_id = cpu_to_le16(vif->bss_conf.aid);
+	il->staging.assoc_id = cpu_to_le16(vif->cfg.aid);
 
-	D_ASSOC("assoc id %d beacon interval %d\n", vif->bss_conf.aid,
+	D_ASSOC("assoc id %d beacon interval %d\n", vif->cfg.aid,
 		vif->bss_conf.beacon_int);
 
 	if (vif->bss_conf.use_short_preamble)
@@ -1777,7 +1775,7 @@ il4965_post_associate(struct il_priv *il)
 
 	il_commit_rxon(il);
 
-	D_ASSOC("Associated as %d to: %pM\n", vif->bss_conf.aid,
+	D_ASSOC("Associated as %d to: %pM\n", vif->cfg.aid,
 		il->active.bssid_addr);
 
 	switch (vif->type) {

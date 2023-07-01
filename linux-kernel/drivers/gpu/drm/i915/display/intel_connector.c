@@ -29,12 +29,13 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_edid.h>
 
-#include "display/intel_panel.h"
-
 #include "i915_drv.h"
+#include "intel_backlight.h"
 #include "intel_connector.h"
+#include "intel_display_debugfs.h"
 #include "intel_display_types.h"
 #include "intel_hdcp.h"
+#include "intel_panel.h"
 
 int intel_connector_init(struct intel_connector *connector)
 {
@@ -52,6 +53,8 @@ int intel_connector_init(struct intel_connector *connector)
 
 	__drm_atomic_helper_connector_reset(&connector->base,
 					    &conn_state->base);
+
+	intel_panel_init_alloc(connector);
 
 	return 0;
 }
@@ -92,14 +95,11 @@ void intel_connector_destroy(struct drm_connector *connector)
 {
 	struct intel_connector *intel_connector = to_intel_connector(connector);
 
-	kfree(intel_connector->detect_edid);
+	drm_edid_free(intel_connector->detect_edid);
 
 	intel_hdcp_cleanup(intel_connector);
 
-	if (!IS_ERR_OR_NULL(intel_connector->edid))
-		kfree(intel_connector->edid);
-
-	intel_panel_fini(&intel_connector->panel);
+	intel_panel_fini(intel_connector);
 
 	drm_connector_cleanup(connector);
 
@@ -122,6 +122,8 @@ int intel_connector_register(struct drm_connector *connector)
 		ret = -EFAULT;
 		goto err_backlight;
 	}
+
+	intel_connector_debugfs_add(intel_connector);
 
 	return 0;
 
@@ -153,7 +155,7 @@ void intel_connector_attach_encoder(struct intel_connector *connector,
 bool intel_connector_get_hw_state(struct intel_connector *connector)
 {
 	enum pipe pipe = 0;
-	struct intel_encoder *encoder = connector->encoder;
+	struct intel_encoder *encoder = intel_attached_encoder(connector);
 
 	return encoder->get_hw_state(encoder, &pipe);
 }
@@ -162,7 +164,8 @@ enum pipe intel_connector_get_pipe(struct intel_connector *connector)
 {
 	struct drm_device *dev = connector->base.dev;
 
-	WARN_ON(!drm_modeset_is_locked(&dev->mode_config.connection_mutex));
+	drm_WARN_ON(dev,
+		    !drm_modeset_is_locked(&dev->mode_config.connection_mutex));
 
 	if (!connector->base.state->crtc)
 		return INVALID_PIPE;
@@ -223,7 +226,7 @@ intel_attach_force_audio_property(struct drm_connector *connector)
 	struct drm_i915_private *dev_priv = to_i915(dev);
 	struct drm_property *prop;
 
-	prop = dev_priv->force_audio_property;
+	prop = dev_priv->display.properties.force_audio;
 	if (prop == NULL) {
 		prop = drm_property_create_enum(dev, 0,
 					   "audio",
@@ -232,7 +235,7 @@ intel_attach_force_audio_property(struct drm_connector *connector)
 		if (prop == NULL)
 			return;
 
-		dev_priv->force_audio_property = prop;
+		dev_priv->display.properties.force_audio = prop;
 	}
 	drm_object_attach_property(&connector->base, prop, 0);
 }
@@ -250,7 +253,7 @@ intel_attach_broadcast_rgb_property(struct drm_connector *connector)
 	struct drm_i915_private *dev_priv = to_i915(dev);
 	struct drm_property *prop;
 
-	prop = dev_priv->broadcast_rgb_property;
+	prop = dev_priv->display.properties.broadcast_rgb;
 	if (prop == NULL) {
 		prop = drm_property_create_enum(dev, DRM_MODE_PROP_ENUM,
 					   "Broadcast RGB",
@@ -259,7 +262,7 @@ intel_attach_broadcast_rgb_property(struct drm_connector *connector)
 		if (prop == NULL)
 			return;
 
-		dev_priv->broadcast_rgb_property = prop;
+		dev_priv->display.properties.broadcast_rgb = prop;
 	}
 
 	drm_object_attach_property(&connector->base, prop, 0);
@@ -275,24 +278,33 @@ intel_attach_aspect_ratio_property(struct drm_connector *connector)
 }
 
 void
-intel_attach_colorspace_property(struct drm_connector *connector)
+intel_attach_hdmi_colorspace_property(struct drm_connector *connector)
 {
-	switch (connector->connector_type) {
-	case DRM_MODE_CONNECTOR_HDMIA:
-	case DRM_MODE_CONNECTOR_HDMIB:
-		if (drm_mode_create_hdmi_colorspace_property(connector))
-			return;
-		break;
-	case DRM_MODE_CONNECTOR_DisplayPort:
-	case DRM_MODE_CONNECTOR_eDP:
-		if (drm_mode_create_dp_colorspace_property(connector))
-			return;
-		break;
-	default:
-		DRM_DEBUG_KMS("Colorspace property not supported\n");
-		return;
-	}
+	if (!drm_mode_create_hdmi_colorspace_property(connector))
+		drm_connector_attach_colorspace_property(connector);
+}
 
-	drm_object_attach_property(&connector->base,
-				   connector->colorspace_property, 0);
+void
+intel_attach_dp_colorspace_property(struct drm_connector *connector)
+{
+	if (!drm_mode_create_dp_colorspace_property(connector))
+		drm_connector_attach_colorspace_property(connector);
+}
+
+void
+intel_attach_scaling_mode_property(struct drm_connector *connector)
+{
+	struct drm_i915_private *i915 = to_i915(connector->dev);
+	u32 scaling_modes;
+
+	scaling_modes = BIT(DRM_MODE_SCALE_ASPECT) |
+		BIT(DRM_MODE_SCALE_FULLSCREEN);
+
+	/* On GMCH platforms borders are only possible on the LVDS port */
+	if (!HAS_GMCH(i915) || connector->connector_type == DRM_MODE_CONNECTOR_LVDS)
+		scaling_modes |= BIT(DRM_MODE_SCALE_CENTER);
+
+	drm_connector_attach_scaling_mode_property(connector, scaling_modes);
+
+	connector->state->scaling_mode = DRM_MODE_SCALE_ASPECT;
 }

@@ -1,25 +1,29 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * rcar_du_vsp.h  --  R-Car Display Unit VSP-Based Compositor
+ * R-Car Display Unit VSP-Based Compositor
  *
  * Copyright (C) 2015 Renesas Electronics Corporation
  *
  * Contact: Laurent Pinchart (laurent.pinchart@ideasonboard.com)
  */
 
+#include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_blend.h>
 #include <drm/drm_crtc.h>
-#include <drm/drm_fb_cma_helper.h>
+#include <drm/drm_fb_dma_helper.h>
 #include <drm/drm_fourcc.h>
-#include <drm/drm_gem_cma_helper.h>
-#include <drm/drm_gem_framebuffer_helper.h>
-#include <drm/drm_plane_helper.h>
+#include <drm/drm_framebuffer.h>
+#include <drm/drm_gem_atomic_helper.h>
+#include <drm/drm_gem_dma_helper.h>
+#include <drm/drm_managed.h>
 #include <drm/drm_vblank.h>
 
 #include <linux/bitops.h>
 #include <linux/dma-mapping.h>
 #include <linux/of_platform.h>
 #include <linux/scatterlist.h>
+#include <linux/slab.h>
 #include <linux/videodev2.h>
 
 #include <media/vsp1.h>
@@ -81,15 +85,6 @@ void rcar_du_vsp_enable(struct rcar_du_crtc *crtc)
 
 	__rcar_du_plane_setup(crtc->group, &state);
 
-	/*
-	 * Ensure that the plane source configuration takes effect by requesting
-	 * a restart of the group. See rcar_du_plane_atomic_update() for a more
-	 * detailed explanation.
-	 *
-	 * TODO: Check whether this is still needed on Gen3.
-	 */
-	crtc->group->need_restart = true;
-
 	vsp1_du_setup_lif(crtc->vsp->vsp, crtc->vsp_pipe, &cfg);
 }
 
@@ -144,6 +139,43 @@ static const u32 rcar_du_vsp_formats[] = {
 	DRM_FORMAT_YVU444,
 };
 
+/*
+ * Gen4 supports the same formats as above, and additionally 2-10-10-10 RGB
+ * formats and Y210 & Y212 formats.
+ */
+static const u32 rcar_du_vsp_formats_gen4[] = {
+	DRM_FORMAT_RGB332,
+	DRM_FORMAT_ARGB4444,
+	DRM_FORMAT_XRGB4444,
+	DRM_FORMAT_ARGB1555,
+	DRM_FORMAT_XRGB1555,
+	DRM_FORMAT_RGB565,
+	DRM_FORMAT_BGR888,
+	DRM_FORMAT_RGB888,
+	DRM_FORMAT_BGRA8888,
+	DRM_FORMAT_BGRX8888,
+	DRM_FORMAT_ARGB8888,
+	DRM_FORMAT_XRGB8888,
+	DRM_FORMAT_RGBX1010102,
+	DRM_FORMAT_RGBA1010102,
+	DRM_FORMAT_ARGB2101010,
+	DRM_FORMAT_UYVY,
+	DRM_FORMAT_YUYV,
+	DRM_FORMAT_YVYU,
+	DRM_FORMAT_NV12,
+	DRM_FORMAT_NV21,
+	DRM_FORMAT_NV16,
+	DRM_FORMAT_NV61,
+	DRM_FORMAT_YUV420,
+	DRM_FORMAT_YVU420,
+	DRM_FORMAT_YUV422,
+	DRM_FORMAT_YVU422,
+	DRM_FORMAT_YUV444,
+	DRM_FORMAT_YVU444,
+	DRM_FORMAT_Y210,
+	DRM_FORMAT_Y212,
+};
+
 static void rcar_du_vsp_plane_setup(struct rcar_du_vsp_plane *plane)
 {
 	struct rcar_du_vsp_plane_state *state =
@@ -157,6 +189,7 @@ static void rcar_du_vsp_plane_setup(struct rcar_du_vsp_plane *plane)
 		.alpha = state->state.alpha >> 8,
 		.zpos = state->state.zpos,
 	};
+	u32 fourcc = state->format->fourcc;
 	unsigned int i;
 
 	cfg.src.left = state->state.src.x1 >> 16;
@@ -173,8 +206,26 @@ static void rcar_du_vsp_plane_setup(struct rcar_du_vsp_plane *plane)
 		cfg.mem[i] = sg_dma_address(state->sg_tables[i].sgl)
 			   + fb->offsets[i];
 
-	format = rcar_du_format_info(state->format->fourcc);
+	if (state->state.pixel_blend_mode == DRM_MODE_BLEND_PIXEL_NONE) {
+		switch (fourcc) {
+		case DRM_FORMAT_ARGB1555:
+			fourcc = DRM_FORMAT_XRGB1555;
+			break;
+
+		case DRM_FORMAT_ARGB4444:
+			fourcc = DRM_FORMAT_XRGB4444;
+			break;
+
+		case DRM_FORMAT_ARGB8888:
+			fourcc = DRM_FORMAT_XRGB8888;
+			break;
+		}
+	}
+
+	format = rcar_du_format_info(fourcc);
 	cfg.pixelformat = format->v4l2;
+
+	cfg.premult = state->state.pixel_blend_mode == DRM_MODE_BLEND_PREMULTI;
 
 	vsp1_du_atomic_update(plane->vsp->vsp, crtc->vsp_pipe,
 			      plane->index, &cfg);
@@ -184,22 +235,47 @@ int rcar_du_vsp_map_fb(struct rcar_du_vsp *vsp, struct drm_framebuffer *fb,
 		       struct sg_table sg_tables[3])
 {
 	struct rcar_du_device *rcdu = vsp->dev;
-	unsigned int i;
+	unsigned int i, j;
 	int ret;
 
 	for (i = 0; i < fb->format->num_planes; ++i) {
-		struct drm_gem_cma_object *gem = drm_fb_cma_get_gem_obj(fb, i);
+		struct drm_gem_dma_object *gem = drm_fb_dma_get_gem_obj(fb, i);
 		struct sg_table *sgt = &sg_tables[i];
 
-		ret = dma_get_sgtable(rcdu->dev, sgt, gem->vaddr, gem->paddr,
-				      gem->base.size);
-		if (ret)
-			goto fail;
+		if (gem->sgt) {
+			struct scatterlist *src;
+			struct scatterlist *dst;
+
+			/*
+			 * If the GEM buffer has a scatter gather table, it has
+			 * been imported from a dma-buf and has no physical
+			 * address as it might not be physically contiguous.
+			 * Copy the original scatter gather table to map it to
+			 * the VSP.
+			 */
+			ret = sg_alloc_table(sgt, gem->sgt->orig_nents,
+					     GFP_KERNEL);
+			if (ret)
+				goto fail;
+
+			src = gem->sgt->sgl;
+			dst = sgt->sgl;
+			for (j = 0; j < gem->sgt->orig_nents; ++j) {
+				sg_set_page(dst, sg_page(src), src->length,
+					    src->offset);
+				src = sg_next(src);
+				dst = sg_next(dst);
+			}
+		} else {
+			ret = dma_get_sgtable(rcdu->dev, sgt, gem->vaddr,
+					      gem->dma_addr, gem->base.size);
+			if (ret)
+				goto fail;
+		}
 
 		ret = vsp1_du_map_sg(vsp->vsp, sgt);
-		if (!ret) {
+		if (ret) {
 			sg_free_table(sgt);
-			ret = -ENOMEM;
 			goto fail;
 		}
 	}
@@ -235,7 +311,7 @@ static int rcar_du_vsp_plane_prepare_fb(struct drm_plane *plane,
 	if (ret < 0)
 		return ret;
 
-	return drm_gem_fb_prepare_fb(plane, state);
+	return drm_gem_plane_helper_prepare_fb(plane, state);
 }
 
 void rcar_du_vsp_unmap_fb(struct rcar_du_vsp *vsp, struct drm_framebuffer *fb,
@@ -264,22 +340,27 @@ static void rcar_du_vsp_plane_cleanup_fb(struct drm_plane *plane,
 }
 
 static int rcar_du_vsp_plane_atomic_check(struct drm_plane *plane,
-					  struct drm_plane_state *state)
+					  struct drm_atomic_state *state)
 {
-	struct rcar_du_vsp_plane_state *rstate = to_rcar_vsp_plane_state(state);
+	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
+										 plane);
+	struct rcar_du_vsp_plane_state *rstate = to_rcar_vsp_plane_state(new_plane_state);
 
-	return __rcar_du_plane_atomic_check(plane, state, &rstate->format);
+	return __rcar_du_plane_atomic_check(plane, new_plane_state,
+					    &rstate->format);
 }
 
 static void rcar_du_vsp_plane_atomic_update(struct drm_plane *plane,
-					struct drm_plane_state *old_state)
+					struct drm_atomic_state *state)
 {
+	struct drm_plane_state *old_state = drm_atomic_get_old_plane_state(state, plane);
+	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state, plane);
 	struct rcar_du_vsp_plane *rplane = to_rcar_vsp_plane(plane);
 	struct rcar_du_crtc *crtc = to_rcar_crtc(old_state->crtc);
 
-	if (plane->state->visible)
+	if (new_state->visible)
 		rcar_du_vsp_plane_setup(rplane);
-	else
+	else if (old_state->crtc)
 		vsp1_du_atomic_update(rplane->vsp->vsp, crtc->vsp_pipe,
 				      rplane->index, NULL);
 }
@@ -329,7 +410,6 @@ static void rcar_du_vsp_plane_reset(struct drm_plane *plane)
 		return;
 
 	__drm_atomic_helper_plane_reset(plane, &state->state);
-	state->state.zpos = plane->type == DRM_PLANE_TYPE_PRIMARY ? 0 : 1;
 }
 
 static const struct drm_plane_funcs rcar_du_vsp_plane_funcs = {
@@ -341,12 +421,29 @@ static const struct drm_plane_funcs rcar_du_vsp_plane_funcs = {
 	.atomic_destroy_state = rcar_du_vsp_plane_atomic_destroy_state,
 };
 
+static void rcar_du_vsp_cleanup(struct drm_device *dev, void *res)
+{
+	struct rcar_du_vsp *vsp = res;
+	unsigned int i;
+
+	for (i = 0; i < vsp->num_planes; ++i) {
+		struct rcar_du_vsp_plane *plane = &vsp->planes[i];
+
+		drm_plane_cleanup(&plane->plane);
+	}
+
+	kfree(vsp->planes);
+
+	put_device(vsp->vsp);
+}
+
 int rcar_du_vsp_init(struct rcar_du_vsp *vsp, struct device_node *np,
 		     unsigned int crtcs)
 {
 	struct rcar_du_device *rcdu = vsp->dev;
 	struct platform_device *pdev;
 	unsigned int num_crtcs = hweight32(crtcs);
+	unsigned int num_planes;
 	unsigned int i;
 	int ret;
 
@@ -357,34 +454,42 @@ int rcar_du_vsp_init(struct rcar_du_vsp *vsp, struct device_node *np,
 
 	vsp->vsp = &pdev->dev;
 
+	ret = drmm_add_action_or_reset(&rcdu->ddev, rcar_du_vsp_cleanup, vsp);
+	if (ret < 0)
+		return ret;
+
 	ret = vsp1_du_init(vsp->vsp);
 	if (ret < 0)
 		return ret;
 
-	 /*
-	  * The VSP2D (Gen3) has 5 RPFs, but the VSP1D (Gen2) is limited to
-	  * 4 RPFs.
-	  */
-	vsp->num_planes = rcdu->info->gen >= 3 ? 5 : 4;
+	num_planes = rcdu->info->num_rpf;
 
-	vsp->planes = devm_kcalloc(rcdu->dev, vsp->num_planes,
-				   sizeof(*vsp->planes), GFP_KERNEL);
+	vsp->planes = kcalloc(num_planes, sizeof(*vsp->planes), GFP_KERNEL);
 	if (!vsp->planes)
 		return -ENOMEM;
 
-	for (i = 0; i < vsp->num_planes; ++i) {
+	for (i = 0; i < num_planes; ++i) {
 		enum drm_plane_type type = i < num_crtcs
 					 ? DRM_PLANE_TYPE_PRIMARY
 					 : DRM_PLANE_TYPE_OVERLAY;
 		struct rcar_du_vsp_plane *plane = &vsp->planes[i];
+		unsigned int num_formats;
+		const u32 *formats;
+
+		if (rcdu->info->gen < 4) {
+			num_formats = ARRAY_SIZE(rcar_du_vsp_formats);
+			formats = rcar_du_vsp_formats;
+		} else {
+			num_formats = ARRAY_SIZE(rcar_du_vsp_formats_gen4);
+			formats = rcar_du_vsp_formats_gen4;
+		}
 
 		plane->vsp = vsp;
 		plane->index = i;
 
-		ret = drm_universal_plane_init(rcdu->ddev, &plane->plane, crtcs,
-					       &rcar_du_vsp_plane_funcs,
-					       rcar_du_vsp_formats,
-					       ARRAY_SIZE(rcar_du_vsp_formats),
+		ret = drm_universal_plane_init(&rcdu->ddev, &plane->plane,
+					       crtcs, &rcar_du_vsp_plane_funcs,
+					       formats, num_formats,
 					       NULL, type, NULL);
 		if (ret < 0)
 			return ret;
@@ -392,12 +497,16 @@ int rcar_du_vsp_init(struct rcar_du_vsp *vsp, struct device_node *np,
 		drm_plane_helper_add(&plane->plane,
 				     &rcar_du_vsp_plane_helper_funcs);
 
-		if (type == DRM_PLANE_TYPE_PRIMARY)
-			continue;
-
 		drm_plane_create_alpha_property(&plane->plane);
-		drm_plane_create_zpos_property(&plane->plane, 1, 1,
-					       vsp->num_planes - 1);
+		drm_plane_create_zpos_property(&plane->plane, i, 0,
+					       num_planes - 1);
+
+		drm_plane_create_blend_mode_property(&plane->plane,
+					BIT(DRM_MODE_BLEND_PIXEL_NONE) |
+					BIT(DRM_MODE_BLEND_PREMULTI) |
+					BIT(DRM_MODE_BLEND_COVERAGE));
+
+		vsp->num_planes++;
 	}
 
 	return 0;

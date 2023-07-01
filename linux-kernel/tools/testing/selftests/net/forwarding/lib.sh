@@ -4,6 +4,9 @@
 ##############################################################################
 # Defines
 
+# Kselftest framework requirement - SKIP code is 4.
+ksft_skip=4
+
 # Can be overridden by the configuration file.
 PING=${PING:=ping}
 PING6=${PING6:=ping6}
@@ -17,9 +20,16 @@ NETIF_TYPE=${NETIF_TYPE:=veth}
 NETIF_CREATE=${NETIF_CREATE:=yes}
 MCD=${MCD:=smcrouted}
 MC_CLI=${MC_CLI:=smcroutectl}
+PING_COUNT=${PING_COUNT:=10}
 PING_TIMEOUT=${PING_TIMEOUT:=5}
 WAIT_TIMEOUT=${WAIT_TIMEOUT:=20}
 INTERFACE_TIMEOUT=${INTERFACE_TIMEOUT:=600}
+LOW_AGEING_TIME=${LOW_AGEING_TIME:=1000}
+REQUIRE_JQ=${REQUIRE_JQ:=yes}
+REQUIRE_MZ=${REQUIRE_MZ:=yes}
+REQUIRE_MTOOLS=${REQUIRE_MTOOLS:=no}
+STABLE_MAC_ADDRS=${STABLE_MAC_ADDRS:=no}
+TCPDUMP_EXTRA_FLAGS=${TCPDUMP_EXTRA_FLAGS:=}
 
 relative_path="${BASH_SOURCE%/*}"
 if [[ "$relative_path" == "${BASH_SOURCE}" ]]; then
@@ -38,7 +48,48 @@ check_tc_version()
 	tc -j &> /dev/null
 	if [[ $? -ne 0 ]]; then
 		echo "SKIP: iproute2 too old; tc is missing JSON support"
-		exit 1
+		exit $ksft_skip
+	fi
+}
+
+# Old versions of tc don't understand "mpls_uc"
+check_tc_mpls_support()
+{
+	local dev=$1; shift
+
+	tc filter add dev $dev ingress protocol mpls_uc pref 1 handle 1 \
+		matchall action pipe &> /dev/null
+	if [[ $? -ne 0 ]]; then
+		echo "SKIP: iproute2 too old; tc is missing MPLS support"
+		return $ksft_skip
+	fi
+	tc filter del dev $dev ingress protocol mpls_uc pref 1 handle 1 \
+		matchall
+}
+
+# Old versions of tc produce invalid json output for mpls lse statistics
+check_tc_mpls_lse_stats()
+{
+	local dev=$1; shift
+	local ret;
+
+	tc filter add dev $dev ingress protocol mpls_uc pref 1 handle 1 \
+		flower mpls lse depth 2                                 \
+		action continue &> /dev/null
+
+	if [[ $? -ne 0 ]]; then
+		echo "SKIP: iproute2 too old; tc-flower is missing extended MPLS support"
+		return $ksft_skip
+	fi
+
+	tc -j filter show dev $dev ingress protocol mpls_uc | jq . &> /dev/null
+	ret=$?
+	tc filter del dev $dev ingress protocol mpls_uc pref 1 handle 1 \
+		flower
+
+	if [[ $ret -ne 0 ]]; then
+		echo "SKIP: iproute2 too old; tc-flower produces invalid json output for extended MPLS filters"
+		return $ksft_skip
 	fi
 }
 
@@ -47,7 +98,7 @@ check_tc_shblock_support()
 	tc filter help 2>&1 | grep block &> /dev/null
 	if [[ $? -ne 0 ]]; then
 		echo "SKIP: iproute2 too old; tc is missing shared block support"
-		exit 1
+		exit $ksft_skip
 	fi
 }
 
@@ -56,13 +107,47 @@ check_tc_chain_support()
 	tc help 2>&1|grep chain &> /dev/null
 	if [[ $? -ne 0 ]]; then
 		echo "SKIP: iproute2 too old; tc is missing chain support"
-		exit 1
+		exit $ksft_skip
+	fi
+}
+
+check_tc_action_hw_stats_support()
+{
+	tc actions help 2>&1 | grep -q hw_stats
+	if [[ $? -ne 0 ]]; then
+		echo "SKIP: iproute2 too old; tc is missing action hw_stats support"
+		exit $ksft_skip
+	fi
+}
+
+check_ethtool_lanes_support()
+{
+	ethtool --help 2>&1| grep lanes &> /dev/null
+	if [[ $? -ne 0 ]]; then
+		echo "SKIP: ethtool too old; it is missing lanes support"
+		exit $ksft_skip
+	fi
+}
+
+check_locked_port_support()
+{
+	if ! bridge -d link show | grep -q " locked"; then
+		echo "SKIP: iproute2 too old; Locked port feature not supported."
+		return $ksft_skip
+	fi
+}
+
+check_port_mab_support()
+{
+	if ! bridge -d link show | grep -q "mab"; then
+		echo "SKIP: iproute2 too old; MacAuth feature not supported."
+		return $ksft_skip
 	fi
 }
 
 if [[ "$(id -u)" -ne 0 ]]; then
 	echo "SKIP: need root privileges"
-	exit 0
+	exit $ksft_skip
 fi
 
 if [[ "$CHECK_TC" = "yes" ]]; then
@@ -75,16 +160,26 @@ require_command()
 
 	if [[ ! -x "$(command -v "$cmd")" ]]; then
 		echo "SKIP: $cmd not installed"
-		exit 1
+		exit $ksft_skip
 	fi
 }
 
-require_command jq
-require_command $MZ
+if [[ "$REQUIRE_JQ" = "yes" ]]; then
+	require_command jq
+fi
+if [[ "$REQUIRE_MZ" = "yes" ]]; then
+	require_command $MZ
+fi
+if [[ "$REQUIRE_MTOOLS" = "yes" ]]; then
+	# https://github.com/vladimiroltean/mtools/
+	# patched for IPv6 support
+	require_command msend
+	require_command mreceive
+fi
 
 if [[ ! -v NUM_NETIFS ]]; then
 	echo "SKIP: importer does not define \"NUM_NETIFS\""
-	exit 1
+	exit $ksft_skip
 fi
 
 ##############################################################################
@@ -136,15 +231,46 @@ create_netif()
 	esac
 }
 
+declare -A MAC_ADDR_ORIG
+mac_addr_prepare()
+{
+	local new_addr=
+	local dev=
+
+	for ((i = 1; i <= NUM_NETIFS; ++i)); do
+		dev=${NETIFS[p$i]}
+		new_addr=$(printf "00:01:02:03:04:%02x" $i)
+
+		MAC_ADDR_ORIG["$dev"]=$(ip -j link show dev $dev | jq -e '.[].address')
+		# Strip quotes
+		MAC_ADDR_ORIG["$dev"]=${MAC_ADDR_ORIG["$dev"]//\"/}
+		ip link set dev $dev address $new_addr
+	done
+}
+
+mac_addr_restore()
+{
+	local dev=
+
+	for ((i = 1; i <= NUM_NETIFS; ++i)); do
+		dev=${NETIFS[p$i]}
+		ip link set dev $dev address ${MAC_ADDR_ORIG["$dev"]}
+	done
+}
+
 if [[ "$NETIF_CREATE" = "yes" ]]; then
 	create_netif
+fi
+
+if [[ "$STABLE_MAC_ADDRS" = "yes" ]]; then
+	mac_addr_prepare
 fi
 
 for ((i = 1; i <= NUM_NETIFS; ++i)); do
 	ip link show dev ${NETIFS[p$i]} &> /dev/null
 	if [[ $? -ne 0 ]]; then
 		echo "SKIP: could not find all required interfaces"
-		exit 1
+		exit $ksft_skip
 	fi
 done
 
@@ -218,6 +344,15 @@ log_test()
 	return 0
 }
 
+log_test_skip()
+{
+	local test_name=$1
+	local opt_str=$2
+
+	printf "TEST: %-60s  [SKIP]\n" "$test_name $opt_str"
+	return 0
+}
+
 log_info()
 {
 	local msg=$1
@@ -248,13 +383,64 @@ busywait()
 	done
 }
 
+not()
+{
+	"$@"
+	[[ $? != 0 ]]
+}
+
+get_max()
+{
+	local arr=("$@")
+
+	max=${arr[0]}
+	for cur in ${arr[@]}; do
+		if [[ $cur -gt $max ]]; then
+			max=$cur
+		fi
+	done
+
+	echo $max
+}
+
+grep_bridge_fdb()
+{
+	local addr=$1; shift
+	local word
+	local flag
+
+	if [ "$1" == "self" ] || [ "$1" == "master" ]; then
+		word=$1; shift
+		if [ "$1" == "-v" ]; then
+			flag=$1; shift
+		fi
+	fi
+
+	$@ | grep $addr | grep $flag "$word"
+}
+
+wait_for_port_up()
+{
+	"$@" | grep -q "Link detected: yes"
+}
+
+wait_for_offload()
+{
+	"$@" | grep -q offload
+}
+
+wait_for_trap()
+{
+	"$@" | grep -q trap
+}
+
 until_counter_is()
 {
-	local value=$1; shift
+	local expr=$1; shift
 	local current=$("$@")
 
 	echo $((current))
-	((current >= value))
+	((current $expr))
 }
 
 busywait_for_counter()
@@ -263,7 +449,7 @@ busywait_for_counter()
 	local delta=$1; shift
 
 	local base=$("$@")
-	busywait "$timeout" until_counter_is $((base + delta)) "$@"
+	busywait "$timeout" until_counter_is ">= $((base + delta))" "$@"
 }
 
 setup_wait_dev()
@@ -338,32 +524,15 @@ cmd_jq()
 	[ ! -z "$output" ]
 }
 
-lldpad_app_wait_set()
-{
-	local dev=$1; shift
-
-	while lldptool -t -i $dev -V APP -c app | grep -Eq "pending|unknown"; do
-		echo "$dev: waiting for lldpad to push pending APP updates"
-		sleep 5
-	done
-}
-
-lldpad_app_wait_del()
-{
-	# Give lldpad a chance to push down the changes. If the device is downed
-	# too soon, the updates will be left pending. However, they will have
-	# been struck off the lldpad's DB already, so we won't be able to tell
-	# they are pending. Then on next test iteration this would cause
-	# weirdness as newly-added APP rules conflict with the old ones,
-	# sometimes getting stuck in an "unknown" state.
-	sleep 5
-}
-
 pre_cleanup()
 {
 	if [ "${PAUSE_ON_CLEANUP}" = "yes" ]; then
 		echo "Pausing before cleanup, hit any key to continue"
 		read
+	fi
+
+	if [[ "$STABLE_MAC_ADDRS" = "yes" ]]; then
+		mac_addr_restore
 	fi
 }
 
@@ -599,12 +768,62 @@ tc_rule_stats_get()
 	    | jq ".[1].options.actions[].stats$selector"
 }
 
+tc_rule_handle_stats_get()
+{
+	local id=$1; shift
+	local handle=$1; shift
+	local selector=${1:-.packets}; shift
+
+	tc -j -s filter show $id \
+	    | jq ".[] | select(.options.handle == $handle) | \
+		  .options.actions[0].stats$selector"
+}
+
 ethtool_stats_get()
 {
 	local dev=$1; shift
 	local stat=$1; shift
 
 	ethtool -S $dev | grep "^ *$stat:" | head -n 1 | cut -d: -f2
+}
+
+qdisc_stats_get()
+{
+	local dev=$1; shift
+	local handle=$1; shift
+	local selector=$1; shift
+
+	tc -j -s qdisc show dev "$dev" \
+	    | jq '.[] | select(.handle == "'"$handle"'") | '"$selector"
+}
+
+qdisc_parent_stats_get()
+{
+	local dev=$1; shift
+	local parent=$1; shift
+	local selector=$1; shift
+
+	tc -j -s qdisc show dev "$dev" invisible \
+	    | jq '.[] | select(.parent == "'"$parent"'") | '"$selector"
+}
+
+ipv6_stats_get()
+{
+	local dev=$1; shift
+	local stat=$1; shift
+
+	cat /proc/net/dev_snmp6/$dev | grep "^$stat" | cut -f2
+}
+
+hw_stats_get()
+{
+	local suite=$1; shift
+	local if_name=$1; shift
+	local dir=$1; shift
+	local stat=$1; shift
+
+	ip -j stats show dev $if_name group offload subgroup $suite |
+		jq ".[0].stats64.$dir.$stat"
 }
 
 humanize()
@@ -631,11 +850,29 @@ rate()
 	echo $((8 * (t1 - t0) / interval))
 }
 
+packets_rate()
+{
+	local t0=$1; shift
+	local t1=$1; shift
+	local interval=$1; shift
+
+	echo $(((t1 - t0) / interval))
+}
+
 mac_get()
 {
 	local if_name=$1
 
 	ip -j link show dev $if_name | jq -r '.[]["address"]'
+}
+
+ipv6_lladdr_get()
+{
+	local if_name=$1
+
+	ip -j addr show dev $if_name | \
+		jq -r '.[]["addr_info"][] | select(.scope == "link").local' | \
+		head -1
 }
 
 bridge_ageing_time_get()
@@ -656,14 +893,14 @@ sysctl_set()
 	local value=$1; shift
 
 	SYSCTL_ORIG[$key]=$(sysctl -n $key)
-	sysctl -qw $key=$value
+	sysctl -qw $key="$value"
 }
 
 sysctl_restore()
 {
 	local key=$1; shift
 
-	sysctl -qw $key=${SYSCTL_ORIG["$key"]}
+	sysctl -qw $key="${SYSCTL_ORIG[$key]}"
 }
 
 forwarding_enable()
@@ -935,7 +1172,8 @@ ping_do()
 
 	vrf_name=$(master_name_get $if_name)
 	ip vrf exec $vrf_name \
-		$PING $args $dip -c 10 -i 0.1 -w $PING_TIMEOUT &> /dev/null
+		$PING $args $dip -c $PING_COUNT -i 0.1 \
+		-w $PING_TIMEOUT &> /dev/null
 }
 
 ping_test()
@@ -956,7 +1194,8 @@ ping6_do()
 
 	vrf_name=$(master_name_get $if_name)
 	ip vrf exec $vrf_name \
-		$PING6 $args $dip -c 10 -i 0.1 -w $PING_TIMEOUT &> /dev/null
+		$PING6 $args $dip -c $PING_COUNT -i 0.1 \
+		-w $PING_TIMEOUT &> /dev/null
 }
 
 ping6_test()
@@ -988,6 +1227,7 @@ learning_test()
 	# FDB entry was installed.
 	bridge link set dev $br_port1 flood off
 
+	ip link set $host1_if promisc on
 	tc qdisc add dev $host1_if ingress
 	tc filter add dev $host1_if ingress protocol ip pref 1 handle 101 \
 		flower dst_mac $mac action drop
@@ -998,7 +1238,7 @@ learning_test()
 	tc -j -s filter show dev $host1_if ingress \
 		| jq -e ".[] | select(.options.handle == 101) \
 		| select(.options.actions[0].stats.packets == 1)" &> /dev/null
-	check_fail $? "Packet reached second host when should not"
+	check_fail $? "Packet reached first host when should not"
 
 	$MZ $host1_if -c 1 -p 64 -a $mac -t ip -q
 	sleep 1
@@ -1037,6 +1277,7 @@ learning_test()
 
 	tc filter del dev $host1_if ingress protocol ip pref 1 handle 101 flower
 	tc qdisc del dev $host1_if ingress
+	ip link set $host1_if promisc off
 
 	bridge link set dev $br_port1 flood on
 
@@ -1054,6 +1295,7 @@ flood_test_do()
 
 	# Add an ACL on `host2_if` which will tell us whether the packet
 	# was flooded to it or not.
+	ip link set $host2_if promisc on
 	tc qdisc add dev $host2_if ingress
 	tc filter add dev $host2_if ingress protocol ip pref 1 handle 101 \
 		flower dst_mac $mac action drop
@@ -1071,6 +1313,7 @@ flood_test_do()
 
 	tc filter del dev $host2_if ingress protocol ip pref 1 handle 101 flower
 	tc qdisc del dev $host2_if ingress
+	ip link set $host2_if promisc off
 
 	return $err
 }
@@ -1132,20 +1375,515 @@ flood_test()
 	flood_multicast_test $br_port $host1_if $host2_if
 }
 
-start_traffic()
+__start_traffic()
 {
+	local pktsize=$1; shift
+	local proto=$1; shift
 	local h_in=$1; shift    # Where the traffic egresses the host
 	local sip=$1; shift
 	local dip=$1; shift
 	local dmac=$1; shift
 
-	$MZ $h_in -p 8000 -A $sip -B $dip -c 0 \
-		-a own -b $dmac -t udp -q &
+	$MZ $h_in -p $pktsize -A $sip -B $dip -c 0 \
+		-a own -b $dmac -t "$proto" -q "$@" &
 	sleep 1
+}
+
+start_traffic_pktsize()
+{
+	local pktsize=$1; shift
+
+	__start_traffic $pktsize udp "$@"
+}
+
+start_tcp_traffic_pktsize()
+{
+	local pktsize=$1; shift
+
+	__start_traffic $pktsize tcp "$@"
+}
+
+start_traffic()
+{
+	start_traffic_pktsize 8000 "$@"
+}
+
+start_tcp_traffic()
+{
+	start_tcp_traffic_pktsize 8000 "$@"
 }
 
 stop_traffic()
 {
 	# Suppress noise from killing mausezahn.
 	{ kill %% && wait %%; } 2>/dev/null
+}
+
+declare -A cappid
+declare -A capfile
+declare -A capout
+
+tcpdump_start()
+{
+	local if_name=$1; shift
+	local ns=$1; shift
+
+	capfile[$if_name]=$(mktemp)
+	capout[$if_name]=$(mktemp)
+
+	if [ -z $ns ]; then
+		ns_cmd=""
+	else
+		ns_cmd="ip netns exec ${ns}"
+	fi
+
+	if [ -z $SUDO_USER ] ; then
+		capuser=""
+	else
+		capuser="-Z $SUDO_USER"
+	fi
+
+	$ns_cmd tcpdump $TCPDUMP_EXTRA_FLAGS -e -n -Q in -i $if_name \
+		-s 65535 -B 32768 $capuser -w ${capfile[$if_name]} \
+		> "${capout[$if_name]}" 2>&1 &
+	cappid[$if_name]=$!
+
+	sleep 1
+}
+
+tcpdump_stop()
+{
+	local if_name=$1
+	local pid=${cappid[$if_name]}
+
+	$ns_cmd kill "$pid" && wait "$pid"
+	sleep 1
+}
+
+tcpdump_cleanup()
+{
+	local if_name=$1
+
+	rm ${capfile[$if_name]} ${capout[$if_name]}
+}
+
+tcpdump_show()
+{
+	local if_name=$1
+
+	tcpdump -e -n -r ${capfile[$if_name]} 2>&1
+}
+
+# return 0 if the packet wasn't seen on host2_if or 1 if it was
+mcast_packet_test()
+{
+	local mac=$1
+	local src_ip=$2
+	local ip=$3
+	local host1_if=$4
+	local host2_if=$5
+	local seen=0
+	local tc_proto="ip"
+	local mz_v6arg=""
+
+	# basic check to see if we were passed an IPv4 address, if not assume IPv6
+	if [[ ! $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+		tc_proto="ipv6"
+		mz_v6arg="-6"
+	fi
+
+	# Add an ACL on `host2_if` which will tell us whether the packet
+	# was received by it or not.
+	tc qdisc add dev $host2_if ingress
+	tc filter add dev $host2_if ingress protocol $tc_proto pref 1 handle 101 \
+		flower ip_proto udp dst_mac $mac action drop
+
+	$MZ $host1_if $mz_v6arg -c 1 -p 64 -b $mac -A $src_ip -B $ip -t udp "dp=4096,sp=2048" -q
+	sleep 1
+
+	tc -j -s filter show dev $host2_if ingress \
+		| jq -e ".[] | select(.options.handle == 101) \
+		| select(.options.actions[0].stats.packets == 1)" &> /dev/null
+	if [[ $? -eq 0 ]]; then
+		seen=1
+	fi
+
+	tc filter del dev $host2_if ingress protocol $tc_proto pref 1 handle 101 flower
+	tc qdisc del dev $host2_if ingress
+
+	return $seen
+}
+
+brmcast_check_sg_entries()
+{
+	local report=$1; shift
+	local slist=("$@")
+	local sarg=""
+
+	for src in "${slist[@]}"; do
+		sarg="${sarg} and .source_list[].address == \"$src\""
+	done
+	bridge -j -d -s mdb show dev br0 \
+		| jq -e ".[].mdb[] | \
+			 select(.grp == \"$TEST_GROUP\" and .source_list != null $sarg)" &>/dev/null
+	check_err $? "Wrong *,G entry source list after $report report"
+
+	for sgent in "${slist[@]}"; do
+		bridge -j -d -s mdb show dev br0 \
+			| jq -e ".[].mdb[] | \
+				 select(.grp == \"$TEST_GROUP\" and .src == \"$sgent\")" &>/dev/null
+		check_err $? "Missing S,G entry ($sgent, $TEST_GROUP)"
+	done
+}
+
+brmcast_check_sg_fwding()
+{
+	local should_fwd=$1; shift
+	local sources=("$@")
+
+	for src in "${sources[@]}"; do
+		local retval=0
+
+		mcast_packet_test $TEST_GROUP_MAC $src $TEST_GROUP $h2 $h1
+		retval=$?
+		if [ $should_fwd -eq 1 ]; then
+			check_fail $retval "Didn't forward traffic from S,G ($src, $TEST_GROUP)"
+		else
+			check_err $retval "Forwarded traffic for blocked S,G ($src, $TEST_GROUP)"
+		fi
+	done
+}
+
+brmcast_check_sg_state()
+{
+	local is_blocked=$1; shift
+	local sources=("$@")
+	local should_fail=1
+
+	if [ $is_blocked -eq 1 ]; then
+		should_fail=0
+	fi
+
+	for src in "${sources[@]}"; do
+		bridge -j -d -s mdb show dev br0 \
+			| jq -e ".[].mdb[] | \
+				 select(.grp == \"$TEST_GROUP\" and .source_list != null) |
+				 .source_list[] |
+				 select(.address == \"$src\") |
+				 select(.timer == \"0.00\")" &>/dev/null
+		check_err_fail $should_fail $? "Entry $src has zero timer"
+
+		bridge -j -d -s mdb show dev br0 \
+			| jq -e ".[].mdb[] | \
+				 select(.grp == \"$TEST_GROUP\" and .src == \"$src\" and \
+				 .flags[] == \"blocked\")" &>/dev/null
+		check_err_fail $should_fail $? "Entry $src has blocked flag"
+	done
+}
+
+mc_join()
+{
+	local if_name=$1
+	local group=$2
+	local vrf_name=$(master_name_get $if_name)
+
+	# We don't care about actual reception, just about joining the
+	# IP multicast group and adding the L2 address to the device's
+	# MAC filtering table
+	ip vrf exec $vrf_name \
+		mreceive -g $group -I $if_name > /dev/null 2>&1 &
+	mreceive_pid=$!
+
+	sleep 1
+}
+
+mc_leave()
+{
+	kill "$mreceive_pid" && wait "$mreceive_pid"
+}
+
+mc_send()
+{
+	local if_name=$1
+	local groups=$2
+	local vrf_name=$(master_name_get $if_name)
+
+	ip vrf exec $vrf_name \
+		msend -g $groups -I $if_name -c 1 > /dev/null 2>&1
+}
+
+start_ip_monitor()
+{
+	local mtype=$1; shift
+	local ip=${1-ip}; shift
+
+	# start the monitor in the background
+	tmpfile=`mktemp /var/run/nexthoptestXXX`
+	mpid=`($ip monitor $mtype > $tmpfile & echo $!) 2>/dev/null`
+	sleep 0.2
+	echo "$mpid $tmpfile"
+}
+
+stop_ip_monitor()
+{
+	local mpid=$1; shift
+	local tmpfile=$1; shift
+	local el=$1; shift
+	local what=$1; shift
+
+	sleep 0.2
+	kill $mpid
+	local lines=`grep '^\w' $tmpfile | wc -l`
+	test $lines -eq $el
+	check_err $? "$what: $lines lines of events, expected $el"
+	rm -rf $tmpfile
+}
+
+hw_stats_monitor_test()
+{
+	local dev=$1; shift
+	local type=$1; shift
+	local make_suitable=$1; shift
+	local make_unsuitable=$1; shift
+	local ip=${1-ip}; shift
+
+	RET=0
+
+	# Expect a notification about enablement.
+	local ipmout=$(start_ip_monitor stats "$ip")
+	$ip stats set dev $dev ${type}_stats on
+	stop_ip_monitor $ipmout 1 "${type}_stats enablement"
+
+	# Expect a notification about offload.
+	local ipmout=$(start_ip_monitor stats "$ip")
+	$make_suitable
+	stop_ip_monitor $ipmout 1 "${type}_stats installation"
+
+	# Expect a notification about loss of offload.
+	local ipmout=$(start_ip_monitor stats "$ip")
+	$make_unsuitable
+	stop_ip_monitor $ipmout 1 "${type}_stats deinstallation"
+
+	# Expect a notification about disablement
+	local ipmout=$(start_ip_monitor stats "$ip")
+	$ip stats set dev $dev ${type}_stats off
+	stop_ip_monitor $ipmout 1 "${type}_stats disablement"
+
+	log_test "${type}_stats notifications"
+}
+
+ipv4_to_bytes()
+{
+	local IP=$1; shift
+
+	printf '%02x:' ${IP//./ } |
+	    sed 's/:$//'
+}
+
+# Convert a given IPv6 address, `IP' such that the :: token, if present, is
+# expanded, and each 16-bit group is padded with zeroes to be 4 hexadecimal
+# digits. An optional `BYTESEP' parameter can be given to further separate
+# individual bytes of each 16-bit group.
+expand_ipv6()
+{
+	local IP=$1; shift
+	local bytesep=$1; shift
+
+	local cvt_ip=${IP/::/_}
+	local colons=${cvt_ip//[^:]/}
+	local allcol=:::::::
+	# IP where :: -> the appropriate number of colons:
+	local allcol_ip=${cvt_ip/_/${allcol:${#colons}}}
+
+	echo $allcol_ip | tr : '\n' |
+	    sed s/^/0000/ |
+	    sed 's/.*\(..\)\(..\)/\1'"$bytesep"'\2/' |
+	    tr '\n' : |
+	    sed 's/:$//'
+}
+
+ipv6_to_bytes()
+{
+	local IP=$1; shift
+
+	expand_ipv6 "$IP" :
+}
+
+u16_to_bytes()
+{
+	local u16=$1; shift
+
+	printf "%04x" $u16 | sed 's/^/000/;s/^.*\(..\)\(..\)$/\1:\2/'
+}
+
+# Given a mausezahn-formatted payload (colon-separated bytes given as %02x),
+# possibly with a keyword CHECKSUM stashed where a 16-bit checksum should be,
+# calculate checksum as per RFC 1071, assuming the CHECKSUM field (if any)
+# stands for 00:00.
+payload_template_calc_checksum()
+{
+	local payload=$1; shift
+
+	(
+	    # Set input radix.
+	    echo "16i"
+	    # Push zero for the initial checksum.
+	    echo 0
+
+	    # Pad the payload with a terminating 00: in case we get an odd
+	    # number of bytes.
+	    echo "${payload%:}:00:" |
+		sed 's/CHECKSUM/00:00/g' |
+		tr '[:lower:]' '[:upper:]' |
+		# Add the word to the checksum.
+		sed 's/\(..\):\(..\):/\1\2+\n/g' |
+		# Strip the extra odd byte we pushed if left unconverted.
+		sed 's/\(..\):$//'
+
+	    echo "10000 ~ +"	# Calculate and add carry.
+	    echo "FFFF r - p"	# Bit-flip and print.
+	) |
+	    dc |
+	    tr '[:upper:]' '[:lower:]'
+}
+
+payload_template_expand_checksum()
+{
+	local payload=$1; shift
+	local checksum=$1; shift
+
+	local ckbytes=$(u16_to_bytes $checksum)
+
+	echo "$payload" | sed "s/CHECKSUM/$ckbytes/g"
+}
+
+payload_template_nbytes()
+{
+	local payload=$1; shift
+
+	payload_template_expand_checksum "${payload%:}" 0 |
+		sed 's/:/\n/g' | wc -l
+}
+
+igmpv3_is_in_get()
+{
+	local GRP=$1; shift
+	local sources=("$@")
+
+	local igmpv3
+	local nsources=$(u16_to_bytes ${#sources[@]})
+
+	# IS_IN ( $sources )
+	igmpv3=$(:
+		)"22:"$(			: Type - Membership Report
+		)"00:"$(			: Reserved
+		)"CHECKSUM:"$(			: Checksum
+		)"00:00:"$(			: Reserved
+		)"00:01:"$(			: Number of Group Records
+		)"01:"$(			: Record Type - IS_IN
+		)"00:"$(			: Aux Data Len
+		)"${nsources}:"$(		: Number of Sources
+		)"$(ipv4_to_bytes $GRP):"$(	: Multicast Address
+		)"$(for src in "${sources[@]}"; do
+			ipv4_to_bytes $src
+			echo -n :
+		    done)"$(			: Source Addresses
+		)
+	local checksum=$(payload_template_calc_checksum "$igmpv3")
+
+	payload_template_expand_checksum "$igmpv3" $checksum
+}
+
+igmpv2_leave_get()
+{
+	local GRP=$1; shift
+
+	local payload=$(:
+		)"17:"$(			: Type - Leave Group
+		)"00:"$(			: Max Resp Time - not meaningful
+		)"CHECKSUM:"$(			: Checksum
+		)"$(ipv4_to_bytes $GRP)"$(	: Group Address
+		)
+	local checksum=$(payload_template_calc_checksum "$payload")
+
+	payload_template_expand_checksum "$payload" $checksum
+}
+
+mldv2_is_in_get()
+{
+	local SIP=$1; shift
+	local GRP=$1; shift
+	local sources=("$@")
+
+	local hbh
+	local icmpv6
+	local nsources=$(u16_to_bytes ${#sources[@]})
+
+	hbh=$(:
+		)"3a:"$(			: Next Header - ICMPv6
+		)"00:"$(			: Hdr Ext Len
+		)"00:00:00:00:00:00:"$(		: Options and Padding
+		)
+
+	icmpv6=$(:
+		)"8f:"$(			: Type - MLDv2 Report
+		)"00:"$(			: Code
+		)"CHECKSUM:"$(			: Checksum
+		)"00:00:"$(			: Reserved
+		)"00:01:"$(			: Number of Group Records
+		)"01:"$(			: Record Type - IS_IN
+		)"00:"$(			: Aux Data Len
+		)"${nsources}:"$(		: Number of Sources
+		)"$(ipv6_to_bytes $GRP):"$(	: Multicast address
+		)"$(for src in "${sources[@]}"; do
+			ipv6_to_bytes $src
+			echo -n :
+		    done)"$(			: Source Addresses
+		)
+
+	local len=$(u16_to_bytes $(payload_template_nbytes $icmpv6))
+	local sudohdr=$(:
+		)"$(ipv6_to_bytes $SIP):"$(	: SIP
+		)"$(ipv6_to_bytes $GRP):"$(	: DIP is multicast address
+	        )"${len}:"$(			: Upper-layer length
+	        )"00:3a:"$(			: Zero and next-header
+	        )
+	local checksum=$(payload_template_calc_checksum ${sudohdr}${icmpv6})
+
+	payload_template_expand_checksum "$hbh$icmpv6" $checksum
+}
+
+mldv1_done_get()
+{
+	local SIP=$1; shift
+	local GRP=$1; shift
+
+	local hbh
+	local icmpv6
+
+	hbh=$(:
+		)"3a:"$(			: Next Header - ICMPv6
+		)"00:"$(			: Hdr Ext Len
+		)"00:00:00:00:00:00:"$(		: Options and Padding
+		)
+
+	icmpv6=$(:
+		)"84:"$(			: Type - MLDv1 Done
+		)"00:"$(			: Code
+		)"CHECKSUM:"$(			: Checksum
+		)"00:00:"$(			: Max Resp Delay - not meaningful
+		)"00:00:"$(			: Reserved
+		)"$(ipv6_to_bytes $GRP):"$(	: Multicast address
+		)
+
+	local len=$(u16_to_bytes $(payload_template_nbytes $icmpv6))
+	local sudohdr=$(:
+		)"$(ipv6_to_bytes $SIP):"$(	: SIP
+		)"$(ipv6_to_bytes $GRP):"$(	: DIP is multicast address
+	        )"${len}:"$(			: Upper-layer length
+	        )"00:3a:"$(			: Zero and next-header
+	        )
+	local checksum=$(payload_template_calc_checksum ${sudohdr}${icmpv6})
+
+	payload_template_expand_checksum "$hbh$icmpv6" $checksum
 }

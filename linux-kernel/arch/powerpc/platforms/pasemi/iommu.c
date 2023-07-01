@@ -11,6 +11,7 @@
 #include <linux/types.h>
 #include <linux/spinlock.h>
 #include <linux/pci.h>
+#include <linux/of.h>
 #include <asm/iommu.h>
 #include <asm/machdep.h>
 #include <asm/firmware.h>
@@ -146,7 +147,9 @@ static void iommu_table_iobmap_setup(void)
 	 */
 	iommu_table_iobmap.it_blocksize = 4;
 	iommu_table_iobmap.it_ops = &iommu_table_iobmap_ops;
-	iommu_init_table(&iommu_table_iobmap, 0, 0, 0);
+	if (!iommu_init_table(&iommu_table_iobmap, 0, 0, 0))
+		panic("Failed to initialize iommu table");
+
 	pr_debug(" <- %s\n", __func__);
 }
 

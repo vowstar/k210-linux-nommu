@@ -25,7 +25,7 @@
 
 #include <nvfw/flcn.h>
 
-static void
+void
 gp108_gr_acr_bld_patch(struct nvkm_acr *acr, u32 bld, s64 adjust)
 {
 	struct flcn_bl_dmem_desc_v2 hdr;
@@ -36,7 +36,7 @@ gp108_gr_acr_bld_patch(struct nvkm_acr *acr, u32 bld, s64 adjust)
 	flcn_bl_dmem_desc_v2_dump(&acr->subdev, &hdr);
 }
 
-static void
+void
 gp108_gr_acr_bld_write(struct nvkm_acr *acr, u32 bld,
 		       struct nvkm_acr_lsfw *lsfw)
 {
@@ -86,12 +86,13 @@ MODULE_FIRMWARE("nvidia/gp108/gr/sw_method_init.bin");
 
 static const struct gf100_gr_fwif
 gp108_gr_fwif[] = {
-	{ 0, gm200_gr_load, &gp107_gr, &gp108_gr_fecs_acr, &gp108_gr_gpccs_acr },
+	{  0, gm200_gr_load, &gp107_gr, &gp108_gr_fecs_acr, &gp108_gr_gpccs_acr },
+	{ -1, gm200_gr_nofw },
 	{}
 };
 
 int
-gp108_gr_new(struct nvkm_device *device, int index, struct nvkm_gr **pgr)
+gp108_gr_new(struct nvkm_device *device, enum nvkm_subdev_type type, int inst, struct nvkm_gr **pgr)
 {
-	return gf100_gr_new_(gp108_gr_fwif, device, index, pgr);
+	return gf100_gr_new_(gp108_gr_fwif, device, type, inst, pgr);
 }

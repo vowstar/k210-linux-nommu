@@ -7,8 +7,6 @@
  * This file has goodies to help simplify instantiation of machine vectors.
  */
 
-#include <asm/pgalloc.h>
-
 /* Whee.  These systems don't have an HAE:
        IRONGATE, MARVEL, POLARIS, TSUNAMI, TITAN, WILDFIRE
    Fix things up for the GENERIC kernel by defining the HAE address
@@ -80,9 +78,11 @@
 	.mv_ioread8 =		CAT(low,_ioread8),			\
 	.mv_ioread16 =		CAT(low,_ioread16),			\
 	.mv_ioread32 =		CAT(low,_ioread32),			\
+	.mv_ioread64 =		CAT(low,_ioread64),			\
 	.mv_iowrite8 =		CAT(low,_iowrite8),			\
 	.mv_iowrite16 =		CAT(low,_iowrite16),			\
 	.mv_iowrite32 =		CAT(low,_iowrite32),			\
+	.mv_iowrite64 =		CAT(low,_iowrite64),			\
 	.mv_readb =		CAT(low,_readb),			\
 	.mv_readw =		CAT(low,_readw),			\
 	.mv_readl =		CAT(low,_readl),			\

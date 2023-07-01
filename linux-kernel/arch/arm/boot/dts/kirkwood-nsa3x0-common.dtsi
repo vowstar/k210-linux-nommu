@@ -45,7 +45,7 @@
 		};
 
 		serial@12000 {
-			status = "ok";
+			status = "okay";
 		};
 
 		sata@80000 {
@@ -150,7 +150,7 @@
 };
 
 &pciec {
-        status = "okay";
+	status = "okay";
 };
 
 &pcie0 {

@@ -55,10 +55,10 @@ static int soundbus_probe(struct device *dev)
 }
 
 
-static int soundbus_uevent(struct device *dev, struct kobj_uevent_env *env)
+static int soundbus_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
-	struct soundbus_dev * soundbus_dev;
-	struct platform_device * of;
+	const struct soundbus_dev * soundbus_dev;
+	const struct platform_device * of;
 	const char *compat;
 	int retval = 0;
 	int cplen, seen = 0;
@@ -104,7 +104,7 @@ static int soundbus_uevent(struct device *dev, struct kobj_uevent_env *env)
 	return retval;
 }
 
-static int soundbus_device_remove(struct device *dev)
+static void soundbus_device_remove(struct device *dev)
 {
 	struct soundbus_dev * soundbus_dev = to_soundbus_device(dev);
 	struct soundbus_driver * drv = to_soundbus_driver(dev->driver);
@@ -112,8 +112,6 @@ static int soundbus_device_remove(struct device *dev)
 	if (dev->driver && drv->remove)
 		drv->remove(soundbus_dev);
 	soundbus_dev_put(soundbus_dev);
-
-	return 0;
 }
 
 static void soundbus_device_shutdown(struct device *dev)

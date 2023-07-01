@@ -1144,7 +1144,7 @@ static ssize_t viafb_dvp0_proc_write(struct file *file,
 		if (value != NULL) {
 			if (kstrtou8(value, 0, &reg_val) < 0)
 				return -EINVAL;
-			DEBUG_MSG(KERN_INFO "DVP0:reg_val[%l]=:%x\n", i,
+			DEBUG_MSG(KERN_INFO "DVP0:reg_val[%lu]=:%x\n", i,
 				  reg_val);
 			switch (i) {
 			case 0:
@@ -1939,8 +1939,12 @@ static int __init viafb_setup(void)
 
 		if (!strncmp(this_opt, "viafb_mode1=", 12)) {
 			viafb_mode1 = kstrdup(this_opt + 12, GFP_KERNEL);
+			if (!viafb_mode1)
+				return -ENOMEM;
 		} else if (!strncmp(this_opt, "viafb_mode=", 11)) {
 			viafb_mode = kstrdup(this_opt + 11, GFP_KERNEL);
+			if (!viafb_mode)
+				return -ENOMEM;
 		} else if (!strncmp(this_opt, "viafb_bpp1=", 11)) {
 			if (kstrtouint(this_opt + 11, 0, &viafb_bpp1) < 0)
 				return -EINVAL;
@@ -1969,6 +1973,8 @@ static int __init viafb_setup(void)
 				return -EINVAL;
 		} else if (!strncmp(this_opt, "viafb_active_dev=", 17)) {
 			viafb_active_dev = kstrdup(this_opt + 17, GFP_KERNEL);
+			if (!viafb_active_dev)
+				return -ENOMEM;
 		} else if (!strncmp(this_opt,
 			"viafb_display_hardware_layout=", 30)) {
 			if (kstrtoint(this_opt + 30, 0,
@@ -1995,8 +2001,12 @@ static int __init viafb_setup(void)
 				return -EINVAL;
 		} else if (!strncmp(this_opt, "viafb_lcd_port=", 15)) {
 			viafb_lcd_port = kstrdup(this_opt + 15, GFP_KERNEL);
+			if (!viafb_lcd_port)
+				return -ENOMEM;
 		} else if (!strncmp(this_opt, "viafb_dvi_port=", 15)) {
 			viafb_dvi_port = kstrdup(this_opt + 15, GFP_KERNEL);
+			if (!viafb_dvi_port)
+				return -ENOMEM;
 		}
 	}
 	return 0;

@@ -1,5 +1,3 @@
-.. _admin_guide_transhuge:
-
 ============================
 Transparent Hugepage Support
 ============================
@@ -191,7 +189,14 @@ allocation failure to throttle the next allocation attempt::
 
 	/sys/kernel/mm/transparent_hugepage/khugepaged/alloc_sleep_millisecs
 
-The khugepaged progress can be seen in the number of pages collapsed::
+The khugepaged progress can be seen in the number of pages collapsed (note
+that this counter may not be an exact count of the number of pages
+collapsed, since "collapsed" could mean multiple things: (1) A PTE mapping
+being replaced by a PMD mapping, or (2) All 4K physical pages replaced by
+one 2M hugepage. Each may happen independently, or together, depending on
+the type of memory and the failures that occur. As such, this value should
+be interpreted roughly as a sign of progress, and counters in /proc/vmstat
+consulted for more accurate accounting)::
 
 	/sys/kernel/mm/transparent_hugepage/khugepaged/pages_collapsed
 
@@ -219,6 +224,13 @@ A higher value can cause excessive swap IO and waste
 memory. A lower value can prevent THPs from being
 collapsed, resulting fewer pages being collapsed into
 THPs, and lower memory access performance.
+
+``max_ptes_shared`` specifies how many pages can be shared across multiple
+processes. Exceeding the number would block the collapse::
+
+	/sys/kernel/mm/transparent_hugepage/khugepaged/max_ptes_shared
+
+A higher value may increase memory footprint for some workloads.
 
 Boot parameter
 ==============
@@ -298,8 +310,7 @@ monitor how successfully the system is providing huge pages for use.
 
 thp_fault_alloc
 	is incremented every time a huge page is successfully
-	allocated to handle a page fault. This applies to both the
-	first time a page is faulted and for COW faults.
+	allocated to handle a page fault.
 
 thp_collapse_alloc
 	is incremented by khugepaged when it has found
@@ -310,6 +321,11 @@ thp_fault_fallback
 	is incremented if a page fault fails to allocate
 	a huge page and instead falls back to using small pages.
 
+thp_fault_fallback_charge
+	is incremented if a page fault fails to charge a huge page and
+	instead falls back to using small pages even though the
+	allocation was successful.
+
 thp_collapse_alloc_failed
 	is incremented if khugepaged found a range
 	of pages that should be collapsed into one huge page but failed
@@ -318,6 +334,15 @@ thp_collapse_alloc_failed
 thp_file_alloc
 	is incremented every time a file huge page is successfully
 	allocated.
+
+thp_file_fallback
+	is incremented if a file huge page is attempted to be allocated
+	but fails and instead falls back to using small pages.
+
+thp_file_fallback_charge
+	is incremented if a file huge page cannot be charged and instead
+	falls back to using small pages even though the allocation was
+	successful.
 
 thp_file_mapped
 	is incremented every time a file huge page is mapped into
@@ -346,10 +371,9 @@ thp_split_pmd
 	page table entry.
 
 thp_zero_page_alloc
-	is incremented every time a huge zero page is
-	successfully allocated. It includes allocations which where
-	dropped due race with other allocation. Note, it doesn't count
-	every map of the huge zero page, only its allocation.
+	is incremented every time a huge zero page used for thp is
+	successfully allocated. Note, it doesn't count every map of
+	the huge zero page, only its allocation.
 
 thp_zero_page_alloc_failed
 	is incremented if kernel fails to allocate
@@ -381,23 +405,8 @@ compact_fail
 	is incremented if the system tries to compact memory
 	but failed.
 
-compact_pages_moved
-	is incremented each time a page is moved. If
-	this value is increasing rapidly, it implies that the system
-	is copying a lot of data to satisfy the huge page allocation.
-	It is possible that the cost of copying exceeds any savings
-	from reduced TLB misses.
-
-compact_pagemigrate_failed
-	is incremented when the underlying mechanism
-	for moving a page failed.
-
-compact_blocks_moved
-	is incremented each time memory compaction examines
-	a huge page aligned range of pages.
-
 It is possible to establish how long the stalls were using the function
-tracer to record how long was spent in __alloc_pages_nodemask and
+tracer to record how long was spent in __alloc_pages() and
 using the mm_page_alloc tracepoint to identify which allocations were
 for huge pages.
 

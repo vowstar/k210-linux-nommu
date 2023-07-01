@@ -17,6 +17,8 @@
  * warranty of any kind, whether express or implied.
  */
 
+#include <linux/acpi.h>
+#include <linux/acpi_mdio.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -144,9 +146,6 @@ static int orion_mdio_smi_read(struct mii_bus *bus, int mii_id,
 	u32 val;
 	int ret;
 
-	if (regnum & MII_ADDR_C45)
-		return -EOPNOTSUPP;
-
 	ret = orion_mdio_wait_ready(&orion_mdio_smi_ops, bus);
 	if (ret < 0)
 		return ret;
@@ -175,9 +174,6 @@ static int orion_mdio_smi_write(struct mii_bus *bus, int mii_id,
 	struct orion_mdio_dev *dev = bus->priv;
 	int ret;
 
-	if (regnum & MII_ADDR_C45)
-		return -EOPNOTSUPP;
-
 	ret = orion_mdio_wait_ready(&orion_mdio_smi_ops, bus);
 	if (ret < 0)
 		return ret;
@@ -202,21 +198,17 @@ static const struct orion_mdio_ops orion_mdio_xsmi_ops = {
 	.poll_interval_max = MVMDIO_XSMI_POLL_INTERVAL_MAX,
 };
 
-static int orion_mdio_xsmi_read(struct mii_bus *bus, int mii_id,
-				int regnum)
+static int orion_mdio_xsmi_read_c45(struct mii_bus *bus, int mii_id,
+				    int dev_addr, int regnum)
 {
 	struct orion_mdio_dev *dev = bus->priv;
-	u16 dev_addr = (regnum >> 16) & GENMASK(4, 0);
 	int ret;
-
-	if (!(regnum & MII_ADDR_C45))
-		return -EOPNOTSUPP;
 
 	ret = orion_mdio_wait_ready(&orion_mdio_xsmi_ops, bus);
 	if (ret < 0)
 		return ret;
 
-	writel(regnum & GENMASK(15, 0), dev->regs + MVMDIO_XSMI_ADDR_REG);
+	writel(regnum, dev->regs + MVMDIO_XSMI_ADDR_REG);
 	writel((mii_id << MVMDIO_XSMI_PHYADDR_SHIFT) |
 	       (dev_addr << MVMDIO_XSMI_DEVADDR_SHIFT) |
 	       MVMDIO_XSMI_READ_OPERATION,
@@ -235,21 +227,17 @@ static int orion_mdio_xsmi_read(struct mii_bus *bus, int mii_id,
 	return readl(dev->regs + MVMDIO_XSMI_MGNT_REG) & GENMASK(15, 0);
 }
 
-static int orion_mdio_xsmi_write(struct mii_bus *bus, int mii_id,
-				int regnum, u16 value)
+static int orion_mdio_xsmi_write_c45(struct mii_bus *bus, int mii_id,
+				     int dev_addr, int regnum, u16 value)
 {
 	struct orion_mdio_dev *dev = bus->priv;
-	u16 dev_addr = (regnum >> 16) & GENMASK(4, 0);
 	int ret;
-
-	if (!(regnum & MII_ADDR_C45))
-		return -EOPNOTSUPP;
 
 	ret = orion_mdio_wait_ready(&orion_mdio_xsmi_ops, bus);
 	if (ret < 0)
 		return ret;
 
-	writel(regnum & GENMASK(15, 0), dev->regs + MVMDIO_XSMI_ADDR_REG);
+	writel(regnum, dev->regs + MVMDIO_XSMI_ADDR_REG);
 	writel((mii_id << MVMDIO_XSMI_PHYADDR_SHIFT) |
 	       (dev_addr << MVMDIO_XSMI_DEVADDR_SHIFT) |
 	       MVMDIO_XSMI_WRITE_OPERATION | value,
@@ -281,7 +269,7 @@ static int orion_mdio_probe(struct platform_device *pdev)
 	struct orion_mdio_dev *dev;
 	int i, ret;
 
-	type = (enum orion_mdio_bus_type)of_device_get_match_data(&pdev->dev);
+	type = (enum orion_mdio_bus_type)device_get_match_data(&pdev->dev);
 
 	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!r) {
@@ -300,8 +288,8 @@ static int orion_mdio_probe(struct platform_device *pdev)
 		bus->write = orion_mdio_smi_write;
 		break;
 	case BUS_TYPE_XSMI:
-		bus->read = orion_mdio_xsmi_read;
-		bus->write = orion_mdio_xsmi_write;
+		bus->read_c45 = orion_mdio_xsmi_read_c45;
+		bus->write_c45 = orion_mdio_xsmi_write_c45;
 		break;
 	}
 
@@ -347,7 +335,7 @@ static int orion_mdio_probe(struct platform_device *pdev)
 	}
 
 
-	dev->err_interrupt = platform_get_irq(pdev, 0);
+	dev->err_interrupt = platform_get_irq_optional(pdev, 0);
 	if (dev->err_interrupt > 0 &&
 	    resource_size(r) < MVMDIO_ERR_INT_MASK + 4) {
 		dev_err(&pdev->dev,
@@ -369,7 +357,13 @@ static int orion_mdio_probe(struct platform_device *pdev)
 		goto out_mdio;
 	}
 
-	ret = of_mdiobus_register(bus, pdev->dev.of_node);
+	/* For the platforms not supporting DT/ACPI fall-back
+	 * to mdiobus_register via of_mdiobus_register.
+	 */
+	if (is_acpi_node(pdev->dev.fwnode))
+		ret = acpi_mdiobus_register(bus, pdev->dev.fwnode);
+	else
+		ret = of_mdiobus_register(bus, pdev->dev.of_node);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "Cannot register MDIO bus (%d)\n", ret);
 		goto out_mdio;
@@ -421,12 +415,22 @@ static const struct of_device_id orion_mdio_match[] = {
 };
 MODULE_DEVICE_TABLE(of, orion_mdio_match);
 
+#ifdef CONFIG_ACPI
+static const struct acpi_device_id orion_mdio_acpi_match[] = {
+	{ "MRVL0100", BUS_TYPE_SMI },
+	{ "MRVL0101", BUS_TYPE_XSMI },
+	{ },
+};
+MODULE_DEVICE_TABLE(acpi, orion_mdio_acpi_match);
+#endif
+
 static struct platform_driver orion_mdio_driver = {
 	.probe = orion_mdio_probe,
 	.remove = orion_mdio_remove,
 	.driver = {
 		.name = "orion-mdio",
 		.of_match_table = orion_mdio_match,
+		.acpi_match_table = ACPI_PTR(orion_mdio_acpi_match),
 	},
 };
 

@@ -124,7 +124,6 @@ teql_reset(struct Qdisc *sch)
 	struct teql_sched_data *dat = qdisc_priv(sch);
 
 	skb_queue_purge(&dat->q);
-	sch->q.qlen = 0;
 }
 
 static void
@@ -133,6 +132,9 @@ teql_destroy(struct Qdisc *sch)
 	struct Qdisc *q, *prev;
 	struct teql_sched_data *dat = qdisc_priv(sch);
 	struct teql_master *master = dat->m;
+
+	if (!master)
+		return;
 
 	prev = master->slaves;
 	if (prev) {
@@ -239,7 +241,7 @@ __teql_resolve(struct sk_buff *skb, struct sk_buff *skb_res,
 		char haddr[MAX_ADDR_LEN];
 
 		neigh_ha_snapshot(haddr, n, dev);
-		err = dev_hard_header(skb, dev, ntohs(tc_skb_protocol(skb)),
+		err = dev_hard_header(skb, dev, ntohs(skb_protocol(skb, false)),
 				      haddr, NULL, skb->len);
 
 		if (err < 0)
@@ -489,7 +491,7 @@ static int __init teql_init(void)
 
 		master = netdev_priv(dev);
 
-		strlcpy(master->qops.id, dev->name, IFNAMSIZ);
+		strscpy(master->qops.id, dev->name, IFNAMSIZ);
 		err = register_qdisc(&master->qops);
 
 		if (err) {

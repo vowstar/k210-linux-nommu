@@ -245,6 +245,7 @@ void hubp1_program_pixel_format(
 	if (format == SURFACE_PIXEL_FORMAT_GRPH_ABGR8888
 			|| format == SURFACE_PIXEL_FORMAT_GRPH_ABGR2101010
 			|| format == SURFACE_PIXEL_FORMAT_GRPH_ABGR2101010_XR_BIAS
+			|| format == SURFACE_PIXEL_FORMAT_GRPH_ABGR16161616
 			|| format == SURFACE_PIXEL_FORMAT_GRPH_ABGR16161616F) {
 		red_bar = 2;
 		blue_bar = 3;
@@ -277,8 +278,9 @@ void hubp1_program_pixel_format(
 				SURFACE_PIXEL_FORMAT, 10);
 		break;
 	case SURFACE_PIXEL_FORMAT_GRPH_ARGB16161616:
+	case SURFACE_PIXEL_FORMAT_GRPH_ABGR16161616: /*we use crossbar already*/
 		REG_UPDATE(DCSURF_SURFACE_CONFIG,
-				SURFACE_PIXEL_FORMAT, 22);
+				SURFACE_PIXEL_FORMAT, 26); /* ARGB16161616_UNORM */
 		break;
 	case SURFACE_PIXEL_FORMAT_GRPH_ARGB16161616F:
 	case SURFACE_PIXEL_FORMAT_GRPH_ABGR16161616F:/*we use crossbar already*/
@@ -325,6 +327,16 @@ void hubp1_program_pixel_format(
 	case SURFACE_PIXEL_FORMAT_GRPH_BGR101111_FLOAT:
 		REG_UPDATE(DCSURF_SURFACE_CONFIG,
 				SURFACE_PIXEL_FORMAT, 119);
+		break;
+	case SURFACE_PIXEL_FORMAT_GRPH_RGBE:
+		REG_UPDATE_2(DCSURF_SURFACE_CONFIG,
+				SURFACE_PIXEL_FORMAT, 116,
+				ALPHA_PLANE_EN, 0);
+		break;
+	case SURFACE_PIXEL_FORMAT_GRPH_RGBE_ALPHA:
+		REG_UPDATE_2(DCSURF_SURFACE_CONFIG,
+				SURFACE_PIXEL_FORMAT, 116,
+				ALPHA_PLANE_EN, 1);
 		break;
 	default:
 		BREAK_TO_DEBUGGER();
@@ -722,6 +734,9 @@ bool hubp1_is_flip_pending(struct hubp *hubp)
 	struct dcn10_hubp *hubp1 = TO_DCN10_HUBP(hubp);
 	struct dc_plane_address earliest_inuse_address;
 
+	if (hubp && hubp->power_gated)
+		return false;
+
 	REG_GET(DCSURF_FLIP_CONTROL,
 			SURFACE_FLIP_PENDING, &flip_pending);
 
@@ -856,6 +871,8 @@ void hubp1_read_state_common(struct hubp *hubp)
 	struct _vcs_dpi_display_dlg_regs_st *dlg_attr = &s->dlg_attr;
 	struct _vcs_dpi_display_ttu_regs_st *ttu_attr = &s->ttu_attr;
 	struct _vcs_dpi_display_rq_regs_st *rq_regs = &s->rq_regs;
+	uint32_t aperture_low_msb, aperture_low_lsb;
+	uint32_t aperture_high_msb, aperture_high_lsb;
 
 	/* Requester */
 	REG_GET(HUBPRET_CONTROL,
@@ -865,6 +882,22 @@ void hubp1_read_state_common(struct hubp *hubp)
 			PRQ_EXPANSION_MODE, &rq_regs->prq_expansion_mode,
 			MRQ_EXPANSION_MODE, &rq_regs->mrq_expansion_mode,
 			CRQ_EXPANSION_MODE, &rq_regs->crq_expansion_mode);
+
+	REG_GET(DCN_VM_SYSTEM_APERTURE_LOW_ADDR_MSB,
+			MC_VM_SYSTEM_APERTURE_LOW_ADDR_MSB, &aperture_low_msb);
+
+	REG_GET(DCN_VM_SYSTEM_APERTURE_LOW_ADDR_LSB,
+			MC_VM_SYSTEM_APERTURE_LOW_ADDR_LSB, &aperture_low_lsb);
+
+	REG_GET(DCN_VM_SYSTEM_APERTURE_HIGH_ADDR_MSB,
+			MC_VM_SYSTEM_APERTURE_HIGH_ADDR_MSB, &aperture_high_msb);
+
+	REG_GET(DCN_VM_SYSTEM_APERTURE_HIGH_ADDR_LSB,
+			MC_VM_SYSTEM_APERTURE_HIGH_ADDR_LSB, &aperture_high_lsb);
+
+	// On DCN1, aperture is broken down into MSB and LSB; only keep bits [47:18] to match later DCN format
+	rq_regs->aperture_low_addr = (aperture_low_msb << 26) | (aperture_low_lsb >> 6);
+	rq_regs->aperture_high_addr = (aperture_high_msb << 26) | (aperture_high_lsb >> 6);
 
 	/* DLG - Per hubp */
 	REG_GET_2(BLANK_OFFSET_0,
@@ -1022,6 +1055,17 @@ void hubp1_read_state_common(struct hubp *hubp)
 			QoS_LEVEL_LOW_WM, &s->qos_level_low_wm,
 			QoS_LEVEL_HIGH_WM, &s->qos_level_high_wm);
 
+	REG_GET(DCSURF_PRIMARY_SURFACE_ADDRESS,
+			PRIMARY_SURFACE_ADDRESS, &s->primary_surface_addr_lo);
+
+	REG_GET(DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH,
+			PRIMARY_SURFACE_ADDRESS, &s->primary_surface_addr_hi);
+
+	REG_GET(DCSURF_PRIMARY_META_SURFACE_ADDRESS,
+			PRIMARY_META_SURFACE_ADDRESS, &s->primary_meta_addr_lo);
+
+	REG_GET(DCSURF_PRIMARY_META_SURFACE_ADDRESS_HIGH,
+			PRIMARY_META_SURFACE_ADDRESS, &s->primary_meta_addr_hi);
 }
 
 void hubp1_read_state(struct hubp *hubp)
@@ -1135,12 +1179,18 @@ void hubp1_cursor_set_position(
 		const struct dc_cursor_mi_param *param)
 {
 	struct dcn10_hubp *hubp1 = TO_DCN10_HUBP(hubp);
-	int src_x_offset = pos->x - pos->x_hotspot - param->viewport.x;
-	int src_y_offset = pos->y - pos->y_hotspot - param->viewport.y;
+	int x_pos = pos->x - param->viewport.x;
+	int y_pos = pos->y - param->viewport.y;
 	int x_hotspot = pos->x_hotspot;
 	int y_hotspot = pos->y_hotspot;
+	int src_x_offset = x_pos - pos->x_hotspot;
+	int src_y_offset = y_pos - pos->y_hotspot;
+	int cursor_height = (int)hubp->curs_attr.height;
+	int cursor_width = (int)hubp->curs_attr.width;
 	uint32_t dst_x_offset;
 	uint32_t cur_en = pos->enable ? 1 : 0;
+
+	hubp->curs_pos = *pos;
 
 	/*
 	 * Guard aganst cursor_set_position() from being called with invalid
@@ -1152,15 +1202,26 @@ void hubp1_cursor_set_position(
 	if (hubp->curs_attr.address.quad_part == 0)
 		return;
 
+	// Transform cursor width / height and hotspots for offset calculations
 	if (param->rotation == ROTATION_ANGLE_90 || param->rotation == ROTATION_ANGLE_270) {
-		src_x_offset = pos->y - pos->y_hotspot - param->viewport.x;
-		y_hotspot = pos->x_hotspot;
-		x_hotspot = pos->y_hotspot;
-	}
+		swap(cursor_height, cursor_width);
+		swap(x_hotspot, y_hotspot);
 
-	if (param->mirror) {
-		x_hotspot = param->viewport.width - x_hotspot;
-		src_x_offset = param->viewport.x + param->viewport.width - src_x_offset;
+		if (param->rotation == ROTATION_ANGLE_90) {
+			// hotspot = (-y, x)
+			src_x_offset = x_pos - (cursor_width - x_hotspot);
+			src_y_offset = y_pos - y_hotspot;
+		} else if (param->rotation == ROTATION_ANGLE_270) {
+			// hotspot = (y, -x)
+			src_x_offset = x_pos - x_hotspot;
+			src_y_offset = y_pos - (cursor_height - y_hotspot);
+		}
+	} else if (param->rotation == ROTATION_ANGLE_180) {
+		// hotspot = (-x, -y)
+		if (!param->mirror)
+			src_x_offset = x_pos - (cursor_width - x_hotspot);
+
+		src_y_offset = y_pos - (cursor_height - y_hotspot);
 	}
 
 	dst_x_offset = (src_x_offset >= 0) ? src_x_offset : 0;
@@ -1177,13 +1238,13 @@ void hubp1_cursor_set_position(
 	if (src_x_offset >= (int)param->viewport.width)
 		cur_en = 0;  /* not visible beyond right edge*/
 
-	if (src_x_offset + (int)hubp->curs_attr.width <= 0)
+	if (src_x_offset + cursor_width <= 0)
 		cur_en = 0;  /* not visible beyond left edge*/
 
 	if (src_y_offset >= (int)param->viewport.height)
 		cur_en = 0;  /* not visible beyond bottom edge*/
 
-	if (src_y_offset + (int)hubp->curs_attr.height <= 0)
+	if (src_y_offset + cursor_height <= 0)
 		cur_en = 0;  /* not visible beyond top edge*/
 
 	if (cur_en && REG_READ(CURSOR_SURFACE_ADDRESS) == 0)
@@ -1197,14 +1258,22 @@ void hubp1_cursor_set_position(
 			CURSOR_Y_POSITION, pos->y);
 
 	REG_SET_2(CURSOR_HOT_SPOT, 0,
-			CURSOR_HOT_SPOT_X, x_hotspot,
-			CURSOR_HOT_SPOT_Y, y_hotspot);
+			CURSOR_HOT_SPOT_X, pos->x_hotspot,
+			CURSOR_HOT_SPOT_Y, pos->y_hotspot);
 
 	REG_SET(CURSOR_DST_OFFSET, 0,
 			CURSOR_DST_X_OFFSET, dst_x_offset);
 	/* TODO Handle surface pixel formats other than 4:4:4 */
 }
 
+/**
+ * hubp1_clk_cntl - Disable or enable clocks for DCHUBP
+ *
+ * @hubp: hubp struct reference.
+ * @enable: Set true for enabling gate clock.
+ *
+ * When enabling/disabling DCHUBP clock, we affect dcfclk/dppclk.
+ */
 void hubp1_clk_cntl(struct hubp *hubp, bool enable)
 {
 	struct dcn10_hubp *hubp1 = TO_DCN10_HUBP(hubp);
@@ -1218,6 +1287,51 @@ void hubp1_vtg_sel(struct hubp *hubp, uint32_t otg_inst)
 	struct dcn10_hubp *hubp1 = TO_DCN10_HUBP(hubp);
 
 	REG_UPDATE(DCHUBP_CNTL, HUBP_VTG_SEL, otg_inst);
+}
+
+bool hubp1_in_blank(struct hubp *hubp)
+{
+	uint32_t in_blank;
+	struct dcn10_hubp *hubp1 = TO_DCN10_HUBP(hubp);
+
+	REG_GET(DCHUBP_CNTL, HUBP_IN_BLANK, &in_blank);
+	return in_blank ? true : false;
+}
+
+void hubp1_soft_reset(struct hubp *hubp, bool reset)
+{
+	struct dcn10_hubp *hubp1 = TO_DCN10_HUBP(hubp);
+
+	REG_UPDATE(DCHUBP_CNTL, HUBP_DISABLE, reset ? 1 : 0);
+}
+
+/**
+ * hubp1_set_flip_int - Enable surface flip interrupt
+ *
+ * @hubp: hubp struct reference.
+ */
+void hubp1_set_flip_int(struct hubp *hubp)
+{
+	struct dcn10_hubp *hubp1 = TO_DCN10_HUBP(hubp);
+
+	REG_UPDATE(DCSURF_SURFACE_FLIP_INTERRUPT,
+		SURFACE_FLIP_INT_MASK, 1);
+
+	return;
+}
+
+/**
+ * hubp1_wait_pipe_read_start - wait for hubp ret path starting read.
+ *
+ * @hubp: hubp struct reference.
+ */
+static void hubp1_wait_pipe_read_start(struct hubp *hubp)
+{
+	struct dcn10_hubp *hubp1 = TO_DCN10_HUBP(hubp);
+
+	REG_WAIT(HUBPRET_READ_LINE_STATUS,
+		PIPE_READ_VBLANK, 0,
+		 1, 1000);
 }
 
 void hubp1_init(struct hubp *hubp)
@@ -1251,6 +1365,10 @@ static const struct hubp_funcs dcn10_hubp_funcs = {
 
 	.dmdata_set_attributes = NULL,
 	.dmdata_load = NULL,
+	.hubp_soft_reset = hubp1_soft_reset,
+	.hubp_in_blank = hubp1_in_blank,
+	.hubp_set_flip_int = hubp1_set_flip_int,
+	.hubp_wait_pipe_read_start = hubp1_wait_pipe_read_start,
 };
 
 /*****************************************/

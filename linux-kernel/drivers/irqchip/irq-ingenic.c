@@ -49,19 +49,13 @@ static irqreturn_t intc_cascade(int irq, void *data)
 		while (pending) {
 			int bit = __fls(pending);
 
-			irq = irq_linear_revmap(domain, bit + (i * 32));
-			generic_handle_irq(irq);
+			generic_handle_domain_irq(domain, bit + (i * 32));
 			pending &= ~BIT(bit);
 		}
 	}
 
 	return IRQ_HANDLED;
 }
-
-static struct irqaction intc_cascade_action = {
-	.handler = intc_cascade,
-	.name = "SoC intc cascade interrupt",
-};
 
 static int __init ingenic_intc_of_init(struct device_node *node,
 				       unsigned num_chips)
@@ -130,7 +124,9 @@ static int __init ingenic_intc_of_init(struct device_node *node,
 		irq_reg_writel(gc, IRQ_MSK(32), JZ_REG_INTC_SET_MASK);
 	}
 
-	setup_irq(parent_irq, &intc_cascade_action);
+	if (request_irq(parent_irq, intc_cascade, IRQF_NO_SUSPEND,
+			"SoC intc cascade interrupt", NULL))
+		pr_err("Failed to register SoC intc cascade interrupt\n");
 	return 0;
 
 out_domain_remove:
@@ -158,6 +154,7 @@ static int __init intc_2chip_of_init(struct device_node *node,
 {
 	return ingenic_intc_of_init(node, 2);
 }
+IRQCHIP_DECLARE(jz4760_intc, "ingenic,jz4760-intc", intc_2chip_of_init);
 IRQCHIP_DECLARE(jz4770_intc, "ingenic,jz4770-intc", intc_2chip_of_init);
 IRQCHIP_DECLARE(jz4775_intc, "ingenic,jz4775-intc", intc_2chip_of_init);
 IRQCHIP_DECLARE(jz4780_intc, "ingenic,jz4780-intc", intc_2chip_of_init);

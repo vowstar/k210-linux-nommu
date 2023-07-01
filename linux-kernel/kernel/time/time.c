@@ -449,50 +449,7 @@ time64_t mktime64(const unsigned int year0, const unsigned int mon0,
 }
 EXPORT_SYMBOL(mktime64);
 
-/**
- * ns_to_timespec - Convert nanoseconds to timespec
- * @nsec:       the nanoseconds value to be converted
- *
- * Returns the timespec representation of the nsec parameter.
- */
-struct timespec ns_to_timespec(const s64 nsec)
-{
-	struct timespec ts;
-	s32 rem;
-
-	if (!nsec)
-		return (struct timespec) {0, 0};
-
-	ts.tv_sec = div_s64_rem(nsec, NSEC_PER_SEC, &rem);
-	if (unlikely(rem < 0)) {
-		ts.tv_sec--;
-		rem += NSEC_PER_SEC;
-	}
-	ts.tv_nsec = rem;
-
-	return ts;
-}
-EXPORT_SYMBOL(ns_to_timespec);
-
-/**
- * ns_to_timeval - Convert nanoseconds to timeval
- * @nsec:       the nanoseconds value to be converted
- *
- * Returns the timeval representation of the nsec parameter.
- */
-struct timeval ns_to_timeval(const s64 nsec)
-{
-	struct timespec ts = ns_to_timespec(nsec);
-	struct timeval tv;
-
-	tv.tv_sec = ts.tv_sec;
-	tv.tv_usec = (suseconds_t) ts.tv_nsec / 1000;
-
-	return tv;
-}
-EXPORT_SYMBOL(ns_to_timeval);
-
-struct __kernel_old_timeval ns_to_kernel_old_timeval(const s64 nsec)
+struct __kernel_old_timeval ns_to_kernel_old_timeval(s64 nsec)
 {
 	struct timespec64 ts = ns_to_timespec64(nsec);
 	struct __kernel_old_timeval tv;
@@ -505,7 +462,7 @@ struct __kernel_old_timeval ns_to_kernel_old_timeval(const s64 nsec)
 EXPORT_SYMBOL(ns_to_kernel_old_timeval);
 
 /**
- * set_normalized_timespec - set timespec sec and nsec parts and normalize
+ * set_normalized_timespec64 - set timespec sec and nsec parts and normalize
  *
  * @ts:		pointer to timespec variable to be set
  * @sec:	seconds to set
@@ -546,7 +503,7 @@ EXPORT_SYMBOL(set_normalized_timespec64);
  *
  * Returns the timespec64 representation of the nsec parameter.
  */
-struct timespec64 ns_to_timespec64(const s64 nsec)
+struct timespec64 ns_to_timespec64(s64 nsec)
 {
 	struct timespec64 ts = { 0, 0 };
 	s32 rem;
@@ -569,7 +526,7 @@ struct timespec64 ns_to_timespec64(const s64 nsec)
 EXPORT_SYMBOL(ns_to_timespec64);
 
 /**
- * msecs_to_jiffies: - convert milliseconds to jiffies
+ * __msecs_to_jiffies: - convert milliseconds to jiffies
  * @m:	time in milliseconds
  *
  * conversion is done as follows:
@@ -584,12 +541,12 @@ EXPORT_SYMBOL(ns_to_timespec64);
  *   handling any 32-bit overflows.
  *   for the details see __msecs_to_jiffies()
  *
- * msecs_to_jiffies() checks for the passed in value being a constant
+ * __msecs_to_jiffies() checks for the passed in value being a constant
  * via __builtin_constant_p() allowing gcc to eliminate most of the
  * code, __msecs_to_jiffies() is called if the value passed does not
  * allow constant folding and the actual conversion must be done at
  * runtime.
- * the _msecs_to_jiffies helpers are the HZ dependent conversion
+ * The _msecs_to_jiffies helpers are the HZ dependent conversion
  * routines found in include/linux/jiffies.h
  */
 unsigned long __msecs_to_jiffies(const unsigned int m)
@@ -614,7 +571,7 @@ EXPORT_SYMBOL(__usecs_to_jiffies);
 /*
  * The TICK_NSEC - 1 rounds up the value to the next resolution.  Note
  * that a remainder subtract here would not do the right thing as the
- * resolution values don't fall on second boundries.  I.e. the line:
+ * resolution values don't fall on second boundaries.  I.e. the line:
  * nsec -= nsec % TICK_NSEC; is NOT a correct resolution rounding.
  * Note that due to the small error in the multiplier here, this
  * rounding is incorrect for sufficiently large values of tv_nsec, but

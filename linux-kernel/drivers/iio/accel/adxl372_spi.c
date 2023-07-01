@@ -40,8 +40,8 @@ static const struct spi_device_id adxl372_spi_id[] = {
 MODULE_DEVICE_TABLE(spi, adxl372_spi_id);
 
 static const struct of_device_id adxl372_of_match[] = {
-        { .compatible = "adi,adxl372" },
-        { },
+	{ .compatible = "adi,adxl372" },
+	{ }
 };
 MODULE_DEVICE_TABLE(of, adxl372_of_match);
 
@@ -59,3 +59,4 @@ module_spi_driver(adxl372_spi_driver);
 MODULE_AUTHOR("Stefan Popa <stefan.popa@analog.com>");
 MODULE_DESCRIPTION("Analog Devices ADXL372 3-axis accelerometer SPI driver");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS(IIO_ADXL372);

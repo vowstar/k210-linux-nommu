@@ -34,8 +34,8 @@ extern struct sort_entry sort_dso_to;
 extern struct sort_entry sort_sym_from;
 extern struct sort_entry sort_sym_to;
 extern struct sort_entry sort_srcline;
-extern enum sort_type sort__first_dimension;
 extern const char default_mem_sort_order[];
+extern bool chk_double_cl;
 
 struct res_sample {
 	u64 time;
@@ -49,7 +49,6 @@ struct he_stat {
 	u64			period_us;
 	u64			period_guest_sys;
 	u64			period_guest_us;
-	u64			weight;
 	u32			nr_events;
 };
 
@@ -101,10 +100,15 @@ struct hist_entry {
 	struct thread		*thread;
 	struct comm		*comm;
 	struct namespace_id	cgroup_id;
+	u64			cgroup;
 	u64			ip;
 	u64			transaction;
 	s32			socket;
 	s32			cpu;
+	u64			code_page_size;
+	u64			weight;
+	u64			ins_lat;
+	u64			p_stage_cyc;
 	u8			cpumode;
 	u8			depth;
 
@@ -224,9 +228,18 @@ enum sort_type {
 	SORT_TRACE,
 	SORT_SYM_SIZE,
 	SORT_DSO_SIZE,
+	SORT_CGROUP,
 	SORT_CGROUP_ID,
 	SORT_SYM_IPC_NULL,
 	SORT_TIME,
+	SORT_CODE_PAGE_SIZE,
+	SORT_LOCAL_INS_LAT,
+	SORT_GLOBAL_INS_LAT,
+	SORT_LOCAL_PIPELINE_STAGE_CYC,
+	SORT_GLOBAL_PIPELINE_STAGE_CYC,
+	SORT_ADDR,
+	SORT_LOCAL_RETIRE_LAT,
+	SORT_GLOBAL_RETIRE_LAT,
 
 	/* branch stack specific sort keys */
 	__SORT_BRANCH_STACK,
@@ -241,6 +254,8 @@ enum sort_type {
 	SORT_SRCLINE_FROM,
 	SORT_SRCLINE_TO,
 	SORT_SYM_IPC,
+	SORT_ADDR_FROM,
+	SORT_ADDR_TO,
 
 	/* memory mode specific sort keys */
 	__SORT_MEMORY_MODE,
@@ -253,6 +268,8 @@ enum sort_type {
 	SORT_MEM_DCACHELINE,
 	SORT_MEM_IADDR_SYMBOL,
 	SORT_MEM_PHYS_DADDR,
+	SORT_MEM_DATA_PAGE_SIZE,
+	SORT_MEM_BLOCKED,
 };
 
 /*
@@ -268,6 +285,7 @@ struct sort_entry {
 	int	(*se_snprintf)(struct hist_entry *he, char *bf, size_t size,
 			       unsigned int width);
 	int	(*se_filter)(struct hist_entry *he, int type, const void *arg);
+	void	(*se_init)(struct hist_entry *he);
 	u8	se_width_idx;
 };
 
@@ -281,7 +299,6 @@ struct block_hist {
 };
 
 extern struct sort_entry sort_thread;
-extern struct list_head hist_entry__sort_list;
 
 struct evlist;
 struct tep_handle;
@@ -291,7 +308,7 @@ void reset_output_field(void);
 void sort__setup_elide(FILE *fp);
 void perf_hpp__set_elide(int idx, bool elide);
 
-const char *sort_help(const char *prefix);
+char *sort_help(const char *prefix);
 
 int report_parse_ignore_callees_opt(const struct option *opt, const char *arg, int unset);
 
@@ -309,5 +326,7 @@ int64_t
 sort__daddr_cmp(struct hist_entry *left, struct hist_entry *right);
 int64_t
 sort__dcacheline_cmp(struct hist_entry *left, struct hist_entry *right);
+int64_t
+_sort__sym_cmp(struct symbol *sym_l, struct symbol *sym_r);
 char *hist_entry__srcline(struct hist_entry *he);
 #endif	/* __PERF_SORT_H */

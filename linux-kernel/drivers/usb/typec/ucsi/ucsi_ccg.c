@@ -125,6 +125,15 @@ struct version_format {
 #define CCG_FW_BUILD_NVIDIA	(('n' << 8) | 'v')
 #define CCG_OLD_FW_VERSION	(CCG_VERSION(0x31) | CCG_VERSION_PATCH(10))
 
+/* Firmware for Tegra doesn't support UCSI ALT command, built
+ * for NVIDIA has known issue of reporting wrong capability info
+ */
+#define CCG_FW_BUILD_NVIDIA_TEGRA	(('g' << 8) | 'n')
+
+/* Altmode offset for NVIDIA Function Test Board (FTB) */
+#define NVIDIA_FTB_DP_OFFSET	(2)
+#define NVIDIA_FTB_DBG_OFFSET	(3)
+
 struct version_info {
 	struct version_format base;
 	struct version_format app;
@@ -321,7 +330,7 @@ static int ucsi_ccg_init(struct ucsi_ccg *uc)
 		if (status < 0)
 			return status;
 
-		if (!data)
+		if (!(data & DEV_INT))
 			return 0;
 
 		status = ccg_write(uc, CCGX_RAB_INTR_REG, &data, sizeof(data));
@@ -477,24 +486,72 @@ static void ucsi_ccg_update_set_new_cam_cmd(struct ucsi_ccg *uc,
 	*cmd |= UCSI_SET_NEW_CAM_SET_AM(cam);
 }
 
+/*
+ * Change the order of vdo values of NVIDIA test device FTB
+ * (Function Test Board) which reports altmode list with vdo=0x3
+ * first and then vdo=0x. Current logic to assign mode value is
+ * based on order in altmode list and it causes a mismatch of CON
+ * and SOP altmodes since NVIDIA GPU connector has order of vdo=0x1
+ * first and then vdo=0x3
+ */
+static void ucsi_ccg_nvidia_altmode(struct ucsi_ccg *uc,
+				    struct ucsi_altmode *alt)
+{
+	switch (UCSI_ALTMODE_OFFSET(uc->last_cmd_sent)) {
+	case NVIDIA_FTB_DP_OFFSET:
+		if (alt[0].mid == USB_TYPEC_NVIDIA_VLINK_DBG_VDO)
+			alt[0].mid = USB_TYPEC_NVIDIA_VLINK_DP_VDO |
+				DP_CAP_DP_SIGNALING | DP_CAP_USB |
+				DP_CONF_SET_PIN_ASSIGN(BIT(DP_PIN_ASSIGN_E));
+		break;
+	case NVIDIA_FTB_DBG_OFFSET:
+		if (alt[0].mid == USB_TYPEC_NVIDIA_VLINK_DP_VDO)
+			alt[0].mid = USB_TYPEC_NVIDIA_VLINK_DBG_VDO;
+		break;
+	default:
+		break;
+	}
+}
+
 static int ucsi_ccg_read(struct ucsi *ucsi, unsigned int offset,
 			 void *val, size_t val_len)
 {
 	struct ucsi_ccg *uc = ucsi_get_drvdata(ucsi);
-	int ret;
 	u16 reg = CCGX_RAB_UCSI_DATA_BLOCK(offset);
+	struct ucsi_capability *cap;
+	struct ucsi_altmode *alt;
+	int ret;
 
 	ret = ccg_read(uc, reg, val, val_len);
 	if (ret)
 		return ret;
 
-	if (offset == UCSI_MESSAGE_IN) {
-		if (UCSI_COMMAND(uc->last_cmd_sent) == UCSI_GET_CURRENT_CAM &&
-		    uc->has_multiple_dp) {
+	if (offset != UCSI_MESSAGE_IN)
+		return ret;
+
+	switch (UCSI_COMMAND(uc->last_cmd_sent)) {
+	case UCSI_GET_CURRENT_CAM:
+		if (uc->has_multiple_dp)
 			ucsi_ccg_update_get_current_cam_cmd(uc, (u8 *)val);
+		break;
+	case UCSI_GET_ALTERNATE_MODES:
+		if (UCSI_ALTMODE_RECIPIENT(uc->last_cmd_sent) ==
+		    UCSI_RECIPIENT_SOP) {
+			alt = val;
+			if (alt[0].svid == USB_TYPEC_NVIDIA_VLINK_SID)
+				ucsi_ccg_nvidia_altmode(uc, alt);
 		}
-		uc->last_cmd_sent = 0;
+		break;
+	case UCSI_GET_CAPABILITY:
+		if (uc->fw_build == CCG_FW_BUILD_NVIDIA_TEGRA) {
+			cap = val;
+			cap->features &= ~UCSI_CAP_ALT_MODE_DETAILS;
+		}
+		break;
+	default:
+		break;
 	}
+	uc->last_cmd_sent = 0;
 
 	return ret;
 }
@@ -580,6 +637,16 @@ err_clear_irq:
 	ccg_write(uc, CCGX_RAB_INTR_REG, &intr_reg, sizeof(intr_reg));
 
 	return IRQ_HANDLED;
+}
+
+static int ccg_request_irq(struct ucsi_ccg *uc)
+{
+	unsigned long flags = IRQF_ONESHOT;
+
+	if (!dev_fwnode(uc->dev))
+		flags |= IRQF_TRIGGER_HIGH;
+
+	return request_threaded_irq(uc->irq, NULL, ccg_irq_handler, flags, dev_name(uc->dev), uc);
 }
 
 static void ccg_pm_workaround_work(struct work_struct *pm_work)
@@ -1205,9 +1272,7 @@ static int ccg_restart(struct ucsi_ccg *uc)
 		return status;
 	}
 
-	status = request_threaded_irq(uc->irq, NULL, ccg_irq_handler,
-				      IRQF_ONESHOT | IRQF_TRIGGER_HIGH,
-				      dev_name(dev), uc);
+	status = ccg_request_irq(uc);
 	if (status < 0) {
 		dev_err(dev, "request_threaded_irq failed - %d\n", status);
 		return status;
@@ -1219,6 +1284,7 @@ static int ccg_restart(struct ucsi_ccg *uc)
 		return status;
 	}
 
+	pm_runtime_enable(uc->dev);
 	return 0;
 }
 
@@ -1234,6 +1300,7 @@ static void ccg_update_firmware(struct work_struct *work)
 
 	if (flash_mode != FLASH_NOT_NEEDED) {
 		ucsi_unregister(uc->ucsi);
+		pm_runtime_disable(uc->dev);
 		free_irq(uc->irq, uc);
 
 		ccg_fw_update(uc, flash_mode);
@@ -1271,11 +1338,11 @@ static struct attribute *ucsi_ccg_attrs[] = {
 };
 ATTRIBUTE_GROUPS(ucsi_ccg);
 
-static int ucsi_ccg_probe(struct i2c_client *client,
-			  const struct i2c_device_id *id)
+static int ucsi_ccg_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct ucsi_ccg *uc;
+	const char *fw_name;
 	int status;
 
 	uc = devm_kzalloc(dev, sizeof(*uc), GFP_KERNEL);
@@ -1284,15 +1351,22 @@ static int ucsi_ccg_probe(struct i2c_client *client,
 
 	uc->dev = dev;
 	uc->client = client;
+	uc->irq = client->irq;
 	mutex_init(&uc->lock);
 	init_completion(&uc->complete);
 	INIT_WORK(&uc->work, ccg_update_firmware);
 	INIT_WORK(&uc->pm_work, ccg_pm_workaround_work);
 
 	/* Only fail FW flashing when FW build information is not provided */
-	status = device_property_read_u16(dev, "ccgx,firmware-build",
-					  &uc->fw_build);
-	if (status)
+	status = device_property_read_string(dev, "firmware-name", &fw_name);
+	if (!status) {
+		if (!strcmp(fw_name, "nvidia,jetson-agx-xavier"))
+			uc->fw_build = CCG_FW_BUILD_NVIDIA_TEGRA;
+		else if (!strcmp(fw_name, "nvidia,gpu"))
+			uc->fw_build = CCG_FW_BUILD_NVIDIA;
+	}
+
+	if (!uc->fw_build)
 		dev_err(uc->dev, "failed to get FW build information\n");
 
 	/* reset ccg device and initialize ucsi */
@@ -1319,15 +1393,11 @@ static int ucsi_ccg_probe(struct i2c_client *client,
 
 	ucsi_set_drvdata(uc->ucsi, uc);
 
-	status = request_threaded_irq(client->irq, NULL, ccg_irq_handler,
-				      IRQF_ONESHOT | IRQF_TRIGGER_HIGH,
-				      dev_name(dev), uc);
+	status = ccg_request_irq(uc);
 	if (status < 0) {
 		dev_err(uc->dev, "request_threaded_irq failed - %d\n", status);
 		goto out_ucsi_destroy;
 	}
-
-	uc->irq = client->irq;
 
 	status = ucsi_register(uc->ucsi);
 	if (status)
@@ -1351,7 +1421,7 @@ out_ucsi_destroy:
 	return status;
 }
 
-static int ucsi_ccg_remove(struct i2c_client *client)
+static void ucsi_ccg_remove(struct i2c_client *client)
 {
 	struct ucsi_ccg *uc = i2c_get_clientdata(client);
 
@@ -1361,15 +1431,25 @@ static int ucsi_ccg_remove(struct i2c_client *client)
 	ucsi_unregister(uc->ucsi);
 	ucsi_destroy(uc->ucsi);
 	free_irq(uc->irq, uc);
-
-	return 0;
 }
+
+static const struct of_device_id ucsi_ccg_of_match_table[] = {
+		{ .compatible = "cypress,cypd4226", },
+		{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(of, ucsi_ccg_of_match_table);
 
 static const struct i2c_device_id ucsi_ccg_device_id[] = {
 	{"ccgx-ucsi", 0},
 	{}
 };
 MODULE_DEVICE_TABLE(i2c, ucsi_ccg_device_id);
+
+static const struct acpi_device_id amd_i2c_ucsi_match[] = {
+	{"AMDI0042"},
+	{}
+};
+MODULE_DEVICE_TABLE(acpi, amd_i2c_ucsi_match);
 
 static int ucsi_ccg_resume(struct device *dev)
 {
@@ -1412,8 +1492,10 @@ static struct i2c_driver ucsi_ccg_driver = {
 		.name = "ucsi_ccg",
 		.pm = &ucsi_ccg_pm,
 		.dev_groups = ucsi_ccg_groups,
+		.acpi_match_table = amd_i2c_ucsi_match,
+		.of_match_table = ucsi_ccg_of_match_table,
 	},
-	.probe = ucsi_ccg_probe,
+	.probe_new = ucsi_ccg_probe,
 	.remove = ucsi_ccg_remove,
 	.id_table = ucsi_ccg_device_id,
 };

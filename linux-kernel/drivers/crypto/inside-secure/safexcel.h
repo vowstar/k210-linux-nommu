@@ -11,8 +11,11 @@
 #include <crypto/aead.h>
 #include <crypto/algapi.h>
 #include <crypto/internal/hash.h>
-#include <crypto/sha.h>
+#include <crypto/sha1.h>
+#include <crypto/sha2.h>
+#include <crypto/sha3.h>
 #include <crypto/skcipher.h>
+#include <linux/types.h>
 
 #define EIP197_HIA_VERSION_BE			0xca35
 #define EIP197_HIA_VERSION_LE			0x35ca
@@ -22,6 +25,7 @@
 #define EIP96_VERSION_LE			0x9f60
 #define EIP201_VERSION_LE			0x36c9
 #define EIP206_VERSION_LE			0x31ce
+#define EIP207_VERSION_LE			0x30cf
 #define EIP197_REG_LO16(reg)			(reg & 0xffff)
 #define EIP197_REG_HI16(reg)			((reg >> 16) & 0xffff)
 #define EIP197_VERSION_MASK(reg)		((reg >> 16) & 0xfff)
@@ -34,6 +38,7 @@
 
 /* EIP206 OPTIONS ENCODING */
 #define EIP206_OPT_ICE_TYPE(n)			((n>>8)&3)
+#define EIP206_OPT_OCE_TYPE(n)			((n>>10)&3)
 
 /* EIP197 OPTIONS ENCODING */
 #define EIP197_OPT_HAS_TRC			BIT(31)
@@ -168,6 +173,7 @@
 #define EIP197_PE_ICE_FPP_CTRL(n)		(0x0d80 + (0x2000 * (n)))
 #define EIP197_PE_ICE_PPTF_CTRL(n)		(0x0e00 + (0x2000 * (n)))
 #define EIP197_PE_ICE_RAM_CTRL(n)		(0x0ff0 + (0x2000 * (n)))
+#define EIP197_PE_ICE_VERSION(n)		(0x0ffc + (0x2000 * (n)))
 #define EIP197_PE_EIP96_TOKEN_CTRL(n)		(0x1000 + (0x2000 * (n)))
 #define EIP197_PE_EIP96_FUNCTION_EN(n)		(0x1004 + (0x2000 * (n)))
 #define EIP197_PE_EIP96_CONTEXT_CTRL(n)		(0x1008 + (0x2000 * (n)))
@@ -176,8 +182,11 @@
 #define EIP197_PE_EIP96_FUNCTION2_EN(n)		(0x1030 + (0x2000 * (n)))
 #define EIP197_PE_EIP96_OPTIONS(n)		(0x13f8 + (0x2000 * (n)))
 #define EIP197_PE_EIP96_VERSION(n)		(0x13fc + (0x2000 * (n)))
+#define EIP197_PE_OCE_VERSION(n)		(0x1bfc + (0x2000 * (n)))
 #define EIP197_PE_OUT_DBUF_THRES(n)		(0x1c00 + (0x2000 * (n)))
 #define EIP197_PE_OUT_TBUF_THRES(n)		(0x1d00 + (0x2000 * (n)))
+#define EIP197_PE_PSE_VERSION(n)		(0x1efc + (0x2000 * (n)))
+#define EIP197_PE_DEBUG(n)			(0x1ff4 + (0x2000 * (n)))
 #define EIP197_PE_OPTIONS(n)			(0x1ff8 + (0x2000 * (n)))
 #define EIP197_PE_VERSION(n)			(0x1ffc + (0x2000 * (n)))
 #define EIP197_MST_CTRL				0xfff4
@@ -352,6 +361,9 @@
 /* EIP197_PE_EIP96_TOKEN_CTRL2 */
 #define EIP197_PE_EIP96_TOKEN_CTRL2_CTX_DONE	BIT(3)
 
+/* EIP197_PE_DEBUG */
+#define EIP197_DEBUG_OCE_BYPASS			BIT(1)
+
 /* EIP197_STRC_CONFIG */
 #define EIP197_STRC_CONFIG_INIT			BIT(31)
 #define EIP197_STRC_CONFIG_LARGE_REC(s)		(s<<8)
@@ -485,15 +497,15 @@ struct result_data_desc {
 	u32 packet_length:17;
 	u32 error_code:15;
 
-	u8 bypass_length:4;
-	u8 e15:1;
-	u16 rsvd0;
-	u8 hash_bytes:1;
-	u8 hash_length:6;
-	u8 generic_bytes:1;
-	u8 checksum:1;
-	u8 next_header:1;
-	u8 length:1;
+	u32 bypass_length:4;
+	u32 e15:1;
+	u32 rsvd0:16;
+	u32 hash_bytes:1;
+	u32 hash_length:6;
+	u32 generic_bytes:1;
+	u32 checksum:1;
+	u32 next_header:1;
+	u32 length:1;
 
 	u16 application_id;
 	u16 rsvd1;
@@ -707,6 +719,9 @@ struct safexcel_ring {
 	 */
 	struct crypto_async_request *req;
 	struct crypto_async_request *backlog;
+
+	/* irq of this ring */
+	int irq;
 };
 
 /* EIP integration context flags */
@@ -715,7 +730,13 @@ enum safexcel_eip_version {
 	EIP97IES_MRVL,
 	EIP197B_MRVL,
 	EIP197D_MRVL,
-	EIP197_DEVBRD
+	EIP197_DEVBRD,
+	EIP197C_MXL,
+};
+
+struct safexcel_priv_data {
+	enum safexcel_eip_version version;
+	bool fw_little_endian;
 };
 
 /* Priority we use for advertising our algorithms */
@@ -773,6 +794,7 @@ enum safexcel_flags {
 	EIP197_PE_ARB		= BIT(2),
 	EIP197_ICE		= BIT(3),
 	EIP197_SIMPLE_TRC	= BIT(4),
+	EIP197_OCE		= BIT(5),
 };
 
 struct safexcel_hwconfig {
@@ -780,7 +802,10 @@ struct safexcel_hwconfig {
 	int hwver;
 	int hiaver;
 	int ppver;
+	int icever;
 	int pever;
+	int ocever;
+	int psever;
 	int hwdataw;
 	int hwcfsize;
 	int hwrfsize;
@@ -796,7 +821,7 @@ struct safexcel_crypto_priv {
 	struct clk *reg_clk;
 	struct safexcel_config config;
 
-	enum safexcel_eip_version version;
+	struct safexcel_priv_data *data;
 	struct safexcel_register_offsets offsets;
 	struct safexcel_hwconfig hwconfig;
 	u32 flags;
@@ -816,7 +841,15 @@ struct safexcel_context {
 			     struct crypto_async_request *req, bool *complete,
 			     int *ret);
 	struct safexcel_context_record *ctxr;
+	struct safexcel_crypto_priv *priv;
 	dma_addr_t ctxr_dma;
+
+	union {
+		__le32 le[SHA3_512_BLOCK_SIZE / 4];
+		__be32 be[SHA3_512_BLOCK_SIZE / 4];
+		u32 word[SHA3_512_BLOCK_SIZE / 4];
+		u8 byte[SHA3_512_BLOCK_SIZE];
+	} ipad, opad;
 
 	int ring;
 	bool needs_inv;
@@ -849,11 +882,6 @@ struct safexcel_alg_template {
 		struct aead_alg aead;
 		struct ahash_alg ahash;
 	} alg;
-};
-
-struct safexcel_inv_result {
-	struct completion completion;
-	int error;
 };
 
 void safexcel_dequeue(struct safexcel_crypto_priv *priv, int ring);
@@ -894,9 +922,9 @@ void safexcel_rdr_req_set(struct safexcel_crypto_priv *priv,
 			  struct crypto_async_request *req);
 inline struct crypto_async_request *
 safexcel_rdr_req_get(struct safexcel_crypto_priv *priv, int ring);
-void safexcel_inv_complete(struct crypto_async_request *req, int error);
-int safexcel_hmac_setkey(const char *alg, const u8 *key, unsigned int keylen,
-			 void *istate, void *ostate);
+int safexcel_hmac_setkey(struct safexcel_context *base, const u8 *key,
+			 unsigned int keylen, const char *alg,
+			 unsigned int state_sz);
 
 /* available algorithms */
 extern struct safexcel_alg_template safexcel_alg_ecb_des;

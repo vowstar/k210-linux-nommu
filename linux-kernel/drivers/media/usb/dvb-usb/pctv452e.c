@@ -20,6 +20,7 @@
 #include "stb6100.h"
 #include "stb6100_cfg.h"
 /* FE Power */
+#include "isl6423.h"
 #include "lnbp22.h"
 
 #include <media/dvb_ca_en50221.h>
@@ -81,6 +82,13 @@ enum {
 static struct stb0899_postproc pctv45e_postproc[] = {
 	{ PCTV_LED_GPIO, STB0899_GPIOPULLUP },
 	{ 0, 0 }
+};
+
+static struct isl6423_config pctv452e_isl6423_config = {
+	.current_max		= SEC_CURRENT_515m,
+	.curlim			= SEC_CURRENT_LIM_ON,
+	.mod_extern		= 1,
+	.addr			= 0x08,
 };
 
 /*
@@ -909,15 +917,23 @@ static int pctv452e_frontend_attach(struct dvb_usb_adapter *a)
 						&a->dev->i2c_adap);
 	if (!a->fe_adap[0].fe)
 		return -ENODEV;
-	if ((dvb_attach(lnbp22_attach, a->fe_adap[0].fe,
-					&a->dev->i2c_adap)) == NULL)
-		err("Cannot attach lnbp22\n");
 
 	id = a->dev->desc->warm_ids[0];
-	if (USB_VID_TECHNOTREND == id->idVendor
-	    && USB_PID_TECHNOTREND_CONNECT_S2_3650_CI == id->idProduct)
+	if (id->idVendor == USB_VID_TECHNOTREND &&
+	    id->idProduct == USB_PID_TECHNOTREND_CONNECT_S2_3650_CI) {
+		if (dvb_attach(lnbp22_attach,
+			       a->fe_adap[0].fe,
+			       &a->dev->i2c_adap) == NULL) {
+			err("Cannot attach lnbp22\n");
+		}
 		/* Error ignored. */
 		tt3650_ci_init(a);
+	} else if (dvb_attach(isl6423_attach,
+			      a->fe_adap[0].fe,
+			      &a->dev->i2c_adap,
+			      &pctv452e_isl6423_config) == NULL) {
+		err("Cannot attach isl6423\n");
+	}
 
 	return 0;
 }
@@ -935,13 +951,19 @@ static int pctv452e_tuner_attach(struct dvb_usb_adapter *a)
 	return 0;
 }
 
-static struct usb_device_id pctv452e_usb_table[] = {
-	{USB_DEVICE(USB_VID_PINNACLE, USB_PID_PCTV_452E)},
-	{USB_DEVICE(USB_VID_TECHNOTREND, USB_PID_TECHNOTREND_CONNECT_S2_3600)},
-	{USB_DEVICE(USB_VID_TECHNOTREND,
-				USB_PID_TECHNOTREND_CONNECT_S2_3650_CI)},
-	{}
+enum {
+	PINNACLE_PCTV_452E,
+	TECHNOTREND_CONNECT_S2_3600,
+	TECHNOTREND_CONNECT_S2_3650_CI,
 };
+
+static struct usb_device_id pctv452e_usb_table[] = {
+	DVB_USB_DEV(PINNACLE, PINNACLE_PCTV_452E),
+	DVB_USB_DEV(TECHNOTREND, TECHNOTREND_CONNECT_S2_3600),
+	DVB_USB_DEV(TECHNOTREND, TECHNOTREND_CONNECT_S2_3650_CI),
+	{ }
+};
+
 MODULE_DEVICE_TABLE(usb, pctv452e_usb_table);
 
 static struct dvb_usb_device_properties pctv452e_properties = {
@@ -990,7 +1012,7 @@ static struct dvb_usb_device_properties pctv452e_properties = {
 	.devices = {
 		{ .name = "PCTV HDTV USB",
 		  .cold_ids = { NULL, NULL }, /* this is a warm only device */
-		  .warm_ids = { &pctv452e_usb_table[0], NULL }
+		  .warm_ids = { &pctv452e_usb_table[PINNACLE_PCTV_452E], NULL }
 		},
 		{ NULL },
 	}
@@ -1044,11 +1066,11 @@ static struct dvb_usb_device_properties tt_connect_s2_3600_properties = {
 	.devices = {
 		{ .name = "Technotrend TT Connect S2-3600",
 		  .cold_ids = { NULL, NULL }, /* this is a warm only device */
-		  .warm_ids = { &pctv452e_usb_table[1], NULL }
+		  .warm_ids = { &pctv452e_usb_table[TECHNOTREND_CONNECT_S2_3600], NULL }
 		},
 		{ .name = "Technotrend TT Connect S2-3650-CI",
 		  .cold_ids = { NULL, NULL },
-		  .warm_ids = { &pctv452e_usb_table[2], NULL }
+		  .warm_ids = { &pctv452e_usb_table[TECHNOTREND_CONNECT_S2_3650_CI], NULL }
 		},
 		{ NULL },
 	}

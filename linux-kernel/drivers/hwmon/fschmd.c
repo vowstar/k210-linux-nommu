@@ -214,11 +214,10 @@ static const int FSCHMD_NO_TEMP_SENSORS[7] = { 3, 3, 4, 3, 5, 5, 11 };
  * Functions declarations
  */
 
-static int fschmd_probe(struct i2c_client *client,
-			const struct i2c_device_id *id);
+static int fschmd_probe(struct i2c_client *client);
 static int fschmd_detect(struct i2c_client *client,
 			 struct i2c_board_info *info);
-static int fschmd_remove(struct i2c_client *client);
+static void fschmd_remove(struct i2c_client *client);
 static struct fschmd_data *fschmd_update_device(struct device *dev);
 
 /*
@@ -242,7 +241,7 @@ static struct i2c_driver fschmd_driver = {
 	.driver = {
 		.name	= "fschmd",
 	},
-	.probe		= fschmd_probe,
+	.probe_new	= fschmd_probe,
 	.remove		= fschmd_remove,
 	.id_table	= fschmd_id,
 	.detect		= fschmd_detect,
@@ -265,7 +264,7 @@ struct fschmd_data {
 	unsigned long watchdog_is_open;
 	char watchdog_expect_close;
 	char watchdog_name[10]; /* must be unique to avoid sysfs conflict */
-	char valid; /* zero until following fields are valid */
+	bool valid; /* false until following fields are valid */
 	unsigned long last_updated; /* in jiffies */
 
 	/* register values */
@@ -1076,20 +1075,19 @@ static int fschmd_detect(struct i2c_client *client,
 	else
 		return -ENODEV;
 
-	strlcpy(info->type, fschmd_id[kind].name, I2C_NAME_SIZE);
+	strscpy(info->type, fschmd_id[kind].name, I2C_NAME_SIZE);
 
 	return 0;
 }
 
-static int fschmd_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int fschmd_probe(struct i2c_client *client)
 {
 	struct fschmd_data *data;
-	const char * const names[7] = { "Poseidon", "Hermes", "Scylla",
+	static const char * const names[7] = { "Poseidon", "Hermes", "Scylla",
 				"Heracles", "Heimdall", "Hades", "Syleus" };
-	const int watchdog_minors[] = { WATCHDOG_MINOR, 212, 213, 214, 215 };
+	static const int watchdog_minors[] = { WATCHDOG_MINOR, 212, 213, 214, 215 };
 	int i, err;
-	enum chips kind = id->driver_data;
+	enum chips kind = i2c_match_id(fschmd_id, client)->driver_data;
 
 	data = kzalloc(sizeof(struct fschmd_data), GFP_KERNEL);
 	if (!data)
@@ -1250,7 +1248,7 @@ exit_detach:
 	return err;
 }
 
-static int fschmd_remove(struct i2c_client *client)
+static void fschmd_remove(struct i2c_client *client)
 {
 	struct fschmd_data *data = i2c_get_clientdata(client);
 	int i;
@@ -1293,8 +1291,6 @@ static int fschmd_remove(struct i2c_client *client)
 	mutex_lock(&watchdog_data_mutex);
 	kref_put(&data->kref, fschmd_release_resources);
 	mutex_unlock(&watchdog_data_mutex);
-
-	return 0;
 }
 
 static struct fschmd_data *fschmd_update_device(struct device *dev)
@@ -1358,7 +1354,7 @@ static struct fschmd_data *fschmd_update_device(struct device *dev)
 					       FSCHMD_REG_VOLT[data->kind][i]);
 
 		data->last_updated = jiffies;
-		data->valid = 1;
+		data->valid = true;
 	}
 
 	mutex_unlock(&data->update_lock);

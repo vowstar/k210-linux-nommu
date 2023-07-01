@@ -2,7 +2,7 @@
 /*
  * rWTM BIU Mailbox driver for Armada 37xx
  *
- * Author: Marek Behun <marek.behun@nic.cz>
+ * Author: Marek Behún <kabel@kernel.org>
  */
 
 #include <linux/device.h>
@@ -156,16 +156,12 @@ static int armada_37xx_mbox_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	mbox->base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(mbox->base)) {
-		dev_err(&pdev->dev, "ioremap failed\n");
+	if (IS_ERR(mbox->base))
 		return PTR_ERR(mbox->base);
-	}
 
 	mbox->irq = platform_get_irq(pdev, 0);
-	if (mbox->irq < 0) {
-		dev_err(&pdev->dev, "Cannot get irq\n");
+	if (mbox->irq < 0)
 		return mbox->irq;
-	}
 
 	mbox->dev = &pdev->dev;
 
@@ -207,4 +203,4 @@ module_platform_driver(armada_37xx_mbox_driver);
 
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("rWTM BIU Mailbox driver for Armada 37xx");
-MODULE_AUTHOR("Marek Behun <marek.behun@nic.cz>");
+MODULE_AUTHOR("Marek Behun <kabel@kernel.org>");

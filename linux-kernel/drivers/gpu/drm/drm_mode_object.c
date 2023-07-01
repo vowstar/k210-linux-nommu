@@ -91,7 +91,7 @@ void drm_mode_object_register(struct drm_device *dev,
 }
 
 /**
- * drm_mode_object_unregister - free a modeset identifer
+ * drm_mode_object_unregister - free a modeset identifier
  * @dev: DRM device
  * @object: object to free
  *
@@ -115,7 +115,7 @@ void drm_mode_object_unregister(struct drm_device *dev,
 }
 
 /**
- * drm_lease_required - check types which must be leased to be used
+ * drm_mode_object_lease_required - check types which must be leased to be used
  * @type: type of object
  *
  * Returns whether the provided type of drm_mode_object must
@@ -297,11 +297,26 @@ int drm_object_property_set_value(struct drm_mode_object *obj,
 }
 EXPORT_SYMBOL(drm_object_property_set_value);
 
+static int __drm_object_property_get_prop_value(struct drm_mode_object *obj,
+						struct drm_property *property,
+						uint64_t *val)
+{
+	int i;
+
+	for (i = 0; i < obj->properties->count; i++) {
+		if (obj->properties->properties[i] == property) {
+			*val = obj->properties->values[i];
+			return 0;
+		}
+	}
+
+	return -EINVAL;
+}
+
 static int __drm_object_property_get_value(struct drm_mode_object *obj,
 					   struct drm_property *property,
 					   uint64_t *val)
 {
-	int i;
 
 	/* read-only properties bypass atomic mechanism and still store
 	 * their value in obj->properties->values[].. mostly to avoid
@@ -311,15 +326,7 @@ static int __drm_object_property_get_value(struct drm_mode_object *obj,
 			!(property->flags & DRM_MODE_PROP_IMMUTABLE))
 		return drm_atomic_get_property(obj, property, val);
 
-	for (i = 0; i < obj->properties->count; i++) {
-		if (obj->properties->properties[i] == property) {
-			*val = obj->properties->values[i];
-			return 0;
-		}
-
-	}
-
-	return -EINVAL;
+	return __drm_object_property_get_prop_value(obj, property, val);
 }
 
 /**
@@ -347,6 +354,32 @@ int drm_object_property_get_value(struct drm_mode_object *obj,
 	return __drm_object_property_get_value(obj, property, val);
 }
 EXPORT_SYMBOL(drm_object_property_get_value);
+
+/**
+ * drm_object_property_get_default_value - retrieve the default value of a
+ * property when in atomic mode.
+ * @obj: drm mode object to get property value from
+ * @property: property to retrieve
+ * @val: storage for the property value
+ *
+ * This function retrieves the default state of the given property as passed in
+ * to drm_object_attach_property
+ *
+ * Only atomic drivers should call this function directly, as for non-atomic
+ * drivers it will return the current value.
+ *
+ * Returns:
+ * Zero on success, error code on failure.
+ */
+int drm_object_property_get_default_value(struct drm_mode_object *obj,
+					  struct drm_property *property,
+					  uint64_t *val)
+{
+	WARN_ON(!drm_drv_uses_atomic_modeset(property->dev));
+
+	return __drm_object_property_get_prop_value(obj, property, val);
+}
+EXPORT_SYMBOL(drm_object_property_get_default_value);
 
 /* helper for getconnector and getproperties ioctls */
 int drm_mode_object_get_properties(struct drm_mode_object *obj, bool atomic,
@@ -402,12 +435,13 @@ int drm_mode_obj_get_properties_ioctl(struct drm_device *dev, void *data,
 {
 	struct drm_mode_obj_get_properties *arg = data;
 	struct drm_mode_object *obj;
+	struct drm_modeset_acquire_ctx ctx;
 	int ret = 0;
 
 	if (!drm_core_check_feature(dev, DRIVER_MODESET))
 		return -EOPNOTSUPP;
 
-	drm_modeset_lock_all(dev);
+	DRM_MODESET_LOCK_ALL_BEGIN(dev, ctx, 0, ret);
 
 	obj = drm_mode_object_find(dev, file_priv, arg->obj_id, arg->obj_type);
 	if (!obj) {
@@ -427,7 +461,7 @@ int drm_mode_obj_get_properties_ioctl(struct drm_device *dev, void *data,
 out_unref:
 	drm_mode_object_put(obj);
 out:
-	drm_modeset_unlock_all(dev);
+	DRM_MODESET_LOCK_ALL_END(dev, ctx, ret);
 	return ret;
 }
 
@@ -449,12 +483,13 @@ static int set_property_legacy(struct drm_mode_object *obj,
 {
 	struct drm_device *dev = prop->dev;
 	struct drm_mode_object *ref;
+	struct drm_modeset_acquire_ctx ctx;
 	int ret = -EINVAL;
 
 	if (!drm_property_change_valid_get(prop, prop_value, &ref))
 		return -EINVAL;
 
-	drm_modeset_lock_all(dev);
+	DRM_MODESET_LOCK_ALL_BEGIN(dev, ctx, 0, ret);
 	switch (obj->type) {
 	case DRM_MODE_OBJECT_CONNECTOR:
 		ret = drm_connector_set_obj_prop(obj, prop, prop_value);
@@ -468,7 +503,7 @@ static int set_property_legacy(struct drm_mode_object *obj,
 		break;
 	}
 	drm_property_change_valid_put(prop, ref);
-	drm_modeset_unlock_all(dev);
+	DRM_MODESET_LOCK_ALL_END(dev, ctx, ret);
 
 	return ret;
 }

@@ -9,6 +9,7 @@
  * for more details.
  */
 
+#include <linux/aperture.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
@@ -372,6 +373,11 @@ static int kyro_dev_overlay_viewport_set(u32 x, u32 y, u32 ulWidth, u32 ulHeight
 		/* probably haven't called CreateOverlay yet */
 		return -EINVAL;
 
+	if (ulWidth == 0 || ulWidth == 0xffffffff ||
+	    ulHeight == 0 || ulHeight == 0xffffffff ||
+	    (x < 2 && ulWidth + 2 == 0))
+		return -EINVAL;
+
 	/* Stop Ramdac Output */
 	DisableRamdacOutput(deviceInfo.pSTGReg);
 
@@ -393,6 +399,9 @@ static inline unsigned long get_line_length(int x, int bpp)
 static int kyrofb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 {
 	struct kyrofb_info *par = info->par;
+
+	if (!var->pixclock)
+		return -EINVAL;
 
 	if (var->bits_per_pixel != 16 && var->bits_per_pixel != 32) {
 		printk(KERN_WARNING "kyrofb: depth not supported: %u\n", var->bits_per_pixel);
@@ -486,6 +495,8 @@ static int kyrofb_set_par(struct fb_info *info)
 				    info->var.hsync_len +
 				    info->var.left_margin)) / 1000;
 
+	if (!lineclock)
+		return -EINVAL;
 
 	/* time for a frame in ns (precision in 32bpp) */
 	frameclock = lineclock * (info->var.yres +
@@ -666,6 +677,10 @@ static int kyrofb_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	unsigned long size;
 	int err;
 
+	err = aperture_remove_conflicting_pci_devices(pdev, "kyrofb");
+	if (err)
+		return err;
+
 	if ((err = pci_enable_device(pdev))) {
 		printk(KERN_WARNING "kyrofb: Can't enable pdev: %d\n", err);
 		return err;
@@ -774,7 +789,12 @@ static int __init kyrofb_init(void)
 {
 #ifndef MODULE
 	char *option = NULL;
+#endif
 
+	if (fb_modesetting_disabled("kyrofb"))
+		return -ENODEV;
+
+#ifndef MODULE
 	if (fb_get_options("kyrofb", &option))
 		return -ENODEV;
 	kyrofb_setup(option);

@@ -86,11 +86,12 @@ static void octeon2_usb_clocks_start(struct device *dev)
 					 "refclk-frequency", &clock_rate);
 		if (i) {
 			dev_err(dev, "No UCTL \"refclk-frequency\"\n");
+			of_node_put(uctl_node);
 			goto exit;
 		}
 		i = of_property_read_string(uctl_node,
 					    "refclk-type", &clock_type);
-
+		of_node_put(uctl_node);
 		if (!i && strcmp("crystal", clock_type) == 0)
 			is_crystal_clock = true;
 	}
@@ -141,7 +142,7 @@ static void octeon2_usb_clocks_start(struct device *dev)
 	default:
 		pr_err("Invalid UCTL clock rate of %u, using 12000000 instead\n",
 			clock_rate);
-		/* Fall through */
+		fallthrough;
 	case 12000000:
 		clk_rst_ctl.s.p_refclk_div = 0;
 		break;
@@ -328,6 +329,7 @@ static int __init octeon_ehci_device_init(void)
 
 	pd->dev.platform_data = &octeon_ehci_pdata;
 	octeon_ehci_hw_start(&pd->dev);
+	put_device(&pd->dev);
 
 	return ret;
 }
@@ -391,6 +393,7 @@ static int __init octeon_ohci_device_init(void)
 
 	pd->dev.platform_data = &octeon_ohci_pdata;
 	octeon_ohci_hw_start(&pd->dev);
+	put_device(&pd->dev);
 
 	return ret;
 }
@@ -1116,7 +1119,7 @@ end_led:
 				new_f[0] = cpu_to_be32(48000000);
 				fdt_setprop_inplace(initial_boot_params, usbn,
 						    "refclk-frequency",  new_f, sizeof(new_f));
-				/* Fall through ...*/
+				fallthrough;
 			case USB_CLOCK_TYPE_REF_12:
 				/* Missing "refclk-type" defaults to external. */
 				fdt_nop_property(initial_boot_params, usbn, "refclk-type");

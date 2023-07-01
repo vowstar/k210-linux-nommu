@@ -108,7 +108,6 @@ if (!$kernel) {
 sub declare_function() {
 	my ($name, $align, $nargs) = @_;
 	if($kernel) {
-		$code .= ".align $align\n";
 		$code .= "SYM_FUNC_START($name)\n";
 		$code .= ".L$name:\n";
 	} else {
@@ -246,12 +245,12 @@ $code.=<<___ if (!$kernel);
 ___
 &declare_function("poly1305_init_x86_64", 32, 3);
 $code.=<<___;
-	xor	%rax,%rax
+	xor	%eax,%eax
 	mov	%rax,0($ctx)		# initialize hash value
 	mov	%rax,8($ctx)
 	mov	%rax,16($ctx)
 
-	cmp	\$0,$inp
+	test	$inp,$inp
 	je	.Lno_key
 ___
 $code.=<<___ if (!$kernel);
@@ -297,7 +296,7 @@ ___
 $code.=<<___;
 	mov	\$1,%eax
 .Lno_key:
-	ret
+	RET
 ___
 &end_function("poly1305_init_x86_64");
 
@@ -373,7 +372,7 @@ $code.=<<___;
 .cfi_adjust_cfa_offset	-48
 .Lno_data:
 .Lblocks_epilogue:
-	ret
+	RET
 .cfi_endproc
 ___
 &end_function("poly1305_blocks_x86_64");
@@ -399,14 +398,10 @@ $code.=<<___;
 	mov	%rax,0($mac)	# write result
 	mov	%rcx,8($mac)
 
-	ret
+	RET
 ___
 &end_function("poly1305_emit_x86_64");
 if ($avx) {
-
-if($kernel) {
-	$code .= "#ifdef CONFIG_AS_AVX\n";
-}
 
 ########################################################################
 # Layout of opaque area is following.
@@ -433,7 +428,7 @@ ___
 	&poly1305_iteration();
 $code.=<<___;
 	pop $ctx
-	ret
+	RET
 .size	__poly1305_block,.-__poly1305_block
 
 .type	__poly1305_init_avx,\@abi-omnipotent
@@ -598,7 +593,7 @@ __poly1305_init_avx:
 
 	lea	-48-64($ctx),$ctx	# size [de-]optimization
 	pop %rbp
-	ret
+	RET
 .size	__poly1305_init_avx,.-__poly1305_init_avx
 ___
 
@@ -751,7 +746,7 @@ $code.=<<___;
 .cfi_restore	%rbp
 .Lno_data_avx:
 .Lblocks_avx_epilogue:
-	ret
+	RET
 .cfi_endproc
 
 .align	32
@@ -1456,7 +1451,7 @@ $code.=<<___	if (!$win64);
 ___
 $code.=<<___;
 	vzeroupper
-	ret
+	RET
 .cfi_endproc
 ___
 &end_function("poly1305_blocks_avx");
@@ -1512,19 +1507,11 @@ $code.=<<___;
 	mov	%rax,0($mac)	# write result
 	mov	%rcx,8($mac)
 
-	ret
+	RET
 ___
 &end_function("poly1305_emit_avx");
 
-if ($kernel) {
-	$code .= "#endif\n";
-}
-
 if ($avx>1) {
-
-if ($kernel) {
-	$code .= "#ifdef CONFIG_AS_AVX2\n";
-}
 
 my ($H0,$H1,$H2,$H3,$H4, $MASK, $T4,$T0,$T1,$T2,$T3, $D0,$D1,$D2,$D3,$D4) =
     map("%ymm$_",(0..15));
@@ -1687,7 +1674,7 @@ $code.=<<___;
 .cfi_restore 	%rbp
 .Lno_data_avx2$suffix:
 .Lblocks_avx2_epilogue$suffix:
-	ret
+	RET
 .cfi_endproc
 
 .align	32
@@ -2213,7 +2200,7 @@ $code.=<<___	if (!$win64);
 ___
 $code.=<<___;
 	vzeroupper
-	ret
+	RET
 .cfi_endproc
 ___
 if($avx > 2 && $avx512) {
@@ -2804,7 +2791,7 @@ $code.=<<___	if (!$win64);
 .cfi_def_cfa_register	%rsp
 ___
 $code.=<<___;
-	ret
+	RET
 .cfi_endproc
 ___
 
@@ -2815,10 +2802,6 @@ ___
 &declare_function("poly1305_blocks_avx2", 32, 4);
 poly1305_blocks_avxN(0);
 &end_function("poly1305_blocks_avx2");
-
-if($kernel) {
-	$code .= "#endif\n";
-}
 
 #######################################################################
 if ($avx>2) {
@@ -2869,7 +2852,7 @@ $code.=<<___;
 .type	poly1305_init_base2_44,\@function,3
 .align	32
 poly1305_init_base2_44:
-	xor	%rax,%rax
+	xor	%eax,%eax
 	mov	%rax,0($ctx)		# initialize hash value
 	mov	%rax,8($ctx)
 	mov	%rax,16($ctx)
@@ -2909,7 +2892,7 @@ $code.=<<___	if ($flavour =~ /elf32/);
 ___
 $code.=<<___;
 	mov	\$1,%eax
-	ret
+	RET
 .size	poly1305_init_base2_44,.-poly1305_init_base2_44
 ___
 {
@@ -3026,7 +3009,7 @@ poly1305_blocks_vpmadd52:
 	jnz		.Lblocks_vpmadd52_4x
 
 .Lno_data_vpmadd52:
-	ret
+	RET
 .size	poly1305_blocks_vpmadd52,.-poly1305_blocks_vpmadd52
 ___
 }
@@ -3467,7 +3450,7 @@ poly1305_blocks_vpmadd52_4x:
 	vzeroall
 
 .Lno_data_vpmadd52_4x:
-	ret
+	RET
 .size	poly1305_blocks_vpmadd52_4x,.-poly1305_blocks_vpmadd52_4x
 ___
 }
@@ -3840,7 +3823,7 @@ $code.=<<___;
 	vzeroall
 
 .Lno_data_vpmadd52_8x:
-	ret
+	RET
 .size	poly1305_blocks_vpmadd52_8x,.-poly1305_blocks_vpmadd52_8x
 ___
 }
@@ -3877,7 +3860,7 @@ poly1305_emit_base2_44:
 	mov	%rax,0($mac)	# write result
 	mov	%rcx,8($mac)
 
-	ret
+	RET
 .size	poly1305_emit_base2_44,.-poly1305_emit_base2_44
 ___
 }	}	}
@@ -3932,7 +3915,7 @@ xor128_encrypt_n_pad:
 
 .Ldone_enc:
 	mov	$otp,%rax
-	ret
+	RET
 .size	xor128_encrypt_n_pad,.-xor128_encrypt_n_pad
 
 .globl	xor128_decrypt_n_pad
@@ -3963,7 +3946,7 @@ xor128_decrypt_n_pad:
 	mov	\$16,$len
 	sub	%r10,$len
 	xor	%eax,%eax
-	xor	%r11,%r11
+	xor	%r11d,%r11d
 .Loop_dec_byte:
 	mov	($inp,$otp),%r11b
 	mov	($otp),%al
@@ -3983,7 +3966,7 @@ xor128_decrypt_n_pad:
 
 .Ldone_dec:
 	mov	$otp,%rax
-	ret
+	RET
 .size	xor128_decrypt_n_pad,.-xor128_decrypt_n_pad
 ___
 }
@@ -4101,7 +4084,7 @@ avx_handler:
 	.long	0xa548f3fc		# cld; rep movsq
 
 	mov	$disp,%rsi
-	xor	%rcx,%rcx		# arg1, UNW_FLAG_NHANDLER
+	xor	%ecx,%ecx		# arg1, UNW_FLAG_NHANDLER
 	mov	8(%rsi),%rdx		# arg2, disp->ImageBase
 	mov	0(%rsi),%r8		# arg3, disp->ControlPc
 	mov	16(%rsi),%r9		# arg4, disp->FunctionEntry
@@ -4125,7 +4108,7 @@ avx_handler:
 	pop	%rbx
 	pop	%rdi
 	pop	%rsi
-	ret
+	RET
 .size	avx_handler,.-avx_handler
 
 .section	.pdata

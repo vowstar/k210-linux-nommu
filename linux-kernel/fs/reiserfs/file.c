@@ -159,7 +159,7 @@ static int reiserfs_sync_file(struct file *filp, loff_t start, loff_t end,
 	barrier_done = reiserfs_commit_for_inode(inode);
 	reiserfs_write_unlock(inode->i_sb);
 	if (barrier_done != 1 && reiserfs_barrier_flush(inode->i_sb))
-		blkdev_issue_flush(inode->i_sb->s_bdev, GFP_KERNEL, NULL);
+		blkdev_issue_flush(inode->i_sb->s_bdev);
 	inode_unlock(inode);
 	if (barrier_done < 0)
 		return barrier_done;
@@ -227,7 +227,7 @@ drop_write_lock:
 	}
 	/*
 	 * If this is a partial write which happened to make all buffers
-	 * uptodate then we can optimize away a bogus readpage() for
+	 * uptodate then we can optimize away a bogus read_folio() for
 	 * the next read(). Here we 'discover' whether the page went
 	 * uptodate as a result of this (potentially partial) write.
 	 */
@@ -256,6 +256,8 @@ const struct inode_operations reiserfs_file_inode_operations = {
 	.setattr = reiserfs_setattr,
 	.listxattr = reiserfs_listxattr,
 	.permission = reiserfs_permission,
-	.get_acl = reiserfs_get_acl,
+	.get_inode_acl = reiserfs_get_acl,
 	.set_acl = reiserfs_set_acl,
+	.fileattr_get = reiserfs_fileattr_get,
+	.fileattr_set = reiserfs_fileattr_set,
 };

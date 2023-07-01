@@ -59,7 +59,7 @@
 				#qca,ddr-wb-channel-cells = <1>;
 			};
 
-			uart: uart@18020000 {
+			uart: serial@18020000 {
 				compatible = "qca,ar9330-uart";
 				reg = <0x18020000 0x14>;
 
@@ -148,6 +148,7 @@
 			fixed-link {
 				speed = <1000>;
 				full-duplex;
+				pause;
 			};
 
 			mdio {
@@ -175,7 +176,6 @@
 
 						switch_port0: port@0 {
 							reg = <0x0>;
-							label = "cpu";
 							ethernet = <&eth1>;
 
 							phy-mode = "gmii";
@@ -183,6 +183,7 @@
 							fixed-link {
 								speed = <1000>;
 								full-duplex;
+								pause;
 							};
 						};
 

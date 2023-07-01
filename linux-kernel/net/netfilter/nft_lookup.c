@@ -17,11 +17,42 @@
 
 struct nft_lookup {
 	struct nft_set			*set;
-	enum nft_registers		sreg:8;
-	enum nft_registers		dreg:8;
+	u8				sreg;
+	u8				dreg;
 	bool				invert;
 	struct nft_set_binding		binding;
 };
+
+#ifdef CONFIG_RETPOLINE
+bool nft_set_do_lookup(const struct net *net, const struct nft_set *set,
+		       const u32 *key, const struct nft_set_ext **ext)
+{
+	if (set->ops == &nft_set_hash_fast_type.ops)
+		return nft_hash_lookup_fast(net, set, key, ext);
+	if (set->ops == &nft_set_hash_type.ops)
+		return nft_hash_lookup(net, set, key, ext);
+
+	if (set->ops == &nft_set_rhash_type.ops)
+		return nft_rhash_lookup(net, set, key, ext);
+
+	if (set->ops == &nft_set_bitmap_type.ops)
+		return nft_bitmap_lookup(net, set, key, ext);
+
+	if (set->ops == &nft_set_pipapo_type.ops)
+		return nft_pipapo_lookup(net, set, key, ext);
+#if defined(CONFIG_X86_64) && !defined(CONFIG_UML)
+	if (set->ops == &nft_set_pipapo_avx2_type.ops)
+		return nft_pipapo_avx2_lookup(net, set, key, ext);
+#endif
+
+	if (set->ops == &nft_set_rbtree_type.ops)
+		return nft_rbtree_lookup(net, set, key, ext);
+
+	WARN_ON_ONCE(1);
+	return set->ops->lookup(net, set, key, ext);
+}
+EXPORT_SYMBOL_GPL(nft_set_do_lookup);
+#endif
 
 void nft_lookup_eval(const struct nft_expr *expr,
 		     struct nft_regs *regs,
@@ -29,20 +60,27 @@ void nft_lookup_eval(const struct nft_expr *expr,
 {
 	const struct nft_lookup *priv = nft_expr_priv(expr);
 	const struct nft_set *set = priv->set;
-	const struct nft_set_ext *ext;
+	const struct nft_set_ext *ext = NULL;
+	const struct net *net = nft_net(pkt);
 	bool found;
 
-	found = set->ops->lookup(nft_net(pkt), set, &regs->data[priv->sreg],
-				 &ext) ^ priv->invert;
+	found =	nft_set_do_lookup(net, set, &regs->data[priv->sreg], &ext) ^
+				  priv->invert;
 	if (!found) {
-		regs->verdict.code = NFT_BREAK;
-		return;
+		ext = nft_set_catchall_lookup(net, set);
+		if (!ext) {
+			regs->verdict.code = NFT_BREAK;
+			return;
+		}
 	}
 
-	if (set->flags & NFT_SET_MAP)
-		nft_data_copy(&regs->data[priv->dreg],
-			      nft_set_ext_data(ext), set->dlen);
+	if (ext) {
+		if (set->flags & NFT_SET_MAP)
+			nft_data_copy(&regs->data[priv->dreg],
+				      nft_set_ext_data(ext), set->dlen);
 
+		nft_set_elem_update_expr(ext, regs, pkt);
+	}
 }
 
 static const struct nla_policy nft_lookup_policy[NFTA_LOOKUP_MAX + 1] = {
@@ -73,8 +111,8 @@ static int nft_lookup_init(const struct nft_ctx *ctx,
 	if (IS_ERR(set))
 		return PTR_ERR(set);
 
-	priv->sreg = nft_parse_register(tb[NFTA_LOOKUP_SREG]);
-	err = nft_validate_register_load(priv->sreg, set->klen);
+	err = nft_parse_register_load(tb[NFTA_LOOKUP_SREG], &priv->sreg,
+				      set->klen);
 	if (err < 0)
 		return err;
 
@@ -97,9 +135,9 @@ static int nft_lookup_init(const struct nft_ctx *ctx,
 		if (!(set->flags & NFT_SET_MAP))
 			return -EINVAL;
 
-		priv->dreg = nft_parse_register(tb[NFTA_LOOKUP_DREG]);
-		err = nft_validate_register_store(ctx, priv->dreg, NULL,
-						  set->dtype, set->dlen);
+		err = nft_parse_register_store(ctx, tb[NFTA_LOOKUP_DREG],
+					       &priv->dreg, NULL, set->dtype,
+					       set->dlen);
 		if (err < 0)
 			return err;
 	} else if (set->flags & NFT_SET_MAP)
@@ -140,7 +178,8 @@ static void nft_lookup_destroy(const struct nft_ctx *ctx,
 	nf_tables_destroy_set(ctx, priv->set);
 }
 
-static int nft_lookup_dump(struct sk_buff *skb, const struct nft_expr *expr)
+static int nft_lookup_dump(struct sk_buff *skb,
+			   const struct nft_expr *expr, bool reset)
 {
 	const struct nft_lookup *priv = nft_expr_priv(expr);
 	u32 flags = priv->invert ? NFT_LOOKUP_F_INV : 0;
@@ -160,37 +199,6 @@ nla_put_failure:
 	return -1;
 }
 
-static int nft_lookup_validate_setelem(const struct nft_ctx *ctx,
-				       struct nft_set *set,
-				       const struct nft_set_iter *iter,
-				       struct nft_set_elem *elem)
-{
-	const struct nft_set_ext *ext = nft_set_elem_ext(set, elem->priv);
-	struct nft_ctx *pctx = (struct nft_ctx *)ctx;
-	const struct nft_data *data;
-	int err;
-
-	if (nft_set_ext_exists(ext, NFT_SET_EXT_FLAGS) &&
-	    *nft_set_ext_flags(ext) & NFT_SET_ELEM_INTERVAL_END)
-		return 0;
-
-	data = nft_set_ext_data(ext);
-	switch (data->verdict.code) {
-	case NFT_JUMP:
-	case NFT_GOTO:
-		pctx->level++;
-		err = nft_chain_validate(ctx, data->verdict.chain);
-		if (err < 0)
-			return err;
-		pctx->level--;
-		break;
-	default:
-		break;
-	}
-
-	return 0;
-}
-
 static int nft_lookup_validate(const struct nft_ctx *ctx,
 			       const struct nft_expr *expr,
 			       const struct nft_data **d)
@@ -206,13 +214,27 @@ static int nft_lookup_validate(const struct nft_ctx *ctx,
 	iter.skip	= 0;
 	iter.count	= 0;
 	iter.err	= 0;
-	iter.fn		= nft_lookup_validate_setelem;
+	iter.fn		= nft_setelem_validate;
 
 	priv->set->ops->walk(ctx, priv->set, &iter);
+	if (!iter.err)
+		iter.err = nft_set_catchall_validate(ctx, priv->set);
+
 	if (iter.err < 0)
 		return iter.err;
 
 	return 0;
+}
+
+static bool nft_lookup_reduce(struct nft_regs_track *track,
+			      const struct nft_expr *expr)
+{
+	const struct nft_lookup *priv = nft_expr_priv(expr);
+
+	if (priv->set->flags & NFT_SET_MAP)
+		nft_reg_track_cancel(track, priv->dreg, priv->set->dlen);
+
+	return false;
 }
 
 static const struct nft_expr_ops nft_lookup_ops = {
@@ -225,6 +247,7 @@ static const struct nft_expr_ops nft_lookup_ops = {
 	.destroy	= nft_lookup_destroy,
 	.dump		= nft_lookup_dump,
 	.validate	= nft_lookup_validate,
+	.reduce		= nft_lookup_reduce,
 };
 
 struct nft_expr_type nft_lookup_type __read_mostly = {

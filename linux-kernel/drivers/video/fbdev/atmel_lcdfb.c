@@ -49,7 +49,6 @@ struct atmel_lcdfb_info {
 	struct clk		*lcdc_clk;
 
 	struct backlight_device	*backlight;
-	u8			bl_power;
 	u8			saved_lcdcon;
 
 	u32			pseudo_palette[16];
@@ -109,22 +108,7 @@ static u32 contrast_ctr = ATMEL_LCDC_PS_DIV8
 static int atmel_bl_update_status(struct backlight_device *bl)
 {
 	struct atmel_lcdfb_info *sinfo = bl_get_data(bl);
-	int			power = sinfo->bl_power;
-	int			brightness = bl->props.brightness;
-
-	/* REVISIT there may be a meaningful difference between
-	 * fb_blank and power ... there seem to be some cases
-	 * this doesn't handle correctly.
-	 */
-	if (bl->props.fb_blank != sinfo->bl_power)
-		power = bl->props.fb_blank;
-	else if (bl->props.power != sinfo->bl_power)
-		power = bl->props.power;
-
-	if (brightness < 0 && power == FB_BLANK_UNBLANK)
-		brightness = lcdc_readl(sinfo, ATMEL_LCDC_CONTRAST_VAL);
-	else if (power != FB_BLANK_UNBLANK)
-		brightness = 0;
+	int			brightness = backlight_get_brightness(bl);
 
 	lcdc_writel(sinfo, ATMEL_LCDC_CONTRAST_VAL, brightness);
 	if (contrast_ctr & ATMEL_LCDC_POL_POSITIVE)
@@ -132,8 +116,6 @@ static int atmel_bl_update_status(struct backlight_device *bl)
 			brightness ? contrast_ctr : 0);
 	else
 		lcdc_writel(sinfo, ATMEL_LCDC_CONTRAST_CTR, contrast_ctr);
-
-	bl->props.fb_blank = bl->props.power = sinfo->bl_power = power;
 
 	return 0;
 }
@@ -154,8 +136,6 @@ static void init_backlight(struct atmel_lcdfb_info *sinfo)
 {
 	struct backlight_properties props;
 	struct backlight_device	*bl;
-
-	sinfo->bl_power = FB_BLANK_UNBLANK;
 
 	if (sinfo->backlight)
 		return;
@@ -508,7 +488,7 @@ static int atmel_lcdfb_check_var(struct fb_var_screeninfo *var,
 	case 32:
 		var->transp.offset = 24;
 		var->transp.length = 8;
-		/* fall through */
+		fallthrough;
 	case 24:
 		if (pdata->lcd_wiring_mode == ATMEL_LCDC_WIRING_RGB) {
 			/* RGB:888 mode */
@@ -633,7 +613,7 @@ static int atmel_lcdfb_set_par(struct fb_info *info)
 		case 2: value |= ATMEL_LCDC_PIXELSIZE_2; break;
 		case 4: value |= ATMEL_LCDC_PIXELSIZE_4; break;
 		case 8: value |= ATMEL_LCDC_PIXELSIZE_8; break;
-		case 15: /* fall through */
+		case 15: fallthrough;
 		case 16: value |= ATMEL_LCDC_PIXELSIZE_16; break;
 		case 24: value |= ATMEL_LCDC_PIXELSIZE_24; break;
 		case 32: value |= ATMEL_LCDC_PIXELSIZE_32; break;
@@ -987,8 +967,8 @@ static int atmel_lcdfb_of_init(struct atmel_lcdfb_info *sinfo)
 	}
 
 	INIT_LIST_HEAD(&pdata->pwr_gpios);
-	ret = -ENOMEM;
 	for (i = 0; i < gpiod_count(dev, "atmel,power-control"); i++) {
+		ret = -ENOMEM;
 		gpiod = devm_gpiod_get_index(dev, "atmel,power-control",
 					     i, GPIOD_ASIS);
 		if (IS_ERR(gpiod))
@@ -1062,15 +1042,16 @@ static int __init atmel_lcdfb_probe(struct platform_device *pdev)
 
 	INIT_LIST_HEAD(&info->modelist);
 
-	if (pdev->dev.of_node) {
-		ret = atmel_lcdfb_of_init(sinfo);
-		if (ret)
-			goto free_info;
-	} else {
+	if (!pdev->dev.of_node) {
 		dev_err(dev, "cannot get default configuration\n");
 		goto free_info;
 	}
 
+	ret = atmel_lcdfb_of_init(sinfo);
+	if (ret)
+		goto free_info;
+
+	ret = -ENODEV;
 	if (!sinfo->config)
 		goto free_info;
 
@@ -1114,7 +1095,6 @@ static int __init atmel_lcdfb_probe(struct platform_device *pdev)
 
 	sinfo->irq_base = platform_get_irq(pdev, 0);
 	if (sinfo->irq_base < 0) {
-		dev_err(dev, "unable to get irq\n");
 		ret = sinfo->irq_base;
 		goto stop_clk;
 	}

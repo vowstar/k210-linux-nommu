@@ -11,6 +11,8 @@
 #ifndef _XTENSA_PAGE_H
 #define _XTENSA_PAGE_H
 
+#include <linux/const.h>
+
 #include <asm/processor.h>
 #include <asm/types.h>
 #include <asm/cache.h>
@@ -189,12 +191,6 @@ static inline unsigned long ___pa(unsigned long va)
 #endif
 #define __va(x)	\
 	((void *)((unsigned long) (x) - PHYS_OFFSET + PAGE_OFFSET))
-#define pfn_valid(pfn) \
-	((pfn) >= ARCH_PFN_OFFSET && ((pfn) - ARCH_PFN_OFFSET) < max_mapnr)
-
-#ifdef CONFIG_DISCONTIGMEM
-# error CONFIG_DISCONTIGMEM not supported
-#endif
 
 #define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
 #define page_to_virt(page)	__va(page_to_pfn(page) << PAGE_SHIFT)
@@ -202,9 +198,6 @@ static inline unsigned long ___pa(unsigned long va)
 #define page_to_phys(page)	(page_to_pfn(page) << PAGE_SHIFT)
 
 #endif /* __ASSEMBLY__ */
-
-#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
-				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
 #include <asm-generic/memory_model.h>
 #endif /* _XTENSA_PAGE_H */

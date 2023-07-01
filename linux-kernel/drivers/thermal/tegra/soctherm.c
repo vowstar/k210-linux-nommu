@@ -421,9 +421,9 @@ static int translate_temp(u16 val)
 	return t;
 }
 
-static int tegra_thermctl_get_temp(void *data, int *out_temp)
+static int tegra_thermctl_get_temp(struct thermal_zone_device *tz, int *out_temp)
 {
-	struct tegra_thermctl_zone *zone = data;
+	struct tegra_thermctl_zone *zone = tz->devdata;
 	u32 val;
 
 	val = readl(zone->reg);
@@ -450,8 +450,8 @@ static int enforce_temp_range(struct device *dev, int trip_temp)
 
 	temp = clamp_val(trip_temp, min_low_temp, max_high_temp);
 	if (temp != trip_temp)
-		dev_info(dev, "soctherm: trip temperature %d forced to %d\n",
-			 trip_temp, temp);
+		dev_dbg(dev, "soctherm: trip temperature %d forced to %d\n",
+			trip_temp, temp);
 	return temp;
 }
 
@@ -582,24 +582,23 @@ static int tsensor_group_thermtrip_get(struct tegra_soctherm *ts, int id)
 	return temp;
 }
 
-static int tegra_thermctl_set_trip_temp(void *data, int trip, int temp)
+static int tegra_thermctl_set_trip_temp(struct thermal_zone_device *tz, int trip_id, int temp)
 {
-	struct tegra_thermctl_zone *zone = data;
-	struct thermal_zone_device *tz = zone->tz;
+	struct tegra_thermctl_zone *zone = tz->devdata;
 	struct tegra_soctherm *ts = zone->ts;
+	struct thermal_trip trip;
 	const struct tegra_tsensor_group *sg = zone->sg;
 	struct device *dev = zone->dev;
-	enum thermal_trip_type type;
 	int ret;
 
 	if (!tz)
 		return -EINVAL;
 
-	ret = tz->ops->get_trip_type(tz, trip, &type);
+	ret = __thermal_zone_get_trip(tz, trip_id, &trip);
 	if (ret)
 		return ret;
 
-	if (type == THERMAL_TRIP_CRITICAL) {
+	if (trip.type == THERMAL_TRIP_CRITICAL) {
 		/*
 		 * If thermtrips property is set in DT,
 		 * doesn't need to program critical type trip to HW,
@@ -610,7 +609,7 @@ static int tegra_thermctl_set_trip_temp(void *data, int trip, int temp)
 		else
 			return 0;
 
-	} else if (type == THERMAL_TRIP_HOT) {
+	} else if (trip.type == THERMAL_TRIP_HOT) {
 		int i;
 
 		for (i = 0; i < THROTTLE_SIZE; i++) {
@@ -621,44 +620,13 @@ static int tegra_thermctl_set_trip_temp(void *data, int trip, int temp)
 				continue;
 
 			cdev = ts->throt_cfgs[i].cdev;
-			if (get_thermal_instance(tz, cdev, trip))
+			if (get_thermal_instance(tz, cdev, trip_id))
 				stc = find_throttle_cfg_by_name(ts, cdev->type);
 			else
 				continue;
 
 			return throttrip_program(dev, sg, stc, temp);
 		}
-	}
-
-	return 0;
-}
-
-static int tegra_thermctl_get_trend(void *data, int trip,
-				    enum thermal_trend *trend)
-{
-	struct tegra_thermctl_zone *zone = data;
-	struct thermal_zone_device *tz = zone->tz;
-	int trip_temp, temp, last_temp, ret;
-
-	if (!tz)
-		return -EINVAL;
-
-	ret = tz->ops->get_trip_temp(zone->tz, trip, &trip_temp);
-	if (ret)
-		return ret;
-
-	temp = READ_ONCE(tz->temperature);
-	last_temp = READ_ONCE(tz->last_temperature);
-
-	if (temp > trip_temp) {
-		if (temp >= last_temp)
-			*trend = THERMAL_TREND_RAISING;
-		else
-			*trend = THERMAL_TREND_STABLE;
-	} else if (temp < trip_temp) {
-		*trend = THERMAL_TREND_DROPPING;
-	} else {
-		*trend = THERMAL_TREND_STABLE;
 	}
 
 	return 0;
@@ -688,9 +656,9 @@ static void thermal_irq_disable(struct tegra_thermctl_zone *zn)
 	mutex_unlock(&zn->ts->thermctl_lock);
 }
 
-static int tegra_thermctl_set_trips(void *data, int lo, int hi)
+static int tegra_thermctl_set_trips(struct thermal_zone_device *tz, int lo, int hi)
 {
-	struct tegra_thermctl_zone *zone = data;
+	struct tegra_thermctl_zone *zone = tz->devdata;
 	u32 r;
 
 	thermal_irq_disable(zone);
@@ -713,32 +681,26 @@ static int tegra_thermctl_set_trips(void *data, int lo, int hi)
 	return 0;
 }
 
-static const struct thermal_zone_of_device_ops tegra_of_thermal_ops = {
+static const struct thermal_zone_device_ops tegra_of_thermal_ops = {
 	.get_temp = tegra_thermctl_get_temp,
 	.set_trip_temp = tegra_thermctl_set_trip_temp,
-	.get_trend = tegra_thermctl_get_trend,
 	.set_trips = tegra_thermctl_set_trips,
 };
 
-static int get_hot_temp(struct thermal_zone_device *tz, int *trip, int *temp)
+static int get_hot_temp(struct thermal_zone_device *tz, int *trip_id, int *temp)
 {
-	int ntrips, i, ret;
-	enum thermal_trip_type type;
+	int i, ret;
+	struct thermal_trip trip;
 
-	ntrips = of_thermal_get_ntrips(tz);
-	if (ntrips <= 0)
-		return -EINVAL;
+	for (i = 0; i < thermal_zone_get_num_trips(tz); i++) {
 
-	for (i = 0; i < ntrips; i++) {
-		ret = tz->ops->get_trip_type(tz, i, &type);
+		ret = thermal_zone_get_trip(tz, i, &trip);
 		if (ret)
 			return -EINVAL;
-		if (type == THERMAL_TRIP_HOT) {
-			ret = tz->ops->get_trip_temp(tz, i, temp);
-			if (!ret)
-				*trip = i;
 
-			return ret;
+		if (trip.type == THERMAL_TRIP_HOT) {
+			*trip_id = i;
+			return 0;
 		}
 	}
 
@@ -780,7 +742,7 @@ static int tegra_soctherm_set_hwtrips(struct device *dev,
 	/* Get thermtrips. If missing, try to get critical trips. */
 	temperature = tsensor_group_thermtrip_get(ts, sg->id);
 	if (min_low_temp == temperature)
-		if (tz->ops->get_crit_temp(tz, &temperature))
+		if (thermal_zone_get_crit_temp(tz, &temperature))
 			temperature = max_high_temp;
 
 	ret = thermtrip_program(dev, sg, temperature);
@@ -2118,7 +2080,6 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 	struct tegra_soctherm *tegra;
 	struct thermal_zone_device *z;
 	struct tsensor_shared_calib shared_calib;
-	struct resource *res;
 	struct tegra_soctherm_soc *soc;
 	unsigned int i;
 	int err;
@@ -2140,26 +2101,20 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 
 	tegra->soc = soc;
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-					   "soctherm-reg");
-	tegra->regs = devm_ioremap_resource(&pdev->dev, res);
+	tegra->regs = devm_platform_ioremap_resource_byname(pdev, "soctherm-reg");
 	if (IS_ERR(tegra->regs)) {
 		dev_err(&pdev->dev, "can't get soctherm registers");
 		return PTR_ERR(tegra->regs);
 	}
 
 	if (!tegra->soc->use_ccroc) {
-		res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-						   "car-reg");
-		tegra->clk_regs = devm_ioremap_resource(&pdev->dev, res);
+		tegra->clk_regs = devm_platform_ioremap_resource_byname(pdev, "car-reg");
 		if (IS_ERR(tegra->clk_regs)) {
 			dev_err(&pdev->dev, "can't get car clk registers");
 			return PTR_ERR(tegra->clk_regs);
 		}
 	} else {
-		res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
-						   "ccroc-reg");
-		tegra->ccroc_regs = devm_ioremap_resource(&pdev->dev, res);
+		tegra->ccroc_regs = devm_platform_ioremap_resource_byname(pdev, "ccroc-reg");
 		if (IS_ERR(tegra->ccroc_regs)) {
 			dev_err(&pdev->dev, "can't get ccroc registers");
 			return PTR_ERR(tegra->ccroc_regs);
@@ -2195,7 +2150,7 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 	if (err)
 		return err;
 
-	/* calculate tsensor calibaration data */
+	/* calculate tsensor calibration data */
 	for (i = 0; i < soc->num_tsensors; ++i) {
 		err = tegra_calc_tsensor_calib(&soc->tsensors[i],
 					       &shared_calib,
@@ -2233,9 +2188,9 @@ static int tegra_soctherm_probe(struct platform_device *pdev)
 		zone->sg = soc->ttgs[i];
 		zone->ts = tegra;
 
-		z = devm_thermal_zone_of_sensor_register(&pdev->dev,
-							 soc->ttgs[i]->id, zone,
-							 &tegra_of_thermal_ops);
+		z = devm_thermal_of_zone_register(&pdev->dev,
+						  soc->ttgs[i]->id, zone,
+						  &tegra_of_thermal_ops);
 		if (IS_ERR(z)) {
 			err = PTR_ERR(z);
 			dev_err(&pdev->dev, "failed to register sensor: %d\n",

@@ -130,11 +130,15 @@
 #include <linux/spinlock.h>
 #include <linux/usb.h>
 #include <linux/proc_fs.h>
-
 #include <linux/atomic.h>
 #include <linux/blkdev.h>
-#include "../../scsi/scsi.h"
+
+#include <scsi/scsi.h>
+#include <scsi/scsi_cmnd.h>
+#include <scsi/scsi_device.h>
+#include <scsi/scsi_eh.h>
 #include <scsi/scsi_host.h>
+#include <scsi/scsi_tcq.h>
 
 #include "microtek.h"
 
@@ -389,7 +393,7 @@ void mts_int_submit_urb (struct urb* transfer,
 	res = usb_submit_urb( transfer, GFP_ATOMIC );
 	if ( unlikely(res) ) {
 		MTS_INT_ERROR( "could not submit URB! Error was %d\n",(int)res );
-		context->srb->result = DID_ERROR << 16;
+		set_host_byte(context->srb, DID_ERROR);
 		mts_transfer_cleanup(transfer);
 	}
 }
@@ -438,7 +442,7 @@ static void mts_data_done( struct urb* transfer )
 		scsi_set_resid(context->srb, context->data_length -
 			       transfer->actual_length);
 	} else if ( unlikely(status) ) {
-		context->srb->result = (status == -ENOENT ? DID_ABORT : DID_ERROR)<<16;
+		set_host_byte(context->srb, (status == -ENOENT ? DID_ABORT : DID_ERROR));
 	}
 
 	mts_get_status(transfer);
@@ -455,12 +459,12 @@ static void mts_command_done( struct urb *transfer )
 	        if (status == -ENOENT) {
 		        /* We are being killed */
 			MTS_DEBUG_GOT_HERE();
-			context->srb->result = DID_ABORT<<16;
+			set_host_byte(context->srb, DID_ABORT);
                 } else {
 		        /* A genuine error has occurred */
 			MTS_DEBUG_GOT_HERE();
 
-		        context->srb->result = DID_ERROR<<16;
+		        set_host_byte(context->srb, DID_ERROR);
                 }
 		mts_transfer_cleanup(transfer);
 
@@ -495,7 +499,7 @@ static void mts_do_sg (struct urb* transfer)
 	                                          scsi_sg_count(context->srb));
 
 	if (unlikely(status)) {
-                context->srb->result = (status == -ENOENT ? DID_ABORT : DID_ERROR)<<16;
+                set_host_byte(context->srb, (status == -ENOENT ? DID_ABORT : DID_ERROR));
 		mts_transfer_cleanup(transfer);
         }
 
@@ -561,10 +565,9 @@ mts_build_transfer_context(struct scsi_cmnd *srb, struct mts_desc* desc)
 	desc->context.data_pipe = pipe;
 }
 
-
-static int
-mts_scsi_queuecommand_lck(struct scsi_cmnd *srb, mts_scsi_cmnd_callback callback)
+static int mts_scsi_queuecommand_lck(struct scsi_cmnd *srb)
 {
+	mts_scsi_cmnd_callback callback = scsi_done;
 	struct mts_desc* desc = (struct mts_desc*)(srb->device->host->hostdata[0]);
 	int res;
 
@@ -578,7 +581,7 @@ mts_scsi_queuecommand_lck(struct scsi_cmnd *srb, mts_scsi_cmnd_callback callback
 
 		MTS_DEBUG("this device doesn't exist\n");
 
-		srb->result = DID_BAD_TARGET << 16;
+		set_host_byte(srb, DID_BAD_TARGET);
 
 		if(likely(callback != NULL))
 			callback(srb);
@@ -605,7 +608,7 @@ mts_scsi_queuecommand_lck(struct scsi_cmnd *srb, mts_scsi_cmnd_callback callback
 
 	if(unlikely(res)){
 		MTS_ERROR("error %d submitting URB\n",(int)res);
-		srb->result = DID_ERROR << 16;
+		set_host_byte(srb, DID_ERROR);
 
 		if(likely(callback != NULL))
 			callback(srb);

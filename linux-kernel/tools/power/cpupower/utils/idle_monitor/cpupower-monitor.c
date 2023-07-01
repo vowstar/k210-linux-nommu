@@ -27,6 +27,8 @@ struct cpuidle_monitor *all_monitors[] = {
 0
 };
 
+int cpu_count;
+
 static struct cpuidle_monitor *monitors[MONITORS_MAX];
 static unsigned int avail_monitors;
 
@@ -457,9 +459,10 @@ int cmd_monitor(int argc, char **argv)
 			print_results(1, cpu);
 	}
 
-	for (num = 0; num < avail_monitors; num++)
-		monitors[num]->unregister();
-
+	for (num = 0; num < avail_monitors; num++) {
+		if (monitors[num]->unregister)
+			monitors[num]->unregister();
+	}
 	cpu_topology_release(cpu_top);
 	return 0;
 }

@@ -95,6 +95,8 @@ struct mt6358_priv {
 	struct regulator *avdd_reg;
 
 	int wov_enabled;
+
+	unsigned int dmic_one_wire_mode;
 };
 
 int mt6358_set_mtkaif_protocol(struct snd_soc_component *cmpnt,
@@ -105,6 +107,7 @@ int mt6358_set_mtkaif_protocol(struct snd_soc_component *cmpnt,
 	priv->mtkaif_protocol = mtkaif_protocol;
 	return 0;
 }
+EXPORT_SYMBOL_GPL(mt6358_set_mtkaif_protocol);
 
 static void playback_gpio_set(struct mt6358_priv *priv)
 {
@@ -271,6 +274,7 @@ int mt6358_mtkaif_calibration_enable(struct snd_soc_component *cmpnt)
 			   1 << RG_AUD_PAD_TOP_DAT_MISO_LOOPBACK_SFT);
 	return 0;
 }
+EXPORT_SYMBOL_GPL(mt6358_mtkaif_calibration_enable);
 
 int mt6358_mtkaif_calibration_disable(struct snd_soc_component *cmpnt)
 {
@@ -294,6 +298,7 @@ int mt6358_mtkaif_calibration_disable(struct snd_soc_component *cmpnt)
 	capture_gpio_reset(priv);
 	return 0;
 }
+EXPORT_SYMBOL_GPL(mt6358_mtkaif_calibration_disable);
 
 int mt6358_set_mtkaif_calibration_phase(struct snd_soc_component *cmpnt,
 					int phase_1, int phase_2)
@@ -308,6 +313,7 @@ int mt6358_set_mtkaif_calibration_phase(struct snd_soc_component *cmpnt,
 			   phase_2 << RG_AUD_PAD_TOP_PHASE_MODE2_SFT);
 	return 0;
 }
+EXPORT_SYMBOL_GPL(mt6358_set_mtkaif_calibration_phase);
 
 /* dl pga gain */
 enum {
@@ -329,7 +335,7 @@ static void hp_zcd_disable(struct mt6358_priv *priv)
 
 static void hp_main_output_ramp(struct mt6358_priv *priv, bool up)
 {
-	int i = 0, stage = 0;
+	int i, stage;
 	int target = 7;
 
 	/* Enable/Reduce HPL/R main output stage step by step */
@@ -345,7 +351,7 @@ static void hp_main_output_ramp(struct mt6358_priv *priv, bool up)
 
 static void hp_aux_feedback_loop_gain_ramp(struct mt6358_priv *priv, bool up)
 {
-	int i = 0, stage = 0;
+	int i, stage;
 
 	/* Reduce HP aux feedback loop gain step by step */
 	for (i = 0; i <= 0xf; i++) {
@@ -554,6 +560,9 @@ static int mt6358_put_wov(struct snd_kcontrol *kcontrol,
 	struct mt6358_priv *priv = snd_soc_component_get_drvdata(c);
 	int enabled = ucontrol->value.integer.value[0];
 
+	if (enabled < 0 || enabled > 1)
+		return -EINVAL;
+
 	if (priv->wov_enabled != enabled) {
 		if (enabled)
 			mt6358_enable_wov_phase2(priv);
@@ -561,6 +570,8 @@ static int mt6358_put_wov(struct snd_kcontrol *kcontrol,
 			mt6358_disable_wov_phase2(priv);
 
 		priv->wov_enabled = enabled;
+
+		return 1;
 	}
 
 	return 0;
@@ -626,9 +637,6 @@ static const char * const hp_in_mux_map[] = {
 	"Audio Playback",
 	"Test Mode",
 	"HP Impedance",
-	"undefined1",
-	"undefined2",
-	"undefined3",
 };
 
 static int hp_in_mux_map_value[] = {
@@ -637,9 +645,6 @@ static int hp_in_mux_map_value[] = {
 	HP_MUX_HP,
 	HP_MUX_TEST_MODE,
 	HP_MUX_HP_IMPEDANCE,
-	HP_MUX_OPEN,
-	HP_MUX_OPEN,
-	HP_MUX_OPEN,
 };
 
 static SOC_VALUE_ENUM_SINGLE_DECL(hpl_in_mux_map_enum,
@@ -1831,7 +1836,10 @@ static int mt6358_dmic_enable(struct mt6358_priv *priv)
 	mt6358_mtkaif_tx_enable(priv);
 
 	/* UL dmic setting */
-	regmap_write(priv->regmap, MT6358_AFE_UL_SRC_CON0_H, 0x0080);
+	if (priv->dmic_one_wire_mode)
+		regmap_write(priv->regmap, MT6358_AFE_UL_SRC_CON0_H, 0x0400);
+	else
+		regmap_write(priv->regmap, MT6358_AFE_UL_SRC_CON0_H, 0x0080);
 
 	/* UL turn on */
 	regmap_write(priv->regmap, MT6358_AFE_UL_SRC_CON0_L, 0x0003);
@@ -2331,12 +2339,9 @@ static const struct snd_soc_dai_ops mt6358_codec_dai_ops = {
 	.hw_params = mt6358_codec_dai_hw_params,
 };
 
-#define MT6358_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S16_BE |\
-			SNDRV_PCM_FMTBIT_U16_LE | SNDRV_PCM_FMTBIT_U16_BE |\
-			SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_S24_BE |\
-			SNDRV_PCM_FMTBIT_U24_LE | SNDRV_PCM_FMTBIT_U24_BE |\
-			SNDRV_PCM_FMTBIT_S32_LE | SNDRV_PCM_FMTBIT_S32_BE |\
-			SNDRV_PCM_FMTBIT_U32_LE | SNDRV_PCM_FMTBIT_U32_BE)
+#define MT6358_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_U16_LE |\
+			SNDRV_PCM_FMTBIT_S24_LE | SNDRV_PCM_FMTBIT_U24_LE |\
+			SNDRV_PCM_FMTBIT_S32_LE | SNDRV_PCM_FMTBIT_U32_LE)
 
 static struct snd_soc_dai_driver mt6358_dai_driver[] = {
 	{
@@ -2424,7 +2429,22 @@ static const struct snd_soc_component_driver mt6358_soc_component_driver = {
 	.num_dapm_widgets = ARRAY_SIZE(mt6358_dapm_widgets),
 	.dapm_routes = mt6358_dapm_routes,
 	.num_dapm_routes = ARRAY_SIZE(mt6358_dapm_routes),
+	.endianness = 1,
 };
+
+static void mt6358_parse_dt(struct mt6358_priv *priv)
+{
+	int ret;
+	struct device *dev = priv->dev;
+
+	ret = of_property_read_u32(dev->of_node, "mediatek,dmic-mode",
+				   &priv->dmic_one_wire_mode);
+	if (ret) {
+		dev_warn(priv->dev, "%s() failed to read dmic-mode\n",
+			 __func__);
+		priv->dmic_one_wire_mode = 0;
+	}
+}
 
 static int mt6358_platform_driver_probe(struct platform_device *pdev)
 {
@@ -2445,6 +2465,8 @@ static int mt6358_platform_driver_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->regmap))
 		return PTR_ERR(priv->regmap);
 
+	mt6358_parse_dt(priv);
+
 	dev_info(priv->dev, "%s(), dev name %s\n",
 		 __func__, dev_name(&pdev->dev));
 
@@ -2456,6 +2478,7 @@ static int mt6358_platform_driver_probe(struct platform_device *pdev)
 
 static const struct of_device_id mt6358_of_match[] = {
 	{.compatible = "mediatek,mt6358-sound",},
+	{.compatible = "mediatek,mt6366-sound",},
 	{}
 };
 MODULE_DEVICE_TABLE(of, mt6358_of_match);

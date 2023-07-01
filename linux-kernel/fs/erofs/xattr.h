@@ -1,8 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) 2017-2018 HUAWEI, Inc.
- *             http://www.huawei.com/
- * Created by Gao Xiang <gaoxiang25@huawei.com>
+ *             https://www.huawei.com/
  */
 #ifndef __EROFS_XATTR_H
 #define __EROFS_XATTR_H
@@ -40,9 +39,7 @@ static inline unsigned int xattrblock_offset(struct erofs_sb_info *sbi,
 #ifdef CONFIG_EROFS_FS_XATTR
 extern const struct xattr_handler erofs_xattr_user_handler;
 extern const struct xattr_handler erofs_xattr_trusted_handler;
-#ifdef CONFIG_EROFS_FS_SECURITY
 extern const struct xattr_handler erofs_xattr_security_handler;
-#endif
 
 static inline const struct xattr_handler *erofs_xattr_handler(unsigned int idx)
 {
@@ -76,18 +73,14 @@ static inline int erofs_getxattr(struct inode *inode, int index,
 	return -EOPNOTSUPP;
 }
 
-static inline ssize_t erofs_listxattr(struct dentry *dentry,
-				      char *buffer, size_t buffer_size)
-{
-	return -EOPNOTSUPP;
-}
+#define erofs_listxattr (NULL)
+#define erofs_xattr_handlers (NULL)
 #endif	/* !CONFIG_EROFS_FS_XATTR */
 
 #ifdef CONFIG_EROFS_FS_POSIX_ACL
-struct posix_acl *erofs_get_acl(struct inode *inode, int type);
+struct posix_acl *erofs_get_acl(struct inode *inode, int type, bool rcu);
 #else
 #define erofs_get_acl	(NULL)
 #endif
 
 #endif
-

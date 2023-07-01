@@ -19,7 +19,7 @@
 #include <linux/spinlock.h>
 #include <linux/wait.h>
 
-#define MAX_MSG_LEN		128
+#define MAX_MSG_LEN		240
 #define IPMB_REQUEST_LEN_MIN	7
 #define NETFN_RSP_BIT_MASK	0x4
 #define REQUEST_QUEUE_MAX_LEN	256
@@ -63,6 +63,7 @@ struct ipmb_dev {
 	spinlock_t lock;
 	wait_queue_head_t wait_queue;
 	struct mutex file_mutex;
+	bool is_i2c_protocol;
 };
 
 static inline struct ipmb_dev *to_ipmb_dev(struct file *file)
@@ -112,12 +113,31 @@ static ssize_t ipmb_read(struct file *file, char __user *buf, size_t count,
 	return ret < 0 ? ret : count;
 }
 
+static int ipmb_i2c_write(struct i2c_client *client, u8 *msg, u8 addr)
+{
+	struct i2c_msg i2c_msg;
+
+	/*
+	 * subtract 1 byte (rq_sa) from the length of the msg passed to
+	 * raw i2c_transfer
+	 */
+	i2c_msg.len = msg[IPMB_MSG_LEN_IDX] - 1;
+
+	/* Assign message to buffer except first 2 bytes (length and address) */
+	i2c_msg.buf = msg + 2;
+
+	i2c_msg.addr = addr;
+	i2c_msg.flags = client->flags & I2C_CLIENT_PEC;
+
+	return i2c_transfer(client->adapter, &i2c_msg, 1);
+}
+
 static ssize_t ipmb_write(struct file *file, const char __user *buf,
 			size_t count, loff_t *ppos)
 {
 	struct ipmb_dev *ipmb_dev = to_ipmb_dev(file);
 	u8 rq_sa, netf_rq_lun, msg_len;
-	union i2c_smbus_data data;
+	struct i2c_client *temp_client;
 	u8 msg[MAX_MSG_LEN];
 	ssize_t ret;
 
@@ -133,22 +153,28 @@ static ssize_t ipmb_write(struct file *file, const char __user *buf,
 	rq_sa = GET_7BIT_ADDR(msg[RQ_SA_8BIT_IDX]);
 	netf_rq_lun = msg[NETFN_LUN_IDX];
 
+	/* Check i2c block transfer vs smbus */
+	if (ipmb_dev->is_i2c_protocol) {
+		ret = ipmb_i2c_write(ipmb_dev->client, msg, rq_sa);
+		return (ret == 1) ? count : ret;
+	}
+
 	/*
-	 * subtract rq_sa and netf_rq_lun from the length of the msg passed to
-	 * i2c_smbus_xfer
+	 * subtract rq_sa and netf_rq_lun from the length of the msg. Fill the
+	 * temporary client. Note that its use is an exception for IPMI.
 	 */
 	msg_len = msg[IPMB_MSG_LEN_IDX] - SMBUS_MSG_HEADER_LENGTH;
-	if (msg_len > I2C_SMBUS_BLOCK_MAX)
-		msg_len = I2C_SMBUS_BLOCK_MAX;
+	temp_client = kmemdup(ipmb_dev->client, sizeof(*temp_client), GFP_KERNEL);
+	if (!temp_client)
+		return -ENOMEM;
 
-	data.block[0] = msg_len;
-	memcpy(&data.block[1], msg + SMBUS_MSG_IDX_OFFSET, msg_len);
-	ret = i2c_smbus_xfer(ipmb_dev->client->adapter, rq_sa,
-			     ipmb_dev->client->flags,
-			     I2C_SMBUS_WRITE, netf_rq_lun,
-			     I2C_SMBUS_BLOCK_DATA, &data);
+	temp_client->addr = rq_sa;
 
-	return ret ? : count;
+	ret = i2c_smbus_write_block_data(temp_client, netf_rq_lun, msg_len,
+					 msg + SMBUS_MSG_IDX_OFFSET);
+	kfree(temp_client);
+
+	return ret < 0 ? ret : count;
 }
 
 static __poll_t ipmb_poll(struct file *file, poll_table *wait)
@@ -253,7 +279,7 @@ static int ipmb_slave_cb(struct i2c_client *client,
 		break;
 
 	case I2C_SLAVE_WRITE_RECEIVED:
-		if (ipmb_dev->msg_idx >= sizeof(struct ipmb_msg))
+		if (ipmb_dev->msg_idx >= sizeof(struct ipmb_msg) - 1)
 			break;
 
 		buf[++ipmb_dev->msg_idx] = *val;
@@ -273,8 +299,7 @@ static int ipmb_slave_cb(struct i2c_client *client,
 	return 0;
 }
 
-static int ipmb_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int ipmb_probe(struct i2c_client *client)
 {
 	struct ipmb_dev *ipmb_dev;
 	int ret;
@@ -302,6 +327,9 @@ static int ipmb_probe(struct i2c_client *client,
 	if (ret)
 		return ret;
 
+	ipmb_dev->is_i2c_protocol
+		= device_property_read_bool(&client->dev, "i2c-protocol");
+
 	ipmb_dev->client = client;
 	i2c_set_clientdata(client, ipmb_dev);
 	ret = i2c_slave_register(client, ipmb_slave_cb);
@@ -313,14 +341,12 @@ static int ipmb_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int ipmb_remove(struct i2c_client *client)
+static void ipmb_remove(struct i2c_client *client)
 {
 	struct ipmb_dev *ipmb_dev = i2c_get_clientdata(client);
 
 	i2c_slave_unregister(client);
 	misc_deregister(&ipmb_dev->miscdev);
-
-	return 0;
 }
 
 static const struct i2c_device_id ipmb_id[] = {
@@ -340,7 +366,7 @@ static struct i2c_driver ipmb_driver = {
 		.name = "ipmb-dev",
 		.acpi_match_table = ACPI_PTR(acpi_ipmb_id),
 	},
-	.probe = ipmb_probe,
+	.probe_new = ipmb_probe,
 	.remove = ipmb_remove,
 	.id_table = ipmb_id,
 };

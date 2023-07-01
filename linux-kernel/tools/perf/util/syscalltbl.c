@@ -8,9 +8,9 @@
 #include "syscalltbl.h"
 #include <stdlib.h>
 #include <linux/compiler.h>
+#include <linux/zalloc.h>
 
 #ifdef HAVE_SYSCALL_TABLE_SUPPORT
-#include <linux/zalloc.h>
 #include <string.h>
 #include "string2.h"
 
@@ -34,6 +34,10 @@ static const char **syscalltbl_native = syscalltbl_powerpc_32;
 #include <asm/syscalls.c>
 const int syscalltbl_native_max_id = SYSCALLTBL_ARM64_MAX_ID;
 static const char **syscalltbl_native = syscalltbl_arm64;
+#elif defined(__mips__)
+#include <asm/syscalls_n64.c>
+const int syscalltbl_native_max_id = SYSCALLTBL_MIPS_N64_MAX_ID;
+static const char **syscalltbl_native = syscalltbl_mips_n64;
 #endif
 
 struct syscall {
@@ -142,7 +146,7 @@ int syscalltbl__strglobmatch_first(struct syscalltbl *tbl, const char *syscall_g
 
 struct syscalltbl *syscalltbl__new(void)
 {
-	struct syscalltbl *tbl = malloc(sizeof(*tbl));
+	struct syscalltbl *tbl = zalloc(sizeof(*tbl));
 	if (tbl)
 		tbl->audit_machine = audit_detect_machine();
 	return tbl;

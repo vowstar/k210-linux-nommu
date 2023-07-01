@@ -1,3 +1,5 @@
+.. SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+
 ===============
 bpftool-feature
 ===============
@@ -7,30 +9,39 @@ tool for inspection of eBPF-related parameters for Linux kernel or net device
 
 :Manual section: 8
 
+.. include:: substitutions.rst
+
 SYNOPSIS
 ========
 
 	**bpftool** [*OPTIONS*] **feature** *COMMAND*
 
-	*OPTIONS* := { { **-j** | **--json** } [{ **-p** | **--pretty** }] }
+	*OPTIONS* := { |COMMON_OPTIONS| }
 
 	*COMMANDS* := { **probe** | **help** }
 
 FEATURE COMMANDS
 ================
 
-|	**bpftool** **feature probe** [*COMPONENT*] [**macros** [**prefix** *PREFIX*]]
+|	**bpftool** **feature probe** [*COMPONENT*] [**full**] [**unprivileged**] [**macros** [**prefix** *PREFIX*]]
+|	**bpftool** **feature list_builtins** *GROUP*
 |	**bpftool** **feature help**
 |
 |	*COMPONENT* := { **kernel** | **dev** *NAME* }
+|	*GROUP* := { **prog_types** | **map_types** | **attach_types** | **link_types** | **helpers** }
 
 DESCRIPTION
 ===========
-	**bpftool feature probe** [**kernel**] [**macros** [**prefix** *PREFIX*]]
+	**bpftool feature probe** [**kernel**] [**full**] [**macros** [**prefix** *PREFIX*]]
 		  Probe the running kernel and dump a number of eBPF-related
-		  parameters, such as availability of the **bpf()** system call,
+		  parameters, such as availability of the **bpf**\ () system call,
 		  JIT status, eBPF program types availability, eBPF helper
 		  functions availability, and more.
+
+		  By default, bpftool **does not run probes** for
+		  **bpf_probe_write_user**\ () and **bpf_trace_printk**\()
+		  helpers which print warnings to kernel logs. To enable them
+		  and run all probes, the **full** keyword should be used.
 
 		  If the **macros** keyword (but not the **-j** option) is
 		  passed, a subset of the output is dumped as a list of
@@ -44,47 +55,36 @@ DESCRIPTION
 		  Keyword **kernel** can be omitted. If no probe target is
 		  specified, probing the kernel is the default behaviour.
 
-		  Note that when probed, some eBPF helpers (e.g.
-		  **bpf_trace_printk**\ () or **bpf_probe_write_user**\ ()) may
-		  print warnings to kernel logs.
+		  When the **unprivileged** keyword is used, bpftool will dump
+		  only the features available to a user who does not have the
+		  **CAP_SYS_ADMIN** capability set. The features available in
+		  that case usually represent a small subset of the parameters
+		  supported by the system. Unprivileged users MUST use the
+		  **unprivileged** keyword: This is to avoid misdetection if
+		  bpftool is inadvertently run as non-root, for example. This
+		  keyword is unavailable if bpftool was compiled without
+		  libcap.
 
-	**bpftool feature probe dev** *NAME* [**macros** [**prefix** *PREFIX*]]
+	**bpftool feature probe dev** *NAME* [**full**] [**macros** [**prefix** *PREFIX*]]
 		  Probe network device for supported eBPF features and dump
 		  results to the console.
 
-		  The two keywords **macros** and **prefix** have the same
-		  role as when probing the kernel.
+		  The keywords **full**, **macros** and **prefix** have the
+		  same role as when probing the kernel.
+
+	**bpftool feature list_builtins** *GROUP*
+		  List items known to bpftool. These can be BPF program types
+		  (**prog_types**), BPF map types (**map_types**), attach types
+		  (**attach_types**), link types (**link_types**), or BPF helper
+		  functions (**helpers**). The command does not probe the system, but
+		  simply lists the elements that bpftool knows from compilation time,
+		  as provided from libbpf (for all object types) or from the BPF UAPI
+		  header (list of helpers). This can be used in scripts to iterate over
+		  BPF types or helpers.
 
 	**bpftool feature help**
 		  Print short help message.
 
 OPTIONS
 =======
-	-h, --help
-		  Print short generic help message (similar to **bpftool help**).
-
-	-V, --version
-		  Print version number (similar to **bpftool version**).
-
-	-j, --json
-		  Generate JSON output. For commands that cannot produce JSON, this
-		  option has no effect.
-
-	-p, --pretty
-		  Generate human-readable JSON output. Implies **-j**.
-
-	-d, --debug
-		  Print all logs available from libbpf, including debug-level
-		  information.
-
-SEE ALSO
-========
-	**bpf**\ (2),
-	**bpf-helpers**\ (7),
-	**bpftool**\ (8),
-	**bpftool-prog**\ (8),
-	**bpftool-map**\ (8),
-	**bpftool-cgroup**\ (8),
-	**bpftool-net**\ (8),
-	**bpftool-perf**\ (8),
-	**bpftool-btf**\ (8)
+	.. include:: common_options.rst

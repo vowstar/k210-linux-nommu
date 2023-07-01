@@ -7,10 +7,13 @@
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/interrupt.h>
+#include <linux/module.h>
 #include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
 
 #include "mtk_cec.h"
+#include "mtk_hdmi.h"
+#include "mtk_drm_drv.h"
 
 #define TR_CONFIG		0x00
 #define CLEAR_CEC_IRQ			BIT(15)
@@ -84,7 +87,7 @@ static void mtk_cec_mask(struct mtk_cec *cec, unsigned int offset,
 	u32 tmp = readl(cec->regs + offset) & ~mask;
 
 	tmp |= val & mask;
-	writel(val, cec->regs + offset);
+	writel(tmp, cec->regs + offset);
 }
 
 void mtk_cec_set_hpd_event(struct device *dev,
@@ -208,10 +211,8 @@ static int mtk_cec_probe(struct platform_device *pdev)
 	}
 
 	cec->irq = platform_get_irq(pdev, 0);
-	if (cec->irq < 0) {
-		dev_err(dev, "Failed to get cec irq: %d\n", cec->irq);
+	if (cec->irq < 0)
 		return cec->irq;
-	}
 
 	ret = devm_request_threaded_irq(dev, cec->irq, NULL,
 					mtk_cec_htplg_isr_thread,
@@ -247,6 +248,7 @@ static const struct of_device_id mtk_cec_of_ids[] = {
 	{ .compatible = "mediatek,mt8173-cec", },
 	{}
 };
+MODULE_DEVICE_TABLE(of, mtk_cec_of_ids);
 
 struct platform_driver mtk_cec_driver = {
 	.probe = mtk_cec_probe,

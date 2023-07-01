@@ -27,7 +27,7 @@
 
 #include <nvif/class.h>
 
-const u8 *
+static const u8 *
 tu102_mmu_kind(struct nvkm_mmu *mmu, int *count, u8 *invalid)
 {
 	static const u8
@@ -51,7 +51,8 @@ tu102_mmu = {
 };
 
 int
-tu102_mmu_new(struct nvkm_device *device, int index, struct nvkm_mmu **pmmu)
+tu102_mmu_new(struct nvkm_device *device, enum nvkm_subdev_type type, int inst,
+	      struct nvkm_mmu **pmmu)
 {
-	return nvkm_mmu_new_(&tu102_mmu, device, index, pmmu);
+	return nvkm_mmu_new_(&tu102_mmu, device, type, inst, pmmu);
 }

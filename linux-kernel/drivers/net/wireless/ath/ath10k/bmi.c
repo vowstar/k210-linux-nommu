@@ -12,18 +12,11 @@
 
 void ath10k_bmi_start(struct ath10k *ar)
 {
-	int ret;
-
 	ath10k_dbg(ar, ATH10K_DBG_BMI, "bmi start\n");
 
 	ar->bmi.done_sent = false;
-
-	/* Enable hardware clock to speed up firmware download */
-	if (ar->hw_params.hw_ops->enable_pll_clk) {
-		ret = ar->hw_params.hw_ops->enable_pll_clk(ar);
-		ath10k_dbg(ar, ATH10K_DBG_BMI, "bmi enable pll ret %d\n", ret);
-	}
 }
+EXPORT_SYMBOL(ath10k_bmi_start);
 
 int ath10k_bmi_done(struct ath10k *ar)
 {
@@ -108,7 +101,7 @@ int ath10k_bmi_get_target_info_sdio(struct ath10k *ar,
 	cmd.id = __cpu_to_le32(BMI_GET_TARGET_INFO);
 
 	/* Step 1: Read 4 bytes of the target info and check if it is
-	 * the special sentinal version word or the first word in the
+	 * the special sentinel version word or the first word in the
 	 * version response.
 	 */
 	resplen = sizeof(u32);
@@ -118,7 +111,7 @@ int ath10k_bmi_get_target_info_sdio(struct ath10k *ar,
 		return ret;
 	}
 
-	/* Some SDIO boards have a special sentinal byte before the real
+	/* Some SDIO boards have a special sentinel byte before the real
 	 * version response.
 	 */
 	if (__le32_to_cpu(tmp) == TARGET_VERSION_SENTINAL) {
@@ -197,6 +190,7 @@ int ath10k_bmi_read_memory(struct ath10k *ar,
 
 	return 0;
 }
+EXPORT_SYMBOL(ath10k_bmi_read_memory);
 
 int ath10k_bmi_write_soc_reg(struct ath10k *ar, u32 address, u32 reg_val)
 {
@@ -380,6 +374,7 @@ static int ath10k_bmi_lz_data_large(struct ath10k *ar, const void *buffer, u32 l
 						  NULL, NULL);
 		if (ret) {
 			ath10k_warn(ar, "unable to write to the device\n");
+			kfree(cmd);
 			return ret;
 		}
 

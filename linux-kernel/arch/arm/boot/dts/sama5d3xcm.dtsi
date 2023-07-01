@@ -14,7 +14,7 @@
 		stdout-path = "serial0:115200n8";
 	};
 
-	memory {
+	memory@20000000 {
 		reg = <0x20000000 0x20000000>;
 	};
 
@@ -130,7 +130,7 @@
 	leds {
 		compatible = "gpio-leds";
 
-		d2 {
+		led-d2 {
 			label = "d2";
 			gpios = <&pioE 25 GPIO_ACTIVE_LOW>;	/* PE25, conflicts with A25, RXD2 */
 			linux,default-trigger = "heartbeat";

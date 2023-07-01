@@ -29,11 +29,14 @@
 #include <linux/list.h>
 
 struct backlight_device;
+struct dentry;
 struct device_node;
 struct drm_connector;
 struct drm_device;
 struct drm_panel;
 struct display_timing;
+
+enum drm_panel_orientation;
 
 /**
  * struct drm_panel_funcs - perform operations on a given panel
@@ -62,8 +65,8 @@ struct display_timing;
  * the panel. This is the job of the .unprepare() function.
  *
  * Backlight can be handled automatically if configured using
- * drm_panel_of_backlight(). Then the driver does not need to implement the
- * functionality to enable/disable backlight.
+ * drm_panel_of_backlight() or drm_panel_dp_aux_backlight(). Then the driver
+ * does not need to implement the functionality to enable/disable backlight.
  */
 struct drm_panel_funcs {
 	/**
@@ -114,6 +117,15 @@ struct drm_panel_funcs {
 			 struct drm_connector *connector);
 
 	/**
+	 * @get_orientation:
+	 *
+	 * Return the panel orientation set by device tree or EDID.
+	 *
+	 * This function is optional.
+	 */
+	enum drm_panel_orientation (*get_orientation)(struct drm_panel *panel);
+
+	/**
 	 * @get_timings:
 	 *
 	 * Copy display timings into the provided array and return
@@ -123,6 +135,13 @@ struct drm_panel_funcs {
 	 */
 	int (*get_timings)(struct drm_panel *panel, unsigned int num_timings,
 			   struct display_timing *timings);
+
+	/**
+	 * @debugfs_init:
+	 *
+	 * Allows panels to create panels-specific debugfs files.
+	 */
+	void (*debugfs_init)(struct drm_panel *panel, struct dentry *root);
 };
 
 /**
@@ -142,8 +161,8 @@ struct drm_panel {
 	 * Backlight device, used to turn on backlight after the call
 	 * to enable(), and to turn off backlight before the call to
 	 * disable().
-	 * backlight is set by drm_panel_of_backlight() and drivers
-	 * shall not assign it.
+	 * backlight is set by drm_panel_of_backlight() or
+	 * drm_panel_dp_aux_backlight() and drivers shall not assign it.
 	 */
 	struct backlight_device *backlight;
 
@@ -169,17 +188,24 @@ struct drm_panel {
 	 * Panel entry in registry.
 	 */
 	struct list_head list;
+
+	/**
+	 * @prepare_prev_first:
+	 *
+	 * The previous controller should be prepared first, before the prepare
+	 * for the panel is called. This is largely required for DSI panels
+	 * where the DSI host controller should be initialised to LP-11 before
+	 * the panel is powered up.
+	 */
+	bool prepare_prev_first;
 };
 
 void drm_panel_init(struct drm_panel *panel, struct device *dev,
 		    const struct drm_panel_funcs *funcs,
 		    int connector_type);
 
-int drm_panel_add(struct drm_panel *panel);
+void drm_panel_add(struct drm_panel *panel);
 void drm_panel_remove(struct drm_panel *panel);
-
-int drm_panel_attach(struct drm_panel *panel, struct drm_connector *connector);
-void drm_panel_detach(struct drm_panel *panel);
 
 int drm_panel_prepare(struct drm_panel *panel);
 int drm_panel_unprepare(struct drm_panel *panel);
@@ -191,14 +217,23 @@ int drm_panel_get_modes(struct drm_panel *panel, struct drm_connector *connector
 
 #if defined(CONFIG_OF) && defined(CONFIG_DRM_PANEL)
 struct drm_panel *of_drm_find_panel(const struct device_node *np);
+int of_drm_get_panel_orientation(const struct device_node *np,
+				 enum drm_panel_orientation *orientation);
 #else
 static inline struct drm_panel *of_drm_find_panel(const struct device_node *np)
 {
 	return ERR_PTR(-ENODEV);
 }
+
+static inline int of_drm_get_panel_orientation(const struct device_node *np,
+					       enum drm_panel_orientation *orientation)
+{
+	return -ENODEV;
+}
 #endif
 
-#if IS_REACHABLE(CONFIG_BACKLIGHT_CLASS_DEVICE)
+#if IS_ENABLED(CONFIG_DRM_PANEL) && (IS_BUILTIN(CONFIG_BACKLIGHT_CLASS_DEVICE) || \
+	(IS_MODULE(CONFIG_DRM) && IS_MODULE(CONFIG_BACKLIGHT_CLASS_DEVICE)))
 int drm_panel_of_backlight(struct drm_panel *panel);
 #else
 static inline int drm_panel_of_backlight(struct drm_panel *panel)

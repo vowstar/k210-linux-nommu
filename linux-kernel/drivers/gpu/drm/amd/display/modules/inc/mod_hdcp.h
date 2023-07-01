@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 Advanced Micro Devices, Inc.
+ * Copyright 2018 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -56,9 +56,11 @@ enum mod_hdcp_status {
 	MOD_HDCP_STATUS_HDCP1_NOT_CAPABLE,
 	MOD_HDCP_STATUS_HDCP1_R0_PRIME_PENDING,
 	MOD_HDCP_STATUS_HDCP1_VALIDATE_RX_FAILURE,
+	MOD_HDCP_STATUS_HDCP1_BKSV_REVOKED,
 	MOD_HDCP_STATUS_HDCP1_KSV_LIST_NOT_READY,
 	MOD_HDCP_STATUS_HDCP1_VALIDATE_KSV_LIST_FAILURE,
-	MOD_HDCP_STATUS_HDCP1_ENABLE_ENCRYPTION,
+	MOD_HDCP_STATUS_HDCP1_KSV_LIST_REVOKED,
+	MOD_HDCP_STATUS_HDCP1_ENABLE_ENCRYPTION_FAILURE,
 	MOD_HDCP_STATUS_HDCP1_ENABLE_STREAM_ENCRYPTION_FAILURE,
 	MOD_HDCP_STATUS_HDCP1_MAX_CASCADE_EXCEEDED_FAILURE,
 	MOD_HDCP_STATUS_HDCP1_MAX_DEVS_EXCEEDED_FAILURE,
@@ -88,18 +90,21 @@ enum mod_hdcp_status {
 	MOD_HDCP_STATUS_HDCP2_RX_ID_LIST_NOT_READY,
 	MOD_HDCP_STATUS_HDCP2_VALIDATE_RX_ID_LIST_FAILURE,
 	MOD_HDCP_STATUS_HDCP2_RX_ID_LIST_REVOKED,
-	MOD_HDCP_STATUS_HDCP2_ENABLE_STREAM_ENCRYPTION,
+	MOD_HDCP_STATUS_HDCP2_ENABLE_STREAM_ENCRYPTION_FAILURE,
 	MOD_HDCP_STATUS_HDCP2_STREAM_READY_PENDING,
 	MOD_HDCP_STATUS_HDCP2_VALIDATE_STREAM_READY_FAILURE,
 	MOD_HDCP_STATUS_HDCP2_PREPARE_STREAM_MANAGEMENT_FAILURE,
 	MOD_HDCP_STATUS_HDCP2_REAUTH_REQUEST,
 	MOD_HDCP_STATUS_HDCP2_REAUTH_LINK_INTEGRITY_FAILURE,
 	MOD_HDCP_STATUS_HDCP2_DEVICE_COUNT_MISMATCH_FAILURE,
+	MOD_HDCP_STATUS_UNSUPPORTED_PSP_VER_FAILURE,
 };
 
 struct mod_hdcp_displayport {
 	uint8_t rev;
-	uint8_t assr_supported;
+	uint8_t assr_enabled;
+	uint8_t mst_enabled;
+	uint8_t usb4_enabled;
 };
 
 struct mod_hdcp_hdmi {
@@ -108,15 +113,23 @@ struct mod_hdcp_hdmi {
 enum mod_hdcp_operation_mode {
 	MOD_HDCP_MODE_OFF,
 	MOD_HDCP_MODE_DEFAULT,
-	MOD_HDCP_MODE_DP,
-	MOD_HDCP_MODE_DP_MST
+	MOD_HDCP_MODE_DP
 };
 
 enum mod_hdcp_display_state {
 	MOD_HDCP_DISPLAY_INACTIVE = 0,
 	MOD_HDCP_DISPLAY_ACTIVE,
-	MOD_HDCP_DISPLAY_ACTIVE_AND_ADDED,
 	MOD_HDCP_DISPLAY_ENCRYPTION_ENABLED
+};
+
+struct mod_hdcp_psp_caps {
+	uint8_t dtm_v3_supported;
+};
+
+enum mod_hdcp_display_disable_option {
+	MOD_HDCP_DISPLAY_NOT_DISABLE = 0,
+	MOD_HDCP_DISPLAY_DISABLE_AUTHENTICATION,
+	MOD_HDCP_DISPLAY_DISABLE_ENCRYPTION,
 };
 
 struct mod_hdcp_ddc {
@@ -145,17 +158,19 @@ struct mod_hdcp_ddc {
 struct mod_hdcp_psp {
 	void *handle;
 	void *funcs;
+	struct mod_hdcp_psp_caps caps;
 };
 
 struct mod_hdcp_display_adjustment {
-	uint8_t disable			: 1;
-	uint8_t reserved		: 7;
+	uint8_t disable			: 2;
+	uint8_t reserved		: 6;
 };
 
 struct mod_hdcp_link_adjustment_hdcp1 {
 	uint8_t disable			: 1;
 	uint8_t postpone_encryption	: 1;
-	uint8_t reserved		: 6;
+	uint8_t min_auth_retries_wa : 1;
+	uint8_t reserved		: 5;
 };
 
 enum mod_hdcp_force_hdcp_type {
@@ -211,6 +226,7 @@ struct mod_hdcp_output {
 	uint8_t watchdog_timer_stop;
 	uint16_t callback_delay;
 	uint16_t watchdog_timer_delay;
+	uint8_t auth_complete;
 };
 
 /* used to represent per display info */
@@ -219,6 +235,7 @@ struct mod_hdcp_display {
 	uint8_t index;
 	uint8_t controller;
 	uint8_t dig_fe;
+	uint8_t stream_enc_idx;
 	union {
 		uint8_t vc_id;
 	};
@@ -231,6 +248,10 @@ struct mod_hdcp_link {
 	enum mod_hdcp_operation_mode mode;
 	uint8_t dig_be;
 	uint8_t ddc_line;
+	uint8_t link_enc_idx;
+	uint8_t phy_idx;
+	uint8_t dio_output_id;
+	uint8_t hdcp_supported_informational;
 	union {
 		struct mod_hdcp_displayport dp;
 		struct mod_hdcp_hdmi hdmi;
@@ -253,8 +274,6 @@ struct mod_hdcp_config {
 	uint8_t index;
 };
 
-struct mod_hdcp;
-
 /* dm allocates memory of mod_hdcp per dc_link on dm init based on memory size*/
 size_t mod_hdcp_get_memory_size(void);
 
@@ -265,14 +284,21 @@ enum mod_hdcp_status mod_hdcp_setup(struct mod_hdcp *hdcp,
 /* called per link on link destroy */
 enum mod_hdcp_status mod_hdcp_teardown(struct mod_hdcp *hdcp);
 
-/* called per display on cp_desired set to true */
+/* called per display after stream is enabled */
 enum mod_hdcp_status mod_hdcp_add_display(struct mod_hdcp *hdcp,
 		struct mod_hdcp_link *link, struct mod_hdcp_display *display,
 		struct mod_hdcp_output *output);
 
-/* called per display on cp_desired set to false */
+/* called per display before stream is disabled */
 enum mod_hdcp_status mod_hdcp_remove_display(struct mod_hdcp *hdcp,
 		uint8_t index, struct mod_hdcp_output *output);
+
+/* called per display to apply new authentication adjustment */
+enum mod_hdcp_status mod_hdcp_update_display(struct mod_hdcp *hdcp,
+		uint8_t index,
+		struct mod_hdcp_link_adjustment *link_adjust,
+		struct mod_hdcp_display_adjustment *display_adjust,
+		struct mod_hdcp_output *output);
 
 /* called to query hdcp information on a specific index */
 enum mod_hdcp_status mod_hdcp_query_display(struct mod_hdcp *hdcp,

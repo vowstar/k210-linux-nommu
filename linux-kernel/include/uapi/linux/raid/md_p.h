@@ -123,7 +123,7 @@ typedef struct mdp_device_descriptor_s {
 
 /*
  * Notes:
- * - if an array is being reshaped (restriped) in order to change the
+ * - if an array is being reshaped (restriped) in order to change
  *   the number of active devices in the array, 'raid_disks' will be
  *   the larger of the old and new numbers.  'delta_disks' will
  *   be the "new - old".  So if +ve, raid_disks is the new value, and
@@ -303,7 +303,7 @@ struct mdp_superblock_1 {
 	 * into the 'roles' value.  If a device is spare or faulty, then it doesn't
 	 * have a meaningful role.
 	 */
-	__le16	dev_roles[0];	/* role in array, or 0xffff for a spare, or 0xfffe for faulty */
+	__le16	dev_roles[];	/* role in array, or 0xffff for a spare, or 0xfffe for faulty */
 };
 
 /* feature_map bits */

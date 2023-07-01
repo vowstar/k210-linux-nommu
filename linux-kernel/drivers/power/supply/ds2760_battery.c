@@ -198,7 +198,7 @@ static ssize_t w1_slave_read(struct file *filp, struct kobject *kobj,
 			     struct bin_attribute *bin_attr, char *buf,
 			     loff_t off, size_t count)
 {
-	struct device *dev = container_of(kobj, struct device, kobj);
+	struct device *dev = kobj_to_dev(kobj);
 	return w1_ds2760_read(dev, buf, off, count);
 }
 
@@ -227,20 +227,12 @@ static int rated_capacities[] = {
 	920,	/* NEC */
 	1440,	/* Samsung */
 	1440,	/* BYD */
-#ifdef CONFIG_MACH_H4700
-	1800,	/* HP iPAQ hx4700 3.7V 1800mAh (359113-001) */
-#else
 	1440,	/* Lishen */
-#endif
 	1440,	/* NEC */
 	2880,	/* Samsung */
 	2880,	/* BYD */
 	2880,	/* Lishen */
 	2880,	/* NEC */
-#ifdef CONFIG_MACH_H4700
-	0,
-	3600,	/* HP iPAQ hx4700 3.7V 3600mAh (359114-001) */
-#endif
 };
 
 /* array is level at temps 0°C, 10°C, 20°C, 30°C, 40°C
@@ -795,7 +787,7 @@ static const struct of_device_id w1_ds2760_of_ids[] = {
 };
 #endif
 
-static struct w1_family_ops w1_ds2760_fops = {
+static const struct w1_family_ops w1_ds2760_fops = {
 	.add_slave	= w1_ds2760_add_slave,
 	.remove_slave	= w1_ds2760_remove_slave,
 	.groups		= w1_ds2760_groups,

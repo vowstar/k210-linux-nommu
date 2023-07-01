@@ -9,6 +9,7 @@
 #include <sound/core.h>
 #include <sound/hdaudio.h>
 #include <sound/hda_register.h>
+#include "local.h"
 
 /* clear CORB read pointer properly */
 static void azx_clear_corbrp(struct hdac_bus *bus)
@@ -420,8 +421,9 @@ int snd_hdac_bus_reset_link(struct hdac_bus *bus, bool full_reset)
 	if (!full_reset)
 		goto skip_reset;
 
-	/* clear STATESTS */
-	snd_hdac_chip_writew(bus, STATESTS, STATESTS_INT_MASK);
+	/* clear STATESTS if not in reset */
+	if (snd_hdac_chip_readb(bus, GCTL) & AZX_GCTL_RESET)
+		snd_hdac_chip_writew(bus, STATESTS, STATESTS_INT_MASK);
 
 	/* reset controller */
 	snd_hdac_bus_enter_link_reset(bus);
@@ -472,11 +474,8 @@ static void azx_int_disable(struct hdac_bus *bus)
 	list_for_each_entry(azx_dev, &bus->stream_list, list)
 		snd_hdac_stream_updateb(azx_dev, SD_CTL, SD_INT_MASK, 0);
 
-	/* disable SIE for all streams */
-	snd_hdac_chip_writeb(bus, INTCTL, 0);
-
-	/* disable controller CIE and GIE */
-	snd_hdac_chip_updatel(bus, INTCTL, AZX_INT_CTRL_EN | AZX_INT_GLOBAL_EN, 0);
+	/* disable SIE for all streams & disable controller CIE and GIE */
+	snd_hdac_chip_writel(bus, INTCTL, 0);
 }
 
 /* clear interrupts */
@@ -527,6 +526,7 @@ bool snd_hdac_bus_init_chip(struct hdac_bus *bus, bool full_reset)
 	}
 
 	bus->chip_init = true;
+
 	return true;
 }
 EXPORT_SYMBOL_GPL(snd_hdac_bus_init_chip);
@@ -578,8 +578,8 @@ int snd_hdac_bus_handle_stream_irq(struct hdac_bus *bus, unsigned int status,
 			sd_status = snd_hdac_stream_readb(azx_dev, SD_STS);
 			snd_hdac_stream_writeb(azx_dev, SD_STS, SD_INT_MASK);
 			handled |= 1 << azx_dev->index;
-			if (!azx_dev->substream || !azx_dev->running ||
-			    !(sd_status & SD_INT_COMPLETE))
+			if ((!azx_dev->substream && !azx_dev->cstream) ||
+			    !azx_dev->running || !(sd_status & SD_INT_COMPLETE))
 				continue;
 			if (ack)
 				ack(bus, azx_dev);
@@ -646,3 +646,17 @@ void snd_hdac_bus_free_stream_pages(struct hdac_bus *bus)
 		snd_dma_free_pages(&bus->posbuf);
 }
 EXPORT_SYMBOL_GPL(snd_hdac_bus_free_stream_pages);
+
+/**
+ * snd_hdac_bus_link_power - power up/down codec link
+ * @codec: HD-audio device
+ * @enable: whether to power-up the link
+ */
+void snd_hdac_bus_link_power(struct hdac_device *codec, bool enable)
+{
+	if (enable)
+		set_bit(codec->addr, &codec->bus->codec_powered);
+	else
+		clear_bit(codec->addr, &codec->bus->codec_powered);
+}
+EXPORT_SYMBOL_GPL(snd_hdac_bus_link_power);

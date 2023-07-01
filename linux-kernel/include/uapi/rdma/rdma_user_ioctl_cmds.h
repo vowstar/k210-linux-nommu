@@ -36,7 +36,7 @@
 #include <linux/types.h>
 #include <linux/ioctl.h>
 
-/* Documentation/ioctl/ioctl-number.rst */
+/* Documentation/userspace-api/ioctl/ioctl-number.rst */
 #define RDMA_IOCTL_MAGIC	0x1b
 #define RDMA_VERBS_IOCTL \
 	_IOWR(RDMA_IOCTL_MAGIC, 1, struct ib_uverbs_ioctl_hdr)
@@ -81,7 +81,7 @@ struct ib_uverbs_ioctl_hdr {
 	__aligned_u64 reserved1;
 	__u32 driver_id;
 	__u32 reserved2;
-	struct ib_uverbs_attr  attrs[0];
+	struct ib_uverbs_attr  attrs[];
 };
 
 #endif

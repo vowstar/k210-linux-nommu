@@ -53,7 +53,7 @@ static struct fsnotify_group *audit_watch_group;
 
 /* fsnotify events we care about. */
 #define AUDIT_FS_WATCH (FS_MOVE | FS_CREATE | FS_DELETE | FS_DELETE_SELF |\
-			FS_MOVE_SELF | FS_EVENT_ON_CHILD | FS_UNMOUNT)
+			FS_MOVE_SELF | FS_UNMOUNT)
 
 static void audit_free_parent(struct audit_parent *parent)
 {
@@ -133,7 +133,7 @@ int audit_watch_compare(struct audit_watch *watch, unsigned long ino, dev_t dev)
 }
 
 /* Initialize a parent watch entry. */
-static struct audit_parent *audit_init_parent(struct path *path)
+static struct audit_parent *audit_init_parent(const struct path *path)
 {
 	struct inode *inode = d_backing_inode(path->dentry);
 	struct audit_parent *parent;
@@ -183,7 +183,8 @@ int audit_to_watch(struct audit_krule *krule, char *path, int len, u32 op)
 		return -EOPNOTSUPP;
 
 	if (path[0] != '/' || path[len-1] == '/' ||
-	    krule->listnr != AUDIT_FILTER_EXIT ||
+	    (krule->listnr != AUDIT_FILTER_EXIT &&
+	     krule->listnr != AUDIT_FILTER_URING_EXIT) ||
 	    op != Audit_equal ||
 	    krule->inode_f || krule->watch || krule->tree)
 		return -EINVAL;
@@ -301,8 +302,6 @@ static void audit_update_watch(struct audit_parent *parent,
 			}
 			if (oentry->rule.exe)
 				audit_remove_mark(oentry->rule.exe);
-
-			audit_watch_log_rule_change(r, owatch, "updated_rules");
 
 			call_rcu(&oentry->rcu, audit_free_rule_rcu);
 		}
@@ -466,32 +465,16 @@ void audit_remove_watch_rule(struct audit_krule *krule)
 }
 
 /* Update watch data in audit rules based on fsnotify events. */
-static int audit_watch_handle_event(struct fsnotify_group *group,
-				    struct inode *to_tell,
-				    u32 mask, const void *data, int data_type,
-				    const struct qstr *dname, u32 cookie,
-				    struct fsnotify_iter_info *iter_info)
+static int audit_watch_handle_event(struct fsnotify_mark *inode_mark, u32 mask,
+				    struct inode *inode, struct inode *dir,
+				    const struct qstr *dname, u32 cookie)
 {
-	struct fsnotify_mark *inode_mark = fsnotify_iter_inode_mark(iter_info);
-	const struct inode *inode;
 	struct audit_parent *parent;
 
 	parent = container_of(inode_mark, struct audit_parent, mark);
 
-	BUG_ON(group != audit_watch_group);
-
-	switch (data_type) {
-	case (FSNOTIFY_EVENT_PATH):
-		inode = d_backing_inode(((const struct path *)data)->dentry);
-		break;
-	case (FSNOTIFY_EVENT_INODE):
-		inode = (const struct inode *)data;
-		break;
-	default:
-		BUG();
-		inode = NULL;
-		break;
-	}
+	if (WARN_ON_ONCE(inode_mark->group != audit_watch_group))
+		return 0;
 
 	if (mask & (FS_CREATE|FS_MOVED_TO) && inode)
 		audit_update_watch(parent, dname, inode->i_sb->s_dev, inode->i_ino, 0);
@@ -504,13 +487,13 @@ static int audit_watch_handle_event(struct fsnotify_group *group,
 }
 
 static const struct fsnotify_ops audit_watch_fsnotify_ops = {
-	.handle_event = 	audit_watch_handle_event,
+	.handle_inode_event =	audit_watch_handle_event,
 	.free_mark =		audit_watch_free_mark,
 };
 
 static int __init audit_watch_init(void)
 {
-	audit_watch_group = fsnotify_alloc_group(&audit_watch_fsnotify_ops);
+	audit_watch_group = fsnotify_alloc_group(&audit_watch_fsnotify_ops, 0);
 	if (IS_ERR(audit_watch_group)) {
 		audit_watch_group = NULL;
 		audit_panic("cannot create audit fsnotify group");

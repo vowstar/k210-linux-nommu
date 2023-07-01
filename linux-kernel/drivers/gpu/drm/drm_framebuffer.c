@@ -31,6 +31,7 @@
 #include <drm/drm_file.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_framebuffer.h>
+#include <drm/drm_gem.h>
 #include <drm/drm_print.h>
 #include <drm/drm_util.h>
 
@@ -86,13 +87,13 @@ int drm_framebuffer_check_src_coords(uint32_t src_x, uint32_t src_y,
 	    src_x > fb_width - src_w ||
 	    src_h > fb_height ||
 	    src_y > fb_height - src_h) {
-		DRM_DEBUG_KMS("Invalid source coordinates "
-			      "%u.%06ux%u.%06u+%u.%06u+%u.%06u (fb %ux%u)\n",
-			      src_w >> 16, ((src_w & 0xffff) * 15625) >> 10,
-			      src_h >> 16, ((src_h & 0xffff) * 15625) >> 10,
-			      src_x >> 16, ((src_x & 0xffff) * 15625) >> 10,
-			      src_y >> 16, ((src_y & 0xffff) * 15625) >> 10,
-			      fb->width, fb->height);
+		drm_dbg_kms(fb->dev, "Invalid source coordinates "
+			    "%u.%06ux%u.%06u+%u.%06u+%u.%06u (fb %ux%u)\n",
+			    src_w >> 16, ((src_w & 0xffff) * 15625) >> 10,
+			    src_h >> 16, ((src_h & 0xffff) * 15625) >> 10,
+			    src_x >> 16, ((src_x & 0xffff) * 15625) >> 10,
+			    src_y >> 16, ((src_y & 0xffff) * 15625) >> 10,
+			    fb->width, fb->height);
 		return -ENOSPC;
 	}
 
@@ -124,7 +125,7 @@ int drm_mode_addfb(struct drm_device *dev, struct drm_mode_fb_cmd *or,
 
 	r.pixel_format = drm_driver_legacy_fb_format(dev, or->bpp, or->depth);
 	if (r.pixel_format == DRM_FORMAT_INVALID) {
-		DRM_DEBUG("bad {bpp:%d, depth:%d}\n", or->bpp, or->depth);
+		drm_dbg_kms(dev, "bad {bpp:%d, depth:%d}\n", or->bpp, or->depth);
 		return -EINVAL;
 	}
 
@@ -175,28 +176,24 @@ static int framebuffer_check(struct drm_device *dev,
 	int i;
 
 	/* check if the format is supported at all */
-	info = __drm_format_info(r->pixel_format);
-	if (!info) {
-		struct drm_format_name_buf format_name;
+	if (!__drm_format_info(r->pixel_format)) {
+		drm_dbg_kms(dev, "bad framebuffer format %p4cc\n",
+			    &r->pixel_format);
+		return -EINVAL;
+	}
 
-		DRM_DEBUG_KMS("bad framebuffer format %s\n",
-			      drm_get_format_name(r->pixel_format,
-						  &format_name));
+	if (r->width == 0) {
+		drm_dbg_kms(dev, "bad framebuffer width %u\n", r->width);
+		return -EINVAL;
+	}
+
+	if (r->height == 0) {
+		drm_dbg_kms(dev, "bad framebuffer height %u\n", r->height);
 		return -EINVAL;
 	}
 
 	/* now let the driver pick its own format info */
 	info = drm_get_format_info(dev, r);
-
-	if (r->width == 0) {
-		DRM_DEBUG_KMS("bad framebuffer width %u\n", r->width);
-		return -EINVAL;
-	}
-
-	if (r->height == 0) {
-		DRM_DEBUG_KMS("bad framebuffer height %u\n", r->height);
-		return -EINVAL;
-	}
 
 	for (i = 0; i < info->num_planes; i++) {
 		unsigned int width = fb_plane_width(r->width, info, i);
@@ -205,12 +202,12 @@ static int framebuffer_check(struct drm_device *dev,
 		u64 min_pitch = drm_format_info_min_pitch(info, i, width);
 
 		if (!block_size && (r->modifier[i] == DRM_FORMAT_MOD_LINEAR)) {
-			DRM_DEBUG_KMS("Format requires non-linear modifier for plane %d\n", i);
+			drm_dbg_kms(dev, "Format requires non-linear modifier for plane %d\n", i);
 			return -EINVAL;
 		}
 
 		if (!r->handles[i]) {
-			DRM_DEBUG_KMS("no buffer object handle for plane %d\n", i);
+			drm_dbg_kms(dev, "no buffer object handle for plane %d\n", i);
 			return -EINVAL;
 		}
 
@@ -221,20 +218,20 @@ static int framebuffer_check(struct drm_device *dev,
 			return -ERANGE;
 
 		if (block_size && r->pitches[i] < min_pitch) {
-			DRM_DEBUG_KMS("bad pitch %u for plane %d\n", r->pitches[i], i);
+			drm_dbg_kms(dev, "bad pitch %u for plane %d\n", r->pitches[i], i);
 			return -EINVAL;
 		}
 
 		if (r->modifier[i] && !(r->flags & DRM_MODE_FB_MODIFIERS)) {
-			DRM_DEBUG_KMS("bad fb modifier %llu for plane %d\n",
-				      r->modifier[i], i);
+			drm_dbg_kms(dev, "bad fb modifier %llu for plane %d\n",
+				    r->modifier[i], i);
 			return -EINVAL;
 		}
 
 		if (r->flags & DRM_MODE_FB_MODIFIERS &&
 		    r->modifier[i] != r->modifier[0]) {
-			DRM_DEBUG_KMS("bad fb modifier %llu for plane %d\n",
-				      r->modifier[i], i);
+			drm_dbg_kms(dev, "bad fb modifier %llu for plane %d\n",
+				    r->modifier[i], i);
 			return -EINVAL;
 		}
 
@@ -247,7 +244,7 @@ static int framebuffer_check(struct drm_device *dev,
 			if (r->pixel_format != DRM_FORMAT_NV12 ||
 					width % 128 || height % 32 ||
 					r->pitches[i] % 128) {
-				DRM_DEBUG_KMS("bad modifier data for plane %d\n", i);
+				drm_dbg_kms(dev, "bad modifier data for plane %d\n", i);
 				return -EINVAL;
 			}
 			break;
@@ -259,7 +256,7 @@ static int framebuffer_check(struct drm_device *dev,
 
 	for (i = info->num_planes; i < 4; i++) {
 		if (r->modifier[i]) {
-			DRM_DEBUG_KMS("non-zero modifier for unused plane %d\n", i);
+			drm_dbg_kms(dev, "non-zero modifier for unused plane %d\n", i);
 			return -EINVAL;
 		}
 
@@ -268,17 +265,17 @@ static int framebuffer_check(struct drm_device *dev,
 			continue;
 
 		if (r->handles[i]) {
-			DRM_DEBUG_KMS("buffer object handle for unused plane %d\n", i);
+			drm_dbg_kms(dev, "buffer object handle for unused plane %d\n", i);
 			return -EINVAL;
 		}
 
 		if (r->pitches[i]) {
-			DRM_DEBUG_KMS("non-zero pitch for unused plane %d\n", i);
+			drm_dbg_kms(dev, "non-zero pitch for unused plane %d\n", i);
 			return -EINVAL;
 		}
 
 		if (r->offsets[i]) {
-			DRM_DEBUG_KMS("non-zero offset for unused plane %d\n", i);
+			drm_dbg_kms(dev, "non-zero offset for unused plane %d\n", i);
 			return -EINVAL;
 		}
 	}
@@ -296,24 +293,24 @@ drm_internal_framebuffer_create(struct drm_device *dev,
 	int ret;
 
 	if (r->flags & ~(DRM_MODE_FB_INTERLACED | DRM_MODE_FB_MODIFIERS)) {
-		DRM_DEBUG_KMS("bad framebuffer flags 0x%08x\n", r->flags);
+		drm_dbg_kms(dev, "bad framebuffer flags 0x%08x\n", r->flags);
 		return ERR_PTR(-EINVAL);
 	}
 
 	if ((config->min_width > r->width) || (r->width > config->max_width)) {
-		DRM_DEBUG_KMS("bad framebuffer width %d, should be >= %d && <= %d\n",
-			  r->width, config->min_width, config->max_width);
+		drm_dbg_kms(dev, "bad framebuffer width %d, should be >= %d && <= %d\n",
+			    r->width, config->min_width, config->max_width);
 		return ERR_PTR(-EINVAL);
 	}
 	if ((config->min_height > r->height) || (r->height > config->max_height)) {
-		DRM_DEBUG_KMS("bad framebuffer height %d, should be >= %d && <= %d\n",
-			  r->height, config->min_height, config->max_height);
+		drm_dbg_kms(dev, "bad framebuffer height %d, should be >= %d && <= %d\n",
+			    r->height, config->min_height, config->max_height);
 		return ERR_PTR(-EINVAL);
 	}
 
 	if (r->flags & DRM_MODE_FB_MODIFIERS &&
-	    !dev->mode_config.allow_fb_modifiers) {
-		DRM_DEBUG_KMS("driver does not support fb modifiers\n");
+	    dev->mode_config.fb_modifiers_not_supported) {
+		drm_dbg_kms(dev, "driver does not support fb modifiers\n");
 		return ERR_PTR(-EINVAL);
 	}
 
@@ -323,7 +320,7 @@ drm_internal_framebuffer_create(struct drm_device *dev,
 
 	fb = dev->mode_config.funcs->fb_create(dev, file_priv, r);
 	if (IS_ERR(fb)) {
-		DRM_DEBUG_KMS("could not create framebuffer\n");
+		drm_dbg_kms(dev, "could not create framebuffer\n");
 		return fb;
 	}
 
@@ -359,7 +356,7 @@ int drm_mode_addfb2(struct drm_device *dev,
 	if (IS_ERR(fb))
 		return PTR_ERR(fb);
 
-	DRM_DEBUG_KMS("[FB:%d]\n", fb->base.id);
+	drm_dbg_kms(dev, "[FB:%d]\n", fb->base.id);
 	r->fb_id = fb->base.id;
 
 	/* Transfer ownership to the filp for reaping on close */
@@ -387,7 +384,7 @@ int drm_mode_addfb2_ioctl(struct drm_device *dev,
 		 * then.  So block it to make userspace fallback to
 		 * ADDFB.
 		 */
-		DRM_DEBUG_KMS("addfb2 broken on bigendian");
+		drm_dbg_kms(dev, "addfb2 broken on bigendian");
 		return -EOPNOTSUPP;
 	}
 #endif
@@ -407,6 +404,9 @@ static void drm_mode_rmfb_work_fn(struct work_struct *w)
 		struct drm_framebuffer *fb =
 			list_first_entry(&arg->fbs, typeof(*fb), filp_head);
 
+		drm_dbg_kms(fb->dev,
+			    "Removing [FB:%d] from all active usage due to RMFB ioctl\n",
+			    fb->base.id);
 		list_del_init(&fb->filp_head);
 		drm_framebuffer_remove(fb);
 	}
@@ -530,7 +530,7 @@ int drm_mode_getfb(struct drm_device *dev,
 	r->height = fb->height;
 	r->width = fb->width;
 	r->depth = fb->format->depth;
-	r->bpp = fb->format->cpp[0] * 8;
+	r->bpp = drm_format_info_bpp(fb->format, 0);
 	r->pitch = fb->pitches[0];
 
 	/* GET_FB() is an unprivileged ioctl so we must not return a
@@ -548,7 +548,128 @@ int drm_mode_getfb(struct drm_device *dev,
 
 out:
 	drm_framebuffer_put(fb);
+	return ret;
+}
 
+/**
+ * drm_mode_getfb2_ioctl - get extended FB info
+ * @dev: drm device for the ioctl
+ * @data: data pointer for the ioctl
+ * @file_priv: drm file for the ioctl call
+ *
+ * Lookup the FB given its ID and return info about it.
+ *
+ * Called by the user via ioctl.
+ *
+ * Returns:
+ * Zero on success, negative errno on failure.
+ */
+int drm_mode_getfb2_ioctl(struct drm_device *dev,
+			  void *data, struct drm_file *file_priv)
+{
+	struct drm_mode_fb_cmd2 *r = data;
+	struct drm_framebuffer *fb;
+	unsigned int i;
+	int ret;
+
+	if (!drm_core_check_feature(dev, DRIVER_MODESET))
+		return -EINVAL;
+
+	fb = drm_framebuffer_lookup(dev, file_priv, r->fb_id);
+	if (!fb)
+		return -ENOENT;
+
+	/* For multi-plane framebuffers, we require the driver to place the
+	 * GEM objects directly in the drm_framebuffer. For single-plane
+	 * framebuffers, we can fall back to create_handle.
+	 */
+	if (!fb->obj[0] &&
+	    (fb->format->num_planes > 1 || !fb->funcs->create_handle)) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	r->height = fb->height;
+	r->width = fb->width;
+	r->pixel_format = fb->format->format;
+
+	r->flags = 0;
+	if (!dev->mode_config.fb_modifiers_not_supported)
+		r->flags |= DRM_MODE_FB_MODIFIERS;
+
+	for (i = 0; i < ARRAY_SIZE(r->handles); i++) {
+		r->handles[i] = 0;
+		r->pitches[i] = 0;
+		r->offsets[i] = 0;
+		r->modifier[i] = 0;
+	}
+
+	for (i = 0; i < fb->format->num_planes; i++) {
+		r->pitches[i] = fb->pitches[i];
+		r->offsets[i] = fb->offsets[i];
+		if (!dev->mode_config.fb_modifiers_not_supported)
+			r->modifier[i] = fb->modifier;
+	}
+
+	/* GET_FB2() is an unprivileged ioctl so we must not return a
+	 * buffer-handle to non master/root processes! To match GET_FB()
+	 * just return invalid handles (0) for non masters/root
+	 * rather than making GET_FB2() privileged.
+	 */
+	if (!drm_is_current_master(file_priv) && !capable(CAP_SYS_ADMIN)) {
+		ret = 0;
+		goto out;
+	}
+
+	for (i = 0; i < fb->format->num_planes; i++) {
+		int j;
+
+		/* If we reuse the same object for multiple planes, also
+		 * return the same handle.
+		 */
+		for (j = 0; j < i; j++) {
+			if (fb->obj[i] == fb->obj[j]) {
+				r->handles[i] = r->handles[j];
+				break;
+			}
+		}
+
+		if (r->handles[i])
+			continue;
+
+		if (fb->obj[i]) {
+			ret = drm_gem_handle_create(file_priv, fb->obj[i],
+						    &r->handles[i]);
+		} else {
+			WARN_ON(i > 0);
+			ret = fb->funcs->create_handle(fb, file_priv,
+						       &r->handles[i]);
+		}
+
+		if (ret != 0)
+			goto out;
+	}
+
+out:
+	if (ret != 0) {
+		/* Delete any previously-created handles on failure. */
+		for (i = 0; i < ARRAY_SIZE(r->handles); i++) {
+			int j;
+
+			if (r->handles[i])
+				drm_gem_handle_delete(file_priv, r->handles[i]);
+
+			/* Zero out any handles identical to the one we just
+			 * deleted.
+			 */
+			for (j = i + 1; j < ARRAY_SIZE(r->handles); j++) {
+				if (r->handles[j] == r->handles[i])
+					r->handles[j] = 0;
+			}
+		}
+	}
+
+	drm_framebuffer_put(fb);
 	return ret;
 }
 
@@ -814,7 +935,7 @@ EXPORT_SYMBOL(drm_framebuffer_unregister_private);
  * the id and get back -EINVAL. Obviously no concern at driver unload time.
  *
  * Also, the framebuffer will not be removed from the lookup idr - for
- * user-created framebuffers this will happen in in the rmfb ioctl. For
+ * user-created framebuffers this will happen in the rmfb ioctl. For
  * driver-private objects (e.g. for fbdev) drivers need to explicitly call
  * drm_framebuffer_unregister_private.
  */
@@ -863,6 +984,10 @@ retry:
 		if (plane->state->fb != fb)
 			continue;
 
+		drm_dbg_kms(dev,
+			    "Disabling [PLANE:%d:%s] because [FB:%d] is removed\n",
+			    plane->base.id, plane->name, fb->base.id);
+
 		plane_state = drm_atomic_get_plane_state(state, plane);
 		if (IS_ERR(plane_state)) {
 			ret = PTR_ERR(plane_state);
@@ -871,6 +996,11 @@ retry:
 
 		if (disable_crtcs && plane_state->crtc->primary == plane) {
 			struct drm_crtc_state *crtc_state;
+
+			drm_dbg_kms(dev,
+				    "Disabling [CRTC:%d:%s] because [FB:%d] is removed\n",
+				    plane_state->crtc->base.id,
+				    plane_state->crtc->name, fb->base.id);
 
 			crtc_state = drm_atomic_get_existing_crtc_state(state, plane_state->crtc);
 
@@ -934,6 +1064,10 @@ static void legacy_remove_fb(struct drm_framebuffer *fb)
 	/* remove from any CRTC */
 	drm_for_each_crtc(crtc, dev) {
 		if (crtc->primary->fb == fb) {
+			drm_dbg_kms(dev,
+				    "Disabling [CRTC:%d:%s] because [FB:%d] is removed\n",
+				    crtc->base.id, crtc->name, fb->base.id);
+
 			/* should turn off the crtc */
 			if (drm_crtc_force_disable(crtc))
 				DRM_ERROR("failed to reset crtc %p when fb was deleted\n", crtc);
@@ -941,8 +1075,12 @@ static void legacy_remove_fb(struct drm_framebuffer *fb)
 	}
 
 	drm_for_each_plane(plane, dev) {
-		if (plane->fb == fb)
+		if (plane->fb == fb) {
+			drm_dbg_kms(dev,
+				    "Disabling [PLANE:%d:%s] because [FB:%d] is removed\n",
+				    plane->base.id, plane->name, fb->base.id);
 			drm_plane_force_disable(plane);
+		}
 	}
 	drm_modeset_unlock_all(dev);
 }
@@ -972,7 +1110,7 @@ void drm_framebuffer_remove(struct drm_framebuffer *fb)
 
 	/*
 	 * drm ABI mandates that we remove any deleted framebuffers from active
-	 * useage. But since most sane clients only remove framebuffers they no
+	 * usage. But since most sane clients only remove framebuffers they no
 	 * longer need, try to optimize this away.
 	 *
 	 * Since we're holding a reference ourselves, observing a refcount of 1
@@ -988,6 +1126,7 @@ void drm_framebuffer_remove(struct drm_framebuffer *fb)
 	if (drm_framebuffer_read_refcount(fb) > 1) {
 		if (drm_drv_uses_atomic_modeset(dev)) {
 			int ret = atomic_remove_fb(fb);
+
 			WARN(ret, "atomic remove_fb failed with %i\n", ret);
 		} else
 			legacy_remove_fb(fb);
@@ -1038,14 +1177,12 @@ EXPORT_SYMBOL(drm_framebuffer_plane_height);
 void drm_framebuffer_print_info(struct drm_printer *p, unsigned int indent,
 				const struct drm_framebuffer *fb)
 {
-	struct drm_format_name_buf format_name;
 	unsigned int i;
 
 	drm_printf_indent(p, indent, "allocated by = %s\n", fb->comm);
 	drm_printf_indent(p, indent, "refcount=%u\n",
 			  drm_framebuffer_read_refcount(fb));
-	drm_printf_indent(p, indent, "format=%s\n",
-			  drm_get_format_name(fb->format->format, &format_name));
+	drm_printf_indent(p, indent, "format=%p4cc\n", &fb->format->format);
 	drm_printf_indent(p, indent, "modifier=0x%llx\n", fb->modifier);
 	drm_printf_indent(p, indent, "size=%ux%u\n", fb->width, fb->height);
 	drm_printf_indent(p, indent, "layers:\n");
@@ -1066,8 +1203,8 @@ void drm_framebuffer_print_info(struct drm_printer *p, unsigned int indent,
 #ifdef CONFIG_DEBUG_FS
 static int drm_framebuffer_info(struct seq_file *m, void *data)
 {
-	struct drm_info_node *node = m->private;
-	struct drm_device *dev = node->minor->dev;
+	struct drm_debugfs_entry *entry = m->private;
+	struct drm_device *dev = entry->dev;
 	struct drm_printer p = drm_seq_file_printer(m);
 	struct drm_framebuffer *fb;
 
@@ -1081,14 +1218,13 @@ static int drm_framebuffer_info(struct seq_file *m, void *data)
 	return 0;
 }
 
-static const struct drm_info_list drm_framebuffer_debugfs_list[] = {
+static const struct drm_debugfs_info drm_framebuffer_debugfs_list[] = {
 	{ "framebuffer", drm_framebuffer_info, 0 },
 };
 
-int drm_framebuffer_debugfs_init(struct drm_minor *minor)
+void drm_framebuffer_debugfs_init(struct drm_minor *minor)
 {
-	return drm_debugfs_create_files(drm_framebuffer_debugfs_list,
-				ARRAY_SIZE(drm_framebuffer_debugfs_list),
-				minor->debugfs_root, minor);
+	drm_debugfs_add_files(minor->dev, drm_framebuffer_debugfs_list,
+			      ARRAY_SIZE(drm_framebuffer_debugfs_list));
 }
 #endif

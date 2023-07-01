@@ -16,7 +16,7 @@
 	leds: gpio-leds {
 		compatible = "gpio-leds";
 
-		work {
+		work_led: led-0 {
 			gpios = <&gpio2 RK_PD6 GPIO_ACTIVE_HIGH>;
 			label = "kylin:red:led";
 			pinctrl-names = "default";
@@ -80,16 +80,20 @@
 };
 
 &emac {
+	phy = <&phy0>;
+	phy-reset-duration = <10>; /* millisecond */
+	phy-reset-gpios = <&gpio2 RK_PC6 GPIO_ACTIVE_LOW>; /* PHY_RST */
 	pinctrl-names = "default";
 	pinctrl-0 = <&emac_xfer>, <&emac_mdio>;
-	phy = <&phy0>;
-	phy-reset-gpios = <&gpio2 RK_PC6 GPIO_ACTIVE_LOW>; /* PHY_RST */
-	phy-reset-duration = <10>; /* millisecond */
-
 	status = "okay";
 
-	phy0: ethernet-phy@0 {
-		reg = <0>;
+	mdio {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		phy0: ethernet-phy@0 {
+			reg = <0>;
+		};
 	};
 };
 
@@ -319,7 +323,7 @@
 	bus-width = <4>;
 	cap-sd-highspeed;
 	cap-sdio-irq;
-	default-sample-phase = <90>;
+	rockchip,default-sample-phase = <90>;
 	keep-power-in-suspend;
 	mmc-pwrseq = <&sdio_pwrseq>;
 	non-removable;
@@ -390,7 +394,7 @@
 		};
 	};
 
-	sleep {
+	suspend {
 		global_pwroff: global-pwroff {
 			rockchip,pins = <2 RK_PA7 1 &pcfg_pull_none>;
 		};

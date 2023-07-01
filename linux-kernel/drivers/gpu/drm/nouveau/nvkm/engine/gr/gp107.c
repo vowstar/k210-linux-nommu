@@ -45,7 +45,10 @@ gp107_gr = {
 	.init_tex_hww_esr = gf100_gr_init_tex_hww_esr,
 	.init_504430 = gm107_gr_init_504430,
 	.init_shader_exceptions = gp100_gr_init_shader_exceptions,
+	.init_rop_exceptions = gf100_gr_init_rop_exceptions,
+	.init_exception2 = gf100_gr_init_exception2,
 	.trap_mp = gf100_gr_trap_mp,
+	.fecs.reset = gf100_gr_fecs_reset,
 	.rops = gm200_gr_rops,
 	.gpc_nr = 2,
 	.tpc_nr = 3,
@@ -76,12 +79,13 @@ MODULE_FIRMWARE("nvidia/gp107/gr/sw_method_init.bin");
 
 static const struct gf100_gr_fwif
 gp107_gr_fwif[] = {
-	{ 0, gm200_gr_load, &gp107_gr, &gm200_gr_fecs_acr, &gm200_gr_gpccs_acr },
+	{  0, gm200_gr_load, &gp107_gr, &gm200_gr_fecs_acr, &gm200_gr_gpccs_acr },
+	{ -1, gm200_gr_nofw },
 	{}
 };
 
 int
-gp107_gr_new(struct nvkm_device *device, int index, struct nvkm_gr **pgr)
+gp107_gr_new(struct nvkm_device *device, enum nvkm_subdev_type type, int inst, struct nvkm_gr **pgr)
 {
-	return gf100_gr_new_(gp107_gr_fwif, device, index, pgr);
+	return gf100_gr_new_(gp107_gr_fwif, device, type, inst, pgr);
 }

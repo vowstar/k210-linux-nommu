@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * rcar_cmm.c -- R-Car Display Unit Color Management Module
+ * R-Car Display Unit Color Management Module
  *
  * Copyright (C) 2019 Jacopo Mondi <jacopo+renesas@jmondi.org>
  */
@@ -122,7 +122,7 @@ int rcar_cmm_enable(struct platform_device *pdev)
 {
 	int ret;
 
-	ret = pm_runtime_get_sync(&pdev->dev);
+	ret = pm_runtime_resume_and_get(&pdev->dev);
 	if (ret < 0)
 		return ret;
 

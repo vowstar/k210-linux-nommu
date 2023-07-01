@@ -40,10 +40,10 @@
 #include <linux/highmem.h>
 #include <linux/io.h>
 #include <linux/jiffies.h>
-#include <asm/pgtable.h>
 #include <linux/delay.h>
 #include <linux/export.h>
 #include <linux/uio.h>
+#include <linux/pgtable.h>
 
 #include <rdma/ib.h>
 
@@ -153,7 +153,7 @@ static int qib_get_base_info(struct file *fp, void __user *ubase,
 		kinfo->spi_tidcnt += dd->rcvtidcnt % subctxt_cnt;
 	/*
 	 * for this use, may be cfgctxts summed over all chips that
-	 * are are configured and present
+	 * are configured and present
 	 */
 	kinfo->spi_nctxts = dd->cfgctxts;
 	/* unit (chip/board) our context is on */
@@ -429,8 +429,8 @@ cleanup:
 				dd->f_put_tid(dd, &tidbase[tid],
 					      RCVHQ_RCV_TYPE_EXPECTED,
 					      dd->tidinvalid);
-				pci_unmap_page(dd->pcidev, phys, PAGE_SIZE,
-					       PCI_DMA_FROMDEVICE);
+				dma_unmap_page(&dd->pcidev->dev, phys,
+					       PAGE_SIZE, DMA_FROM_DEVICE);
 				dd->pageshadow[ctxttid + tid] = NULL;
 			}
 		}
@@ -544,8 +544,8 @@ static int qib_tid_free(struct qib_ctxtdata *rcd, unsigned subctxt,
 			 */
 			dd->f_put_tid(dd, &tidbase[tid],
 				      RCVHQ_RCV_TYPE_EXPECTED, dd->tidinvalid);
-			pci_unmap_page(dd->pcidev, phys, PAGE_SIZE,
-				       PCI_DMA_FROMDEVICE);
+			dma_unmap_page(&dd->pcidev->dev, phys, PAGE_SIZE,
+				       DMA_FROM_DEVICE);
 			qib_release_user_pages(&p, 1);
 		}
 	}
@@ -733,7 +733,7 @@ static int qib_mmap_mem(struct vm_area_struct *vma, struct qib_ctxtdata *rcd,
 		}
 
 		/* don't allow them to later change with mprotect */
-		vma->vm_flags &= ~VM_MAYWRITE;
+		vm_flags_clear(vma, VM_MAYWRITE);
 	}
 
 	pfn = virt_to_phys(kvaddr) >> PAGE_SHIFT;
@@ -769,7 +769,7 @@ static int mmap_ureg(struct vm_area_struct *vma, struct qib_devdata *dd,
 		phys = dd->physaddr + ureg;
 		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 
-		vma->vm_flags |= VM_DONTCOPY | VM_DONTEXPAND;
+		vm_flags_set(vma, VM_DONTCOPY | VM_DONTEXPAND);
 		ret = io_remap_pfn_range(vma, vma->vm_start,
 					 phys >> PAGE_SHIFT,
 					 vma->vm_end - vma->vm_start,
@@ -810,8 +810,7 @@ static int mmap_piobufs(struct vm_area_struct *vma,
 	 * don't allow them to later change to readable with mprotect (for when
 	 * not initially mapped readable, as is normally the case)
 	 */
-	vma->vm_flags &= ~VM_MAYREAD;
-	vma->vm_flags |= VM_DONTCOPY | VM_DONTEXPAND;
+	vm_flags_mod(vma, VM_DONTCOPY | VM_DONTEXPAND, VM_MAYREAD);
 
 	/* We used PAT if wc_cookie == 0 */
 	if (!dd->wc_cookie)
@@ -851,8 +850,8 @@ static int mmap_rcvegrbufs(struct vm_area_struct *vma,
 		ret = -EPERM;
 		goto bail;
 	}
-	/* don't allow them to later change to writeable with mprotect */
-	vma->vm_flags &= ~VM_MAYWRITE;
+	/* don't allow them to later change to writable with mprotect */
+	vm_flags_clear(vma, VM_MAYWRITE);
 
 	start = vma->vm_start;
 
@@ -941,10 +940,10 @@ static int mmap_kvaddr(struct vm_area_struct *vma, u64 pgaddr,
 			goto bail;
 		}
 		/*
-		 * Don't allow permission to later change to writeable
+		 * Don't allow permission to later change to writable
 		 * with mprotect.
 		 */
-		vma->vm_flags &= ~VM_MAYWRITE;
+		vm_flags_clear(vma, VM_MAYWRITE);
 	} else
 		goto bail;
 	len = vma->vm_end - vma->vm_start;
@@ -955,7 +954,7 @@ static int mmap_kvaddr(struct vm_area_struct *vma, u64 pgaddr,
 
 	vma->vm_pgoff = (unsigned long) addr >> PAGE_SHIFT;
 	vma->vm_ops = &qib_file_vm_ops;
-	vma->vm_flags |= VM_DONTEXPAND | VM_DONTDUMP;
+	vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
 	ret = 1;
 
 bail:
@@ -1321,7 +1320,7 @@ static int setup_ctxt(struct qib_pportdata *ppd, int ctxt,
 	rcd->tid_pg_list = ptmp;
 	rcd->pid = current->pid;
 	init_waitqueue_head(&dd->rcd[ctxt]->wait);
-	strlcpy(rcd->comm, current->comm, sizeof(rcd->comm));
+	get_task_comm(rcd->comm, current);
 	ctxt_fp(fp) = rcd;
 	qib_stats.sps_ctxts++;
 	dd->freectxts--;
@@ -1758,7 +1757,8 @@ bail:
 }
 
 /**
- * unlock_exptid - unlock any expected TID entries context still had in use
+ * unlock_expected_tids - unlock any expected TID entries context still had
+ * in use
  * @rcd: ctxt
  *
  * We don't actually update the chip here, because we do a bulk update
@@ -1780,8 +1780,8 @@ static void unlock_expected_tids(struct qib_ctxtdata *rcd)
 		phys = dd->physshadow[i];
 		dd->physshadow[i] = dd->tidinvalid;
 		dd->pageshadow[i] = NULL;
-		pci_unmap_page(dd->pcidev, phys, PAGE_SIZE,
-			       PCI_DMA_FROMDEVICE);
+		dma_unmap_page(&dd->pcidev->dev, phys, PAGE_SIZE,
+			       DMA_FROM_DEVICE);
 		qib_release_user_pages(&p, 1);
 		cnt++;
 	}
@@ -2247,7 +2247,7 @@ static ssize_t qib_write_iter(struct kiocb *iocb, struct iov_iter *from)
 
 	if (!iter_is_iovec(from) || !from->nr_segs || !pq)
 		return -EINVAL;
-			 
+
 	return qib_user_sdma_writev(rcd, pq, from->iov, from->nr_segs);
 }
 

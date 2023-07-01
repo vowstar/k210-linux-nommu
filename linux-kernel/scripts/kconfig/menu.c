@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "lkc.h"
+#include "internal.h"
 
 static const char nohelp_text[] = "There is no help available for this option.";
 
@@ -65,7 +66,8 @@ void menu_add_entry(struct symbol *sym)
 struct menu *menu_add_menu(void)
 {
 	last_entry_ptr = &current_entry->list;
-	return current_menu = current_entry;
+	current_menu = current_entry;
+	return current_menu;
 }
 
 void menu_end_menu(void)
@@ -208,28 +210,6 @@ void menu_add_expr(enum prop_type type, struct expr *expr, struct expr *dep)
 void menu_add_symbol(enum prop_type type, struct symbol *sym, struct expr *dep)
 {
 	menu_add_prop(type, expr_alloc_symbol(sym), dep);
-}
-
-void menu_add_option_modules(void)
-{
-	if (modules_sym)
-		zconf_error("symbol '%s' redefines option 'modules' already defined by symbol '%s'",
-			    current_entry->sym->name, modules_sym->name);
-	modules_sym = current_entry->sym;
-}
-
-void menu_add_option_defconfig_list(void)
-{
-	if (!sym_defconfig_list)
-		sym_defconfig_list = current_entry->sym;
-	else if (sym_defconfig_list != current_entry->sym)
-		zconf_error("trying to redefine defconfig symbol");
-	sym_defconfig_list->flags |= SYMBOL_NO_WRITE;
-}
-
-void menu_add_option_allnoconfig_y(void)
-{
-	current_entry->sym->flags |= SYMBOL_ALLNOCONFIG_Y;
 }
 
 static int menu_validate_number(struct symbol *sym, struct symbol *sym2)
@@ -681,11 +661,6 @@ const char *menu_get_prompt(struct menu *menu)
 	return NULL;
 }
 
-struct menu *menu_get_root_menu(struct menu *menu)
-{
-	return &rootmenu;
-}
-
 struct menu *menu_get_parent_menu(struct menu *menu)
 {
 	enum prop_type type;
@@ -747,27 +722,16 @@ static void get_prompt_str(struct gstr *r, struct property *prop,
 	if (!expr_eq(prop->menu->dep, prop->visible.expr))
 		get_dep_str(r, prop->visible.expr, "  Visible if: ");
 
-	menu = prop->menu->parent;
+	menu = prop->menu;
 	for (i = 0; menu != &rootmenu && i < 8; menu = menu->parent) {
-		bool accessible = menu_is_visible(menu);
-
 		submenu[i++] = menu;
-		if (location == NULL && accessible)
+		if (location == NULL && menu_is_visible(menu))
 			location = menu;
 	}
 	if (head && location) {
 		jump = xmalloc(sizeof(struct jump_key));
 
-		if (menu_is_visible(prop->menu)) {
-			/*
-			 * There is not enough room to put the hint at the
-			 * beginning of the "Prompt" line. Put the hint on the
-			 * last "Location" line even when it would belong on
-			 * the former.
-			 */
-			jump->target = prop->menu;
-		} else
-			jump->target = location;
+		jump->target = location;
 
 		if (list_empty(head))
 			jump->index = 0;
@@ -778,21 +742,18 @@ static void get_prompt_str(struct gstr *r, struct property *prop,
 		list_add_tail(&jump->entries, head);
 	}
 
-	if (i > 0) {
-		str_printf(r, "  Location:\n");
-		for (j = 4; --i >= 0; j += 2) {
-			menu = submenu[i];
-			if (jump && menu == location)
-				jump->offset = strlen(r->s);
-			str_printf(r, "%*c-> %s", j, ' ',
-				   menu_get_prompt(menu));
-			if (menu->sym) {
-				str_printf(r, " (%s [=%s])", menu->sym->name ?
-					menu->sym->name : "<choice>",
-					sym_get_string_value(menu->sym));
-			}
-			str_append(r, "\n");
+	str_printf(r, "  Location:\n");
+	for (j = 4; --i >= 0; j += 2) {
+		menu = submenu[i];
+		if (jump && menu == location)
+			jump->offset = strlen(r->s);
+		str_printf(r, "%*c-> %s", j, ' ', menu_get_prompt(menu));
+		if (menu->sym) {
+			str_printf(r, " (%s [=%s])", menu->sym->name ?
+				menu->sym->name : "<choice>",
+				sym_get_string_value(menu->sym));
 		}
+		str_append(r, "\n");
 	}
 }
 

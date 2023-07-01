@@ -81,6 +81,7 @@ static int snd_virmidi_dev_receive_event(struct snd_virmidi_dev *rdev,
 			if ((ev->flags & SNDRV_SEQ_EVENT_LENGTH_MASK) != SNDRV_SEQ_EVENT_LENGTH_VARIABLE)
 				continue;
 			snd_seq_dump_var_event(ev, (snd_seq_dump_func_t)snd_rawmidi_receive, vmidi->substream);
+			snd_midi_event_reset_decode(vmidi->parser);
 		} else {
 			len = snd_midi_event_decode(vmidi->parser, msg, sizeof(msg), ev);
 			if (len > 0)
@@ -262,6 +263,16 @@ static int snd_virmidi_output_close(struct snd_rawmidi_substream *substream)
 }
 
 /*
+ * drain output work queue
+ */
+static void snd_virmidi_output_drain(struct snd_rawmidi_substream *substream)
+{
+	struct snd_virmidi *vmidi = substream->runtime->private_data;
+
+	flush_work(&vmidi->output_work);
+}
+
+/*
  * subscribe callback - allow output to rawmidi device
  */
 static int snd_virmidi_subscribe(void *private_data,
@@ -335,6 +346,7 @@ static const struct snd_rawmidi_ops snd_virmidi_output_ops = {
 	.open = snd_virmidi_output_open,
 	.close = snd_virmidi_output_close,
 	.trigger = snd_virmidi_output_trigger,
+	.drain = snd_virmidi_output_drain,
 };
 
 /*
@@ -481,10 +493,11 @@ int snd_virmidi_new(struct snd_card *card, int device, struct snd_rawmidi **rrmi
 	int err;
 	
 	*rrmidi = NULL;
-	if ((err = snd_rawmidi_new(card, "VirMidi", device,
-				   16,	/* may be configurable */
-				   16,	/* may be configurable */
-				   &rmidi)) < 0)
+	err = snd_rawmidi_new(card, "VirMidi", device,
+			      16,	/* may be configurable */
+			      16,	/* may be configurable */
+			      &rmidi);
+	if (err < 0)
 		return err;
 	strcpy(rmidi->name, rmidi->id);
 	rdev = kzalloc(sizeof(*rdev), GFP_KERNEL);

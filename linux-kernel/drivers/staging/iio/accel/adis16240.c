@@ -5,20 +5,14 @@
  * Copyright 2010 Analog Devices Inc.
  */
 
-#include <linux/interrupt.h>
-#include <linux/irq.h>
-#include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/spi/spi.h>
-#include <linux/slab.h>
 #include <linux/sysfs.h>
-#include <linux/list.h>
 #include <linux/module.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
-#include <linux/iio/buffer.h>
 #include <linux/iio/imu/adis.h>
 
 #define ADIS16240_STARTUP_DELAY	220 /* ms */
@@ -373,6 +367,7 @@ static const struct adis_data adis16240_data = {
 	.diag_stat_reg = ADIS16240_DIAG_STAT,
 
 	.self_test_mask = ADIS16240_MSC_CTRL_SELF_TEST_EN,
+	.self_test_reg = ADIS16240_MSC_CTRL,
 	.self_test_no_autoclear = true,
 	.timeouts = &adis16240_timeouts,
 
@@ -399,7 +394,6 @@ static int adis16240_probe(struct spi_device *spi)
 	spi_set_drvdata(spi, indio_dev);
 
 	indio_dev->name = spi->dev.driver->name;
-	indio_dev->dev.parent = &spi->dev;
 	indio_dev->info = &adis16240_info;
 	indio_dev->channels = adis16240_channels;
 	indio_dev->num_channels = ARRAY_SIZE(adis16240_channels);
@@ -415,33 +409,16 @@ static int adis16240_probe(struct spi_device *spi)
 	ret = adis_init(st, indio_dev, spi, &adis16240_data);
 	if (ret)
 		return ret;
-	ret = adis_setup_buffer_and_trigger(st, indio_dev, NULL);
+	ret = devm_adis_setup_buffer_and_trigger(st, indio_dev, NULL);
 	if (ret)
 		return ret;
 
 	/* Get the device into a sane initial state */
-	ret = adis_initial_startup(st);
+	ret = __adis_initial_startup(st);
 	if (ret)
-		goto error_cleanup_buffer_trigger;
-	ret = iio_device_register(indio_dev);
-	if (ret)
-		goto error_cleanup_buffer_trigger;
-	return 0;
+		return ret;
 
-error_cleanup_buffer_trigger:
-	adis_cleanup_buffer_and_trigger(st, indio_dev);
-	return ret;
-}
-
-static int adis16240_remove(struct spi_device *spi)
-{
-	struct iio_dev *indio_dev = spi_get_drvdata(spi);
-	struct adis *st = iio_priv(indio_dev);
-
-	iio_device_unregister(indio_dev);
-	adis_cleanup_buffer_and_trigger(st, indio_dev);
-
-	return 0;
+	return devm_iio_device_register(&spi->dev, indio_dev);
 }
 
 static const struct of_device_id adis16240_of_match[] = {
@@ -456,7 +433,6 @@ static struct spi_driver adis16240_driver = {
 		.of_match_table = adis16240_of_match,
 	},
 	.probe = adis16240_probe,
-	.remove = adis16240_remove,
 };
 module_spi_driver(adis16240_driver);
 
@@ -464,3 +440,4 @@ MODULE_AUTHOR("Barry Song <21cnbao@gmail.com>");
 MODULE_DESCRIPTION("Analog Devices Programmable Impact Sensor and Recorder");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("spi:adis16240");
+MODULE_IMPORT_NS(IIO_ADISLIB);

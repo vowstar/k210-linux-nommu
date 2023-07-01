@@ -140,10 +140,23 @@ static void lan9303_mdio_remove(struct mdio_device *mdiodev)
 	lan9303_remove(&sw_dev->chip);
 }
 
+static void lan9303_mdio_shutdown(struct mdio_device *mdiodev)
+{
+	struct lan9303_mdio *sw_dev = dev_get_drvdata(&mdiodev->dev);
+
+	if (!sw_dev)
+		return;
+
+	lan9303_shutdown(&sw_dev->chip);
+
+	dev_set_drvdata(&mdiodev->dev, NULL);
+}
+
 /*-------------------------------------------------------------------------*/
 
 static const struct of_device_id lan9303_mdio_of_match[] = {
 	{ .compatible = "smsc,lan9303-mdio" },
+	{ .compatible = "microchip,lan9354-mdio" },
 	{ /* sentinel */ },
 };
 MODULE_DEVICE_TABLE(of, lan9303_mdio_of_match);
@@ -155,6 +168,7 @@ static struct mdio_driver lan9303_mdio_driver = {
 	},
 	.probe  = lan9303_mdio_probe,
 	.remove = lan9303_mdio_remove,
+	.shutdown = lan9303_mdio_shutdown,
 };
 mdio_module_driver(lan9303_mdio_driver);
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Test module for in-kernel sythetic event creation and generation.
+ * Test module for in-kernel synthetic event creation and generation.
  *
  * Copyright (C) 2019 Tom Zanussi <zanussi@kernel.org>
  */
@@ -22,7 +22,7 @@
  * Then:
  *
  * # insmod kernel/trace/synth_event_gen_test.ko
- * # cat /sys/kernel/debug/tracing/trace
+ * # cat /sys/kernel/tracing/trace
  *
  * You should see several events in the trace buffer -
  * "create_synth_test", "empty_synth_test", and several instances of
@@ -111,24 +111,22 @@ static int __init test_gen_synth_cmd(void)
 	/* Create some bogus values just for testing */
 
 	vals[0] = 777;			/* next_pid_field */
-	vals[1] = (u64)"hula hoops";	/* next_comm_field */
+	vals[1] = (u64)(long)"hula hoops";	/* next_comm_field */
 	vals[2] = 1000000;		/* ts_ns */
 	vals[3] = 1000;			/* ts_ms */
-	vals[4] = smp_processor_id();	/* cpu */
-	vals[5] = (u64)"thneed";	/* my_string_field */
+	vals[4] = raw_smp_processor_id(); /* cpu */
+	vals[5] = (u64)(long)"thneed";	/* my_string_field */
 	vals[6] = 598;			/* my_int_field */
 
 	/* Now generate a gen_synth_test event */
 	ret = synth_event_trace_array(gen_synth_test, vals, ARRAY_SIZE(vals));
- out:
+ free:
+	kfree(buf);
 	return ret;
  delete:
 	/* We got an error after creating the event, delete it */
 	synth_event_delete("gen_synth_test");
- free:
-	kfree(buf);
-
-	goto out;
+	goto free;
 }
 
 /*
@@ -218,33 +216,33 @@ static int __init test_empty_synth_event(void)
 	/* Create some bogus values just for testing */
 
 	vals[0] = 777;			/* next_pid_field */
-	vals[1] = (u64)"tiddlywinks";	/* next_comm_field */
+	vals[1] = (u64)(long)"tiddlywinks";	/* next_comm_field */
 	vals[2] = 1000000;		/* ts_ns */
 	vals[3] = 1000;			/* ts_ms */
-	vals[4] = smp_processor_id();	/* cpu */
-	vals[5] = (u64)"thneed_2.0";	/* my_string_field */
+	vals[4] = raw_smp_processor_id(); /* cpu */
+	vals[5] = (u64)(long)"thneed_2.0";	/* my_string_field */
 	vals[6] = 399;			/* my_int_field */
 
 	/* Now trace an empty_synth_test event */
 	ret = synth_event_trace_array(empty_synth_test, vals, ARRAY_SIZE(vals));
- out:
+ free:
+	kfree(buf);
 	return ret;
  delete:
 	/* We got an error after creating the event, delete it */
 	synth_event_delete("empty_synth_test");
- free:
-	kfree(buf);
-
-	goto out;
+	goto free;
 }
 
 static struct synth_field_desc create_synth_test_fields[] = {
 	{ .type = "pid_t",		.name = "next_pid_field" },
 	{ .type = "char[16]",		.name = "next_comm_field" },
 	{ .type = "u64",		.name = "ts_ns" },
+	{ .type = "char[]",		.name = "dynstring_field_1" },
 	{ .type = "u64",		.name = "ts_ms" },
 	{ .type = "unsigned int",	.name = "cpu" },
 	{ .type = "char[64]",		.name = "my_string_field" },
+	{ .type = "char[]",		.name = "dynstring_field_2" },
 	{ .type = "int",		.name = "my_int_field" },
 };
 
@@ -254,7 +252,7 @@ static struct synth_field_desc create_synth_test_fields[] = {
  */
 static int __init test_create_synth_event(void)
 {
-	u64 vals[7];
+	u64 vals[9];
 	int ret;
 
 	/* Create the create_synth_test event with the fields above */
@@ -290,12 +288,14 @@ static int __init test_create_synth_event(void)
 	/* Create some bogus values just for testing */
 
 	vals[0] = 777;			/* next_pid_field */
-	vals[1] = (u64)"tiddlywinks";	/* next_comm_field */
+	vals[1] = (u64)(long)"tiddlywinks";	/* next_comm_field */
 	vals[2] = 1000000;		/* ts_ns */
-	vals[3] = 1000;			/* ts_ms */
-	vals[4] = smp_processor_id();	/* cpu */
-	vals[5] = (u64)"thneed";	/* my_string_field */
-	vals[6] = 398;			/* my_int_field */
+	vals[3] = (u64)(long)"xrayspecs";	/* dynstring_field_1 */
+	vals[4] = 1000;			/* ts_ms */
+	vals[5] = raw_smp_processor_id(); /* cpu */
+	vals[6] = (u64)(long)"thneed";	/* my_string_field */
+	vals[7] = (u64)(long)"kerplunk";	/* dynstring_field_2 */
+	vals[8] = 398;			/* my_int_field */
 
 	/* Now generate a create_synth_test event */
 	ret = synth_event_trace_array(create_synth_test, vals, ARRAY_SIZE(vals));
@@ -303,7 +303,7 @@ static int __init test_create_synth_event(void)
 	return ret;
  delete:
 	/* We got an error after creating the event, delete it */
-	ret = synth_event_delete("create_synth_test");
+	synth_event_delete("create_synth_test");
 
 	goto out;
 }
@@ -330,7 +330,7 @@ static int __init test_add_next_synth_val(void)
 		goto out;
 
 	/* next_comm_field */
-	ret = synth_event_add_next_val((u64)"slinky", &trace_state);
+	ret = synth_event_add_next_val((u64)(long)"slinky", &trace_state);
 	if (ret)
 		goto out;
 
@@ -345,12 +345,12 @@ static int __init test_add_next_synth_val(void)
 		goto out;
 
 	/* cpu */
-	ret = synth_event_add_next_val(smp_processor_id(), &trace_state);
+	ret = synth_event_add_next_val(raw_smp_processor_id(), &trace_state);
 	if (ret)
 		goto out;
 
 	/* my_string_field */
-	ret = synth_event_add_next_val((u64)"thneed_2.01", &trace_state);
+	ret = synth_event_add_next_val((u64)(long)"thneed_2.01", &trace_state);
 	if (ret)
 		goto out;
 
@@ -388,7 +388,7 @@ static int __init test_add_synth_val(void)
 	if (ret)
 		goto out;
 
-	ret = synth_event_add_val("cpu", smp_processor_id(), &trace_state);
+	ret = synth_event_add_val("cpu", raw_smp_processor_id(), &trace_state);
 	if (ret)
 		goto out;
 
@@ -396,12 +396,12 @@ static int __init test_add_synth_val(void)
 	if (ret)
 		goto out;
 
-	ret = synth_event_add_val("next_comm_field", (u64)"silly putty",
+	ret = synth_event_add_val("next_comm_field", (u64)(long)"silly putty",
 				  &trace_state);
 	if (ret)
 		goto out;
 
-	ret = synth_event_add_val("my_string_field", (u64)"thneed_9",
+	ret = synth_event_add_val("my_string_field", (u64)(long)"thneed_9",
 				  &trace_state);
 	if (ret)
 		goto out;
@@ -422,14 +422,16 @@ static int __init test_trace_synth_event(void)
 	int ret;
 
 	/* Trace some bogus values just for testing */
-	ret = synth_event_trace(create_synth_test, 7,	/* number of values */
-				444,			/* next_pid_field */
-				(u64)"clackers",	/* next_comm_field */
-				1000000,		/* ts_ns */
-				1000,			/* ts_ms */
-				smp_processor_id(),	/* cpu */
-				(u64)"Thneed",		/* my_string_field */
-				999);			/* my_int_field */
+	ret = synth_event_trace(create_synth_test, 9,	/* number of values */
+				(u64)444,		/* next_pid_field */
+				(u64)(long)"clackers",	/* next_comm_field */
+				(u64)1000000,		/* ts_ns */
+				(u64)(long)"viewmaster",/* dynstring_field_1 */
+				(u64)1000,		/* ts_ms */
+				(u64)raw_smp_processor_id(), /* cpu */
+				(u64)(long)"Thneed",	/* my_string_field */
+				(u64)(long)"yoyos",	/* dynstring_field_2 */
+				(u64)999);		/* my_int_field */
 	return ret;
 }
 

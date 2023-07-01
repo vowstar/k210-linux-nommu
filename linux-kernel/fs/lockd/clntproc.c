@@ -12,6 +12,7 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
+#include <linux/filelock.h>
 #include <linux/nfs_fs.h>
 #include <linux/utsname.h>
 #include <linux/freezer.h>
@@ -130,7 +131,7 @@ static void nlmclnt_setlockargs(struct nlm_rqst *req, struct file_lock *fl)
 	char *nodename = req->a_host->h_rpcclnt->cl_nodename;
 
 	nlmclnt_next_cookie(&argp->cookie);
-	memcpy(&lock->fh, NFS_FH(locks_inode(fl->fl_file)), sizeof(struct nfs_fh));
+	memcpy(&lock->fh, NFS_FH(file_inode(fl->fl_file)), sizeof(struct nfs_fh));
 	lock->caller  = nodename;
 	lock->oh.data = req->a_owner;
 	lock->oh.len  = snprintf(req->a_owner, sizeof(req->a_owner), "%u@%s",
@@ -793,9 +794,6 @@ static void nlmclnt_cancel_callback(struct rpc_task *task, void *data)
 					task->tk_status);
 		goto retry_cancel;
 	}
-
-	dprintk("lockd: cancel status %u (task %u)\n",
-			status, task->tk_pid);
 
 	switch (status) {
 	case NLM_LCK_GRANTED:

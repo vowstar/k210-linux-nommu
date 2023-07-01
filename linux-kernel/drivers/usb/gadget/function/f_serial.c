@@ -233,7 +233,7 @@ static int gser_bind(struct usb_configuration *c, struct usb_function *f)
 	gser_ss_out_desc.bEndpointAddress = gser_fs_out_desc.bEndpointAddress;
 
 	status = usb_assign_descriptors(f, gser_fs_function, gser_hs_function,
-			gser_ss_function, NULL);
+			gser_ss_function, gser_ss_function);
 	if (status)
 		goto fail;
 	dev_dbg(&cdev->gadget->dev, "generic ttyGS%d: %s speed IN/%s OUT/%s\n",
@@ -345,7 +345,25 @@ static void gser_free(struct usb_function *f)
 
 static void gser_unbind(struct usb_configuration *c, struct usb_function *f)
 {
+	struct f_gser	*gser = func_to_gser(f);
+
+	/* Ensure port is disconnected before unbinding */
+	gserial_disconnect(&gser->port);
 	usb_free_all_descriptors(f);
+}
+
+static void gser_resume(struct usb_function *f)
+{
+	struct f_gser *gser = func_to_gser(f);
+
+	gserial_resume(&gser->port);
+}
+
+static void gser_suspend(struct usb_function *f)
+{
+	struct f_gser *gser = func_to_gser(f);
+
+	gserial_suspend(&gser->port);
 }
 
 static struct usb_function *gser_alloc(struct usb_function_instance *fi)
@@ -369,6 +387,8 @@ static struct usb_function *gser_alloc(struct usb_function_instance *fi)
 	gser->port.func.set_alt = gser_set_alt;
 	gser->port.func.disable = gser_disable;
 	gser->port.func.free_func = gser_free;
+	gser->port.func.resume = gser_resume;
+	gser->port.func.suspend = gser_suspend;
 
 	return &gser->port.func;
 }

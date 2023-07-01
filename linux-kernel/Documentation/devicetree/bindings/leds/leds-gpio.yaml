@@ -23,9 +23,8 @@ patternProperties:
   # node name to at least catch some child nodes.
   "(^led-[0-9a-f]$|led)":
     type: object
-
-    allOf:
-      - $ref: common.yaml#
+    $ref: common.yaml#
+    unevaluatedProperties: false
 
     properties:
       gpios:

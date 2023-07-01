@@ -107,10 +107,9 @@ static int crypto_authenc_esn_genicv_tail(struct aead_request *req,
 	return 0;
 }
 
-static void authenc_esn_geniv_ahash_done(struct crypto_async_request *areq,
-					 int err)
+static void authenc_esn_geniv_ahash_done(void *data, int err)
 {
-	struct aead_request *req = areq->data;
+	struct aead_request *req = data;
 
 	err = err ?: crypto_authenc_esn_genicv_tail(req, 0);
 	aead_request_complete(req, err);
@@ -153,10 +152,9 @@ static int crypto_authenc_esn_genicv(struct aead_request *req,
 }
 
 
-static void crypto_authenc_esn_encrypt_done(struct crypto_async_request *req,
-					    int err)
+static void crypto_authenc_esn_encrypt_done(void *data, int err)
 {
-	struct aead_request *areq = req->data;
+	struct aead_request *areq = data;
 
 	if (!err)
 		err = crypto_authenc_esn_genicv(areq, 0);
@@ -258,10 +256,9 @@ decrypt:
 	return crypto_skcipher_decrypt(skreq);
 }
 
-static void authenc_esn_verify_ahash_done(struct crypto_async_request *areq,
-					  int err)
+static void authenc_esn_verify_ahash_done(void *data, int err)
 {
-	struct aead_request *req = areq->data;
+	struct aead_request *req = data;
 
 	err = err ?: crypto_authenc_esn_decrypt_tail(req, 0);
 	authenc_esn_request_complete(req, err);
@@ -390,7 +387,6 @@ static void crypto_authenc_esn_free(struct aead_instance *inst)
 static int crypto_authenc_esn_create(struct crypto_template *tmpl,
 				     struct rtattr **tb)
 {
-	struct crypto_attr_type *algt;
 	u32 mask;
 	struct aead_instance *inst;
 	struct authenc_esn_instance_ctx *ctx;
@@ -399,14 +395,9 @@ static int crypto_authenc_esn_create(struct crypto_template *tmpl,
 	struct skcipher_alg *enc;
 	int err;
 
-	algt = crypto_get_attr_type(tb);
-	if (IS_ERR(algt))
-		return PTR_ERR(algt);
-
-	if ((algt->type ^ CRYPTO_ALG_TYPE_AEAD) & algt->mask)
-		return -EINVAL;
-
-	mask = crypto_requires_sync(algt->type, algt->mask);
+	err = crypto_check_attr_type(tb, CRYPTO_ALG_TYPE_AEAD, &mask);
+	if (err)
+		return err;
 
 	inst = kzalloc(sizeof(*inst) + sizeof(*ctx), GFP_KERNEL);
 	if (!inst)
@@ -437,8 +428,6 @@ static int crypto_authenc_esn_create(struct crypto_template *tmpl,
 		     enc->base.cra_driver_name) >= CRYPTO_MAX_ALG_NAME)
 		goto err_free_inst;
 
-	inst->alg.base.cra_flags = (auth_base->cra_flags |
-				    enc->base.cra_flags) & CRYPTO_ALG_ASYNC;
 	inst->alg.base.cra_priority = enc->base.cra_priority * 10 +
 				      auth_base->cra_priority;
 	inst->alg.base.cra_blocksize = enc->base.cra_blocksize;
@@ -458,7 +447,7 @@ static int crypto_authenc_esn_create(struct crypto_template *tmpl,
 	inst->alg.encrypt = crypto_authenc_esn_encrypt;
 	inst->alg.decrypt = crypto_authenc_esn_decrypt;
 
-	inst->free = crypto_authenc_esn_free,
+	inst->free = crypto_authenc_esn_free;
 
 	err = aead_register_instance(tmpl, inst);
 	if (err) {

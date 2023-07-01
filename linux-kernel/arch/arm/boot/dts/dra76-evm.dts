@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2017 Texas Instruments Incorporated - http://www.ti.com/
+ * Copyright (C) 2017 Texas Instruments Incorporated - https://www.ti.com/
  */
 /dts-v1/;
 
@@ -23,6 +23,40 @@
 	memory@0 {
 		device_type = "memory";
 		reg = <0x0 0x80000000 0x0 0x80000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		ipu2_cma_pool: ipu2_cma@95800000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0x95800000 0x0 0x3800000>;
+			reusable;
+			status = "okay";
+		};
+
+		dsp1_cma_pool: dsp1_cma@99000000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0x99000000 0x0 0x4000000>;
+			reusable;
+			status = "okay";
+		};
+
+		ipu1_cma_pool: ipu1_cma@9d000000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0x9d000000 0x0 0x2000000>;
+			reusable;
+			status = "okay";
+		};
+
+		dsp2_cma_pool: dsp2_cma@9f000000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0x9f000000 0x0 0x800000>;
+			reusable;
+			status = "okay";
+		};
 	};
 
 	vsys_12v0: fixedregulator-vsys12v0 {
@@ -122,12 +156,6 @@
 		vin-supply = <&vio_3v3>;
 		regulator-min-microvolt = <1800000>;
 		regulator-max-microvolt = <1800000>;
-	};
-
-	clk_ov5640_fixed: clock {
-		compatible = "fixed-clock";
-		#clock-cells = <0>;
-		clock-frequency = <24000000>;
 	};
 
 	hdmi0: connector {
@@ -321,7 +349,7 @@
 	};
 
 	pcf_lcd: pcf8757@20 {
-		compatible = "ti,pcf8575", "nxp,pcf8575";
+		compatible = "nxp,pcf8575";
 		reg = <0x20>;
 		gpio-controller;
 		#gpio-cells = <2>;
@@ -332,7 +360,7 @@
 	};
 
 	pcf_gpio_21: pcf8757@21 {
-		compatible = "ti,pcf8575", "nxp,pcf8575";
+		compatible = "nxp,pcf8575";
 		reg = <0x21>;
 		gpio-controller;
 		#gpio-cells = <2>;
@@ -343,11 +371,11 @@
 	};
 
 	pcf_hdmi: pcf8575@26 {
-		compatible = "ti,pcf8575", "nxp,pcf8575";
+		compatible = "nxp,pcf8575";
 		reg = <0x26>;
 		gpio-controller;
 		#gpio-cells = <2>;
-		p1 {
+		hdmi-audio-hog {
 			/* vin6_sel_s0: high: VIN6, low: audio */
 			gpio-hog;
 			gpios = <1 GPIO_ACTIVE_HIGH>;
@@ -369,27 +397,6 @@
 		IOVDD-supply = <&vio_3v3>;
 		DRVDD-supply = <&vio_3v3>;
 		DVDD-supply = <&aic_dvdd>;
-	};
-};
-
-&i2c5 {
-	status = "okay";
-	clock-frequency = <400000>;
-
-	ov5640@3c {
-		compatible = "ovti,ov5640";
-		reg = <0x3c>;
-
-		clocks = <&clk_ov5640_fixed>;
-		clock-names = "xclk";
-
-		port {
-			csi2_cam0: endpoint {
-				remote-endpoint = <&csi2_phy0>;
-				clock-lanes = <0>;
-				data-lanes = <1 2>;
-			};
-		};
 	};
 };
 
@@ -441,25 +448,23 @@
 	status = "disabled";
 };
 
-&mac {
+&mac_sw {
 	status = "okay";
-
-	dual_emac;
 };
 
-&cpsw_emac0 {
+&cpsw_port1 {
 	phy-handle = <&dp83867_0>;
 	phy-mode = "rgmii-id";
-	dual_emac_res_vlan = <1>;
+	ti,dual-emac-pvid = <1>;
 };
 
-&cpsw_emac1 {
+&cpsw_port2 {
 	phy-handle = <&dp83867_1>;
 	phy-mode = "rgmii-id";
-	dual_emac_res_vlan = <2>;
+	ti,dual-emac-pvid = <2>;
 };
 
-&davinci_mdio {
+&davinci_mdio_sw {
 	dp83867_0: ethernet-phy@2 {
 		reg = <2>;
 		ti,rx-internal-delay = <DP83867_RGMIIDCTL_2_25_NS>;
@@ -488,12 +493,12 @@
 };
 
 &dss {
-	status = "ok";
+	status = "okay";
 	vdda_video-supply = <&ldo5_reg>;
 };
 
 &hdmi {
-	status = "ok";
+	status = "okay";
 
 	vdda-supply = <&ldo1_reg>;
 
@@ -506,7 +511,7 @@
 
 &qspi {
 	spi-max-frequency = <96000000>;
-	m25p80@0 {
+	flash@0 {
 		spi-max-frequency = <96000000>;
 	};
 };
@@ -541,10 +546,22 @@
 	};
 };
 
-&csi2_0 {
-	csi2_phy0: endpoint {
-		remote-endpoint = <&csi2_cam0>;
-		clock-lanes = <0>;
-		data-lanes = <1 2>;
-	};
+&ipu2 {
+	status = "okay";
+	memory-region = <&ipu2_cma_pool>;
+};
+
+&ipu1 {
+	status = "okay";
+	memory-region = <&ipu1_cma_pool>;
+};
+
+&dsp1 {
+	status = "okay";
+	memory-region = <&dsp1_cma_pool>;
+};
+
+&dsp2 {
+	status = "okay";
+	memory-region = <&dsp2_cma_pool>;
 };

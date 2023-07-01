@@ -4557,7 +4557,7 @@ static int rt5677_set_dai_pll(struct snd_soc_dai *dai, int pll_id, int source,
 
 	ret = rt5677_pll_calc(freq_in, freq_out, &pll_code);
 	if (ret < 0) {
-		dev_err(component->dev, "Unsupport input clock %d\n", freq_in);
+		dev_err(component->dev, "Unsupported input clock %d\n", freq_in);
 		return ret;
 	}
 
@@ -4568,8 +4568,8 @@ static int rt5677_set_dai_pll(struct snd_soc_dai *dai, int pll_id, int source,
 	regmap_write(rt5677->regmap, RT5677_PLL1_CTRL1,
 		pll_code.n_code << RT5677_PLL_N_SFT | pll_code.k_code);
 	regmap_write(rt5677->regmap, RT5677_PLL1_CTRL2,
-		(pll_code.m_bp ? 0 : pll_code.m_code) << RT5677_PLL_M_SFT |
-		pll_code.m_bp << RT5677_PLL_M_BP_SFT);
+		((pll_code.m_bp ? 0 : pll_code.m_code) << RT5677_PLL_M_SFT) |
+		(pll_code.m_bp << RT5677_PLL_M_BP_SFT));
 
 	rt5677->pll_in = freq_in;
 	rt5677->pll_out = freq_out;
@@ -4609,7 +4609,7 @@ static int rt5677_set_tdm_slot(struct snd_soc_dai *dai, unsigned int tx_mask,
 		break;
 	case 25:
 		slot_width_25 = 0x8080;
-		/* fall through */
+		fallthrough;
 	case 24:
 		val |= (2 << 8);
 		break;
@@ -5189,7 +5189,6 @@ static const struct snd_soc_component_driver soc_component_dev_rt5677 = {
 	.num_dapm_routes	= ARRAY_SIZE(rt5677_dapm_routes),
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 static const struct regmap_config rt5677_regmap_physical = {
@@ -5332,7 +5331,7 @@ static bool rt5677_check_hotword(struct rt5677_priv *rt5677)
 static irqreturn_t rt5677_irq(int unused, void *data)
 {
 	struct rt5677_priv *rt5677 = data;
-	int ret = 0, loop, i, reg_irq, virq;
+	int ret, loop, i, reg_irq, virq;
 	bool irq_fired = false;
 
 	mutex_lock(&rt5677->irq_lock);
@@ -5694,11 +5693,9 @@ static int rt5677_i2c_probe(struct i2c_client *i2c)
 				      rt5677_dai, ARRAY_SIZE(rt5677_dai));
 }
 
-static int rt5677_i2c_remove(struct i2c_client *i2c)
+static void rt5677_i2c_remove(struct i2c_client *i2c)
 {
 	rt5677_free_gpio(i2c);
-
-	return 0;
 }
 
 static struct i2c_driver rt5677_i2c_driver = {

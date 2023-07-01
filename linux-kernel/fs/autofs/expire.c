@@ -355,7 +355,7 @@ static struct dentry *should_expire(struct dentry *dentry,
 		return NULL;
 	}
 
-	if (d_really_is_positive(dentry) && d_is_symlink(dentry)) {
+	if (d_is_symlink(dentry)) {
 		pr_debug("checking symlink %p %pd\n", dentry, dentry);
 
 		/* Forced expire, user space handles busy mounts */
@@ -371,7 +371,7 @@ static struct dentry *should_expire(struct dentry *dentry,
 		return NULL;
 	}
 
-	if (simple_empty(dentry))
+	if (autofs_empty(ino))
 		return NULL;
 
 	/* Case 2: tree mount, expire iff entire tree is not busy */

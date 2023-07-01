@@ -12,11 +12,12 @@ struct nvkm_instmem_func {
 	void (*wr32)(struct nvkm_instmem *, u32 addr, u32 data);
 	int (*memory_new)(struct nvkm_instmem *, u32 size, u32 align,
 			  bool zero, struct nvkm_memory **);
+	int (*memory_wrap)(struct nvkm_instmem *, struct nvkm_memory *, struct nvkm_memory **);
 	bool zero;
 };
 
 void nvkm_instmem_ctor(const struct nvkm_instmem_func *, struct nvkm_device *,
-		       int index, struct nvkm_instmem *);
+		       enum nvkm_subdev_type, int, struct nvkm_instmem *);
 void nvkm_instmem_boot(struct nvkm_instmem *);
 
 #include <core/memory.h>

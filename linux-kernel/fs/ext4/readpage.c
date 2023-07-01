@@ -7,8 +7,8 @@
  *
  * This was originally taken from fs/mpage.c
  *
- * The intent is the ext4_mpage_readpages() function here is intended
- * to replace mpage_readpages() in the general case, not just for
+ * The ext4_mpage_readpages() function here is intended to
+ * replace mpage_readahead() in the general case, not just for
  * encrypted files.  It has some limitations (see below), where it
  * will fall back to read_block_full_page(), but these limitations
  * should only be hit when page_size != block_size.
@@ -43,7 +43,6 @@
 #include <linux/writeback.h>
 #include <linux/backing-dev.h>
 #include <linux/pagevec.h>
-#include <linux/cleancache.h>
 
 #include "ext4.h"
 
@@ -76,14 +75,10 @@ static void __read_end_io(struct bio *bio)
 	bio_for_each_segment_all(bv, bio, iter_all) {
 		page = bv->bv_page;
 
-		/* PG_error was set if any post_read step failed */
-		if (bio->bi_status || PageError(page)) {
+		if (bio->bi_status)
 			ClearPageUptodate(page);
-			/* will re-read again later */
-			ClearPageError(page);
-		} else {
+		else
 			SetPageUptodate(page);
-		}
 		unlock_page(page);
 	}
 	if (bio->bi_private)
@@ -97,10 +92,12 @@ static void decrypt_work(struct work_struct *work)
 {
 	struct bio_post_read_ctx *ctx =
 		container_of(work, struct bio_post_read_ctx, work);
+	struct bio *bio = ctx->bio;
 
-	fscrypt_decrypt_bio(ctx->bio);
-
-	bio_post_read_processing(ctx);
+	if (fscrypt_decrypt_bio(bio))
+		bio_post_read_processing(ctx);
+	else
+		__read_end_io(bio);
 }
 
 static void verity_work(struct work_struct *work)
@@ -110,7 +107,7 @@ static void verity_work(struct work_struct *work)
 	struct bio *bio = ctx->bio;
 
 	/*
-	 * fsverity_verify_bio() may call readpages() again, and although verity
+	 * fsverity_verify_bio() may call readahead() again, and although verity
 	 * will be disabled for that, decryption may still be needed, causing
 	 * another bio_post_read_ctx to be allocated.  So to guarantee that
 	 * mempool_alloc() never deadlocks we must free the current ctx first.
@@ -140,7 +137,7 @@ static void bio_post_read_processing(struct bio_post_read_ctx *ctx)
 			return;
 		}
 		ctx->cur_step++;
-		/* fall-through */
+		fallthrough;
 	case STEP_VERITY:
 		if (ctx->enabled_steps & (1 << STEP_VERITY)) {
 			INIT_WORK(&ctx->work, verity_work);
@@ -148,7 +145,7 @@ static void bio_post_read_processing(struct bio_post_read_ctx *ctx)
 			return;
 		}
 		ctx->cur_step++;
-		/* fall-through */
+		fallthrough;
 	default:
 		__read_end_io(ctx->bio);
 	}
@@ -164,7 +161,7 @@ static bool bio_post_read_required(struct bio *bio)
  *
  * The mpage code never puts partial pages into a BIO (except for end-of-file).
  * If a page does not map to a contiguous run of blocks then it simply falls
- * back to block_read_full_page().
+ * back to block_read_full_folio().
  *
  * Why is this?  If a page's completion depends on a number of different BIOs
  * which can complete in any order (or at the same time) then determining the
@@ -195,7 +192,7 @@ static void ext4_set_bio_post_read_ctx(struct bio *bio,
 {
 	unsigned int post_read_steps = 0;
 
-	if (IS_ENCRYPTED(inode) && S_ISREG(inode->i_mode))
+	if (fscrypt_inode_uses_fs_layer_crypto(inode))
 		post_read_steps |= 1 << STEP_DECRYPT;
 
 	if (ext4_need_verity(inode, first_idx))
@@ -214,24 +211,22 @@ static void ext4_set_bio_post_read_ctx(struct bio *bio,
 
 static inline loff_t ext4_readpage_limit(struct inode *inode)
 {
-	if (IS_ENABLED(CONFIG_FS_VERITY) &&
-	    (IS_VERITY(inode) || ext4_verity_in_progress(inode)))
+	if (IS_ENABLED(CONFIG_FS_VERITY) && IS_VERITY(inode))
 		return inode->i_sb->s_maxbytes;
 
 	return i_size_read(inode);
 }
 
-int ext4_mpage_readpages(struct address_space *mapping,
-			 struct list_head *pages, struct page *page,
-			 unsigned nr_pages, bool is_readahead)
+int ext4_mpage_readpages(struct inode *inode,
+		struct readahead_control *rac, struct page *page)
 {
 	struct bio *bio = NULL;
 	sector_t last_block_in_bio = 0;
 
-	struct inode *inode = mapping->host;
 	const unsigned blkbits = inode->i_blkbits;
 	const unsigned blocks_per_page = PAGE_SIZE >> blkbits;
 	const unsigned blocksize = 1 << blkbits;
+	sector_t next_block;
 	sector_t block_in_file;
 	sector_t last_block;
 	sector_t last_block_in_file;
@@ -241,6 +236,7 @@ int ext4_mpage_readpages(struct address_space *mapping,
 	int length;
 	unsigned relative_block = 0;
 	struct ext4_map_blocks map;
+	unsigned int nr_pages = rac ? readahead_count(rac) : 1;
 
 	map.m_pblk = 0;
 	map.m_lblk = 0;
@@ -251,20 +247,16 @@ int ext4_mpage_readpages(struct address_space *mapping,
 		int fully_mapped = 1;
 		unsigned first_hole = blocks_per_page;
 
-		if (pages) {
-			page = lru_to_page(pages);
-
+		if (rac) {
+			page = readahead_page(rac);
 			prefetchw(&page->flags);
-			list_del(&page->lru);
-			if (add_to_page_cache_lru(page, mapping, page->index,
-				  readahead_gfp_mask(mapping)))
-				goto next_page;
 		}
 
 		if (page_has_buffers(page))
 			goto confused;
 
-		block_in_file = (sector_t)page->index << (PAGE_SHIFT - blkbits);
+		block_in_file = next_block =
+			(sector_t)page->index << (PAGE_SHIFT - blkbits);
 		last_block = block_in_file + nr_pages * blocks_per_page;
 		last_block_in_file = (ext4_readpage_limit(inode) +
 				      blocksize - 1) >> blkbits;
@@ -354,17 +346,13 @@ int ext4_mpage_readpages(struct address_space *mapping,
 		} else if (fully_mapped) {
 			SetPageMappedToDisk(page);
 		}
-		if (fully_mapped && blocks_per_page == 1 &&
-		    !PageUptodate(page) && cleancache_get_page(page) == 0) {
-			SetPageUptodate(page);
-			goto confused;
-		}
 
 		/*
 		 * This page will go to BIO.  Do we need to send this
 		 * BIO off first?
 		 */
-		if (bio && (last_block_in_bio != blocks[0] - 1)) {
+		if (bio && (last_block_in_bio != blocks[0] - 1 ||
+			    !fscrypt_mergeable_bio(bio, inode, next_block))) {
 		submit_and_realloc:
 			submit_bio(bio);
 			bio = NULL;
@@ -374,14 +362,15 @@ int ext4_mpage_readpages(struct address_space *mapping,
 			 * bio_alloc will _always_ be able to allocate a bio if
 			 * __GFP_DIRECT_RECLAIM is set, see bio_alloc_bioset().
 			 */
-			bio = bio_alloc(GFP_KERNEL,
-				min_t(int, nr_pages, BIO_MAX_PAGES));
+			bio = bio_alloc(bdev, bio_max_segs(nr_pages),
+					REQ_OP_READ, GFP_KERNEL);
+			fscrypt_set_bio_crypt_ctx(bio, inode, next_block,
+						  GFP_KERNEL);
 			ext4_set_bio_post_read_ctx(bio, inode, page->index);
-			bio_set_dev(bio, bdev);
 			bio->bi_iter.bi_sector = blocks[0] << (blkbits - 9);
 			bio->bi_end_io = mpage_end_io;
-			bio_set_op_attrs(bio, REQ_OP_READ,
-						is_readahead ? REQ_RAHEAD : 0);
+			if (rac)
+				bio->bi_opf |= REQ_RAHEAD;
 		}
 
 		length = first_hole << blkbits;
@@ -402,14 +391,13 @@ int ext4_mpage_readpages(struct address_space *mapping,
 			bio = NULL;
 		}
 		if (!PageUptodate(page))
-			block_read_full_page(page, ext4_get_block);
+			block_read_full_folio(page_folio(page), ext4_get_block);
 		else
 			unlock_page(page);
 	next_page:
-		if (pages)
+		if (rac)
 			put_page(page);
 	}
-	BUG_ON(pages && !list_empty(pages));
 	if (bio)
 		submit_bio(bio);
 	return 0;
@@ -417,9 +405,8 @@ int ext4_mpage_readpages(struct address_space *mapping,
 
 int __init ext4_init_post_read_processing(void)
 {
-	bio_post_read_ctx_cache =
-		kmem_cache_create("ext4_bio_post_read_ctx",
-				  sizeof(struct bio_post_read_ctx), 0, 0, NULL);
+	bio_post_read_ctx_cache = KMEM_CACHE(bio_post_read_ctx, SLAB_RECLAIM_ACCOUNT);
+
 	if (!bio_post_read_ctx_cache)
 		goto fail;
 	bio_post_read_ctx_pool =

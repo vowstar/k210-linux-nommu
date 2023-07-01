@@ -24,6 +24,8 @@
 #ifndef __AMDGPU_JPEG_H__
 #define __AMDGPU_JPEG_H__
 
+#include "amdgpu_ras.h"
+
 #define AMDGPU_MAX_JPEG_INSTANCES	2
 
 #define AMDGPU_JPEG_HARVEST_JPEG0 (1 << 0)
@@ -39,15 +41,21 @@ struct amdgpu_jpeg_inst {
 	struct amdgpu_jpeg_reg external;
 };
 
+struct amdgpu_jpeg_ras {
+	struct amdgpu_ras_block_object ras_block;
+};
+
 struct amdgpu_jpeg {
 	uint8_t	num_jpeg_inst;
 	struct amdgpu_jpeg_inst inst[AMDGPU_MAX_JPEG_INSTANCES];
 	struct amdgpu_jpeg_reg internal;
-	struct drm_gpu_scheduler *jpeg_sched[AMDGPU_MAX_JPEG_INSTANCES];
-	uint32_t num_jpeg_sched;
 	unsigned harvest_config;
 	struct delayed_work idle_work;
 	enum amd_powergating_state cur_state;
+	struct mutex jpeg_pg_lock;
+	atomic_t total_submission_cnt;
+	struct ras_common_if	*ras_if;
+	struct amdgpu_jpeg_ras	*ras;
 };
 
 int amdgpu_jpeg_sw_init(struct amdgpu_device *adev);
@@ -60,5 +68,10 @@ void amdgpu_jpeg_ring_end_use(struct amdgpu_ring *ring);
 
 int amdgpu_jpeg_dec_ring_test_ring(struct amdgpu_ring *ring);
 int amdgpu_jpeg_dec_ring_test_ib(struct amdgpu_ring *ring, long timeout);
+
+int amdgpu_jpeg_process_poison_irq(struct amdgpu_device *adev,
+				struct amdgpu_irq_src *source,
+				struct amdgpu_iv_entry *entry);
+void jpeg_set_ras_funcs(struct amdgpu_device *adev);
 
 #endif /*__AMDGPU_JPEG_H__*/

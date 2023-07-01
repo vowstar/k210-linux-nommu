@@ -36,6 +36,43 @@ static const char *const aa_audit_type[] = {
 	"AUTO"
 };
 
+static const char *const aa_class_names[] = {
+	"none",
+	"unknown",
+	"file",
+	"cap",
+	"net",
+	"rlimits",
+	"domain",
+	"mount",
+	"unknown",
+	"ptrace",
+	"signal",
+	"xmatch",
+	"unknown",
+	"unknown",
+	"net",
+	"unknown",
+	"label",
+	"posix_mqueue",
+	"io_uring",
+	"module",
+	"lsm",
+	"unknown",
+	"unknown",
+	"unknown",
+	"unknown",
+	"unknown",
+	"unknown",
+	"unknown",
+	"unknown",
+	"unknown",
+	"unknown",
+	"X",
+	"dbus",
+};
+
+
 /*
  * Currently AppArmor auditing is fed straight into the audit framework.
  *
@@ -46,7 +83,7 @@ static const char *const aa_audit_type[] = {
  */
 
 /**
- * audit_base - core AppArmor function.
+ * audit_pre() - core AppArmor function.
  * @ab: audit buffer to fill (NOT NULL)
  * @ca: audit structure containing data to audit (NOT NULL)
  *
@@ -57,18 +94,22 @@ static void audit_pre(struct audit_buffer *ab, void *ca)
 	struct common_audit_data *sa = ca;
 
 	if (aa_g_audit_header) {
-		audit_log_format(ab, "apparmor=");
-		audit_log_string(ab, aa_audit_type[aad(sa)->type]);
+		audit_log_format(ab, "apparmor=\"%s\"",
+				 aa_audit_type[aad(sa)->type]);
 	}
 
 	if (aad(sa)->op) {
-		audit_log_format(ab, " operation=");
-		audit_log_string(ab, aad(sa)->op);
+		audit_log_format(ab, " operation=\"%s\"", aad(sa)->op);
 	}
 
+	if (aad(sa)->class)
+		audit_log_format(ab, " class=\"%s\"",
+				 aad(sa)->class <= AA_CLASS_LAST ?
+				 aa_class_names[aad(sa)->class] :
+				 "unknown");
+
 	if (aad(sa)->info) {
-		audit_log_format(ab, " info=");
-		audit_log_string(ab, aad(sa)->info);
+		audit_log_format(ab, " info=\"%s\"", aad(sa)->info);
 		if (aad(sa)->error)
 			audit_log_format(ab, " error=%d", aad(sa)->error);
 	}
@@ -139,7 +180,7 @@ int aa_audit(int type, struct aa_profile *profile, struct common_audit_data *sa,
 	}
 	if (AUDIT_MODE(profile) == AUDIT_QUIET ||
 	    (type == AUDIT_APPARMOR_DENIED &&
-	     AUDIT_MODE(profile) == AUDIT_QUIET))
+	     AUDIT_MODE(profile) == AUDIT_QUIET_DENIED))
 		return aad(sa)->error;
 
 	if (KILL_MODE(profile) && type == AUDIT_APPARMOR_DENIED)
@@ -197,8 +238,9 @@ int aa_audit_rule_init(u32 field, u32 op, char *rulestr, void **vrule)
 	rule->label = aa_label_parse(&root_ns->unconfined->label, rulestr,
 				     GFP_KERNEL, true, false);
 	if (IS_ERR(rule->label)) {
+		int err = PTR_ERR(rule->label);
 		aa_audit_rule_free(rule);
-		return PTR_ERR(rule->label);
+		return err;
 	}
 
 	*vrule = rule;

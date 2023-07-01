@@ -32,6 +32,7 @@ static int nf_br_ip_fragment(struct net *net, struct sock *sk,
 					   struct sk_buff *))
 {
 	int frag_max_size = BR_INPUT_SKB_CB(skb)->frag_max_size;
+	bool mono_delivery_time = skb->mono_delivery_time;
 	unsigned int hlen, ll_rs, mtu;
 	ktime_t tstamp = skb->tstamp;
 	struct ip_frag_state state;
@@ -81,13 +82,19 @@ static int nf_br_ip_fragment(struct net *net, struct sock *sk,
 			if (iter.frag)
 				ip_fraglist_prepare(skb, &iter);
 
-			skb->tstamp = tstamp;
+			skb_set_delivery_time(skb, tstamp, mono_delivery_time);
 			err = output(net, sk, data, skb);
 			if (err || !iter.frag)
 				break;
 
 			skb = ip_fraglist_next(&iter);
 		}
+
+		if (!err)
+			return 0;
+
+		kfree_skb_list(iter.frag);
+
 		return err;
 	}
 slow_path:
@@ -106,7 +113,7 @@ slow_path:
 			goto blackhole;
 		}
 
-		skb2->tstamp = tstamp;
+		skb_set_delivery_time(skb2, tstamp, mono_delivery_time);
 		err = output(net, sk, data, skb2);
 		if (err)
 			goto blackhole;
@@ -168,6 +175,7 @@ static unsigned int nf_ct_br_defrag4(struct sk_buff *skb,
 static unsigned int nf_ct_br_defrag6(struct sk_buff *skb,
 				     const struct nf_hook_state *state)
 {
+#if IS_ENABLED(CONFIG_NF_DEFRAG_IPV6)
 	u16 zone_id = NF_CT_DEFAULT_ZONE_ID;
 	enum ip_conntrack_info ctinfo;
 	struct br_input_skb_cb cb;
@@ -180,14 +188,17 @@ static unsigned int nf_ct_br_defrag6(struct sk_buff *skb,
 
 	br_skb_cb_save(skb, &cb, sizeof(struct inet6_skb_parm));
 
-	err = nf_ipv6_br_defrag(state->net, skb,
-				IP_DEFRAG_CONNTRACK_BRIDGE_IN + zone_id);
+	err = nf_ct_frag6_gather(state->net, skb,
+				 IP_DEFRAG_CONNTRACK_BRIDGE_IN + zone_id);
 	/* queued */
 	if (err == -EINPROGRESS)
 		return NF_STOLEN;
 
 	br_skb_cb_restore(skb, &cb, IP6CB(skb)->frag_max_size);
 	return err == 0 ? NF_ACCEPT : NF_DROP;
+#else
+	return NF_ACCEPT;
+#endif
 }
 
 static int nf_ct_br_ip_check(const struct sk_buff *skb)
@@ -201,7 +212,7 @@ static int nf_ct_br_ip_check(const struct sk_buff *skb)
 	    iph->version != 4)
 		return -1;
 
-	len = ntohs(iph->tot_len);
+	len = skb_ip_totlen(skb);
 	if (skb->len < nhoff + len ||
 	    len < (iph->ihl * 4))
                 return -1;
@@ -245,7 +256,7 @@ static unsigned int nf_ct_bridge_pre(void *priv, struct sk_buff *skb,
 		if (!pskb_may_pull(skb, sizeof(struct iphdr)))
 			return NF_ACCEPT;
 
-		len = ntohs(ip_hdr(skb)->tot_len);
+		len = skb_ip_totlen(skb);
 		if (pskb_trim_rcsum(skb, len))
 			return NF_ACCEPT;
 
@@ -355,42 +366,12 @@ static int nf_ct_bridge_refrag_post(struct net *net, struct sock *sk,
 	return br_dev_queue_push_xmit(net, sk, skb);
 }
 
-static unsigned int nf_ct_bridge_confirm(struct sk_buff *skb)
-{
-	enum ip_conntrack_info ctinfo;
-	struct nf_conn *ct;
-	int protoff;
-
-	ct = nf_ct_get(skb, &ctinfo);
-	if (!ct || ctinfo == IP_CT_RELATED_REPLY)
-		return nf_conntrack_confirm(skb);
-
-	switch (skb->protocol) {
-	case htons(ETH_P_IP):
-		protoff = skb_network_offset(skb) + ip_hdrlen(skb);
-		break;
-	case htons(ETH_P_IPV6): {
-		 unsigned char pnum = ipv6_hdr(skb)->nexthdr;
-		__be16 frag_off;
-
-		protoff = ipv6_skip_exthdr(skb, sizeof(struct ipv6hdr), &pnum,
-					   &frag_off);
-		if (protoff < 0 || (frag_off & htons(~0x7)) != 0)
-			return nf_conntrack_confirm(skb);
-		}
-		break;
-	default:
-		return NF_ACCEPT;
-	}
-	return nf_confirm(skb, protoff, ct, ctinfo);
-}
-
 static unsigned int nf_ct_bridge_post(void *priv, struct sk_buff *skb,
 				      const struct nf_hook_state *state)
 {
 	int ret;
 
-	ret = nf_ct_bridge_confirm(skb);
+	ret = nf_confirm(priv, skb, state);
 	if (ret != NF_ACCEPT)
 		return ret;
 

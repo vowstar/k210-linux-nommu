@@ -7,15 +7,51 @@
  * Author: Masami Hiramatsu <mhiramat@kernel.org>
  */
 
+#ifdef __KERNEL__
 #include <linux/kernel.h>
 #include <linux/types.h>
+#else /* !__KERNEL__ */
+/*
+ * NOTE: This is only for tools/bootconfig, because tools/bootconfig will
+ * run the parser sanity test.
+ * This does NOT mean linux/bootconfig.h is available in the user space.
+ * However, if you change this file, please make sure the tools/bootconfig
+ * has no issue on building and running.
+ */
+#endif
+
+#define BOOTCONFIG_MAGIC	"#BOOTCONFIG\n"
+#define BOOTCONFIG_MAGIC_LEN	12
+#define BOOTCONFIG_ALIGN_SHIFT	2
+#define BOOTCONFIG_ALIGN	(1 << BOOTCONFIG_ALIGN_SHIFT)
+#define BOOTCONFIG_ALIGN_MASK	(BOOTCONFIG_ALIGN - 1)
+
+/**
+ * xbc_calc_checksum() - Calculate checksum of bootconfig
+ * @data: Bootconfig data.
+ * @size: The size of the bootconfig data.
+ *
+ * Calculate the checksum value of the bootconfig data.
+ * The checksum will be used with the BOOTCONFIG_MAGIC and the size for
+ * embedding the bootconfig in the initrd image.
+ */
+static inline __init uint32_t xbc_calc_checksum(void *data, uint32_t size)
+{
+	unsigned char *p = data;
+	uint32_t ret = 0;
+
+	while (size--)
+		ret += *p++;
+
+	return ret;
+}
 
 /* XBC tree node */
 struct xbc_node {
-	u16 next;
-	u16 child;
-	u16 parent;
-	u16 data;
+	uint16_t next;
+	uint16_t child;
+	uint16_t parent;
+	uint16_t data;
 } __attribute__ ((__packed__));
 
 #define XBC_KEY		0
@@ -23,7 +59,7 @@ struct xbc_node {
 /* Maximum size of boot config is 32KB - 1 */
 #define XBC_DATA_MAX	(XBC_VALUE - 1)
 
-#define XBC_NODE_MAX	1024
+#define XBC_NODE_MAX	8192
 #define XBC_KEYLEN_MAX	256
 #define XBC_DEPTH_MAX	16
 
@@ -65,7 +101,7 @@ static inline __init bool xbc_node_is_key(struct xbc_node *node)
  */
 static inline __init bool xbc_node_is_array(struct xbc_node *node)
 {
-	return xbc_node_is_value(node) && node->next != 0;
+	return xbc_node_is_value(node) && node->child != 0;
 }
 
 /**
@@ -74,6 +110,8 @@ static inline __init bool xbc_node_is_array(struct xbc_node *node)
  *
  * Test the @node is a leaf key node which is a key node and has a value node
  * or no child. Returns true if it is a leaf node, or false if not.
+ * Note that the leaf node can have subkey nodes in addition to the
+ * value node.
  */
 static inline __init bool xbc_node_is_leaf(struct xbc_node *node)
 {
@@ -82,7 +120,7 @@ static inline __init bool xbc_node_is_leaf(struct xbc_node *node)
 }
 
 /* Tree-based key-value access APIs */
-struct xbc_node * __init xbc_node_find_child(struct xbc_node *parent,
+struct xbc_node * __init xbc_node_find_subkey(struct xbc_node *parent,
 					     const char *key);
 
 const char * __init xbc_node_find_value(struct xbc_node *parent,
@@ -120,7 +158,24 @@ xbc_find_value(const char *key, struct xbc_node **vnode)
  */
 static inline struct xbc_node * __init xbc_find_node(const char *key)
 {
-	return xbc_node_find_child(NULL, key);
+	return xbc_node_find_subkey(NULL, key);
+}
+
+/**
+ * xbc_node_get_subkey() - Return the first subkey node if exists
+ * @node: Parent node
+ *
+ * Return the first subkey node of the @node. If the @node has no child
+ * or only value node, this will return NULL.
+ */
+static inline struct xbc_node * __init xbc_node_get_subkey(struct xbc_node *node)
+{
+	struct xbc_node *child = xbc_node_get_child(node);
+
+	if (child && xbc_node_is_value(child))
+		return xbc_node_get_next(child);
+	else
+		return child;
 }
 
 /**
@@ -134,7 +189,7 @@ static inline struct xbc_node * __init xbc_find_node(const char *key)
  */
 #define xbc_array_for_each_value(anode, value)				\
 	for (value = xbc_node_get_data(anode); anode != NULL ;		\
-	     anode = xbc_node_get_next(anode),				\
+	     anode = xbc_node_get_child(anode),				\
 	     value = anode ? xbc_node_get_data(anode) : NULL)
 
 /**
@@ -143,9 +198,22 @@ static inline struct xbc_node * __init xbc_find_node(const char *key)
  * @child: Iterated XBC node.
  *
  * Iterate child nodes of @parent. Each child nodes are stored to @child.
+ * The @child can be mixture of a value node and subkey nodes.
  */
 #define xbc_node_for_each_child(parent, child)				\
 	for (child = xbc_node_get_child(parent); child != NULL ;	\
+	     child = xbc_node_get_next(child))
+
+/**
+ * xbc_node_for_each_subkey() - Iterate child subkey nodes
+ * @parent: An XBC node.
+ * @child: Iterated XBC node.
+ *
+ * Iterate subkey nodes of @parent. Each child nodes are stored to @child.
+ * The @child is only the subkey node.
+ */
+#define xbc_node_for_each_subkey(parent, child)				\
+	for (child = xbc_node_get_subkey(parent); child != NULL ;	\
 	     child = xbc_node_get_next(child))
 
 /**
@@ -156,16 +224,16 @@ static inline struct xbc_node * __init xbc_find_node(const char *key)
  * @value: Iterated value of array entry.
  *
  * Iterate array entries of given @key under @node. Each array entry node
- * is stroed to @anode and @value. If the @node doesn't have @key node,
+ * is stored to @anode and @value. If the @node doesn't have @key node,
  * it does nothing.
  * Note that even if the found key node has only one value (not array)
- * this executes block once. Hoever, if the found key node has no value
+ * this executes block once. However, if the found key node has no value
  * (key-only node), this does nothing. So don't use this for testing the
  * key-value pair existence.
  */
 #define xbc_node_for_each_array_value(node, key, anode, value)		\
 	for (value = xbc_node_find_value(node, key, &anode); value != NULL; \
-	     anode = xbc_node_get_next(anode),				\
+	     anode = xbc_node_get_child(anode),				\
 	     value = anode ? xbc_node_get_data(anode) : NULL)
 
 /**
@@ -213,12 +281,22 @@ static inline int __init xbc_node_compose_key(struct xbc_node *node,
 }
 
 /* XBC node initializer */
-int __init xbc_init(char *buf);
+int __init xbc_init(const char *buf, size_t size, const char **emsg, int *epos);
+
+/* XBC node and size information */
+int __init xbc_get_info(int *node_size, size_t *data_size);
 
 /* XBC cleanup data structures */
-void __init xbc_destroy_all(void);
+void __init xbc_exit(void);
 
-/* Debug dump functions */
-void __init xbc_debug_dump(void);
+/* XBC embedded bootconfig data in kernel */
+#ifdef CONFIG_BOOT_CONFIG_EMBED
+const char * __init xbc_get_embedded_bootconfig(size_t *size);
+#else
+static inline const char *xbc_get_embedded_bootconfig(size_t *size)
+{
+	return NULL;
+}
+#endif
 
 #endif

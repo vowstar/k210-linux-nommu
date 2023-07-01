@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 // TI LM3532 LED driver
-// Copyright (C) 2019 Texas Instruments Incorporated - http://www.ti.com/
-// http://www.ti.com/lit/ds/symlink/lm3532.pdf
+// Copyright (C) 2019 Texas Instruments Incorporated - https://www.ti.com/
+// https://www.ti.com/lit/ds/symlink/lm3532.pdf
 
 #include <linux/i2c.h>
 #include <linux/leds.h>
@@ -96,15 +96,15 @@
 
 /*
  * struct lm3532_als_data
- * @config - value of ALS configuration register
- * @als1_imp_sel - value of ALS1 resistor select register
- * @als2_imp_sel - value of ALS2 resistor select register
- * @als_avrg_time - ALS averaging time
- * @als_input_mode - ALS input mode for brightness control
- * @als_vmin - Minimum ALS voltage
- * @als_vmax - Maximum ALS voltage
- * @zone_lo - values of ALS lo ZB(Zone Boundary) registers
- * @zone_hi - values of ALS hi ZB(Zone Boundary) registers
+ * @config: value of ALS configuration register
+ * @als1_imp_sel: value of ALS1 resistor select register
+ * @als2_imp_sel: value of ALS2 resistor select register
+ * @als_avrg_time: ALS averaging time
+ * @als_input_mode: ALS input mode for brightness control
+ * @als_vmin: Minimum ALS voltage
+ * @als_vmax: Maximum ALS voltage
+ * @zone_lo: values of ALS lo ZB(Zone Boundary) registers
+ * @zone_hi: values of ALS hi ZB(Zone Boundary) registers
  */
 struct lm3532_als_data {
 	u8 config;
@@ -121,15 +121,14 @@ struct lm3532_als_data {
 /**
  * struct lm3532_led
  * @led_dev: led class device
- * @priv - Pointer the device data structure
- * @control_bank - Control bank the LED is associated to
- * @mode - Mode of the LED string
- * @ctrl_brt_pointer - Zone target register that controls the sink
- * @num_leds - Number of LED strings are supported in this array
- * @full_scale_current - The full-scale current setting for the current sink.
- * @led_strings - The LED strings supported in this array
- * @enabled - Enabled status
- * @label - LED label
+ * @priv: Pointer the device data structure
+ * @control_bank: Control bank the LED is associated to
+ * @mode: Mode of the LED string
+ * @ctrl_brt_pointer: Zone target register that controls the sink
+ * @num_leds: Number of LED strings are supported in this array
+ * @full_scale_current: The full-scale current setting for the current sink.
+ * @led_strings: The LED strings supported in this array
+ * @enabled: Enabled status
  */
 struct lm3532_led {
 	struct led_classdev led_dev;
@@ -140,23 +139,22 @@ struct lm3532_led {
 	int ctrl_brt_pointer;
 	int num_leds;
 	int full_scale_current;
-	int enabled:1;
+	unsigned int enabled:1;
 	u32 led_strings[LM3532_MAX_CONTROL_BANKS];
-	char label[LED_MAX_NAME_SIZE];
 };
 
 /**
  * struct lm3532_data
- * @enable_gpio - Hardware enable gpio
+ * @enable_gpio: Hardware enable gpio
  * @regulator: regulator
  * @client: i2c client
- * @regmap - Devices register map
- * @dev - Pointer to the devices device struct
- * @lock - Lock for reading/writing the device
- * @als_data - Pointer to the als data struct
- * @runtime_ramp_up - Runtime ramp up setting
- * @runtime_ramp_down - Runtime ramp down setting
- * @leds - Array of LED strings
+ * @regmap: Devices register map
+ * @dev: Pointer to the devices device struct
+ * @lock: Lock for reading/writing the device
+ * @als_data: Pointer to the als data struct
+ * @runtime_ramp_up: Runtime ramp up setting
+ * @runtime_ramp_down: Runtime ramp down setting
+ * @leds: Array of LED strings
  */
 struct lm3532_data {
 	struct gpio_desc *enable_gpio;
@@ -548,7 +546,6 @@ static int lm3532_parse_node(struct lm3532_data *priv)
 {
 	struct fwnode_handle *child = NULL;
 	struct lm3532_led *led;
-	const char *name;
 	int control_bank;
 	u32 ramp_time;
 	size_t i = 0;
@@ -589,7 +586,6 @@ static int lm3532_parse_node(struct lm3532_data *priv)
 		ret = fwnode_property_read_u32(child, "reg", &control_bank);
 		if (ret) {
 			dev_err(&priv->client->dev, "reg property missing\n");
-			fwnode_handle_put(child);
 			goto child_out;
 		}
 
@@ -604,7 +600,6 @@ static int lm3532_parse_node(struct lm3532_data *priv)
 					       &led->mode);
 		if (ret) {
 			dev_err(&priv->client->dev, "ti,led-mode property missing\n");
-			fwnode_handle_put(child);
 			goto child_out;
 		}
 
@@ -639,30 +634,16 @@ static int lm3532_parse_node(struct lm3532_data *priv)
 						    led->num_leds);
 		if (ret) {
 			dev_err(&priv->client->dev, "led-sources property missing\n");
-			fwnode_handle_put(child);
 			goto child_out;
 		}
 
-		fwnode_property_read_string(child, "linux,default-trigger",
-					    &led->led_dev.default_trigger);
-
-		ret = fwnode_property_read_string(child, "label", &name);
-		if (ret)
-			snprintf(led->label, sizeof(led->label),
-				"%s::", priv->client->name);
-		else
-			snprintf(led->label, sizeof(led->label),
-				 "%s:%s", priv->client->name, name);
-
 		led->priv = priv;
-		led->led_dev.name = led->label;
 		led->led_dev.brightness_set_blocking = lm3532_brightness_set;
 
 		ret = devm_led_classdev_register_ext(priv->dev, &led->led_dev, &idata);
 		if (ret) {
 			dev_err(&priv->client->dev, "led register err: %d\n",
 				ret);
-			fwnode_handle_put(child);
 			goto child_out;
 		}
 
@@ -670,19 +651,19 @@ static int lm3532_parse_node(struct lm3532_data *priv)
 		if (ret) {
 			dev_err(&priv->client->dev, "register init err: %d\n",
 				ret);
-			fwnode_handle_put(child);
 			goto child_out;
 		}
 
 		i++;
 	}
+	return 0;
 
 child_out:
+	fwnode_handle_put(child);
 	return ret;
 }
 
-static int lm3532_probe(struct i2c_client *client,
-			   const struct i2c_device_id *id)
+static int lm3532_probe(struct i2c_client *client)
 {
 	struct lm3532_data *drvdata;
 	int ret = 0;
@@ -722,7 +703,7 @@ static int lm3532_probe(struct i2c_client *client,
 	return ret;
 }
 
-static int lm3532_remove(struct i2c_client *client)
+static void lm3532_remove(struct i2c_client *client)
 {
 	struct lm3532_data *drvdata = i2c_get_clientdata(client);
 
@@ -730,8 +711,6 @@ static int lm3532_remove(struct i2c_client *client)
 
 	if (drvdata->enable_gpio)
 		gpiod_direction_output(drvdata->enable_gpio, 0);
-
-	return 0;
 }
 
 static const struct of_device_id of_lm3532_leds_match[] = {
@@ -747,7 +726,7 @@ static const struct i2c_device_id lm3532_id[] = {
 MODULE_DEVICE_TABLE(i2c, lm3532_id);
 
 static struct i2c_driver lm3532_i2c_driver = {
-	.probe = lm3532_probe,
+	.probe_new = lm3532_probe,
 	.remove = lm3532_remove,
 	.id_table = lm3532_id,
 	.driver = {

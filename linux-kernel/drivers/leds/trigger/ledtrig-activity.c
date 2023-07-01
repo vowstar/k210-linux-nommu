@@ -11,6 +11,7 @@
 #include <linux/kernel_stat.h>
 #include <linux/leds.h>
 #include <linux/module.h>
+#include <linux/panic_notifier.h>
 #include <linux/reboot.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -207,7 +208,7 @@ static void activity_deactivate(struct led_classdev *led_cdev)
 {
 	struct activity_data *activity_data = led_get_trigger_data(led_cdev);
 
-	del_timer_sync(&activity_data->timer);
+	timer_shutdown_sync(&activity_data->timer);
 	kfree(activity_data);
 	clear_bit(LED_BLINK_SW, &led_cdev->work_flags);
 }

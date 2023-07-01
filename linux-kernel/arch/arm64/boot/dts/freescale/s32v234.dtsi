@@ -61,10 +61,12 @@
 
 		cluster0_l2_cache: l2-cache0 {
 			compatible = "cache";
+			cache-level = <2>;
 		};
 
 		cluster1_l2_cache: l2-cache1 {
 			compatible = "cache";
+			cache-level = <2>;
 		};
 	};
 
@@ -104,7 +106,7 @@
 		interrupt-parent = <&gic>;
 		ranges;
 
-		aips0: aips-bus@40000000 {
+		aips0: bus@40000000 {
 			compatible = "simple-bus";
 			#address-cells = <2>;
 			#size-cells = <2>;
@@ -120,7 +122,7 @@
 			};
 		};
 
-		aips1: aips-bus@40080000 {
+		aips1: bus@40080000 {
 			compatible = "simple-bus";
 			#address-cells = <2>;
 			#size-cells = <2>;

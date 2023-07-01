@@ -29,15 +29,13 @@
 
 #ifndef CONFIG_ARC_HAS_LLSC
 arch_spinlock_t smp_atomic_ops_lock = __ARCH_SPIN_LOCK_UNLOCKED;
-arch_spinlock_t smp_bitops_lock = __ARCH_SPIN_LOCK_UNLOCKED;
 
 EXPORT_SYMBOL_GPL(smp_atomic_ops_lock);
-EXPORT_SYMBOL_GPL(smp_bitops_lock);
 #endif
 
 struct plat_smp_ops  __weak plat_smp_ops;
 
-/* XXX: per cpu ? Only needed once in early seconday boot */
+/* XXX: per cpu ? Only needed once in early secondary boot */
 struct task_struct *secondary_idle_tsk;
 
 /* Called from start_kernel */
@@ -189,7 +187,6 @@ void start_kernel_secondary(void)
 	pr_info("## CPU%u LIVE ##: Executing Code...\n", cpu);
 
 	local_irq_enable();
-	preempt_disable();
 	cpu_startup_entry(CPUHP_AP_ONLINE_IDLE);
 }
 
@@ -226,21 +223,13 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
 	}
 
 	if (!cpu_online(cpu)) {
-		pr_info("Timeout: CPU%u FAILED to comeup !!!\n", cpu);
+		pr_info("Timeout: CPU%u FAILED to come up !!!\n", cpu);
 		return -1;
 	}
 
 	secondary_idle_tsk = NULL;
 
 	return 0;
-}
-
-/*
- * not supported here
- */
-int setup_profiling_timer(unsigned int multiplier)
-{
-	return -EINVAL;
 }
 
 /*****************************************************************************/
@@ -277,14 +266,14 @@ static void ipi_send_msg_one(int cpu, enum ipi_msg_type msg)
 	 * and read back old value
 	 */
 	do {
-		new = old = READ_ONCE(*ipi_data_ptr);
+		new = old = *ipi_data_ptr;
 		new |= 1U << msg;
 	} while (cmpxchg(ipi_data_ptr, old, new) != old);
 
 	/*
 	 * Call the platform specific IPI kick function, but avoid if possible:
 	 * Only do so if there's no pending msg from other concurrent sender(s).
-	 * Otherwise, recevier will see this msg as well when it takes the
+	 * Otherwise, receiver will see this msg as well when it takes the
 	 * IPI corresponding to that msg. This is true, even if it is already in
 	 * IPI handler, because !@old means it has not yet dequeued the msg(s)
 	 * so @new msg can be a free-loader
@@ -396,7 +385,7 @@ irqreturn_t do_IPI(int irq, void *dev_id)
  * API called by platform code to hookup arch-common ISR to their IPI IRQ
  *
  * Note: If IPI is provided by platform (vs. say ARC MCIP), their intc setup/map
- * function needs to call call irq_set_percpu_devid() for IPI IRQ, otherwise
+ * function needs to call irq_set_percpu_devid() for IPI IRQ, otherwise
  * request_percpu_irq() below will fail
  */
 static DEFINE_PER_CPU(int, ipi_dev);

@@ -3,8 +3,8 @@
 #define __KVM_IO_APIC_H
 
 #include <linux/kvm_host.h>
-
 #include <kvm/iodev.h>
+#include "irq.h"
 
 struct kvm;
 struct kvm_vcpu;
@@ -35,21 +35,17 @@ struct kvm_vcpu;
 #define	IOAPIC_INIT			0x5
 #define	IOAPIC_EXTINT			0x7
 
-#ifdef CONFIG_X86
 #define RTC_GSI 8
-#else
-#define RTC_GSI -1U
-#endif
 
 struct dest_map {
 	/* vcpu bitmap where IRQ has been sent */
-	DECLARE_BITMAP(map, KVM_MAX_VCPU_ID);
+	DECLARE_BITMAP(map, KVM_MAX_VCPU_IDS);
 
 	/*
 	 * Vector sent to a given vcpu, only valid when
 	 * the vcpu's bit in map is set
 	 */
-	u8 vectors[KVM_MAX_VCPU_ID];
+	u8 vectors[KVM_MAX_VCPU_IDS];
 };
 
 
@@ -85,7 +81,6 @@ struct kvm_ioapic {
 	unsigned long irq_states[IOAPIC_NUM_PINS];
 	struct kvm_io_device dev;
 	struct kvm *kvm;
-	void (*ack_notifier)(void *opaque, int irq);
 	spinlock_t lock;
 	struct rtc_status rtc_status;
 	struct delayed_work eoi_inject;
@@ -108,11 +103,7 @@ do {									\
 
 static inline int ioapic_in_kernel(struct kvm *kvm)
 {
-	int mode = kvm->arch.irqchip_mode;
-
-	/* Matches smp_wmb() when setting irqchip_mode */
-	smp_rmb();
-	return mode == KVM_IRQCHIP_KERNEL;
+	return irqchip_kernel(kvm);
 }
 
 void kvm_rtc_eoi_tracking_restore_one(struct kvm_vcpu *vcpu);

@@ -4,12 +4,44 @@
  */
 
 #include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/leds/common.h>
 #include "ste-href-family-pinctrl.dtsi"
 
 / {
 	memory {
 		device_type = "memory";
 		reg = <0x00000000 0x20000000>;
+	};
+
+	battery: battery {
+		compatible = "simple-battery";
+		battery-type = "lithium-ion-polymer";
+	};
+
+	thermal-zones {
+		battery-thermal {
+			/* This zone will be polled by the battery temperature code */
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&bat_therm>;
+
+			trips {
+				battery-crit-hi {
+					temperature = <70000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+	};
+
+	bat_therm: thermistor {
+		compatible = "murata,ncp18wb473";
+		io-channels = <&gpadc 0x02>; /* BatTemp */
+		pullup-uv = <1800000>;
+		pullup-ohm = <230000>;
+		pulldown-ohm = <0>;
+		#thermal-sensor-cells = <0>;
 	};
 
 	soc {
@@ -58,18 +90,26 @@
 				reg = <0x33>;
 				label = "lp5521_pri";
 				clock-mode = /bits/ 8 <2>;
-				chan0 {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				led@0 {
+					reg = <0>;
 					led-cur = /bits/ 8 <0x2f>;
 					max-cur = /bits/ 8 <0x5f>;
+					color = <LED_COLOR_ID_BLUE>;
 					linux,default-trigger = "heartbeat";
 				};
-				chan1 {
+				led@1 {
+					reg = <1>;
 					led-cur = /bits/ 8 <0x2f>;
 					max-cur = /bits/ 8 <0x5f>;
+					color = <LED_COLOR_ID_BLUE>;
 				};
-				chan2 {
+				led@2 {
+					reg = <2>;
 					led-cur = /bits/ 8 <0x2f>;
 					max-cur = /bits/ 8 <0x5f>;
+					color = <LED_COLOR_ID_BLUE>;
 				};
 			};
 			lp5521@34 {
@@ -77,17 +117,25 @@
 				reg = <0x34>;
 				label = "lp5521_sec";
 				clock-mode = /bits/ 8 <2>;
-				chan0 {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				led@0 {
+					reg = <0>;
 					led-cur = /bits/ 8 <0x2f>;
 					max-cur = /bits/ 8 <0x5f>;
+					color = <LED_COLOR_ID_BLUE>;
 				};
-				chan1 {
+				led@1 {
+					reg = <1>;
 					led-cur = /bits/ 8 <0x2f>;
 					max-cur = /bits/ 8 <0x5f>;
+					color = <LED_COLOR_ID_BLUE>;
 				};
-				chan2 {
+				led@2 {
+					reg = <2>;
 					led-cur = /bits/ 8 <0x2f>;
 					max-cur = /bits/ 8 <0x5f>;
+					color = <LED_COLOR_ID_BLUE>;
 				};
 			};
 			bh1780@29 {
@@ -103,23 +151,8 @@
 			status = "okay";
 		};
 
-		/* ST6G3244ME level translator for 1.8/2.9 V */
-		vmmci: regulator-gpio {
-			compatible = "regulator-gpio";
-
-			regulator-min-microvolt = <1800000>;
-			regulator-max-microvolt = <2900000>;
-			regulator-name = "mmci-reg";
-			regulator-type = "voltage";
-
-			startup-delay-us = <100>;
-
-			states = <1800000 0x1
-				  2900000 0x0>;
-		};
-
 		// External Micro SD slot
-		sdi0_per1@80126000 {
+		mmc@80126000 {
 			arm,primecell-periphid = <0x10480180>;
 			max-frequency = <100000000>;
 			bus-width = <4>;
@@ -142,7 +175,7 @@
 		};
 
 		// WLAN SDIO channel
-		sdi1_per2@80118000 {
+		mmc@80118000 {
 			arm,primecell-periphid = <0x10480180>;
 			max-frequency = <100000000>;
 			bus-width = <4>;
@@ -155,12 +188,14 @@
 		};
 
 		// PoP:ed eMMC
-		sdi2_per3@80005000 {
+		mmc@80005000 {
 			arm,primecell-periphid = <0x10480180>;
 			max-frequency = <100000000>;
 			bus-width = <8>;
 			cap-mmc-highspeed;
 			non-removable;
+			no-sdio;
+			no-sd;
 			vmmc-supply = <&db8500_vsmps2_reg>;
 			pinctrl-names = "default", "sleep";
 			pinctrl-0 = <&mc2_a_1_default>;
@@ -170,12 +205,14 @@
 		};
 
 		// On-board eMMC
-		sdi4_per2@80114000 {
+		mmc@80114000 {
 			arm,primecell-periphid = <0x10480180>;
 		        max-frequency = <100000000>;
 			bus-width = <8>;
 			cap-mmc-highspeed;
 			non-removable;
+			no-sdio;
+			no-sd;
 			vmmc-supply = <&ab8500_ldo_aux2_reg>;
 			pinctrl-names = "default", "sleep";
 			pinctrl-0 = <&mc4_a_1_default>;
@@ -207,16 +244,16 @@
 
 		prcmu@80157000 {
 			ab8500 {
-				ab8500-gpio {
+				gpio {
 				};
 
-				ab8500_usb {
+				phy {
 					pinctrl-names = "default", "sleep";
 					pinctrl-0 = <&usb_a_1_default>;
 					pinctrl-1 = <&usb_a_1_sleep>;
 				};
 
-				ab8500-regulators {
+				regulator {
 					ab8500_ldo_aux1_reg: ab8500_ldo_aux1 {
 						regulator-name = "V-DISPLAY";
 					};

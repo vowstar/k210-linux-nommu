@@ -582,7 +582,7 @@ csio_hw_free(struct csio_hw *hw)
  * @hw:		The HW module.
  * @dev:	The device associated with this invocation.
  * @probe:	Called from probe context or not?
- * @os_pln:	Parent lnode if any.
+ * @pln:	Parent lnode if any.
  *
  * Allocates lnode structure via scsi_host_alloc, initializes
  * shost, initializes lnode module and registers with SCSI ML
@@ -1254,3 +1254,4 @@ MODULE_DEVICE_TABLE(pci, csio_pci_tbl);
 MODULE_VERSION(CSIO_DRV_VERSION);
 MODULE_FIRMWARE(FW_FNAME_T5);
 MODULE_FIRMWARE(FW_FNAME_T6);
+MODULE_SOFTDEP("pre: cxgb4");

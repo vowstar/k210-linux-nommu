@@ -52,8 +52,23 @@ struct subsys_private {
 
 	struct kset glue_dirs;
 	struct class *class;
+
+	struct lock_class_key lock_key;
 };
-#define to_subsys_private(obj) container_of(obj, struct subsys_private, subsys.kobj)
+#define to_subsys_private(obj) container_of_const(obj, struct subsys_private, subsys.kobj)
+
+static inline struct subsys_private *subsys_get(struct subsys_private *sp)
+{
+	if (sp)
+		kset_get(&sp->subsys);
+	return sp;
+}
+
+static inline void subsys_put(struct subsys_private *sp)
+{
+	if (sp)
+		kset_put(&sp->subsys);
+}
 
 struct driver_private {
 	struct kobject kobj;
@@ -93,6 +108,7 @@ struct device_private {
 	struct klist_node knode_class;
 	struct list_head deferred_probe;
 	struct device_driver *async_driver;
+	char *deferred_probe_reason;
 	struct device *device;
 	u8 dead:1;
 };
@@ -118,12 +134,19 @@ static inline int hypervisor_init(void) { return 0; }
 extern int platform_bus_init(void);
 extern void cpu_dev_init(void);
 extern void container_dev_init(void);
+#ifdef CONFIG_AUXILIARY_BUS
+extern void auxiliary_bus_init(void);
+#else
+static inline void auxiliary_bus_init(void) { }
+#endif
 
 struct kobject *virtual_device_parent(struct device *dev);
 
 extern int bus_add_device(struct device *dev);
 extern void bus_probe_device(struct device *dev);
 extern void bus_remove_device(struct device *dev);
+void bus_notify(struct device *dev, enum bus_notifier_event value);
+bool bus_is_registered(const struct bus_type *bus);
 
 extern int bus_add_driver(struct device_driver *drv);
 extern void bus_remove_driver(struct device_driver *drv);
@@ -132,27 +155,28 @@ extern void device_release_driver_internal(struct device *dev,
 					   struct device *parent);
 
 extern void driver_detach(struct device_driver *drv);
-extern int driver_probe_device(struct device_driver *drv, struct device *dev);
 extern void driver_deferred_probe_del(struct device *dev);
+extern void device_set_deferred_probe_reason(const struct device *dev,
+					     struct va_format *vaf);
 static inline int driver_match_device(struct device_driver *drv,
 				      struct device *dev)
 {
 	return drv->bus->match ? drv->bus->match(dev, drv) : 1;
 }
-extern bool driver_allows_async_probing(struct device_driver *drv);
 
 extern int driver_add_groups(struct device_driver *drv,
 			     const struct attribute_group **groups);
 extern void driver_remove_groups(struct device_driver *drv,
 				 const struct attribute_group **groups);
-int device_driver_attach(struct device_driver *drv, struct device *dev);
 void device_driver_detach(struct device *dev);
-
-extern char *make_class_name(const char *name, struct kobject *kobj);
 
 extern int devres_release_all(struct device *dev);
 extern void device_block_probing(void);
 extern void device_unblock_probing(void);
+extern void deferred_probe_extend_timeout(void);
+extern void driver_deferred_probe_trigger(void);
+const char *device_get_devnode(const struct device *dev, umode_t *mode,
+			       kuid_t *uid, kgid_t *gid, const char **tmp);
 
 /* /sys/devices directory */
 extern struct kset *devices_kset;
@@ -178,11 +202,13 @@ extern int device_links_read_lock(void);
 extern void device_links_read_unlock(int idx);
 extern int device_links_read_lock_held(void);
 extern int device_links_check_suppliers(struct device *dev);
+extern void device_links_force_bind(struct device *dev);
 extern void device_links_driver_bound(struct device *dev);
 extern void device_links_driver_cleanup(struct device *dev);
 extern void device_links_no_driver(struct device *dev);
 extern bool device_links_busy(struct device *dev);
 extern void device_links_unbind_consumers(struct device *dev);
+extern void fw_devlink_drivers_done(void);
 
 /* device pm support */
 void device_pm_move_to_tail(struct device *dev);
@@ -194,3 +220,6 @@ int devtmpfs_delete_node(struct device *dev);
 static inline int devtmpfs_create_node(struct device *dev) { return 0; }
 static inline int devtmpfs_delete_node(struct device *dev) { return 0; }
 #endif
+
+void software_node_notify(struct device *dev);
+void software_node_notify_remove(struct device *dev);

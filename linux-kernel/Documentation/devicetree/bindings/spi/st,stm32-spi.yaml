@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/spi/st,stm32-spi.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: STMicroelectronics STM32 SPI Controller bindings
+title: STMicroelectronics STM32 SPI Controller
 
 description: |
   The STM32 SPI controller is used to communicate with external devices using
@@ -13,11 +13,11 @@ description: |
   from 4 to 32-bit data size.
 
 maintainers:
-  - Erwan Leray <erwan.leray@st.com>
-  - Fabrice Gasnier <fabrice.gasnier@st.com>
+  - Erwan Leray <erwan.leray@foss.st.com>
+  - Fabrice Gasnier <fabrice.gasnier@foss.st.com>
 
 allOf:
-  - $ref: "spi-controller.yaml#"
+  - $ref: spi-controller.yaml#
   - if:
       properties:
         compatible:
@@ -49,7 +49,7 @@ properties:
   dmas:
     description: |
       DMA specifiers for tx and rx dma. DMA fifo mode must be used. See
-      the STM32 DMA bindings Documentation/devicetree/bindings/dma/stm32-dma.txt.
+      the STM32 DMA bindings Documentation/devicetree/bindings/dma/st,stm32-dma.yaml.
     items:
       - description: rx DMA channel
       - description: tx DMA channel
@@ -76,30 +76,25 @@ required:
   - clocks
   - interrupts
 
+unevaluatedProperties: false
+
 examples:
   - |
     #include <dt-bindings/interrupt-controller/arm-gic.h>
     #include <dt-bindings/clock/stm32mp1-clks.h>
     #include <dt-bindings/reset/stm32mp1-resets.h>
     spi@4000b000 {
-      #address-cells = <1>;
-      #size-cells = <0>;
-      compatible = "st,stm32h7-spi";
-      reg = <0x4000b000 0x400>;
-      interrupts = <GIC_SPI 36 IRQ_TYPE_LEVEL_HIGH>;
-      clocks = <&rcc SPI2_K>;
-      resets = <&rcc SPI2_R>;
-      dmas = <&dmamux1 0 39 0x400 0x05>,
-             <&dmamux1 1 40 0x400 0x05>;
-      dma-names = "rx", "tx";
-      cs-gpios = <&gpioa 11 0>;
-
-      aardvark@0 {
-        compatible = "totalphase,aardvark";
-        reg = <0>;
-        spi-max-frequency = <4000000>;
-        st,spi-midi-ns = <4000>;
-      };
+        #address-cells = <1>;
+        #size-cells = <0>;
+        compatible = "st,stm32h7-spi";
+        reg = <0x4000b000 0x400>;
+        interrupts = <GIC_SPI 36 IRQ_TYPE_LEVEL_HIGH>;
+        clocks = <&rcc SPI2_K>;
+        resets = <&rcc SPI2_R>;
+        dmas = <&dmamux1 0 39 0x400 0x05>,
+               <&dmamux1 1 40 0x400 0x05>;
+        dma-names = "rx", "tx";
+        cs-gpios = <&gpioa 11 0>;
     };
 
 ...

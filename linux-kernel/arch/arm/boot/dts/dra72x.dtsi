@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2014 Texas Instruments Incorporated - http://www.ti.com/
+ * Copyright (C) 2014 Texas Instruments Incorporated - https://www.ti.com/
  *
  * Based on "omap4.dtsi"
  */
@@ -9,6 +9,12 @@
 
 / {
 	compatible = "ti,dra722", "ti,dra72", "ti,dra7";
+
+	aliases {
+		rproc0 = &ipu1;
+		rproc1 = &ipu2;
+		rproc2 = &dsp1;
+	};
 
 	pmu {
 		compatible = "arm,cortex-a15-pmu";
@@ -60,9 +66,9 @@
 };
 
 &dss {
-	reg = <0x58000000 0x80>,
-	      <0x58004054 0x4>,
-	      <0x58004300 0x20>;
+	reg = <0 0x80>,
+	      <0x4054 0x4>,
+	      <0x4300 0x20>;
 	reg-names = "dss", "pll1_clkctrl", "pll1";
 
 	clocks = <&dss_clkctrl DRA7_DSS_DSS_CORE_CLKCTRL 8>,
@@ -71,12 +77,12 @@
 };
 
 &mailbox5 {
-	mbox_ipu1_ipc3x: mbox_ipu1_ipc3x {
+	mbox_ipu1_ipc3x: mbox-ipu1-ipc3x {
 		ti,mbox-tx = <6 2 2>;
 		ti,mbox-rx = <4 2 2>;
 		status = "disabled";
 	};
-	mbox_dsp1_ipc3x: mbox_dsp1_ipc3x {
+	mbox_dsp1_ipc3x: mbox-dsp1-ipc3x {
 		ti,mbox-tx = <5 2 2>;
 		ti,mbox-rx = <1 2 2>;
 		status = "disabled";
@@ -84,7 +90,7 @@
 };
 
 &mailbox6 {
-	mbox_ipu2_ipc3x: mbox_ipu2_ipc3x {
+	mbox_ipu2_ipc3x: mbox-ipu2-ipc3x {
 		ti,mbox-tx = <6 2 2>;
 		ti,mbox-rx = <4 2 2>;
 		status = "disabled";
@@ -101,8 +107,4 @@
 
 &pcie2_rc {
 	compatible = "ti,dra726-pcie-rc", "ti,dra7-pcie";
-};
-
-&usb4_tm {
-	status = "disabled";
 };

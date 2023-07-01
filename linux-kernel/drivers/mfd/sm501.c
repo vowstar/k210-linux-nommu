@@ -1145,22 +1145,14 @@ static int sm501_register_gpio_i2c_instance(struct sm501_devdata *sm,
 		return -ENOMEM;
 
 	lookup->dev_id = "i2c-gpio";
-	if (iic->pin_sda < 32)
-		lookup->table[0].chip_label = "SM501-LOW";
-	else
-		lookup->table[0].chip_label = "SM501-HIGH";
-	lookup->table[0].chip_hwnum = iic->pin_sda % 32;
-	lookup->table[0].con_id = NULL;
-	lookup->table[0].idx = 0;
-	lookup->table[0].flags = GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN;
-	if (iic->pin_scl < 32)
-		lookup->table[1].chip_label = "SM501-LOW";
-	else
-		lookup->table[1].chip_label = "SM501-HIGH";
-	lookup->table[1].chip_hwnum = iic->pin_scl % 32;
-	lookup->table[1].con_id = NULL;
-	lookup->table[1].idx = 1;
-	lookup->table[1].flags = GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN;
+	lookup->table[0] = (struct gpiod_lookup)
+		GPIO_LOOKUP_IDX(iic->pin_sda < 32 ? "SM501-LOW" : "SM501-HIGH",
+				iic->pin_sda % 32, NULL, 0,
+				GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN);
+	lookup->table[1] = (struct gpiod_lookup)
+		GPIO_LOOKUP_IDX(iic->pin_scl < 32 ? "SM501-LOW" : "SM501-HIGH",
+				iic->pin_scl % 32, NULL, 1,
+				GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN);
 	gpiod_add_lookup_table(lookup);
 
 	icd = dev_get_platdata(&pdev->dev);
@@ -1198,13 +1190,13 @@ static int sm501_register_gpio_i2c(struct sm501_devdata *sm,
 	return 0;
 }
 
-/* sm501_dbg_regs
+/* dbg_regs_show
  *
  * Debug attribute to attach to parent device to show core registers
 */
 
-static ssize_t sm501_dbg_regs(struct device *dev,
-			      struct device_attribute *attr, char *buff)
+static ssize_t dbg_regs_show(struct device *dev,
+			     struct device_attribute *attr, char *buff)
 {
 	struct sm501_devdata *sm = dev_get_drvdata(dev)	;
 	unsigned int reg;
@@ -1221,7 +1213,7 @@ static ssize_t sm501_dbg_regs(struct device *dev,
 }
 
 
-static DEVICE_ATTR(dbg_regs, 0444, sm501_dbg_regs, NULL);
+static DEVICE_ATTR_RO(dbg_regs);
 
 /* sm501_init_reg
  *
@@ -1423,8 +1415,14 @@ static int sm501_plat_probe(struct platform_device *dev)
 		goto err_claim;
 	}
 
-	return sm501_init_dev(sm);
+	ret = sm501_init_dev(sm);
+	if (ret)
+		goto err_unmap;
 
+	return 0;
+
+ err_unmap:
+	iounmap(sm->regs);
  err_claim:
 	release_mem_region(sm->io_res->start, 0x100);
  err_res:
@@ -1433,8 +1431,6 @@ static int sm501_plat_probe(struct platform_device *dev)
 	return ret;
 
 }
-
-#ifdef CONFIG_PM
 
 /* power management support */
 
@@ -1511,10 +1507,6 @@ static int sm501_plat_resume(struct platform_device *pdev)
 
 	return 0;
 }
-#else
-#define sm501_plat_suspend NULL
-#define sm501_plat_resume NULL
-#endif
 
 /* Initialisation data for PCI devices */
 
@@ -1716,13 +1708,18 @@ static struct platform_driver sm501_plat_driver = {
 	},
 	.probe		= sm501_plat_probe,
 	.remove		= sm501_plat_remove,
-	.suspend	= sm501_plat_suspend,
-	.resume		= sm501_plat_resume,
+	.suspend	= pm_sleep_ptr(sm501_plat_suspend),
+	.resume		= pm_sleep_ptr(sm501_plat_resume),
 };
 
 static int __init sm501_base_init(void)
 {
-	platform_driver_register(&sm501_plat_driver);
+	int ret;
+
+	ret = platform_driver_register(&sm501_plat_driver);
+	if (ret < 0)
+		return ret;
+
 	return pci_register_driver(&sm501_pci_driver);
 }
 

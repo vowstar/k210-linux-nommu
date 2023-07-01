@@ -55,7 +55,6 @@ struct mt7621_spi {
 	void __iomem		*base;
 	unsigned int		sys_freq;
 	unsigned int		speed;
-	struct clk		*clk;
 	int			pending_write;
 };
 
@@ -327,7 +326,6 @@ static int mt7621_spi_probe(struct platform_device *pdev)
 	struct spi_controller *master;
 	struct mt7621_spi *rs;
 	void __iomem *base;
-	int status = 0;
 	struct clk *clk;
 	int ret;
 
@@ -339,18 +337,12 @@ static int mt7621_spi_probe(struct platform_device *pdev)
 	if (IS_ERR(base))
 		return PTR_ERR(base);
 
-	clk = devm_clk_get(&pdev->dev, NULL);
-	if (IS_ERR(clk)) {
-		dev_err(&pdev->dev, "unable to get SYS clock, err=%d\n",
-			status);
-		return PTR_ERR(clk);
-	}
+	clk = devm_clk_get_enabled(&pdev->dev, NULL);
+	if (IS_ERR(clk))
+		return dev_err_probe(&pdev->dev, PTR_ERR(clk),
+				     "unable to get SYS clock\n");
 
-	status = clk_prepare_enable(clk);
-	if (status)
-		return status;
-
-	master = spi_alloc_master(&pdev->dev, sizeof(*rs));
+	master = devm_spi_alloc_master(&pdev->dev, sizeof(*rs));
 	if (!master) {
 		dev_info(&pdev->dev, "master allocation failed\n");
 		return -ENOMEM;
@@ -368,9 +360,8 @@ static int mt7621_spi_probe(struct platform_device *pdev)
 
 	rs = spi_controller_get_devdata(master);
 	rs->base = base;
-	rs->clk = clk;
 	rs->master = master;
-	rs->sys_freq = clk_get_rate(rs->clk);
+	rs->sys_freq = clk_get_rate(clk);
 	rs->pending_write = 0;
 	dev_info(&pdev->dev, "sys_freq: %u\n", rs->sys_freq);
 
@@ -383,19 +374,6 @@ static int mt7621_spi_probe(struct platform_device *pdev)
 	return devm_spi_register_controller(&pdev->dev, master);
 }
 
-static int mt7621_spi_remove(struct platform_device *pdev)
-{
-	struct spi_controller *master;
-	struct mt7621_spi *rs;
-
-	master = dev_get_drvdata(&pdev->dev);
-	rs = spi_controller_get_devdata(master);
-
-	clk_disable_unprepare(rs->clk);
-
-	return 0;
-}
-
 MODULE_ALIAS("platform:" DRIVER_NAME);
 
 static struct platform_driver mt7621_spi_driver = {
@@ -404,7 +382,6 @@ static struct platform_driver mt7621_spi_driver = {
 		.of_match_table = mt7621_spi_match,
 	},
 	.probe = mt7621_spi_probe,
-	.remove = mt7621_spi_remove,
 };
 
 module_platform_driver(mt7621_spi_driver);

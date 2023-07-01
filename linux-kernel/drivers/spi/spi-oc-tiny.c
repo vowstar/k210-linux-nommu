@@ -2,7 +2,7 @@
 /*
  * OpenCores tiny SPI master driver
  *
- * http://opencores.org/project,tiny_spi
+ * https://opencores.org/project,tiny_spi
  *
  * Copyright (C) 2011 Thomas Chou <thomas@wytron.com.tw>
  *
@@ -86,7 +86,7 @@ static int tiny_spi_setup(struct spi_device *spi)
 		hw->speed_hz = spi->max_speed_hz;
 		hw->baud = tiny_spi_baud(spi, hw->speed_hz);
 	}
-	hw->mode = spi->mode & (SPI_CPOL | SPI_CPHA);
+	hw->mode = spi->mode & SPI_MODE_X_MASK;
 	return 0;
 }
 

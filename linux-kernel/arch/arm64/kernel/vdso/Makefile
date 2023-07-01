@@ -17,43 +17,48 @@ obj-vdso := vgettimeofday.o note.o sigreturn.o
 targets := $(obj-vdso) vdso.so vdso.so.dbg
 obj-vdso := $(addprefix $(obj)/, $(obj-vdso))
 
-ldflags-y := -shared -nostdlib -soname=linux-vdso.so.1 --hash-style=sysv \
-		--build-id -n -T
+btildflags-$(CONFIG_ARM64_BTI_KERNEL) += -z force-bti
+
+# -Bsymbolic has been added for consistency with arm, the compat vDSO and
+# potential future proofing if we end up with internal calls to the exported
+# routines, as x86 does (see 6f121e548f83 ("x86, vdso: Reimplement vdso.so
+# preparation in build-time C")).
+ldflags-y := -shared -soname=linux-vdso.so.1 --hash-style=sysv	\
+	     -Bsymbolic --build-id=sha1 -n $(btildflags-y)
+
+ifdef CONFIG_LD_ORPHAN_WARN
+  ldflags-y += --orphan-handling=$(CONFIG_LD_ORPHAN_WARN_LEVEL)
+endif
+
+ldflags-y += -T
 
 ccflags-y := -fno-common -fno-builtin -fno-stack-protector -ffixed-x18
-ccflags-y += -DDISABLE_BRANCH_PROFILING
+ccflags-y += -DDISABLE_BRANCH_PROFILING -DBUILD_VDSO
 
-VDSO_LDFLAGS := -Bsymbolic
-
-CFLAGS_REMOVE_vgettimeofday.o = $(CC_FLAGS_FTRACE) -Os
-KBUILD_CFLAGS			+= $(DISABLE_LTO)
+# -Wmissing-prototypes and -Wmissing-declarations are removed from
+# the CFLAGS of vgettimeofday.c to make possible to build the
+# kernel with CONFIG_WERROR enabled.
+CFLAGS_REMOVE_vgettimeofday.o = $(CC_FLAGS_FTRACE) -Os $(CC_FLAGS_SCS) \
+				$(RANDSTRUCT_CFLAGS) $(GCC_PLUGINS_CFLAGS) \
+				$(CC_FLAGS_LTO) $(CC_FLAGS_CFI) \
+				-Wmissing-prototypes -Wmissing-declarations
 KASAN_SANITIZE			:= n
+KCSAN_SANITIZE			:= n
 UBSAN_SANITIZE			:= n
 OBJECT_FILES_NON_STANDARD	:= y
 KCOV_INSTRUMENT			:= n
 
-CFLAGS_vgettimeofday.o = -O2 -mcmodel=tiny
+CFLAGS_vgettimeofday.o = -O2 -mcmodel=tiny -fasynchronous-unwind-tables
 
 ifneq ($(c-gettimeofday-y),)
   CFLAGS_vgettimeofday.o += -include $(c-gettimeofday-y)
 endif
 
-# Clang versions less than 8 do not support -mcmodel=tiny
-ifeq ($(CONFIG_CC_IS_CLANG), y)
-  ifeq ($(shell test $(CONFIG_CLANG_VERSION) -lt 80000; echo $$?),0)
-    CFLAGS_REMOVE_vgettimeofday.o += -mcmodel=tiny
-  endif
-endif
-
 # Disable gcov profiling for VDSO code
 GCOV_PROFILE := n
 
-obj-y += vdso.o
-extra-y += vdso.lds
+targets += vdso.lds
 CPPFLAGS_vdso.lds += -P -C -U$(ARCH)
-
-# Force dependency (incbin is bad)
-$(obj)/vdso.o : $(obj)/vdso.so
 
 # Link rule for the .so file, .lds has to be first
 $(obj)/vdso.so.dbg: $(obj)/vdso.lds $(obj-vdso) FORCE

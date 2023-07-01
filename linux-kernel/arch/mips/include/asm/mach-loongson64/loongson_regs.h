@@ -21,8 +21,10 @@ static inline u32 read_cpucfg(u32 reg)
 	u32 __res;
 
 	__asm__ __volatile__(
+		_ASM_SET_PARSE_R
 		"parse_r __res,%0\n\t"
 		"parse_r reg,%1\n\t"
+		_ASM_UNSET_PARSE_R
 		".insn \n\t"
 		".word (0xc8080118 | (reg << 21) | (__res << 11))\n\t"
 		:"=r"(__res)
@@ -67,6 +69,8 @@ static inline u32 read_cpucfg(u32 reg)
 #define LOONGSON_CFG1_SFBP	BIT(29)
 #define LOONGSON_CFG1_CDMAP	BIT(30)
 
+#define LOONGSON_CFG1_FPREV_OFFSET	1
+
 #define LOONGSON_CFG2 0x2
 #define LOONGSON_CFG2_LEXT1	BIT(0)
 #define LOONGSON_CFG2_LEXT2	BIT(1)
@@ -77,12 +81,12 @@ static inline u32 read_cpucfg(u32 reg)
 #define LOONGSON_CFG2_LBT3	BIT(6)
 #define LOONGSON_CFG2_LBTMMU	BIT(7)
 #define LOONGSON_CFG2_LPMP	BIT(8)
-#define LOONGSON_CFG2_LPMPREV	GENMASK(11, 9)
+#define LOONGSON_CFG2_LPMREV	GENMASK(11, 9)
 #define LOONGSON_CFG2_LAMO	BIT(12)
 #define LOONGSON_CFG2_LPIXU	BIT(13)
-#define LOONGSON_CFG2_LPIXUN	BIT(14)
-#define LOONGSON_CFG2_LZVP	BIT(15)
-#define LOONGSON_CFG2_LZVREV	GENMASK(18, 16)
+#define LOONGSON_CFG2_LPIXNU	BIT(14)
+#define LOONGSON_CFG2_LVZP	BIT(15)
+#define LOONGSON_CFG2_LVZREV	GENMASK(18, 16)
 #define LOONGSON_CFG2_LGFTP	BIT(19)
 #define LOONGSON_CFG2_LGFTPREV	GENMASK(22, 20)
 #define LOONGSON_CFG2_LLFTP	BIT(23)
@@ -90,12 +94,29 @@ static inline u32 read_cpucfg(u32 reg)
 #define LOONGSON_CFG2_LCSRP	BIT(27)
 #define LOONGSON_CFG2_LDISBLIKELY	BIT(28)
 
+#define LOONGSON_CFG2_LPMREV_OFFSET	9
+#define LOONGSON_CFG2_LPM_REV1		(1 << LOONGSON_CFG2_LPMREV_OFFSET)
+#define LOONGSON_CFG2_LPM_REV2		(2 << LOONGSON_CFG2_LPMREV_OFFSET)
+#define LOONGSON_CFG2_LVZREV_OFFSET	16
+#define LOONGSON_CFG2_LVZ_REV1		(1 << LOONGSON_CFG2_LVZREV_OFFSET)
+#define LOONGSON_CFG2_LVZ_REV2		(2 << LOONGSON_CFG2_LVZREV_OFFSET)
+
 #define LOONGSON_CFG3 0x3
 #define LOONGSON_CFG3_LCAMP	BIT(0)
 #define LOONGSON_CFG3_LCAMREV	GENMASK(3, 1)
 #define LOONGSON_CFG3_LCAMNUM	GENMASK(11, 4)
 #define LOONGSON_CFG3_LCAMKW	GENMASK(19, 12)
 #define LOONGSON_CFG3_LCAMVW	GENMASK(27, 20)
+
+#define LOONGSON_CFG3_LCAMREV_OFFSET	1
+#define LOONGSON_CFG3_LCAM_REV1		(1 << LOONGSON_CFG3_LCAMREV_OFFSET)
+#define LOONGSON_CFG3_LCAM_REV2		(2 << LOONGSON_CFG3_LCAMREV_OFFSET)
+#define LOONGSON_CFG3_LCAMNUM_OFFSET	4
+#define LOONGSON_CFG3_LCAMNUM_REV1	(0x3f << LOONGSON_CFG3_LCAMNUM_OFFSET)
+#define LOONGSON_CFG3_LCAMKW_OFFSET	12
+#define LOONGSON_CFG3_LCAMKW_REV1	(0x27 << LOONGSON_CFG3_LCAMKW_OFFSET)
+#define LOONGSON_CFG3_LCAMVW_OFFSET	20
+#define LOONGSON_CFG3_LCAMVW_REV1	(0x3f << LOONGSON_CFG3_LCAMVW_OFFSET)
 
 #define LOONGSON_CFG4 0x4
 #define LOONGSON_CFG4_CCFREQ	GENMASK(31, 0)
@@ -124,8 +145,10 @@ static inline u32 csr_readl(u32 reg)
 
 	/* RDCSR reg, val */
 	__asm__ __volatile__(
+		_ASM_SET_PARSE_R
 		"parse_r __res,%0\n\t"
 		"parse_r reg,%1\n\t"
+		_ASM_UNSET_PARSE_R
 		".insn \n\t"
 		".word (0xc8000118 | (reg << 21) | (__res << 11))\n\t"
 		:"=r"(__res)
@@ -139,10 +162,12 @@ static inline u64 csr_readq(u32 reg)
 {
 	u64 __res;
 
-	/* DWRCSR reg, val */
+	/* DRDCSR reg, val */
 	__asm__ __volatile__(
+		_ASM_SET_PARSE_R
 		"parse_r __res,%0\n\t"
 		"parse_r reg,%1\n\t"
+		_ASM_UNSET_PARSE_R
 		".insn \n\t"
 		".word (0xc8020118 | (reg << 21) | (__res << 11))\n\t"
 		:"=r"(__res)
@@ -156,8 +181,10 @@ static inline void csr_writel(u32 val, u32 reg)
 {
 	/* WRCSR reg, val */
 	__asm__ __volatile__(
+		_ASM_SET_PARSE_R
 		"parse_r reg,%0\n\t"
 		"parse_r val,%1\n\t"
+		_ASM_UNSET_PARSE_R
 		".insn \n\t"
 		".word (0xc8010118 | (reg << 21) | (val << 11))\n\t"
 		:
@@ -170,8 +197,10 @@ static inline void csr_writeq(u64 val, u32 reg)
 {
 	/* DWRCSR reg, val */
 	__asm__ __volatile__(
+		_ASM_SET_PARSE_R
 		"parse_r reg,%0\n\t"
 		"parse_r val,%1\n\t"
+		_ASM_UNSET_PARSE_R
 		".insn \n\t"
 		".word (0xc8030118 | (reg << 21) | (val << 11))\n\t"
 		:
@@ -208,14 +237,26 @@ static inline void csr_writeq(u64 val, u32 reg)
 #define CSR_IPI_SEND_CPU_SHIFT	16
 #define CSR_IPI_SEND_BLOCK	BIT(31)
 
+#define LOONGSON_CSR_MAIL_BUF0		0x1020
+#define LOONGSON_CSR_MAIL_SEND		0x1048
+#define CSR_MAIL_SEND_BLOCK		BIT_ULL(31)
+#define CSR_MAIL_SEND_BOX_LOW(box)	(box << 1)
+#define CSR_MAIL_SEND_BOX_HIGH(box)	((box << 1) + 1)
+#define CSR_MAIL_SEND_BOX_SHIFT		2
+#define CSR_MAIL_SEND_CPU_SHIFT		16
+#define CSR_MAIL_SEND_BUF_SHIFT		32
+#define CSR_MAIL_SEND_H32_MASK		0xFFFFFFFF00000000ULL
+
 static inline u64 drdtime(void)
 {
 	int rID = 0;
 	u64 val = 0;
 
 	__asm__ __volatile__(
+		_ASM_SET_PARSE_R
 		"parse_r rID,%0\n\t"
 		"parse_r val,%1\n\t"
+		_ASM_UNSET_PARSE_R
 		".insn \n\t"
 		".word (0xc8090118 | (rID << 21) | (val << 11))\n\t"
 		:"=r"(rID),"=r"(val)

@@ -23,6 +23,7 @@
 #include <linux/cpu.h>
 #include <linux/prefetch.h>
 #include <linux/slab.h>
+#include <linux/mm.h>
 
 #include "rcu.h"
 
@@ -31,17 +32,19 @@ struct rcu_ctrlblk {
 	struct rcu_head *rcucblist;	/* List of pending callbacks (CBs). */
 	struct rcu_head **donetail;	/* ->next pointer of last "done" CB. */
 	struct rcu_head **curtail;	/* ->next pointer of last CB. */
+	unsigned long gp_seq;		/* Grace-period counter. */
 };
 
 /* Definition for rcupdate control block. */
 static struct rcu_ctrlblk rcu_ctrlblk = {
 	.donetail	= &rcu_ctrlblk.rcucblist,
 	.curtail	= &rcu_ctrlblk.rcucblist,
+	.gp_seq		= 0 - 300UL,
 };
 
 void rcu_barrier(void)
 {
-	wait_rcu_gp(call_rcu);
+	wait_rcu_gp(call_rcu_hurry);
 }
 EXPORT_SYMBOL(rcu_barrier);
 
@@ -55,6 +58,7 @@ void rcu_qs(void)
 		rcu_ctrlblk.donetail = rcu_ctrlblk.curtail;
 		raise_softirq_irqoff(RCU_SOFTIRQ);
 	}
+	WRITE_ONCE(rcu_ctrlblk.gp_seq, rcu_ctrlblk.gp_seq + 2);
 	local_irq_restore(flags);
 }
 
@@ -84,9 +88,9 @@ static inline bool rcu_reclaim_tiny(struct rcu_head *head)
 	unsigned long offset = (unsigned long)head->func;
 
 	rcu_lock_acquire(&rcu_callback_map);
-	if (__is_kfree_rcu_offset(offset)) {
-		trace_rcu_invoke_kfree_callback("", head, offset);
-		kfree((void *)head - offset);
+	if (__is_kvfree_rcu_offset(offset)) {
+		trace_rcu_invoke_kvfree_callback("", head, offset);
+		kvfree((void *)head - offset);
 		rcu_lock_release(&rcu_callback_map);
 		return true;
 	}
@@ -135,8 +139,10 @@ static __latent_entropy void rcu_process_callbacks(struct softirq_action *unused
 /*
  * Wait for a grace period to elapse.  But it is illegal to invoke
  * synchronize_rcu() from within an RCU read-side critical section.
- * Therefore, any legal call to synchronize_rcu() is a quiescent
- * state, and so on a UP system, synchronize_rcu() need do nothing.
+ * Therefore, any legal call to synchronize_rcu() is a quiescent state,
+ * and so on a UP system, synchronize_rcu() need do nothing, other than
+ * let the polled APIs know that another grace period elapsed.
+ *
  * (But Lai Jiangshan points out the benefits of doing might_sleep()
  * to reduce latency.)
  *
@@ -148,8 +154,13 @@ void synchronize_rcu(void)
 			 lock_is_held(&rcu_lock_map) ||
 			 lock_is_held(&rcu_sched_lock_map),
 			 "Illegal synchronize_rcu() in RCU read-side critical section");
+	WRITE_ONCE(rcu_ctrlblk.gp_seq, rcu_ctrlblk.gp_seq + 2);
 }
 EXPORT_SYMBOL_GPL(synchronize_rcu);
+
+static void tiny_rcu_leak_callback(struct rcu_head *rhp)
+{
+}
 
 /*
  * Post an RCU callback to be invoked after the end of an RCU grace
@@ -158,9 +169,20 @@ EXPORT_SYMBOL_GPL(synchronize_rcu);
  */
 void call_rcu(struct rcu_head *head, rcu_callback_t func)
 {
+	static atomic_t doublefrees;
 	unsigned long flags;
 
-	debug_rcu_head_queue(head);
+	if (debug_rcu_head_queue(head)) {
+		if (atomic_inc_return(&doublefrees) < 4) {
+			pr_err("%s(): Double-freed CB %p->%pS()!!!  ", __func__, head, head->func);
+			mem_dump_obj(head);
+		}
+
+		if (!__is_kvfree_rcu_offset((unsigned long)head->func))
+			WRITE_ONCE(head->func, tiny_rcu_leak_callback);
+		return;
+	}
+
 	head->func = func;
 	head->next = NULL;
 
@@ -176,9 +198,66 @@ void call_rcu(struct rcu_head *head, rcu_callback_t func)
 }
 EXPORT_SYMBOL_GPL(call_rcu);
 
+/*
+ * Store a grace-period-counter "cookie".  For more information,
+ * see the Tree RCU header comment.
+ */
+void get_completed_synchronize_rcu_full(struct rcu_gp_oldstate *rgosp)
+{
+	rgosp->rgos_norm = RCU_GET_STATE_COMPLETED;
+}
+EXPORT_SYMBOL_GPL(get_completed_synchronize_rcu_full);
+
+/*
+ * Return a grace-period-counter "cookie".  For more information,
+ * see the Tree RCU header comment.
+ */
+unsigned long get_state_synchronize_rcu(void)
+{
+	return READ_ONCE(rcu_ctrlblk.gp_seq);
+}
+EXPORT_SYMBOL_GPL(get_state_synchronize_rcu);
+
+/*
+ * Return a grace-period-counter "cookie" and ensure that a future grace
+ * period completes.  For more information, see the Tree RCU header comment.
+ */
+unsigned long start_poll_synchronize_rcu(void)
+{
+	unsigned long gp_seq = get_state_synchronize_rcu();
+
+	if (unlikely(is_idle_task(current))) {
+		/* force scheduling for rcu_qs() */
+		resched_cpu(0);
+	}
+	return gp_seq;
+}
+EXPORT_SYMBOL_GPL(start_poll_synchronize_rcu);
+
+/*
+ * Return true if the grace period corresponding to oldstate has completed
+ * and false otherwise.  For more information, see the Tree RCU header
+ * comment.
+ */
+bool poll_state_synchronize_rcu(unsigned long oldstate)
+{
+	return oldstate == RCU_GET_STATE_COMPLETED || READ_ONCE(rcu_ctrlblk.gp_seq) != oldstate;
+}
+EXPORT_SYMBOL_GPL(poll_state_synchronize_rcu);
+
+#ifdef CONFIG_KASAN_GENERIC
+void kvfree_call_rcu(struct rcu_head *head, void *ptr)
+{
+	if (head)
+		kasan_record_aux_stack_noalloc(ptr);
+
+	__kvfree_call_rcu(head, ptr);
+}
+EXPORT_SYMBOL_GPL(kvfree_call_rcu);
+#endif
+
 void __init rcu_init(void)
 {
 	open_softirq(RCU_SOFTIRQ, rcu_process_callbacks);
 	rcu_early_boot_tests();
-	srcu_init();
 }

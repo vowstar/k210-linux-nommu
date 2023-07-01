@@ -21,7 +21,8 @@ security_get(const struct xattr_handler *handler, struct dentry *unused,
 }
 
 static int
-security_set(const struct xattr_handler *handler, struct dentry *unused,
+security_set(const struct xattr_handler *handler,
+	     struct mnt_idmap *idmap, struct dentry *unused,
 	     struct inode *inode, const char *name, const void *buffer,
 	     size_t size, int flags)
 {
@@ -49,6 +50,7 @@ int reiserfs_security_init(struct inode *dir, struct inode *inode,
 	int error;
 
 	sec->name = NULL;
+	sec->value = NULL;
 
 	/* Don't add selinux attributes on xattrs - they'll never get used */
 	if (IS_PRIVATE(dir))
@@ -94,7 +96,6 @@ int reiserfs_security_write(struct reiserfs_transaction_handle *th,
 
 void reiserfs_security_free(struct reiserfs_security_handle *sec)
 {
-	kfree(sec->name);
 	kfree(sec->value);
 	sec->name = NULL;
 	sec->value = NULL;

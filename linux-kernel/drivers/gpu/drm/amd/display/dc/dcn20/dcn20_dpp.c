@@ -166,7 +166,8 @@ static void dpp2_cnv_setup (
 		select = DCN2_ICSC_SELECT_ICSC_A;
 		break;
 	case SURFACE_PIXEL_FORMAT_GRPH_ARGB16161616:
-		pixel_format = 22;
+	case SURFACE_PIXEL_FORMAT_GRPH_ABGR16161616:
+		pixel_format = 26; /* ARGB16161616_UNORM */
 		break;
 	case SURFACE_PIXEL_FORMAT_GRPH_ARGB16161616F:
 		pixel_format = 24;
@@ -181,9 +182,11 @@ static void dpp2_cnv_setup (
 		break;
 	case SURFACE_PIXEL_FORMAT_GRPH_RGB111110_FIX:
 		pixel_format = 112;
+		alpha_en = 0;
 		break;
 	case SURFACE_PIXEL_FORMAT_GRPH_BGR101111_FIX:
 		pixel_format = 113;
+		alpha_en = 0;
 		break;
 	case SURFACE_PIXEL_FORMAT_VIDEO_ACrYCb2101010:
 		pixel_format = 114;
@@ -199,13 +202,18 @@ static void dpp2_cnv_setup (
 		break;
 	case SURFACE_PIXEL_FORMAT_GRPH_RGB111110_FLOAT:
 		pixel_format = 118;
+		alpha_en = 0;
 		break;
 	case SURFACE_PIXEL_FORMAT_GRPH_BGR101111_FLOAT:
 		pixel_format = 119;
+		alpha_en = 0;
 		break;
 	default:
 		break;
 	}
+
+	/* Set default color space based on format if none is given. */
+	color_space = input_color_space ? input_color_space : color_space;
 
 	if (is_2bit == 1 && alpha_2bit_lut != NULL) {
 		REG_UPDATE(ALPHA_2BIT_LUT, ALPHA_2BIT_LUT0, alpha_2bit_lut->lut0);
@@ -244,20 +252,6 @@ static void dpp2_cnv_setup (
 	}
 	dpp2_power_on_obuf(dpp_base, true);
 
-}
-
-void dpp2_cnv_set_bias_scale(
-		struct dpp *dpp_base,
-		struct  dc_bias_and_scale *bias_and_scale)
-{
-	struct dcn20_dpp *dpp = TO_DCN20_DPP(dpp_base);
-
-	REG_UPDATE(FCNV_FP_BIAS_R, FCNV_FP_BIAS_R, bias_and_scale->bias_red);
-	REG_UPDATE(FCNV_FP_BIAS_G, FCNV_FP_BIAS_G, bias_and_scale->bias_green);
-	REG_UPDATE(FCNV_FP_BIAS_B, FCNV_FP_BIAS_B, bias_and_scale->bias_blue);
-	REG_UPDATE(FCNV_FP_SCALE_R, FCNV_FP_SCALE_R, bias_and_scale->scale_red);
-	REG_UPDATE(FCNV_FP_SCALE_G, FCNV_FP_SCALE_G, bias_and_scale->scale_green);
-	REG_UPDATE(FCNV_FP_SCALE_B, FCNV_FP_SCALE_B, bias_and_scale->scale_blue);
 }
 
 /*compute the maximum number of lines that we can fit in the line buffer*/
@@ -369,84 +363,6 @@ void dpp2_set_cursor_attributes(
 	}
 }
 
-#define IDENTITY_RATIO(ratio) (dc_fixpt_u3d19(ratio) == (1 << 19))
-
-bool dpp2_get_optimal_number_of_taps(
-		struct dpp *dpp,
-		struct scaler_data *scl_data,
-		const struct scaling_taps *in_taps)
-{
-	/* Some ASICs does not support  FP16 scaling, so we reject modes require this*/
-	if (scl_data->viewport.width  != scl_data->h_active &&
-		scl_data->viewport.height != scl_data->v_active &&
-		dpp->caps->dscl_data_proc_format == DSCL_DATA_PRCESSING_FIXED_FORMAT &&
-		scl_data->format == PIXEL_FORMAT_FP16)
-		return false;
-
-	if (scl_data->viewport.width > scl_data->h_active &&
-		dpp->ctx->dc->debug.max_downscale_src_width != 0 &&
-		scl_data->viewport.width > dpp->ctx->dc->debug.max_downscale_src_width)
-		return false;
-
-	/* TODO: add lb check */
-
-	/* No support for programming ratio of 8, drop to 7.99999.. */
-	if (scl_data->ratios.horz.value == (8ll << 32))
-		scl_data->ratios.horz.value--;
-	if (scl_data->ratios.vert.value == (8ll << 32))
-		scl_data->ratios.vert.value--;
-	if (scl_data->ratios.horz_c.value == (8ll << 32))
-		scl_data->ratios.horz_c.value--;
-	if (scl_data->ratios.vert_c.value == (8ll << 32))
-		scl_data->ratios.vert_c.value--;
-
-	/* Set default taps if none are provided */
-	if (in_taps->h_taps == 0) {
-		if (dc_fixpt_ceil(scl_data->ratios.horz) > 4)
-			scl_data->taps.h_taps = 8;
-		else
-			scl_data->taps.h_taps = 4;
-	} else
-		scl_data->taps.h_taps = in_taps->h_taps;
-	if (in_taps->v_taps == 0) {
-		if (dc_fixpt_ceil(scl_data->ratios.vert) > 4)
-			scl_data->taps.v_taps = 8;
-		else
-			scl_data->taps.v_taps = 4;
-	} else
-		scl_data->taps.v_taps = in_taps->v_taps;
-	if (in_taps->v_taps_c == 0) {
-		if (dc_fixpt_ceil(scl_data->ratios.vert_c) > 4)
-			scl_data->taps.v_taps_c = 4;
-		else
-			scl_data->taps.v_taps_c = 2;
-	} else
-		scl_data->taps.v_taps_c = in_taps->v_taps_c;
-	if (in_taps->h_taps_c == 0) {
-		if (dc_fixpt_ceil(scl_data->ratios.horz_c) > 4)
-			scl_data->taps.h_taps_c = 4;
-		else
-			scl_data->taps.h_taps_c = 2;
-	} else if ((in_taps->h_taps_c % 2) != 0 && in_taps->h_taps_c != 1)
-		/* Only 1 and even h_taps_c are supported by hw */
-		scl_data->taps.h_taps_c = in_taps->h_taps_c - 1;
-	else
-		scl_data->taps.h_taps_c = in_taps->h_taps_c;
-
-	if (!dpp->ctx->dc->debug.always_scale) {
-		if (IDENTITY_RATIO(scl_data->ratios.horz))
-			scl_data->taps.h_taps = 1;
-		if (IDENTITY_RATIO(scl_data->ratios.vert))
-			scl_data->taps.v_taps = 1;
-		if (IDENTITY_RATIO(scl_data->ratios.horz_c))
-			scl_data->taps.h_taps_c = 1;
-		if (IDENTITY_RATIO(scl_data->ratios.vert_c))
-			scl_data->taps.v_taps_c = 1;
-	}
-
-	return true;
-}
-
 void oppn20_dummy_program_regamma_pwl(
 		struct dpp *dpp,
 		const struct pwl_params *params,
@@ -505,7 +421,8 @@ bool dpp2_construct(
 	dpp->lb_pixel_depth_supported =
 		LB_PIXEL_DEPTH_18BPP |
 		LB_PIXEL_DEPTH_24BPP |
-		LB_PIXEL_DEPTH_30BPP;
+		LB_PIXEL_DEPTH_30BPP |
+		LB_PIXEL_DEPTH_36BPP;
 
 	dpp->lb_bits_per_entry = LB_BITS_PER_ENTRY;
 	dpp->lb_memory_size = LB_TOTAL_NUMBER_OF_ENTRIES; /*0x1404*/

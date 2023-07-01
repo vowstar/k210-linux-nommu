@@ -290,7 +290,7 @@ static void mmc_davinci_start_command(struct mmc_davinci_host *host,
 		default:
 			s = ", (R? response)";
 			break;
-		}; s; }));
+		} s; }));
 	host->cmd = cmd;
 
 	switch (mmc_resp_type(cmd)) {
@@ -300,7 +300,7 @@ static void mmc_davinci_start_command(struct mmc_davinci_host *host,
 		 * then it's harmless for us to allow it.
 		 */
 		cmd_reg |= MMCCMD_BSYEXP;
-		/* FALLTHROUGH */
+		fallthrough;
 	case MMC_RSP_R1:		/* 48 bits, CRC */
 		cmd_reg |= MMCCMD_RSPFMT_R1456;
 		break;
@@ -996,7 +996,7 @@ static irqreturn_t mmc_davinci_irq(int irq, void *dev_id)
 
 	if (qstatus & MMCST0_RSPDNE) {
 		/* End of command phase */
-		end_command = (int) host->cmd;
+		end_command = host->cmd ? 1 : 0;
 	}
 
 	if (end_command)
@@ -1189,7 +1189,6 @@ static int mmc_davinci_parse_pdata(struct mmc_host *mmc)
 
 static int davinci_mmcsd_probe(struct platform_device *pdev)
 {
-	const struct of_device_id *match;
 	struct mmc_davinci_host *host = NULL;
 	struct mmc_host *mmc = NULL;
 	struct resource *r, *mem = NULL;
@@ -1235,14 +1234,12 @@ static int davinci_mmcsd_probe(struct platform_device *pdev)
 
 	host->mmc_input_clk = clk_get_rate(host->clk);
 
-	match = of_match_device(davinci_mmc_dt_ids, &pdev->dev);
-	if (match) {
-		pdev->id_entry = match->data;
+	pdev->id_entry = of_device_get_match_data(&pdev->dev);
+	if (pdev->id_entry) {
 		ret = mmc_of_parse(mmc);
 		if (ret) {
-			if (ret != -EPROBE_DEFER)
-				dev_err(&pdev->dev,
-					"could not parse of data: %d\n", ret);
+			dev_err_probe(&pdev->dev, ret,
+				      "could not parse of data\n");
 			goto parse_fail;
 		}
 	} else {
@@ -1376,8 +1373,12 @@ static int davinci_mmcsd_suspend(struct device *dev)
 static int davinci_mmcsd_resume(struct device *dev)
 {
 	struct mmc_davinci_host *host = dev_get_drvdata(dev);
+	int ret;
 
-	clk_enable(host->clk);
+	ret = clk_enable(host->clk);
+	if (ret)
+		return ret;
+
 	mmc_davinci_reset_ctrl(host, 0);
 
 	return 0;
@@ -1396,6 +1397,7 @@ static const struct dev_pm_ops davinci_mmcsd_pm = {
 static struct platform_driver davinci_mmcsd_driver = {
 	.driver		= {
 		.name	= "davinci_mmc",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.pm	= davinci_mmcsd_pm_ops,
 		.of_match_table = davinci_mmc_dt_ids,
 	},

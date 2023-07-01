@@ -466,7 +466,7 @@ static int usb_dmac_chan_terminate_all(struct dma_chan *chan)
 
 static unsigned int usb_dmac_get_current_residue(struct usb_dmac_chan *chan,
 						 struct usb_dmac_desc *desc,
-						 int sg_index)
+						 unsigned int sg_index)
 {
 	struct usb_dmac_sg *sg = desc->sg + sg_index;
 	u32 mem_addr = sg->mem_addr & 0xffffffff;
@@ -586,6 +586,8 @@ static void usb_dmac_isr_transfer_end(struct usb_dmac_chan *chan)
 		desc->residue = usb_dmac_get_current_residue(chan, desc,
 							desc->sg_index - 1);
 		desc->done_cookie = desc->vd.tx.cookie;
+		desc->vd.tx_result.result = DMA_TRANS_NOERROR;
+		desc->vd.tx_result.residue = desc->residue;
 		vchan_cookie_complete(&desc->vd);
 
 		/* Restart the next transfer if this driver has a next desc */
@@ -766,7 +768,6 @@ static int usb_dmac_probe(struct platform_device *pdev)
 	const enum dma_slave_buswidth widths = USB_DMAC_SLAVE_BUSWIDTH;
 	struct dma_device *engine;
 	struct usb_dmac *dmac;
-	struct resource *mem;
 	unsigned int i;
 	int ret;
 
@@ -787,8 +788,7 @@ static int usb_dmac_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	/* Request resources. */
-	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	dmac->iomem = devm_ioremap_resource(&pdev->dev, mem);
+	dmac->iomem = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(dmac->iomem))
 		return PTR_ERR(dmac->iomem);
 
@@ -853,8 +853,8 @@ static int usb_dmac_probe(struct platform_device *pdev)
 
 error:
 	of_dma_controller_free(pdev->dev.of_node);
-	pm_runtime_put(&pdev->dev);
 error_pm:
+	pm_runtime_put(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
 	return ret;
 }

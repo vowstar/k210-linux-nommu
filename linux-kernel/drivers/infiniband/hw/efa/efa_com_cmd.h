@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-2-Clause */
 /*
- * Copyright 2018-2019 Amazon.com, Inc. or its affiliates. All rights reserved.
+ * Copyright 2018-2021 Amazon.com, Inc. or its affiliates. All rights reserved.
  */
 
 #ifndef _EFA_COM_CMD_H_
@@ -47,6 +47,7 @@ struct efa_com_modify_qp_params {
 	u32 qkey;
 	u32 sq_psn;
 	u8 sq_drained_async_notify;
+	u8 rnr_retry;
 };
 
 struct efa_com_query_qp_params {
@@ -58,6 +59,7 @@ struct efa_com_query_qp_result {
 	u32 qkey;
 	u32 sq_draining;
 	u32 sq_psn;
+	u8 rnr_retry;
 };
 
 struct efa_com_destroy_qp_params {
@@ -71,7 +73,10 @@ struct efa_com_create_cq_params {
 	u16 cq_depth;
 	u16 num_sub_cqs;
 	u16 uarn;
+	u16 eqn;
 	u8 entry_size_in_bytes;
+	u8 interrupt_mode_enabled : 1;
+	u8 set_src_addr : 1;
 };
 
 struct efa_com_create_cq_result {
@@ -79,6 +84,8 @@ struct efa_com_create_cq_result {
 	u16 cq_idx;
 	/* actual cq depth in # of entries */
 	u16 actual_depth;
+	u32 db_off;
+	bool db_valid;
 };
 
 struct efa_com_destroy_cq_params {
@@ -123,10 +130,15 @@ struct efa_com_get_device_attr_result {
 	u32 max_llq_size;
 	u32 max_rdma_size;
 	u32 device_caps;
+	u32 max_eq;
+	u32 max_eq_depth;
+	u32 event_bitmask; /* EQ events bitmask */
 	u16 sub_cqs_per_cq;
 	u16 max_sq_sge;
 	u16 max_rq_sge;
 	u16 max_wr_rdma_sge;
+	u16 max_tx_batch;
+	u16 min_sq_depth;
 	u8 db_bar;
 };
 
@@ -236,11 +248,26 @@ struct efa_com_basic_stats {
 	u64 rx_drops;
 };
 
-union efa_com_get_stats_result {
-	struct efa_com_basic_stats basic_stats;
+struct efa_com_messages_stats {
+	u64 send_bytes;
+	u64 send_wrs;
+	u64 recv_bytes;
+	u64 recv_wrs;
 };
 
-void efa_com_set_dma_addr(dma_addr_t addr, u32 *addr_high, u32 *addr_low);
+struct efa_com_rdma_read_stats {
+	u64 read_wrs;
+	u64 read_bytes;
+	u64 read_wr_err;
+	u64 read_resp_bytes;
+};
+
+union efa_com_get_stats_result {
+	struct efa_com_basic_stats basic_stats;
+	struct efa_com_messages_stats messages_stats;
+	struct efa_com_rdma_read_stats rdma_read_stats;
+};
+
 int efa_com_create_qp(struct efa_com_dev *edev,
 		      struct efa_com_create_qp_params *params,
 		      struct efa_com_create_qp_result *res);
@@ -270,6 +297,15 @@ int efa_com_get_device_attr(struct efa_com_dev *edev,
 			    struct efa_com_get_device_attr_result *result);
 int efa_com_get_hw_hints(struct efa_com_dev *edev,
 			 struct efa_com_get_hw_hints_result *result);
+bool
+efa_com_check_supported_feature_id(struct efa_com_dev *edev,
+				   enum efa_admin_aq_feature_id feature_id);
+int efa_com_set_feature_ex(struct efa_com_dev *edev,
+			   struct efa_admin_set_feature_resp *set_resp,
+			   struct efa_admin_set_feature_cmd *set_cmd,
+			   enum efa_admin_aq_feature_id feature_id,
+			   dma_addr_t control_buf_dma_addr,
+			   u32 control_buff_size);
 int efa_com_set_aenq_config(struct efa_com_dev *edev, u32 groups);
 int efa_com_alloc_pd(struct efa_com_dev *edev,
 		     struct efa_com_alloc_pd_result *result);

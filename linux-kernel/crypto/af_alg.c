@@ -12,24 +12,28 @@
 #include <linux/crypto.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/key.h>
+#include <linux/key-type.h>
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/net.h>
 #include <linux/rwsem.h>
+#include <linux/sched.h>
 #include <linux/sched/signal.h>
 #include <linux/security.h>
+#include <linux/string.h>
+#include <keys/user-type.h>
+#include <keys/trusted-type.h>
+#include <keys/encrypted-type.h>
 
 struct alg_type_list {
 	const struct af_alg_type *type;
 	struct list_head list;
 };
 
-static atomic_long_t alg_memory_allocated;
-
 static struct proto alg_proto = {
 	.name			= "ALG",
 	.owner			= THIS_MODULE,
-	.memory_allocated	= &alg_memory_allocated,
 	.obj_size		= sizeof(struct alg_sock),
 };
 
@@ -128,21 +132,15 @@ EXPORT_SYMBOL_GPL(af_alg_release);
 void af_alg_release_parent(struct sock *sk)
 {
 	struct alg_sock *ask = alg_sk(sk);
-	unsigned int nokey = ask->nokey_refcnt;
-	bool last = nokey && !ask->refcnt;
+	unsigned int nokey = atomic_read(&ask->nokey_refcnt);
 
 	sk = ask->parent;
 	ask = alg_sk(sk);
 
-	local_bh_disable();
-	bh_lock_sock(sk);
-	ask->nokey_refcnt -= nokey;
-	if (!last)
-		last = !--ask->refcnt;
-	bh_unlock_sock(sk);
-	local_bh_enable();
+	if (nokey)
+		atomic_dec(&ask->nokey_refcnt);
 
-	if (last)
+	if (atomic_dec_and_test(&ask->refcnt))
 		sock_put(sk);
 }
 EXPORT_SYMBOL_GPL(af_alg_release_parent);
@@ -152,7 +150,7 @@ static int alg_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	const u32 allowed = CRYPTO_ALG_KERN_DRIVER_ONLY;
 	struct sock *sk = sock->sk;
 	struct alg_sock *ask = alg_sk(sk);
-	struct sockaddr_alg *sa = (void *)uaddr;
+	struct sockaddr_alg_new *sa = (void *)uaddr;
 	const struct af_alg_type *type;
 	void *private;
 	int err;
@@ -160,7 +158,11 @@ static int alg_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	if (sock->state == SS_CONNECTED)
 		return -EINVAL;
 
-	if (addr_len < sizeof(*sa))
+	BUILD_BUG_ON(offsetof(struct sockaddr_alg_new, salg_name) !=
+		     offsetof(struct sockaddr_alg, salg_name));
+	BUILD_BUG_ON(offsetof(struct sockaddr_alg, salg_name) != sizeof(*sa));
+
+	if (addr_len < sizeof(*sa) + 1)
 		return -EINVAL;
 
 	/* If caller uses non-allowed flag, return error. */
@@ -168,7 +170,7 @@ static int alg_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 		return -EINVAL;
 
 	sa->salg_type[sizeof(sa->salg_type) - 1] = 0;
-	sa->salg_name[sizeof(sa->salg_name) + addr_len - sizeof(*sa) - 1] = 0;
+	sa->salg_name[addr_len - sizeof(*sa) - 1] = 0;
 
 	type = alg_get_type(sa->salg_type);
 	if (PTR_ERR(type) == -ENOENT) {
@@ -187,7 +189,7 @@ static int alg_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 
 	err = -EBUSY;
 	lock_sock(sk);
-	if (ask->refcnt | ask->nokey_refcnt)
+	if (atomic_read(&ask->refcnt))
 		goto unlock;
 
 	swap(ask->type, type);
@@ -203,8 +205,7 @@ unlock:
 	return err;
 }
 
-static int alg_setkey(struct sock *sk, char __user *ukey,
-		      unsigned int keylen)
+static int alg_setkey(struct sock *sk, sockptr_t ukey, unsigned int keylen)
 {
 	struct alg_sock *ask = alg_sk(sk);
 	const struct af_alg_type *type = ask->type;
@@ -216,7 +217,7 @@ static int alg_setkey(struct sock *sk, char __user *ukey,
 		return -ENOMEM;
 
 	err = -EFAULT;
-	if (copy_from_user(key, ukey, keylen))
+	if (copy_from_sockptr(key, ukey, keylen))
 		goto out;
 
 	err = type->setkey(ask->private, key, keylen);
@@ -227,8 +228,131 @@ out:
 	return err;
 }
 
+#ifdef CONFIG_KEYS
+
+static const u8 *key_data_ptr_user(const struct key *key,
+				   unsigned int *datalen)
+{
+	const struct user_key_payload *ukp;
+
+	ukp = user_key_payload_locked(key);
+	if (IS_ERR_OR_NULL(ukp))
+		return ERR_PTR(-EKEYREVOKED);
+
+	*datalen = key->datalen;
+
+	return ukp->data;
+}
+
+static const u8 *key_data_ptr_encrypted(const struct key *key,
+					unsigned int *datalen)
+{
+	const struct encrypted_key_payload *ekp;
+
+	ekp = dereference_key_locked(key);
+	if (IS_ERR_OR_NULL(ekp))
+		return ERR_PTR(-EKEYREVOKED);
+
+	*datalen = ekp->decrypted_datalen;
+
+	return ekp->decrypted_data;
+}
+
+static const u8 *key_data_ptr_trusted(const struct key *key,
+				      unsigned int *datalen)
+{
+	const struct trusted_key_payload *tkp;
+
+	tkp = dereference_key_locked(key);
+	if (IS_ERR_OR_NULL(tkp))
+		return ERR_PTR(-EKEYREVOKED);
+
+	*datalen = tkp->key_len;
+
+	return tkp->key;
+}
+
+static struct key *lookup_key(key_serial_t serial)
+{
+	key_ref_t key_ref;
+
+	key_ref = lookup_user_key(serial, 0, KEY_NEED_SEARCH);
+	if (IS_ERR(key_ref))
+		return ERR_CAST(key_ref);
+
+	return key_ref_to_ptr(key_ref);
+}
+
+static int alg_setkey_by_key_serial(struct alg_sock *ask, sockptr_t optval,
+				    unsigned int optlen)
+{
+	const struct af_alg_type *type = ask->type;
+	u8 *key_data = NULL;
+	unsigned int key_datalen;
+	key_serial_t serial;
+	struct key *key;
+	const u8 *ret;
+	int err;
+
+	if (optlen != sizeof(serial))
+		return -EINVAL;
+
+	if (copy_from_sockptr(&serial, optval, optlen))
+		return -EFAULT;
+
+	key = lookup_key(serial);
+	if (IS_ERR(key))
+		return PTR_ERR(key);
+
+	down_read(&key->sem);
+
+	ret = ERR_PTR(-ENOPROTOOPT);
+	if (!strcmp(key->type->name, "user") ||
+	    !strcmp(key->type->name, "logon")) {
+		ret = key_data_ptr_user(key, &key_datalen);
+	} else if (IS_REACHABLE(CONFIG_ENCRYPTED_KEYS) &&
+			   !strcmp(key->type->name, "encrypted")) {
+		ret = key_data_ptr_encrypted(key, &key_datalen);
+	} else if (IS_REACHABLE(CONFIG_TRUSTED_KEYS) &&
+			   !strcmp(key->type->name, "trusted")) {
+		ret = key_data_ptr_trusted(key, &key_datalen);
+	}
+
+	if (IS_ERR(ret)) {
+		up_read(&key->sem);
+		return PTR_ERR(ret);
+	}
+
+	key_data = sock_kmalloc(&ask->sk, key_datalen, GFP_KERNEL);
+	if (!key_data) {
+		up_read(&key->sem);
+		return -ENOMEM;
+	}
+
+	memcpy(key_data, ret, key_datalen);
+
+	up_read(&key->sem);
+
+	err = type->setkey(ask->private, key_data, key_datalen);
+
+	sock_kzfree_s(&ask->sk, key_data, key_datalen);
+
+	return err;
+}
+
+#else
+
+static inline int alg_setkey_by_key_serial(struct alg_sock *ask,
+					   sockptr_t optval,
+					   unsigned int optlen)
+{
+	return -ENOPROTOOPT;
+}
+
+#endif
+
 static int alg_setsockopt(struct socket *sock, int level, int optname,
-			  char __user *optval, unsigned int optlen)
+			  sockptr_t optval, unsigned int optlen)
 {
 	struct sock *sk = sock->sk;
 	struct alg_sock *ask = alg_sk(sk);
@@ -236,7 +360,7 @@ static int alg_setsockopt(struct socket *sock, int level, int optname,
 	int err = -EBUSY;
 
 	lock_sock(sk);
-	if (ask->refcnt)
+	if (atomic_read(&ask->refcnt) != atomic_read(&ask->nokey_refcnt))
 		goto unlock;
 
 	type = ask->type;
@@ -247,12 +371,16 @@ static int alg_setsockopt(struct socket *sock, int level, int optname,
 
 	switch (optname) {
 	case ALG_SET_KEY:
+	case ALG_SET_KEY_BY_KEY_SERIAL:
 		if (sock->state == SS_CONNECTED)
 			goto unlock;
 		if (!type->setkey)
 			goto unlock;
 
-		err = alg_setkey(sk, optval, optlen);
+		if (optname == ALG_SET_KEY_BY_KEY_SERIAL)
+			err = alg_setkey_by_key_serial(ask, optval, optlen);
+		else
+			err = alg_setkey(sk, optval, optlen);
 		break;
 	case ALG_SET_AEAD_AUTHSIZE:
 		if (sock->state == SS_CONNECTED)
@@ -260,6 +388,14 @@ static int alg_setsockopt(struct socket *sock, int level, int optname,
 		if (!type->setauthsize)
 			goto unlock;
 		err = type->setauthsize(ask->private, optlen);
+		break;
+	case ALG_SET_DRBG_ENTROPY:
+		if (sock->state == SS_CONNECTED)
+			goto unlock;
+		if (!type->setentropy)
+			goto unlock;
+
+		err = type->setentropy(ask->private, optval, optlen);
 	}
 
 unlock:
@@ -292,6 +428,11 @@ int af_alg_accept(struct sock *sk, struct socket *newsock, bool kern)
 	security_sock_graft(sk2, newsock);
 	security_sk_clone(sk, sk2);
 
+	/*
+	 * newsock->ops assigned here to allow type->accept call to override
+	 * them when required.
+	 */
+	newsock->ops = type->ops;
 	err = type->accept(ask->private, sk2);
 
 	nokey = err == -ENOKEY;
@@ -301,14 +442,15 @@ int af_alg_accept(struct sock *sk, struct socket *newsock, bool kern)
 	if (err)
 		goto unlock;
 
-	if (nokey || !ask->refcnt++)
+	if (atomic_inc_return_relaxed(&ask->refcnt) == 1)
 		sock_hold(sk);
-	ask->nokey_refcnt += nokey;
+	if (nokey) {
+		atomic_inc(&ask->nokey_refcnt);
+		atomic_set(&alg_sk(sk2)->nokey_refcnt, 1);
+	}
 	alg_sk(sk2)->parent = sk;
 	alg_sk(sk2)->type = type;
-	alg_sk(sk2)->nokey_refcnt = nokey;
 
-	newsock->ops = type->ops;
 	newsock->state = SS_CONNECTED;
 
 	if (nokey)
@@ -339,7 +481,6 @@ static const struct proto_ops alg_proto_ops = {
 	.ioctl		=	sock_no_ioctl,
 	.listen		=	sock_no_listen,
 	.shutdown	=	sock_no_shutdown,
-	.getsockopt	=	sock_no_getsockopt,
 	.mmap		=	sock_no_mmap,
 	.sendpage	=	sock_no_sendpage,
 	.sendmsg	=	sock_no_sendmsg,
@@ -396,11 +537,11 @@ int af_alg_make_sg(struct af_alg_sgl *sgl, struct iov_iter *iter, int len)
 	ssize_t n;
 	int npages, i;
 
-	n = iov_iter_get_pages(iter, sgl->pages, len, ALG_MAX_PAGES, &off);
+	n = iov_iter_get_pages2(iter, sgl->pages, len, ALG_MAX_PAGES, &off);
 	if (n < 0)
 		return n;
 
-	npages = (off + n + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	npages = DIV_ROUND_UP(off + n, PAGE_SIZE);
 	if (WARN_ON(npages == 0))
 		return -EINVAL;
 	/* Add one extra for linking */
@@ -480,8 +621,8 @@ static int af_alg_cmsg_send(struct msghdr *msg, struct af_alg_control *con)
 /**
  * af_alg_alloc_tsgl - allocate the TX SGL
  *
- * @sk socket of connection to user space
- * @return: 0 upon success, < 0 upon error
+ * @sk: socket of connection to user space
+ * Return: 0 upon success, < 0 upon error
  */
 static int af_alg_alloc_tsgl(struct sock *sk)
 {
@@ -514,15 +655,15 @@ static int af_alg_alloc_tsgl(struct sock *sk)
 }
 
 /**
- * aead_count_tsgl - Count number of TX SG entries
+ * af_alg_count_tsgl - Count number of TX SG entries
  *
  * The counting starts from the beginning of the SGL to @bytes. If
- * an offset is provided, the counting of the SG entries starts at the offset.
+ * an @offset is provided, the counting of the SG entries starts at the @offset.
  *
- * @sk socket of connection to user space
- * @bytes Count the number of SG entries holding given number of bytes.
- * @offset Start the counting of SG entries from the given offset.
- * @return Number of TX SG entries found given the constraints
+ * @sk: socket of connection to user space
+ * @bytes: Count the number of SG entries holding given number of bytes.
+ * @offset: Start the counting of SG entries from the given offset.
+ * Return: Number of TX SG entries found given the constraints
  */
 unsigned int af_alg_count_tsgl(struct sock *sk, size_t bytes, size_t offset)
 {
@@ -566,19 +707,19 @@ unsigned int af_alg_count_tsgl(struct sock *sk, size_t bytes, size_t offset)
 EXPORT_SYMBOL_GPL(af_alg_count_tsgl);
 
 /**
- * aead_pull_tsgl - Release the specified buffers from TX SGL
+ * af_alg_pull_tsgl - Release the specified buffers from TX SGL
  *
- * If @dst is non-null, reassign the pages to dst. The caller must release
+ * If @dst is non-null, reassign the pages to @dst. The caller must release
  * the pages. If @dst_offset is given only reassign the pages to @dst starting
  * at the @dst_offset (byte). The caller must ensure that @dst is large
  * enough (e.g. by using af_alg_count_tsgl with the same offset).
  *
- * @sk socket of connection to user space
- * @used Number of bytes to pull from TX SGL
- * @dst If non-NULL, buffer is reassigned to dst SGL instead of releasing. The
- *	caller must release the buffers in dst.
- * @dst_offset Reassign the TX SGL from given offset. All buffers before
- *	       reaching the offset is released.
+ * @sk: socket of connection to user space
+ * @used: Number of bytes to pull from TX SGL
+ * @dst: If non-NULL, buffer is reassigned to dst SGL instead of releasing. The
+ *	 caller must release the buffers in dst.
+ * @dst_offset: Reassign the TX SGL from given offset. All buffers before
+ *	        reaching the offset is released.
  */
 void af_alg_pull_tsgl(struct sock *sk, size_t used, struct scatterlist *dst,
 		      size_t dst_offset)
@@ -639,13 +780,14 @@ void af_alg_pull_tsgl(struct sock *sk, size_t used, struct scatterlist *dst,
 
 	if (!ctx->used)
 		ctx->merge = 0;
+	ctx->init = ctx->more;
 }
 EXPORT_SYMBOL_GPL(af_alg_pull_tsgl);
 
 /**
  * af_alg_free_areq_sgls - Release TX and RX SGLs of the request
  *
- * @areq Request holding the TX and RX SGL
+ * @areq: Request holding the TX and RX SGL
  */
 static void af_alg_free_areq_sgls(struct af_alg_async_req *areq)
 {
@@ -680,9 +822,9 @@ static void af_alg_free_areq_sgls(struct af_alg_async_req *areq)
 /**
  * af_alg_wait_for_wmem - wait for availability of writable memory
  *
- * @sk socket of connection to user space
- * @flags If MSG_DONTWAIT is set, then only report if function would sleep
- * @return 0 when writable memory is available, < 0 upon error
+ * @sk: socket of connection to user space
+ * @flags: If MSG_DONTWAIT is set, then only report if function would sleep
+ * Return: 0 when writable memory is available, < 0 upon error
  */
 static int af_alg_wait_for_wmem(struct sock *sk, unsigned int flags)
 {
@@ -713,7 +855,7 @@ static int af_alg_wait_for_wmem(struct sock *sk, unsigned int flags)
 /**
  * af_alg_wmem_wakeup - wakeup caller when writable memory is available
  *
- * @sk socket of connection to user space
+ * @sk: socket of connection to user space
  */
 void af_alg_wmem_wakeup(struct sock *sk)
 {
@@ -736,11 +878,12 @@ EXPORT_SYMBOL_GPL(af_alg_wmem_wakeup);
 /**
  * af_alg_wait_for_data - wait for availability of TX data
  *
- * @sk socket of connection to user space
- * @flags If MSG_DONTWAIT is set, then only report if function would sleep
- * @return 0 when writable memory is available, < 0 upon error
+ * @sk: socket of connection to user space
+ * @flags: If MSG_DONTWAIT is set, then only report if function would sleep
+ * @min: Set to minimum request size if partial requests are allowed.
+ * Return: 0 when writable memory is available, < 0 upon error
  */
-int af_alg_wait_for_data(struct sock *sk, unsigned flags)
+int af_alg_wait_for_data(struct sock *sk, unsigned flags, unsigned min)
 {
 	DEFINE_WAIT_FUNC(wait, woken_wake_function);
 	struct alg_sock *ask = alg_sk(sk);
@@ -758,7 +901,9 @@ int af_alg_wait_for_data(struct sock *sk, unsigned flags)
 		if (signal_pending(current))
 			break;
 		timeout = MAX_SCHEDULE_TIMEOUT;
-		if (sk_wait_event(sk, &timeout, (ctx->used || !ctx->more),
+		if (sk_wait_event(sk, &timeout,
+				  ctx->init && (!ctx->more ||
+						(min && ctx->used >= min)),
 				  &wait)) {
 			err = 0;
 			break;
@@ -775,7 +920,7 @@ EXPORT_SYMBOL_GPL(af_alg_wait_for_data);
 /**
  * af_alg_data_wakeup - wakeup caller when new data can be sent to kernel
  *
- * @sk socket of connection to user space
+ * @sk: socket of connection to user space
  */
 static void af_alg_data_wakeup(struct sock *sk)
 {
@@ -805,12 +950,12 @@ static void af_alg_data_wakeup(struct sock *sk)
  *
  * In addition, the ctx is filled with the information sent via CMSG.
  *
- * @sock socket of connection to user space
- * @msg message from user space
- * @size size of message from user space
- * @ivsize the size of the IV for the cipher operation to verify that the
+ * @sock: socket of connection to user space
+ * @msg: message from user space
+ * @size: size of message from user space
+ * @ivsize: the size of the IV for the cipher operation to verify that the
  *	   user-space-provided IV has the right size
- * @return the number of copied data upon success, < 0 upon error
+ * Return: the number of copied data upon success, < 0 upon error
  */
 int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
 		   unsigned int ivsize)
@@ -821,8 +966,8 @@ int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
 	struct af_alg_tsgl *sgl;
 	struct af_alg_control con = {};
 	long copied = 0;
-	bool enc = 0;
-	bool init = 0;
+	bool enc = false;
+	bool init = false;
 	int err = 0;
 
 	if (msg->msg_controllen) {
@@ -830,13 +975,13 @@ int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
 		if (err)
 			return err;
 
-		init = 1;
+		init = true;
 		switch (con.op) {
 		case ALG_OP_ENCRYPT:
-			enc = 1;
+			enc = true;
 			break;
 		case ALG_OP_DECRYPT:
-			enc = 0;
+			enc = false;
 			break;
 		default:
 			return -EINVAL;
@@ -847,10 +992,17 @@ int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
 	}
 
 	lock_sock(sk);
-	if (!ctx->more && ctx->used) {
-		err = -EINVAL;
-		goto unlock;
+	if (ctx->init && !ctx->more) {
+		if (ctx->used) {
+			err = -EINVAL;
+			goto unlock;
+		}
+
+		pr_info_once(
+			"%s sent an empty control message without MSG_MORE.\n",
+			current->comm);
 	}
+	ctx->init = true;
 
 	if (init) {
 		ctx->enc = enc;
@@ -909,15 +1061,18 @@ int af_alg_sendmsg(struct socket *sock, struct msghdr *msg, size_t size,
 			sg_unmark_end(sg + sgl->cur - 1);
 
 		do {
+			struct page *pg;
 			unsigned int i = sgl->cur;
 
 			plen = min_t(size_t, len, PAGE_SIZE);
 
-			sg_assign_page(sg + i, alloc_page(GFP_KERNEL));
-			if (!sg_page(sg + i)) {
+			pg = alloc_page(GFP_KERNEL);
+			if (!pg) {
 				err = -ENOMEM;
 				goto unlock;
 			}
+
+			sg_assign_page(sg + i, pg);
 
 			err = memcpy_from_msg(page_address(sg_page(sg + i)),
 					      msg, plen);
@@ -955,6 +1110,11 @@ EXPORT_SYMBOL_GPL(af_alg_sendmsg);
 
 /**
  * af_alg_sendpage - sendpage system call handler
+ * @sock: socket of connection to user space to write to
+ * @page: data to send
+ * @offset: offset into page to begin sending
+ * @size: length of data
+ * @flags: message send/receive flags
  *
  * This is a generic implementation of sendpage to fill ctx->tsgl_list.
  */
@@ -1013,6 +1173,7 @@ EXPORT_SYMBOL_GPL(af_alg_sendpage);
 
 /**
  * af_alg_free_resources - release resources required for crypto request
+ * @areq: Request holding the TX and RX SGL
  */
 void af_alg_free_resources(struct af_alg_async_req *areq)
 {
@@ -1025,6 +1186,9 @@ EXPORT_SYMBOL_GPL(af_alg_free_resources);
 
 /**
  * af_alg_async_cb - AIO callback handler
+ * @data: async request completion data
+ * @err: if non-zero, error result to be returned via ki_complete();
+ *       otherwise return the AIO output length via ki_complete().
  *
  * This handler cleans up the struct af_alg_async_req upon completion of the
  * AIO operation.
@@ -1032,9 +1196,9 @@ EXPORT_SYMBOL_GPL(af_alg_free_resources);
  * The number of bytes to be generated with the AIO operation must be set
  * in areq->outlen before the AIO callback handler is invoked.
  */
-void af_alg_async_cb(struct crypto_async_request *_req, int err)
+void af_alg_async_cb(void *data, int err)
 {
-	struct af_alg_async_req *areq = _req->data;
+	struct af_alg_async_req *areq = data;
 	struct sock *sk = areq->sk;
 	struct kiocb *iocb = areq->iocb;
 	unsigned int resultlen;
@@ -1045,12 +1209,15 @@ void af_alg_async_cb(struct crypto_async_request *_req, int err)
 	af_alg_free_resources(areq);
 	sock_put(sk);
 
-	iocb->ki_complete(iocb, err ? err : (int)resultlen, 0);
+	iocb->ki_complete(iocb, err ? err : (int)resultlen);
 }
 EXPORT_SYMBOL_GPL(af_alg_async_cb);
 
 /**
  * af_alg_poll - poll system call handler
+ * @file: file pointer
+ * @sock: socket to poll
+ * @wait: poll_table
  */
 __poll_t af_alg_poll(struct file *file, struct socket *sock,
 			 poll_table *wait)
@@ -1076,9 +1243,9 @@ EXPORT_SYMBOL_GPL(af_alg_poll);
 /**
  * af_alg_alloc_areq - allocate struct af_alg_async_req
  *
- * @sk socket of connection to user space
- * @areqlen size of struct af_alg_async_req + crypto_*_reqsize
- * @return allocated data structure or ERR_PTR upon error
+ * @sk: socket of connection to user space
+ * @areqlen: size of struct af_alg_async_req + crypto_*_reqsize
+ * Return: allocated data structure or ERR_PTR upon error
  */
 struct af_alg_async_req *af_alg_alloc_areq(struct sock *sk,
 					   unsigned int areqlen)
@@ -1103,13 +1270,13 @@ EXPORT_SYMBOL_GPL(af_alg_alloc_areq);
  * af_alg_get_rsgl - create the RX SGL for the output data from the crypto
  *		     operation
  *
- * @sk socket of connection to user space
- * @msg user space message
- * @flags flags used to invoke recvmsg with
- * @areq instance of the cryptographic request that will hold the RX SGL
- * @maxsize maximum number of bytes to be pulled from user space
- * @outlen number of bytes in the RX SGL
- * @return 0 on success, < 0 upon error
+ * @sk: socket of connection to user space
+ * @msg: user space message
+ * @flags: flags used to invoke recvmsg with
+ * @areq: instance of the cryptographic request that will hold the RX SGL
+ * @maxsize: maximum number of bytes to be pulled from user space
+ * @outlen: number of bytes in the RX SGL
+ * Return: 0 on success, < 0 upon error
  */
 int af_alg_get_rsgl(struct sock *sk, struct msghdr *msg, int flags,
 		    struct af_alg_async_req *areq, size_t maxsize,
@@ -1157,7 +1324,6 @@ int af_alg_get_rsgl(struct sock *sk, struct msghdr *msg, int flags,
 		len += err;
 		atomic_add(err, &ctx->rcvused);
 		rsgl->sg_num_bytes = err;
-		iov_iter_advance(&msg->msg_iter, err);
 	}
 
 	*outlen = len;

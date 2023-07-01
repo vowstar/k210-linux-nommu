@@ -756,7 +756,10 @@ static int oxnas_gpio_get_direction(struct gpio_chip *chip,
 	struct oxnas_gpio_bank *bank = gpiochip_get_data(chip);
 	u32 mask = BIT(offset);
 
-	return !(readl_relaxed(bank->reg_base + OUTPUT_EN) & mask);
+	if (readl_relaxed(bank->reg_base + OUTPUT_EN) & mask)
+		return GPIO_LINE_DIRECTION_OUT;
+
+	return GPIO_LINE_DIRECTION_IN;
 }
 
 static int oxnas_gpio_direction_input(struct gpio_chip *chip,
@@ -1052,7 +1055,7 @@ static void oxnas_gpio_irq_handler(struct irq_desc *desc)
 	stat = readl(bank->reg_base + IRQ_PENDING);
 
 	for_each_set_bit(pin, &stat, BITS_PER_LONG)
-		generic_handle_irq(irq_linear_revmap(gc->irq.domain, pin));
+		generic_handle_domain_irq(gc->irq.domain, pin);
 
 	chained_irq_exit(chip, desc);
 }
@@ -1229,7 +1232,6 @@ static int oxnas_gpio_probe(struct platform_device *pdev)
 
 	bank->id = id;
 	bank->gpio_chip.parent = &pdev->dev;
-	bank->gpio_chip.of_node = np;
 	bank->gpio_chip.ngpio = ngpios;
 	girq = &bank->gpio_chip.irq;
 	girq->chip = &bank->irq_chip;

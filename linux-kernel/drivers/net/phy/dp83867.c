@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * Driver for the Texas Instruments DP83867 PHY
+/* Driver for the Texas Instruments DP83867 PHY
  *
  * Copyright (C) 2015 Texas Instruments Inc.
  */
@@ -14,6 +13,8 @@
 #include <linux/delay.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
+#include <linux/bitfield.h>
+#include <linux/nvmem-consumer.h>
 
 #include <dt-bindings/net/ti-dp83867.h>
 
@@ -21,6 +22,7 @@
 #define DP83867_DEVADDR		0x1f
 
 #define MII_DP83867_PHYCTRL	0x10
+#define MII_DP83867_PHYSTS	0x11
 #define MII_DP83867_MICR	0x12
 #define MII_DP83867_ISR		0x13
 #define DP83867_CFG2		0x14
@@ -28,7 +30,8 @@
 #define DP83867_CTRL		0x1f
 
 /* Extended Registers */
-#define DP83867_CFG4            0x0031
+#define DP83867_FLD_THR_CFG	0x002e
+#define DP83867_CFG4		0x0031
 #define DP83867_CFG4_SGMII_ANEG_MASK (BIT(5) | BIT(6))
 #define DP83867_CFG4_SGMII_ANEG_TIMER_11MS   (3 << 5)
 #define DP83867_CFG4_SGMII_ANEG_TIMER_800US  (2 << 5)
@@ -91,6 +94,7 @@
 #define DP83867_STRAP_STS2_CLK_SKEW_RX_MASK	GENMASK(2, 0)
 #define DP83867_STRAP_STS2_CLK_SKEW_RX_SHIFT	0
 #define DP83867_STRAP_STS2_CLK_SKEW_NONE	BIT(2)
+#define DP83867_STRAP_STS2_STRAP_FLD		BIT(10)
 
 /* PHY CTRL bits */
 #define DP83867_PHYCR_TX_FIFO_DEPTH_SHIFT	14
@@ -109,7 +113,6 @@
 #define DP83867_RGMII_RX_CLK_DELAY_SHIFT	0
 #define DP83867_RGMII_RX_CLK_DELAY_INV	(DP83867_RGMII_RX_CLK_DELAY_MAX + 1)
 
-
 /* IO_MUX_CFG bits */
 #define DP83867_IO_MUX_CFG_IO_IMPEDANCE_MASK	0x1f
 #define DP83867_IO_MUX_CFG_IO_IMPEDANCE_MAX	0x0
@@ -118,12 +121,34 @@
 #define DP83867_IO_MUX_CFG_CLK_O_SEL_MASK	(0x1f << 8)
 #define DP83867_IO_MUX_CFG_CLK_O_SEL_SHIFT	8
 
+/* PHY STS bits */
+#define DP83867_PHYSTS_1000			BIT(15)
+#define DP83867_PHYSTS_100			BIT(14)
+#define DP83867_PHYSTS_DUPLEX			BIT(13)
+#define DP83867_PHYSTS_LINK			BIT(10)
+
+/* CFG2 bits */
+#define DP83867_DOWNSHIFT_EN		(BIT(8) | BIT(9))
+#define DP83867_DOWNSHIFT_ATTEMPT_MASK	(BIT(10) | BIT(11))
+#define DP83867_DOWNSHIFT_1_COUNT_VAL	0
+#define DP83867_DOWNSHIFT_2_COUNT_VAL	1
+#define DP83867_DOWNSHIFT_4_COUNT_VAL	2
+#define DP83867_DOWNSHIFT_8_COUNT_VAL	3
+#define DP83867_DOWNSHIFT_1_COUNT	1
+#define DP83867_DOWNSHIFT_2_COUNT	2
+#define DP83867_DOWNSHIFT_4_COUNT	4
+#define DP83867_DOWNSHIFT_8_COUNT	8
+#define DP83867_SGMII_AUTONEG_EN	BIT(7)
+
 /* CFG3 bits */
 #define DP83867_CFG3_INT_OE			BIT(7)
 #define DP83867_CFG3_ROBUST_AUTO_MDIX		BIT(9)
 
 /* CFG4 bits */
 #define DP83867_CFG4_PORT_MIRROR_EN              BIT(0)
+
+/* FLD_THR_CFG */
+#define DP83867_FLD_THR_CFG_ENERGY_LOST_THR_MASK	0x7
 
 enum {
 	DP83867_PORT_MIRROING_KEEP,
@@ -159,7 +184,7 @@ static int dp83867_set_wol(struct phy_device *phydev,
 {
 	struct net_device *ndev = phydev->attached_dev;
 	u16 val_rxcfg, val_micr;
-	u8 *mac;
+	const u8 *mac;
 
 	val_rxcfg = phy_read_mmd(phydev, DP83867_DEVADDR, DP83867_RXFCFG);
 	val_micr = phy_read(phydev, MII_DP83867_MICR);
@@ -170,7 +195,7 @@ static int dp83867_set_wol(struct phy_device *phydev,
 		val_micr |= MII_DP83867_MICR_WOL_INT_EN;
 
 		if (wol->wolopts & WAKE_MAGIC) {
-			mac = (u8 *)ndev->dev_addr;
+			mac = (const u8 *)ndev->dev_addr;
 
 			if (!is_valid_ether_addr(mac))
 				return -EINVAL;
@@ -190,9 +215,9 @@ static int dp83867_set_wol(struct phy_device *phydev,
 		if (wol->wolopts & WAKE_MAGICSECURE) {
 			phy_write_mmd(phydev, DP83867_DEVADDR, DP83867_RXFSOP1,
 				      (wol->sopass[1] << 8) | wol->sopass[0]);
-			phy_write_mmd(phydev, DP83867_DEVADDR, DP83867_RXFSOP1,
+			phy_write_mmd(phydev, DP83867_DEVADDR, DP83867_RXFSOP2,
 				      (wol->sopass[3] << 8) | wol->sopass[2]);
-			phy_write_mmd(phydev, DP83867_DEVADDR, DP83867_RXFSOP1,
+			phy_write_mmd(phydev, DP83867_DEVADDR, DP83867_RXFSOP3,
 				      (wol->sopass[5] << 8) | wol->sopass[4]);
 
 			val_rxcfg |= DP83867_WOL_SEC_EN;
@@ -265,9 +290,13 @@ static void dp83867_get_wol(struct phy_device *phydev,
 
 static int dp83867_config_intr(struct phy_device *phydev)
 {
-	int micr_status;
+	int micr_status, err;
 
 	if (phydev->interrupts == PHY_INTERRUPT_ENABLED) {
+		err = dp83867_ack_interrupt(phydev);
+		if (err)
+			return err;
+
 		micr_status = phy_read(phydev, MII_DP83867_MICR);
 		if (micr_status < 0)
 			return micr_status;
@@ -280,11 +309,161 @@ static int dp83867_config_intr(struct phy_device *phydev)
 			MII_DP83867_MICR_DUP_MODE_CHNG_INT_EN |
 			MII_DP83867_MICR_SLEEP_MODE_CHNG_INT_EN);
 
-		return phy_write(phydev, MII_DP83867_MICR, micr_status);
+		err = phy_write(phydev, MII_DP83867_MICR, micr_status);
+	} else {
+		micr_status = 0x0;
+		err = phy_write(phydev, MII_DP83867_MICR, micr_status);
+		if (err)
+			return err;
+
+		err = dp83867_ack_interrupt(phydev);
 	}
 
-	micr_status = 0x0;
-	return phy_write(phydev, MII_DP83867_MICR, micr_status);
+	return err;
+}
+
+static irqreturn_t dp83867_handle_interrupt(struct phy_device *phydev)
+{
+	int irq_status, irq_enabled;
+
+	irq_status = phy_read(phydev, MII_DP83867_ISR);
+	if (irq_status < 0) {
+		phy_error(phydev);
+		return IRQ_NONE;
+	}
+
+	irq_enabled = phy_read(phydev, MII_DP83867_MICR);
+	if (irq_enabled < 0) {
+		phy_error(phydev);
+		return IRQ_NONE;
+	}
+
+	if (!(irq_status & irq_enabled))
+		return IRQ_NONE;
+
+	phy_trigger_machine(phydev);
+
+	return IRQ_HANDLED;
+}
+
+static int dp83867_read_status(struct phy_device *phydev)
+{
+	int status = phy_read(phydev, MII_DP83867_PHYSTS);
+	int ret;
+
+	ret = genphy_read_status(phydev);
+	if (ret)
+		return ret;
+
+	if (status < 0)
+		return status;
+
+	if (status & DP83867_PHYSTS_DUPLEX)
+		phydev->duplex = DUPLEX_FULL;
+	else
+		phydev->duplex = DUPLEX_HALF;
+
+	if (status & DP83867_PHYSTS_1000)
+		phydev->speed = SPEED_1000;
+	else if (status & DP83867_PHYSTS_100)
+		phydev->speed = SPEED_100;
+	else
+		phydev->speed = SPEED_10;
+
+	return 0;
+}
+
+static int dp83867_get_downshift(struct phy_device *phydev, u8 *data)
+{
+	int val, cnt, enable, count;
+
+	val = phy_read(phydev, DP83867_CFG2);
+	if (val < 0)
+		return val;
+
+	enable = FIELD_GET(DP83867_DOWNSHIFT_EN, val);
+	cnt = FIELD_GET(DP83867_DOWNSHIFT_ATTEMPT_MASK, val);
+
+	switch (cnt) {
+	case DP83867_DOWNSHIFT_1_COUNT_VAL:
+		count = DP83867_DOWNSHIFT_1_COUNT;
+		break;
+	case DP83867_DOWNSHIFT_2_COUNT_VAL:
+		count = DP83867_DOWNSHIFT_2_COUNT;
+		break;
+	case DP83867_DOWNSHIFT_4_COUNT_VAL:
+		count = DP83867_DOWNSHIFT_4_COUNT;
+		break;
+	case DP83867_DOWNSHIFT_8_COUNT_VAL:
+		count = DP83867_DOWNSHIFT_8_COUNT;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	*data = enable ? count : DOWNSHIFT_DEV_DISABLE;
+
+	return 0;
+}
+
+static int dp83867_set_downshift(struct phy_device *phydev, u8 cnt)
+{
+	int val, count;
+
+	if (cnt > DP83867_DOWNSHIFT_8_COUNT)
+		return -E2BIG;
+
+	if (!cnt)
+		return phy_clear_bits(phydev, DP83867_CFG2,
+				      DP83867_DOWNSHIFT_EN);
+
+	switch (cnt) {
+	case DP83867_DOWNSHIFT_1_COUNT:
+		count = DP83867_DOWNSHIFT_1_COUNT_VAL;
+		break;
+	case DP83867_DOWNSHIFT_2_COUNT:
+		count = DP83867_DOWNSHIFT_2_COUNT_VAL;
+		break;
+	case DP83867_DOWNSHIFT_4_COUNT:
+		count = DP83867_DOWNSHIFT_4_COUNT_VAL;
+		break;
+	case DP83867_DOWNSHIFT_8_COUNT:
+		count = DP83867_DOWNSHIFT_8_COUNT_VAL;
+		break;
+	default:
+		phydev_err(phydev,
+			   "Downshift count must be 1, 2, 4 or 8\n");
+		return -EINVAL;
+	}
+
+	val = DP83867_DOWNSHIFT_EN;
+	val |= FIELD_PREP(DP83867_DOWNSHIFT_ATTEMPT_MASK, count);
+
+	return phy_modify(phydev, DP83867_CFG2,
+			  DP83867_DOWNSHIFT_EN | DP83867_DOWNSHIFT_ATTEMPT_MASK,
+			  val);
+}
+
+static int dp83867_get_tunable(struct phy_device *phydev,
+			       struct ethtool_tunable *tuna, void *data)
+{
+	switch (tuna->id) {
+	case ETHTOOL_PHY_DOWNSHIFT:
+		return dp83867_get_downshift(phydev, data);
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+
+static int dp83867_set_tunable(struct phy_device *phydev,
+			       struct ethtool_tunable *tuna, const void *data)
+{
+	switch (tuna->id) {
+	case ETHTOOL_PHY_DOWNSHIFT:
+		return dp83867_set_downshift(phydev, *(const u8 *)data);
+	default:
+		return -EOPNOTSUPP;
+	}
 }
 
 static int dp83867_config_port_mirroring(struct phy_device *phydev)
@@ -343,7 +522,52 @@ static int dp83867_verify_rgmii_cfg(struct phy_device *phydev)
 	return 0;
 }
 
-#ifdef CONFIG_OF_MDIO
+#if IS_ENABLED(CONFIG_OF_MDIO)
+static int dp83867_of_init_io_impedance(struct phy_device *phydev)
+{
+	struct dp83867_private *dp83867 = phydev->priv;
+	struct device *dev = &phydev->mdio.dev;
+	struct device_node *of_node = dev->of_node;
+	struct nvmem_cell *cell;
+	u8 *buf, val;
+	int ret;
+
+	cell = of_nvmem_cell_get(of_node, "io_impedance_ctrl");
+	if (IS_ERR(cell)) {
+		ret = PTR_ERR(cell);
+		if (ret != -ENOENT && ret != -EOPNOTSUPP)
+			return phydev_err_probe(phydev, ret,
+						"failed to get nvmem cell io_impedance_ctrl\n");
+
+		/* If no nvmem cell, check for the boolean properties. */
+		if (of_property_read_bool(of_node, "ti,max-output-impedance"))
+			dp83867->io_impedance = DP83867_IO_MUX_CFG_IO_IMPEDANCE_MAX;
+		else if (of_property_read_bool(of_node, "ti,min-output-impedance"))
+			dp83867->io_impedance = DP83867_IO_MUX_CFG_IO_IMPEDANCE_MIN;
+		else
+			dp83867->io_impedance = -1; /* leave at default */
+
+		return 0;
+	}
+
+	buf = nvmem_cell_read(cell, NULL);
+	nvmem_cell_put(cell);
+
+	if (IS_ERR(buf))
+		return PTR_ERR(buf);
+
+	val = *buf;
+	kfree(buf);
+
+	if ((val & DP83867_IO_MUX_CFG_IO_IMPEDANCE_MASK) != val) {
+		phydev_err(phydev, "nvmem cell 'io_impedance_ctrl' contents out of range\n");
+		return -ERANGE;
+	}
+	dp83867->io_impedance = val;
+
+	return 0;
+}
+
 static int dp83867_of_init(struct phy_device *phydev)
 {
 	struct dp83867_private *dp83867 = phydev->priv;
@@ -371,19 +595,15 @@ static int dp83867_of_init(struct phy_device *phydev)
 		}
 	}
 
-	if (of_property_read_bool(of_node, "ti,max-output-impedance"))
-		dp83867->io_impedance = DP83867_IO_MUX_CFG_IO_IMPEDANCE_MAX;
-	else if (of_property_read_bool(of_node, "ti,min-output-impedance"))
-		dp83867->io_impedance = DP83867_IO_MUX_CFG_IO_IMPEDANCE_MIN;
-	else
-		dp83867->io_impedance = -1; /* leave at default */
+	ret = dp83867_of_init_io_impedance(phydev);
+	if (ret)
+		return ret;
 
 	dp83867->rxctrl_strap_quirk = of_property_read_bool(of_node,
-					"ti,dp83867-rxctrl-strap-quirk");
+							    "ti,dp83867-rxctrl-strap-quirk");
 
 	dp83867->sgmii_ref_clk_en = of_property_read_bool(of_node,
-					"ti,sgmii-ref-clock-output-enable");
-
+							  "ti,sgmii-ref-clock-output-enable");
 
 	dp83867->rx_id_delay = DP83867_RGMII_RX_CLK_DELAY_INV;
 	ret = of_property_read_u32(of_node, "ti,rx-internal-delay",
@@ -443,6 +663,32 @@ static int dp83867_of_init(struct phy_device *phydev)
 #else
 static int dp83867_of_init(struct phy_device *phydev)
 {
+	struct dp83867_private *dp83867 = phydev->priv;
+	u16 delay;
+
+	/* For non-OF device, the RX and TX ID values are either strapped
+	 * or take from default value. So, we init RX & TX ID values here
+	 * so that the RGMIIDCTL is configured correctly later in
+	 * dp83867_config_init();
+	 */
+	delay = phy_read_mmd(phydev, DP83867_DEVADDR, DP83867_RGMIIDCTL);
+	dp83867->rx_id_delay = delay & DP83867_RGMII_RX_CLK_DELAY_MAX;
+	dp83867->tx_id_delay = (delay >> DP83867_RGMII_TX_CLK_DELAY_SHIFT) &
+			       DP83867_RGMII_TX_CLK_DELAY_MAX;
+
+	/* Per datasheet, IO impedance is default to 50-ohm, so we set the
+	 * same here or else the default '0' means highest IO impedance
+	 * which is wrong.
+	 */
+	dp83867->io_impedance = DP83867_IO_MUX_CFG_IO_IMPEDANCE_MIN / 2;
+
+	/* For non-OF device, the RX and TX FIFO depths are taken from
+	 * default value. So, we init RX & TX FIFO depths here
+	 * so that it is configured correctly later in dp83867_config_init();
+	 */
+	dp83867->tx_fifo_depth = DP83867_PHYCR_FIFO_DEPTH_4_B_NIB;
+	dp83867->rx_fifo_depth = DP83867_PHYCR_FIFO_DEPTH_4_B_NIB;
+
 	return 0;
 }
 #endif /* CONFIG_OF_MDIO */
@@ -467,6 +713,12 @@ static int dp83867_config_init(struct phy_device *phydev)
 	int ret, val, bs;
 	u16 delay;
 
+	/* Force speed optimization for the PHY even if it strapped */
+	ret = phy_modify(phydev, DP83867_CFG2, DP83867_DOWNSHIFT_EN,
+			 DP83867_DOWNSHIFT_EN);
+	if (ret)
+		return ret;
+
 	ret = dp83867_verify_rgmii_cfg(phydev);
 	if (ret)
 		return ret;
@@ -475,6 +727,20 @@ static int dp83867_config_init(struct phy_device *phydev)
 	if (dp83867->rxctrl_strap_quirk)
 		phy_clear_bits_mmd(phydev, DP83867_DEVADDR, DP83867_CFG4,
 				   BIT(7));
+
+	bs = phy_read_mmd(phydev, DP83867_DEVADDR, DP83867_STRAP_STS2);
+	if (bs & DP83867_STRAP_STS2_STRAP_FLD) {
+		/* When using strap to enable FLD, the ENERGY_LOST_FLD_THR will
+		 * be set to 0x2. This may causes the PHY link to be unstable -
+		 * the default value 0x1 need to be restored.
+		 */
+		ret = phy_modify_mmd(phydev, DP83867_DEVADDR,
+				     DP83867_FLD_THR_CFG,
+				     DP83867_FLD_THR_CFG_ENERGY_LOST_THR_MASK,
+				     0x1);
+		if (ret)
+			return ret;
+	}
 
 	if (phy_interface_is_rgmii(phydev) ||
 	    phydev->interface == PHY_INTERFACE_MODE_SGMII) {
@@ -594,6 +860,14 @@ static int dp83867_config_init(struct phy_device *phydev)
 		else
 			val &= ~DP83867_SGMII_TYPE;
 		phy_write_mmd(phydev, DP83867_DEVADDR, DP83867_SGMIICTL, val);
+
+		/* This is a SW workaround for link instability if RX_CTRL is
+		 * not strapped to mode 3 or 4 in HW. This is required for SGMII
+		 * in addition to clearing bit 7, handled above.
+		 */
+		if (dp83867->rxctrl_strap_quirk)
+			phy_set_bits_mmd(phydev, DP83867_DEVADDR, DP83867_CFG4,
+					 BIT(8));
 	}
 
 	val = phy_read(phydev, DP83867_CFG3);
@@ -630,18 +904,46 @@ static int dp83867_phy_reset(struct phy_device *phydev)
 {
 	int err;
 
-	err = phy_write(phydev, DP83867_CTRL, DP83867_SW_RESET);
+	err = phy_write(phydev, DP83867_CTRL, DP83867_SW_RESTART);
 	if (err < 0)
 		return err;
 
 	usleep_range(10, 20);
 
-	/* After reset FORCE_LINK_GOOD bit is set. Although the
-	 * default value should be unset. Disable FORCE_LINK_GOOD
-	 * for the phy to work properly.
-	 */
 	return phy_modify(phydev, MII_DP83867_PHYCTRL,
 			 DP83867_PHYCR_FORCE_LINK_GOOD, 0);
+}
+
+static void dp83867_link_change_notify(struct phy_device *phydev)
+{
+	/* There is a limitation in DP83867 PHY device where SGMII AN is
+	 * only triggered once after the device is booted up. Even after the
+	 * PHY TPI is down and up again, SGMII AN is not triggered and
+	 * hence no new in-band message from PHY to MAC side SGMII.
+	 * This could cause an issue during power up, when PHY is up prior
+	 * to MAC. At this condition, once MAC side SGMII is up, MAC side
+	 * SGMII wouldn`t receive new in-band message from TI PHY with
+	 * correct link status, speed and duplex info.
+	 * Thus, implemented a SW solution here to retrigger SGMII Auto-Neg
+	 * whenever there is a link change.
+	 */
+	if (phydev->interface == PHY_INTERFACE_MODE_SGMII) {
+		int val = 0;
+
+		val = phy_clear_bits(phydev, DP83867_CFG2,
+				     DP83867_SGMII_AUTONEG_EN);
+		if (val < 0)
+			return;
+
+		phy_set_bits(phydev, DP83867_CFG2,
+			     DP83867_SGMII_AUTONEG_EN);
+	}
+}
+
+static int dp83867_loopback(struct phy_device *phydev, bool enable)
+{
+	return phy_modify(phydev, MII_BMCR, BMCR_LOOPBACK,
+			  enable ? BMCR_LOOPBACK : 0);
 }
 
 static struct phy_driver dp83867_driver[] = {
@@ -655,15 +957,22 @@ static struct phy_driver dp83867_driver[] = {
 		.config_init	= dp83867_config_init,
 		.soft_reset	= dp83867_phy_reset,
 
+		.read_status	= dp83867_read_status,
+		.get_tunable	= dp83867_get_tunable,
+		.set_tunable	= dp83867_set_tunable,
+
 		.get_wol	= dp83867_get_wol,
 		.set_wol	= dp83867_set_wol,
 
 		/* IRQ related */
-		.ack_interrupt	= dp83867_ack_interrupt,
 		.config_intr	= dp83867_config_intr,
+		.handle_interrupt = dp83867_handle_interrupt,
 
 		.suspend	= genphy_suspend,
 		.resume		= genphy_resume,
+
+		.link_change_notify = dp83867_link_change_notify,
+		.set_loopback	= dp83867_loopback,
 	},
 };
 module_phy_driver(dp83867_driver);

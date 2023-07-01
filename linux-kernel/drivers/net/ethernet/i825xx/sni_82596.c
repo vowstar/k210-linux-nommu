@@ -24,12 +24,6 @@
 
 static const char sni_82596_string[] = "snirm_82596";
 
-#define LIB82596_DMA_ATTR	0
-
-#define DMA_WBACK(priv, addr, len)     do { } while (0)
-#define DMA_INV(priv, addr, len)       do { } while (0)
-#define DMA_WBACK_INV(priv, addr, len) do { } while (0)
-
 #define SYSBUS      0x00004400
 
 /* big endian CPU, 82596 little endian */
@@ -84,6 +78,7 @@ static int sni_82596_probe(struct platform_device *dev)
 	void __iomem *mpu_addr;
 	void __iomem *ca_addr;
 	u8 __iomem *eth_addr;
+	u8 mac[ETH_ALEN];
 
 	res = platform_get_resource(dev, IORESOURCE_MEM, 0);
 	ca = platform_get_resource(dev, IORESOURCE_MEM, 1);
@@ -115,17 +110,19 @@ static int sni_82596_probe(struct platform_device *dev)
 		goto probe_failed;
 
 	/* someone seems to like messed up stuff */
-	netdevice->dev_addr[0] = readb(eth_addr + 0x0b);
-	netdevice->dev_addr[1] = readb(eth_addr + 0x0a);
-	netdevice->dev_addr[2] = readb(eth_addr + 0x09);
-	netdevice->dev_addr[3] = readb(eth_addr + 0x08);
-	netdevice->dev_addr[4] = readb(eth_addr + 0x07);
-	netdevice->dev_addr[5] = readb(eth_addr + 0x06);
+	mac[0] = readb(eth_addr + 0x0b);
+	mac[1] = readb(eth_addr + 0x0a);
+	mac[2] = readb(eth_addr + 0x09);
+	mac[3] = readb(eth_addr + 0x08);
+	mac[4] = readb(eth_addr + 0x07);
+	mac[5] = readb(eth_addr + 0x06);
+	eth_hw_addr_set(netdevice, mac);
 	iounmap(eth_addr);
 
-	if (!netdevice->irq) {
+	if (netdevice->irq < 0) {
 		printk(KERN_ERR "%s: IRQ not found for i82596 at 0x%lx\n",
 			__FILE__, netdevice->base_addr);
+		retval = netdevice->irq;
 		goto probe_failed;
 	}
 
@@ -134,10 +131,19 @@ static int sni_82596_probe(struct platform_device *dev)
 	lp->ca = ca_addr;
 	lp->mpu_port = mpu_addr;
 
-	retval = i82596_probe(netdevice);
-	if (retval == 0)
-		return 0;
+	lp->dma = dma_alloc_coherent(&dev->dev, sizeof(struct i596_dma),
+				     &lp->dma_addr, GFP_KERNEL);
+	if (!lp->dma)
+		goto probe_failed;
 
+	retval = i82596_probe(netdevice);
+	if (retval)
+		goto probe_failed_free_dma;
+	return 0;
+
+probe_failed_free_dma:
+	dma_free_coherent(&dev->dev, sizeof(struct i596_dma), lp->dma,
+			  lp->dma_addr);
 probe_failed:
 	free_netdev(netdevice);
 probe_failed_free_ca:
@@ -153,8 +159,8 @@ static int sni_82596_driver_remove(struct platform_device *pdev)
 	struct i596_private *lp = netdev_priv(dev);
 
 	unregister_netdev(dev);
-	dma_free_attrs(dev->dev.parent, sizeof(struct i596_private), lp->dma,
-		       lp->dma_addr, LIB82596_DMA_ATTR);
+	dma_free_coherent(&pdev->dev, sizeof(struct i596_private), lp->dma,
+			  lp->dma_addr);
 	iounmap(lp->ca);
 	iounmap(lp->mpu_port);
 	free_netdev (dev);

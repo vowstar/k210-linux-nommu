@@ -291,7 +291,7 @@ static void ssip_set_rxstate(struct ssi_protocol *ssi, unsigned int state)
 		/* CMT speech workaround */
 		if (atomic_read(&ssi->tx_usecnt))
 			break;
-		/* Else, fall through */
+		fallthrough;
 	case RECEIVING:
 		mod_timer(&ssi->keep_alive, jiffies +
 						msecs_to_jiffies(SSIP_KATOUT));
@@ -466,7 +466,7 @@ static void ssip_keep_alive(struct timer_list *t)
 		case SEND_READY:
 			if (atomic_read(&ssi->tx_usecnt) == 0)
 				break;
-			/* Fall through */
+			fallthrough;
 			/*
 			 * Workaround for cmt-speech in that case
 			 * we relay on audio timers.
@@ -668,7 +668,7 @@ static void ssip_rx_bootinforeq(struct hsi_client *cl, u32 cmd)
 	case ACTIVE:
 		dev_err(&cl->device, "Boot info req on active state\n");
 		ssip_error(cl);
-		/* Fall through */
+		fallthrough;
 	case INIT:
 	case HANDSHAKE:
 		spin_lock_bh(&ssi->lock);
@@ -796,7 +796,6 @@ static void ssip_rx_strans(struct hsi_client *cl, u32 cmd)
 		dev_err(&cl->device, "No memory for rx skb\n");
 		goto out1;
 	}
-	skb->dev = ssi->netdev;
 	skb_put(skb, len * 4);
 	msg = ssip_alloc_data(ssi, skb, GFP_ATOMIC);
 	if (unlikely(!msg)) {
@@ -931,6 +930,7 @@ static int ssip_pn_open(struct net_device *dev)
 	if (err < 0) {
 		dev_err(&cl->device, "Register HSI port event failed (%d)\n",
 			err);
+		hsi_release_port(cl);
 		return err;
 	}
 	dev_dbg(&cl->device, "Configuring SSI port\n");
@@ -968,7 +968,7 @@ static void ssip_xmit_work(struct work_struct *work)
 	ssip_xmit(cl);
 }
 
-static int ssip_pn_xmit(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t ssip_pn_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct hsi_client *cl = to_hsi_client(dev->dev.parent);
 	struct ssi_protocol *ssi = hsi_client_drvdata(cl);
@@ -1027,7 +1027,7 @@ static int ssip_pn_xmit(struct sk_buff *skb, struct net_device *dev)
 	dev->stats.tx_packets++;
 	dev->stats.tx_bytes += skb->len;
 
-	return 0;
+	return NETDEV_TX_OK;
 drop2:
 	hsi_free_msg(msg);
 drop:
@@ -1035,7 +1035,7 @@ drop:
 inc_dropped:
 	dev->stats.tx_dropped++;
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /* CMT reset event handler */
@@ -1055,14 +1055,16 @@ static const struct net_device_ops ssip_pn_ops = {
 
 static void ssip_pn_setup(struct net_device *dev)
 {
+	static const u8 addr = PN_MEDIA_SOS;
+
 	dev->features		= 0;
 	dev->netdev_ops		= &ssip_pn_ops;
 	dev->type		= ARPHRD_PHONET;
 	dev->flags		= IFF_POINTOPOINT | IFF_NOARP;
 	dev->mtu		= SSIP_DEFAULT_MTU;
 	dev->hard_header_len	= 1;
-	dev->dev_addr[0]	= PN_MEDIA_SOS;
 	dev->addr_len		= 1;
+	dev_addr_set(dev, &addr);
 	dev->tx_queue_len	= SSIP_TXQUEUE_LEN;
 
 	dev->needs_free_netdev	= true;

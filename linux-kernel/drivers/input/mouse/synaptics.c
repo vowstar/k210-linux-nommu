@@ -146,7 +146,6 @@ static const char * const topbuttonpad_pnp_ids[] = {
 	"LEN0042", /* Yoga */
 	"LEN0045",
 	"LEN0047",
-	"LEN0049",
 	"LEN2000", /* S540 */
 	"LEN2001", /* Edge E431 */
 	"LEN2002", /* Edge E531 */
@@ -166,9 +165,12 @@ static const char * const smbus_pnp_ids[] = {
 	/* all of the topbuttonpad_pnp_ids are valid, we just add some extras */
 	"LEN0048", /* X1 Carbon 3 */
 	"LEN0046", /* X250 */
+	"LEN0049", /* Yoga 11e */
 	"LEN004a", /* W541 */
 	"LEN005b", /* P50 */
 	"LEN005e", /* T560 */
+	"LEN006c", /* T470s */
+	"LEN007a", /* T470s */
 	"LEN0071", /* T480 */
 	"LEN0072", /* X1 Carbon Gen 5 (2017) - Elan/ALPS trackpoint */
 	"LEN0073", /* X1 Carbon G5 (Elantech) */
@@ -177,13 +179,19 @@ static const char * const smbus_pnp_ids[] = {
 	"LEN0093", /* T480 */
 	"LEN0096", /* X280 */
 	"LEN0097", /* X280 -> ALPS trackpoint */
+	"LEN0099", /* X1 Extreme Gen 1 / P1 Gen 1 */
 	"LEN009b", /* T580 */
+	"LEN0402", /* X1 Extreme Gen 2 / P1 Gen 2 */
+	"LEN040f", /* P1 Gen 3 */
 	"LEN200f", /* T450s */
+	"LEN2044", /* L470  */
 	"LEN2054", /* E480 */
 	"LEN2055", /* E580 */
+	"LEN2068", /* T14 Gen 1 */
 	"SYN3052", /* HP EliteBook 840 G4 */
 	"SYN3221", /* HP 15-ay000 */
 	"SYN323d", /* HP Spectre X360 13-w013dx */
+	"SYN3257", /* HP Envy 13-ad105ng */
 	NULL
 };
 
@@ -707,8 +715,8 @@ static void synaptics_pt_create(struct psmouse *psmouse)
 	}
 
 	serio->id.type = SERIO_PS_PSTHRU;
-	strlcpy(serio->name, "Synaptics pass-through", sizeof(serio->name));
-	strlcpy(serio->phys, "synaptics-pt/serio0", sizeof(serio->phys));
+	strscpy(serio->name, "Synaptics pass-through", sizeof(serio->name));
+	strscpy(serio->phys, "synaptics-pt/serio0", sizeof(serio->phys));
 	serio->write = synaptics_pt_write;
 	serio->start = synaptics_pt_start;
 	serio->stop = synaptics_pt_stop;
@@ -1099,8 +1107,11 @@ static void synaptics_process_packet(struct psmouse *psmouse)
 					num_fingers = hw.w + 2;
 				break;
 			case 2:
-				if (SYN_MODEL_PEN(info->model_id))
-					;   /* Nothing, treat a pen as a single finger */
+				/*
+				 * SYN_MODEL_PEN(info->model_id): even if
+				 * the device supports pen, we treat it as
+				 * a single finger.
+				 */
 				break;
 			case 4 ... 15:
 				if (SYN_CAP_PALMDETECT(info->capabilities))
@@ -1747,7 +1758,7 @@ static int synaptics_create_intertouch(struct psmouse *psmouse,
 			.kernel_tracking = false,
 			.topbuttonpad = topbuttonpad,
 		},
-		.f30_data = {
+		.gpio_data = {
 			.buttonpad = SYN_CAP_CLICKPAD(info->ext_cap_0c),
 			.trackstick_buttons =
 				!!SYN_CAP_EXT_BUTTONS_STICK(info->ext_cap_10),
@@ -1763,7 +1774,7 @@ static int synaptics_create_intertouch(struct psmouse *psmouse,
 				  leave_breadcrumbs);
 }
 
-/**
+/*
  * synaptics_setup_intertouch - called once the PS/2 devices are enumerated
  * and decides to instantiate a SMBus InterTouch device.
  */

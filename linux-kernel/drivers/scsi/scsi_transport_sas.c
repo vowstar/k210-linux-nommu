@@ -34,7 +34,6 @@
 
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
-#include <scsi/scsi_request.h>
 #include <scsi/scsi_device.h>
 #include <scsi/scsi_host.h>
 #include <scsi/scsi_transport.h>
@@ -154,6 +153,7 @@ static struct {
 	{ SAS_LINK_RATE_3_0_GBPS,	"3.0 Gbit" },
 	{ SAS_LINK_RATE_6_0_GBPS,	"6.0 Gbit" },
 	{ SAS_LINK_RATE_12_0_GBPS,	"12.0 Gbit" },
+	{ SAS_LINK_RATE_22_5_GBPS,	"22.5 Gbit" },
 };
 sas_bitfield_name_search(linkspeed, sas_linkspeed_names)
 sas_bitfield_name_set(linkspeed, sas_linkspeed_names)
@@ -225,6 +225,7 @@ static int sas_host_setup(struct transport_container *tc, struct device *dev,
 {
 	struct Scsi_Host *shost = dev_to_shost(dev);
 	struct sas_host_attrs *sas_host = to_sas_host_attrs(shost);
+	struct device *dma_dev = shost->dma_dev;
 
 	INIT_LIST_HEAD(&sas_host->rphy_list);
 	mutex_init(&sas_host->lock);
@@ -235,6 +236,11 @@ static int sas_host_setup(struct transport_container *tc, struct device *dev,
 	if (sas_bsg_initialize(shost, NULL))
 		dev_printk(KERN_ERR, dev, "fail to a bsg device %d\n",
 			   shost->host_no);
+
+	if (dma_dev->dma_mask) {
+		shost->opt_sectors = min_t(unsigned int, shost->max_sectors,
+				dma_opt_mapping_size(dma_dev) >> SECTOR_SHIFT);
+	}
 
 	return 0;
 }
@@ -563,7 +569,7 @@ show_sas_phy_enable(struct device *dev, struct device_attribute *attr,
 {
 	struct sas_phy *phy = transport_class_to_phy(dev);
 
-	return snprintf(buf, 20, "%d", phy->enabled);
+	return snprintf(buf, 20, "%d\n", phy->enabled);
 }
 
 static DEVICE_ATTR(enable, S_IRUGO | S_IWUSR, show_sas_phy_enable,
@@ -716,12 +722,17 @@ int sas_phy_add(struct sas_phy *phy)
 	int error;
 
 	error = device_add(&phy->dev);
-	if (!error) {
-		transport_add_device(&phy->dev);
-		transport_configure_device(&phy->dev);
-	}
+	if (error)
+		return error;
 
-	return error;
+	error = transport_add_device(&phy->dev);
+	if (error) {
+		device_del(&phy->dev);
+		return error;
+	}
+	transport_configure_device(&phy->dev);
+
+	return 0;
 }
 EXPORT_SYMBOL(sas_phy_add);
 
@@ -1229,16 +1240,15 @@ int sas_read_port_mode_page(struct scsi_device *sdev)
 	char *buffer = kzalloc(BUF_SIZE, GFP_KERNEL), *msdata;
 	struct sas_end_device *rdev = sas_sdev_to_rdev(sdev);
 	struct scsi_mode_data mode_data;
-	int res, error;
+	int error;
 
 	if (!buffer)
 		return -ENOMEM;
 
-	res = scsi_mode_sense(sdev, 1, 0x19, buffer, BUF_SIZE, 30*HZ, 3,
-			      &mode_data, NULL);
+	error = scsi_mode_sense(sdev, 1, 0x19, buffer, BUF_SIZE, 30*HZ, 3,
+				&mode_data, NULL);
 
-	error = -EINVAL;
-	if (!scsi_status_is_good(res))
+	if (error)
 		goto out;
 
 	msdata = buffer +  mode_data.header_length +
@@ -1526,7 +1536,7 @@ int sas_rphy_add(struct sas_rphy *rphy)
 	list_add_tail(&rphy->list, &sas_host->rphy_list);
 	if (identify->device_type == SAS_END_DEVICE &&
 	    (identify->target_port_protocols &
-	     (SAS_PROTOCOL_SSP|SAS_PROTOCOL_STP|SAS_PROTOCOL_SATA)))
+	     (SAS_PROTOCOL_SSP | SAS_PROTOCOL_STP | SAS_PROTOCOL_SATA)))
 		rphy->scsi_target_id = sas_host->next_target_id++;
 	else if (identify->device_type == SAS_END_DEVICE)
 		rphy->scsi_target_id = -1;

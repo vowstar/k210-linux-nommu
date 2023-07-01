@@ -19,7 +19,7 @@ Complete virtual memory map with 4-level page tables
    Note that as we get closer to the top of the address space, the notation changes
    from TB to GB and then MB/KB.
 
- - "16M TB" might look weird at first sight, but it's an easier to visualize size
+ - "16M TB" might look weird at first sight, but it's an easier way to visualize size
    notation than "16 EB", which few will recognize at first sight as 16 exabytes.
    It also shows it nicely how incredibly large 64-bit address space is.
 
@@ -140,11 +140,7 @@ The direct mapping covers all memory in the system up to the highest
 memory address (this means in some cases it can also include PCI memory
 holes).
 
-vmalloc space is lazily synchronized into the different PML4/PML5 pages of
-the processes using the page fault handler, with init_top_pgt as
-reference.
-
-We map EFI runtime services in the 'efi_pgd' PGD in a 64Gb large virtual
+We map EFI runtime services in the 'efi_pgd' PGD in a 64GB large virtual
 memory window (this size is arbitrary, it can be raised later if needed).
 The mappings are not part of any other kernel PGD and are only available
 during EFI runtime calls.

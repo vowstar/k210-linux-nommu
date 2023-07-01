@@ -45,6 +45,7 @@
 
 #undef DEBUG
 
+#include <linux/aperture.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -652,10 +653,24 @@ static ssize_t pvr2fb_write(struct fb_info *info, const char *buf,
 	if (!pages)
 		return -ENOMEM;
 
-	ret = get_user_pages_fast((unsigned long)buf, nr_pages, FOLL_WRITE, pages);
+	ret = pin_user_pages_fast((unsigned long)buf, nr_pages, FOLL_WRITE, pages);
 	if (ret < nr_pages) {
-		nr_pages = ret;
-		ret = -EINVAL;
+		if (ret < 0) {
+			/*
+			 *  Clamp the unsigned nr_pages to zero so that the
+			 *  error handling works. And leave ret at whatever
+			 *  -errno value was returned from GUP.
+			 */
+			nr_pages = 0;
+		} else {
+			nr_pages = ret;
+			/*
+			 * Use -EINVAL to represent a mildly desperate guess at
+			 * why we got fewer pages (maybe even zero pages) than
+			 * requested.
+			 */
+			ret = -EINVAL;
+		}
 		goto out_unmap;
 	}
 
@@ -698,9 +713,7 @@ out:
 	ret = count;
 
 out_unmap:
-	for (i = 0; i < nr_pages; i++)
-		put_page(pages[i]);
-
+	unpin_user_pages(pages, nr_pages);
 	kfree(pages);
 
 	return ret;
@@ -930,6 +943,10 @@ static int pvr2fb_pci_probe(struct pci_dev *pdev,
 {
 	int ret;
 
+	ret = aperture_remove_conflicting_pci_devices(pdev, "pvrfb");
+	if (ret)
+		return ret;
+
 	ret = pci_enable_device(pdev);
 	if (ret) {
 		printk(KERN_ERR "pvr2fb: PCI enable failed\n");
@@ -1016,6 +1033,8 @@ static int __init pvr2fb_setup(char *options)
 	if (!options || !*options)
 		return 0;
 
+	cable_arg[0] = output_arg[0] = 0;
+
 	while ((this_opt = strsep(&options, ","))) {
 		if (!*this_opt)
 			continue;
@@ -1063,7 +1082,12 @@ static int __init pvr2fb_init(void)
 
 #ifndef MODULE
 	char *option = NULL;
+#endif
 
+	if (fb_modesetting_disabled("pvr2fb"))
+		return -ENODEV;
+
+#ifndef MODULE
 	if (fb_get_options("pvr2fb", &option))
 		return -ENODEV;
 	pvr2fb_setup(option);

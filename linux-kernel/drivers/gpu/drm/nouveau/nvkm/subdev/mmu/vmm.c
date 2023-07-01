@@ -280,7 +280,7 @@ nvkm_vmm_unref_ptes(struct nvkm_vmm_iter *it, bool pfn, u32 ptei, u32 ptes)
 	if (desc->type == SPT && (pgt->refs[0] || pgt->refs[1]))
 		nvkm_vmm_unref_sptes(it, pgt, desc, ptei, ptes);
 
-	/* PT no longer neeed?  Destroy it. */
+	/* PT no longer needed? Destroy it. */
 	if (!pgt->refs[type]) {
 		it->lvl++;
 		TRA(it, "%s empty", nvkm_vmm_desc_type(desc));
@@ -580,7 +580,7 @@ nvkm_vmm_iter(struct nvkm_vmm *vmm, const struct nvkm_vmm_page *page,
 				it.pte[it.lvl]++;
 			}
 		}
-	};
+	}
 
 	nvkm_vmm_flush(&it);
 	return ~0ULL;
@@ -774,7 +774,6 @@ nvkm_vma_tail(struct nvkm_vma *vma, u64 tail)
 	new->refd = vma->refd;
 	new->used = vma->used;
 	new->part = vma->part;
-	new->user = vma->user;
 	new->busy = vma->busy;
 	new->mapped = vma->mapped;
 	list_add(&new->head, &vma->head);
@@ -951,7 +950,7 @@ nvkm_vmm_node_split(struct nvkm_vmm *vmm,
 static void
 nvkm_vma_dump(struct nvkm_vma *vma)
 {
-	printk(KERN_ERR "%016llx %016llx %c%c%c%c%c%c%c%c%c %p\n",
+	printk(KERN_ERR "%016llx %016llx %c%c%c%c%c%c%c%c %p\n",
 	       vma->addr, (u64)vma->size,
 	       vma->used ? '-' : 'F',
 	       vma->mapref ? 'R' : '-',
@@ -959,7 +958,6 @@ nvkm_vma_dump(struct nvkm_vma *vma)
 	       vma->page != NVKM_VMA_PAGE_NONE ? '0' + vma->page : '-',
 	       vma->refd != NVKM_VMA_PAGE_NONE ? '0' + vma->refd : '-',
 	       vma->part ? 'P' : '-',
-	       vma->user ? 'U' : '-',
 	       vma->busy ? 'B' : '-',
 	       vma->mapped ? 'M' : '-',
 	       vma->memory);
@@ -1024,13 +1022,12 @@ nvkm_vmm_ctor_managed(struct nvkm_vmm *vmm, u64 addr, u64 size)
 	vma->mapref = true;
 	vma->sparse = false;
 	vma->used = true;
-	vma->user = true;
 	nvkm_vmm_node_insert(vmm, vma);
 	list_add_tail(&vma->head, &vmm->list);
 	return 0;
 }
 
-int
+static int
 nvkm_vmm_ctor(const struct nvkm_vmm_func *func, struct nvkm_mmu *mmu,
 	      u32 pd_header, bool managed, u64 addr, u64 size,
 	      struct lock_class_key *key, const char *name,
@@ -1051,7 +1048,7 @@ nvkm_vmm_ctor(const struct nvkm_vmm_func *func, struct nvkm_mmu *mmu,
 	__mutex_init(&vmm->mutex, "&vmm->mutex", key ? key : &_key);
 
 	/* Locate the smallest page size supported by the backend, it will
-	 * have the the deepest nesting of page tables.
+	 * have the deepest nesting of page tables.
 	 */
 	while (page[1].shift)
 		page++;
@@ -1204,7 +1201,6 @@ nvkm_vmm_pfn_unmap(struct nvkm_vmm *vmm, u64 addr, u64 size)
 /*TODO:
  * - Avoid PT readback (for dma_unmap etc), this might end up being dealt
  *   with inside HMM, which would be a lot nicer for us to deal with.
- * - Multiple page sizes (particularly for huge page support).
  * - Support for systems without a 4KiB page size.
  */
 int
@@ -1220,8 +1216,8 @@ nvkm_vmm_pfn_map(struct nvkm_vmm *vmm, u8 shift, u64 addr, u64 size, u64 *pfn)
 	/* Only support mapping where the page size of the incoming page
 	 * array matches a page size available for direct mapping.
 	 */
-	while (page->shift && page->shift != shift &&
-	       page->desc->func->pfn == NULL)
+	while (page->shift && (page->shift != shift ||
+	       page->desc->func->pfn == NULL))
 		page++;
 
 	if (!page->shift || !IS_ALIGNED(addr, 1ULL << shift) ||
@@ -1616,7 +1612,6 @@ nvkm_vmm_put_locked(struct nvkm_vmm *vmm, struct nvkm_vma *vma)
 	vma->page = NVKM_VMA_PAGE_NONE;
 	vma->refd = NVKM_VMA_PAGE_NONE;
 	vma->used = false;
-	vma->user = false;
 	nvkm_vmm_put_region(vmm, vma);
 }
 

@@ -17,7 +17,7 @@
  *
  * TODO list is at the wiki:
  *
- * http://wireless.kernel.org/en/users/Drivers/at76c50x-usb#TODO
+ * https://wireless.wiki.kernel.org/en/users/Drivers/at76c50x-usb#TODO
  */
 
 #include <linux/init.h>
@@ -101,7 +101,7 @@ do {									\
 static uint at76_debug = DBG_DEFAULTS;
 
 /* Protect against concurrent firmware loading and parsing */
-static struct mutex fw_mutex;
+static DEFINE_MUTEX(fw_mutex);
 
 static struct fwentry firmwares[] = {
 	[0] = { "" },
@@ -432,7 +432,7 @@ static int at76_usbdfu_download(struct usb_device *udev, u8 *buf, u32 size,
 
 		case STATE_DFU_DOWNLOAD_IDLE:
 			at76_dbg(DBG_DFU, "DOWNLOAD...");
-			/* fall through */
+			fallthrough;
 		case STATE_DFU_IDLE:
 			at76_dbg(DBG_DFU, "DFU IDLE");
 
@@ -1199,7 +1199,6 @@ static void at76_rx_callback(struct urb *urb)
 {
 	struct at76_priv *priv = urb->context;
 
-	priv->rx_tasklet.data = (unsigned long)urb;
 	tasklet_schedule(&priv->rx_tasklet);
 }
 
@@ -1545,10 +1544,10 @@ exit:
 	return ieee80211_channel_to_frequency(channel, NL80211_BAND_2GHZ);
 }
 
-static void at76_rx_tasklet(unsigned long param)
+static void at76_rx_tasklet(struct tasklet_struct *t)
 {
-	struct urb *urb = (struct urb *)param;
-	struct at76_priv *priv = urb->context;
+	struct at76_priv *priv = from_tasklet(priv, t, rx_tasklet);
+	struct urb *urb = priv->rx_urb;
 	struct at76_rx_buffer *buf;
 	struct ieee80211_rx_status rx_status = { 0 };
 
@@ -2034,7 +2033,7 @@ static int at76_config(struct ieee80211_hw *hw, u32 changed)
 static void at76_bss_info_changed(struct ieee80211_hw *hw,
 				  struct ieee80211_vif *vif,
 				  struct ieee80211_bss_conf *conf,
-				  u32 changed)
+				  u64 changed)
 {
 	struct at76_priv *priv = hw->priv;
 
@@ -2180,6 +2179,7 @@ static int at76_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 
 static const struct ieee80211_ops at76_ops = {
 	.tx = at76_mac80211_tx,
+	.wake_tx_queue = ieee80211_handle_wake_tx_queue,
 	.add_interface = at76_add_interface,
 	.remove_interface = at76_remove_interface,
 	.config = at76_config,
@@ -2215,7 +2215,7 @@ static struct at76_priv *at76_alloc_new_device(struct usb_device *udev)
 	INIT_WORK(&priv->work_join_bssid, at76_work_join_bssid);
 	INIT_DELAYED_WORK(&priv->dwork_hw_scan, at76_dwork_hw_scan);
 
-	tasklet_init(&priv->rx_tasklet, at76_rx_tasklet, 0);
+	tasklet_setup(&priv->rx_tasklet, at76_rx_tasklet);
 
 	priv->pm_mode = AT76_PM_OFF;
 	priv->pm_period = 0;
@@ -2572,8 +2572,6 @@ static int __init at76_mod_init(void)
 	int result;
 
 	printk(KERN_INFO DRIVER_DESC " " DRIVER_VERSION " loading\n");
-
-	mutex_init(&fw_mutex);
 
 	/* register this driver with the USB subsystem */
 	result = usb_register(&at76_driver);

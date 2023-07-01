@@ -132,13 +132,13 @@
 				 <&scg1 IMX7ULP_CLK_NIC1_BUS_DIV>;
 			clock-names = "aclk", "ipg";
 
-			sec_jr0: jr0@1000 {
+			sec_jr0: jr@1000 {
 				compatible = "fsl,sec-v4.0-job-ring";
 				reg = <0x1000 0x1000>;
 				interrupts = <GIC_SPI 54 IRQ_TYPE_LEVEL_HIGH>;
 			};
 
-			sec_jr1: jr1@2000 {
+			sec_jr1: jr@2000 {
 				compatible = "fsl,sec-v4.0-job-ring";
 				reg = <0x2000 0x1000>;
 				interrupts = <GIC_SPI 54 IRQ_TYPE_LEVEL_HIGH>;
@@ -259,7 +259,7 @@
 			interrupts = <GIC_SPI 55 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&pcc2 IMX7ULP_CLK_WDG1>;
 			assigned-clocks = <&pcc2 IMX7ULP_CLK_WDG1>;
-			assigned-clocks-parents = <&scg1 IMX7ULP_CLK_FIRC_BUS_CLK>;
+			assigned-clock-parents = <&scg1 IMX7ULP_CLK_FIRC_BUS_CLK>;
 			timeout-sec = <40>;
 		};
 
@@ -328,8 +328,9 @@
 			compatible = "fsl,imx7ulp-lpi2c";
 			reg = <0x40a40000 0x10000>;
 			interrupts = <GIC_SPI 36 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&pcc3 IMX7ULP_CLK_LPI2C6>;
-			clock-names = "ipg";
+			clocks = <&pcc3 IMX7ULP_CLK_LPI2C6>,
+				 <&scg1 IMX7ULP_CLK_NIC1_BUS_DIV>;
+			clock-names = "per", "ipg";
 			assigned-clocks = <&pcc3 IMX7ULP_CLK_LPI2C6>;
 			assigned-clock-parents = <&scg1 IMX7ULP_CLK_FIRC>;
 			assigned-clock-rates = <48000000>;
@@ -340,8 +341,9 @@
 			compatible = "fsl,imx7ulp-lpi2c";
 			reg = <0x40a50000 0x10000>;
 			interrupts = <GIC_SPI 37 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&pcc3 IMX7ULP_CLK_LPI2C7>;
-			clock-names = "ipg";
+			clocks = <&pcc3 IMX7ULP_CLK_LPI2C7>,
+				 <&scg1 IMX7ULP_CLK_NIC1_BUS_DIV>;
+			clock-names = "per", "ipg";
 			assigned-clocks = <&pcc3 IMX7ULP_CLK_LPI2C7>;
 			assigned-clock-parents = <&scg1 IMX7ULP_CLK_FIRC>;
 			assigned-clock-rates = <48000000>;
@@ -394,7 +396,7 @@
 			clocks = <&pcc2 IMX7ULP_CLK_RGPIO2P1>,
 				 <&pcc3 IMX7ULP_CLK_PCTLC>;
 			clock-names = "gpio", "port";
-			gpio-ranges = <&iomuxc1 0 0 32>;
+			gpio-ranges = <&iomuxc1 0 0 20>;
 		};
 
 		gpio_ptd: gpio@40af0000 {
@@ -408,7 +410,7 @@
 			clocks = <&pcc2 IMX7ULP_CLK_RGPIO2P1>,
 				 <&pcc3 IMX7ULP_CLK_PCTLD>;
 			clock-names = "gpio", "port";
-			gpio-ranges = <&iomuxc1 0 32 32>;
+			gpio-ranges = <&iomuxc1 0 32 12>;
 		};
 
 		gpio_pte: gpio@40b00000 {
@@ -422,7 +424,7 @@
 			clocks = <&pcc2 IMX7ULP_CLK_RGPIO2P1>,
 				 <&pcc3 IMX7ULP_CLK_PCTLE>;
 			clock-names = "gpio", "port";
-			gpio-ranges = <&iomuxc1 0 64 32>;
+			gpio-ranges = <&iomuxc1 0 64 16>;
 		};
 
 		gpio_ptf: gpio@40b10000 {
@@ -436,7 +438,7 @@
 			clocks = <&pcc2 IMX7ULP_CLK_RGPIO2P1>,
 				 <&pcc3 IMX7ULP_CLK_PCTLF>;
 			clock-names = "gpio", "port";
-			gpio-ranges = <&iomuxc1 0 96 32>;
+			gpio-ranges = <&iomuxc1 0 96 20>;
 		};
 	};
 
@@ -452,7 +454,7 @@
 			reg = <0x410a3000 0x1000>;
 		};
 
-		ocotp: ocotp-ctrl@410a6000 {
+		ocotp: efuse@410a6000 {
 			compatible = "fsl,imx7ulp-ocotp", "syscon";
 			reg = <0x410a6000 0x4000>;
 			clocks = <&scg1 IMX7ULP_CLK_DUMMY>;

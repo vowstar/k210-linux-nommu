@@ -31,11 +31,8 @@
 #include <linux/slab.h>
 #include <linux/hugetlb.h>
 
-#include <asm/pgalloc.h>
 #include <asm/page.h>
-#include <asm/prom.h>
 #include <asm/mmu_context.h>
-#include <asm/pgtable.h>
 #include <asm/mmu.h>
 #include <asm/smp.h>
 #include <asm/machdep.h>
@@ -101,23 +98,25 @@ EXPORT_SYMBOL(__pte_frag_size_shift);
 
 #ifndef __PAGETABLE_PUD_FOLDED
 /* 4 level page table */
-struct page *pgd_page(pgd_t pgd)
+struct page *p4d_page(p4d_t p4d)
 {
-	if (pgd_is_leaf(pgd)) {
-		VM_WARN_ON(!pgd_huge(pgd));
-		return pte_page(pgd_pte(pgd));
+	if (p4d_is_leaf(p4d)) {
+		if (!IS_ENABLED(CONFIG_HAVE_ARCH_HUGE_VMAP))
+			VM_WARN_ON(!p4d_huge(p4d));
+		return pte_page(p4d_pte(p4d));
 	}
-	return virt_to_page(pgd_page_vaddr(pgd));
+	return virt_to_page(p4d_pgtable(p4d));
 }
 #endif
 
 struct page *pud_page(pud_t pud)
 {
 	if (pud_is_leaf(pud)) {
-		VM_WARN_ON(!pud_huge(pud));
+		if (!IS_ENABLED(CONFIG_HAVE_ARCH_HUGE_VMAP))
+			VM_WARN_ON(!pud_huge(pud));
 		return pte_page(pud_pte(pud));
 	}
-	return virt_to_page(pud_page_vaddr(pud));
+	return virt_to_page(pud_pgtable(pud));
 }
 
 /*
@@ -127,7 +126,13 @@ struct page *pud_page(pud_t pud)
 struct page *pmd_page(pmd_t pmd)
 {
 	if (pmd_is_leaf(pmd)) {
-		VM_WARN_ON(!(pmd_large(pmd) || pmd_huge(pmd)));
+		/*
+		 * vmalloc_to_page may be called on any vmap address (not only
+		 * vmalloc), and it uses pmd_page() etc., when huge vmap is
+		 * enabled so these checks can't be used.
+		 */
+		if (!IS_ENABLED(CONFIG_HAVE_ARCH_HUGE_VMAP))
+			VM_WARN_ON(!(pmd_large(pmd) || pmd_huge(pmd)));
 		return pte_page(pmd_pte(pmd));
 	}
 	return virt_to_page(pmd_page_vaddr(pmd));

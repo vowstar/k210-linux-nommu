@@ -6,6 +6,7 @@
  * (C) Copyright 2014 - 2015, Xilinx, Inc.
  */
 
+#include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/irq.h>
@@ -16,8 +17,8 @@
 #include <linux/of_address.h>
 #include <linux/of_pci.h>
 #include <linux/of_platform.h>
-#include <linux/of_irq.h>
 #include <linux/pci.h>
+#include <linux/pci-ecam.h>
 #include <linux/platform_device.h>
 #include <linux/irqchip/chained_irq.h>
 
@@ -25,6 +26,7 @@
 
 /* Bridge core config registers */
 #define BRCFG_PCIE_RX0			0x00000000
+#define BRCFG_PCIE_RX1			0x00000004
 #define BRCFG_INTERRUPT			0x00000010
 #define BRCFG_PCIE_RX_MSG_FILTER	0x00000020
 
@@ -124,11 +126,10 @@
 #define E_ECAM_CR_ENABLE		BIT(0)
 #define E_ECAM_SIZE_LOC			GENMASK(20, 16)
 #define E_ECAM_SIZE_SHIFT		16
-#define ECAM_BUS_LOC_SHIFT		20
-#define ECAM_DEV_LOC_SHIFT		12
 #define NWL_ECAM_VALUE_DEFAULT		12
 
 #define CFG_DMA_REG_BAR			GENMASK(2, 0)
+#define CFG_PCIE_CACHE			GENMASK(7, 0)
 
 #define INT_PCI_MSI_NR			(2 * 32)
 
@@ -144,7 +145,7 @@
 
 struct nwl_msi {			/* MSI information */
 	struct irq_domain *msi_domain;
-	unsigned long *bitmap;
+	DECLARE_BITMAP(bitmap, INT_PCI_MSI_NR);
 	struct irq_domain *dev_domain;
 	struct mutex lock;		/* protect bitmap variable */
 	int irq_msi0;
@@ -166,9 +167,9 @@ struct nwl_pcie {
 	int irq_misc;
 	u32 ecam_value;
 	u8 last_busno;
-	u8 root_busno;
 	struct nwl_msi msi;
 	struct irq_domain *legacy_irq_domain;
+	struct clk *clk;
 	raw_spinlock_t leg_mask_lock;
 };
 
@@ -217,13 +218,11 @@ static bool nwl_pcie_valid_device(struct pci_bus *bus, unsigned int devfn)
 	struct nwl_pcie *pcie = bus->sysdata;
 
 	/* Check link before accessing downstream ports */
-	if (bus->number != pcie->root_busno) {
+	if (!pci_is_root_bus(bus)) {
 		if (!nwl_pcie_link_up(pcie))
 			return false;
-	}
-
-	/* Only one device down on each root port */
-	if (bus->number == pcie->root_busno && devfn > 0)
+	} else if (devfn > 0)
+		/* Only one device down on each root port */
 		return false;
 
 	return true;
@@ -243,15 +242,11 @@ static void __iomem *nwl_pcie_map_bus(struct pci_bus *bus, unsigned int devfn,
 				      int where)
 {
 	struct nwl_pcie *pcie = bus->sysdata;
-	int relbus;
 
 	if (!nwl_pcie_valid_device(bus, devfn))
 		return NULL;
 
-	relbus = (bus->number << ECAM_BUS_LOC_SHIFT) |
-			(devfn << ECAM_DEV_LOC_SHIFT);
-
-	return pcie->ecam_base + relbus + where;
+	return pcie->ecam_base + PCIE_ECAM_OFFSET(bus->number, devfn, where);
 }
 
 /* PCIe operations */
@@ -324,18 +319,14 @@ static void nwl_pcie_leg_handler(struct irq_desc *desc)
 	struct nwl_pcie *pcie;
 	unsigned long status;
 	u32 bit;
-	u32 virq;
 
 	chained_irq_enter(chip, desc);
 	pcie = irq_desc_get_handler_data(desc);
 
 	while ((status = nwl_bridge_readl(pcie, MSGF_LEG_STATUS) &
 				MSGF_LEG_SR_MASKALL) != 0) {
-		for_each_set_bit(bit, &status, PCI_NUM_INTX) {
-			virq = irq_find_mapping(pcie->legacy_irq_domain, bit);
-			if (virq)
-				generic_handle_irq(virq);
-		}
+		for_each_set_bit(bit, &status, PCI_NUM_INTX)
+			generic_handle_domain_irq(pcie->legacy_irq_domain, bit);
 	}
 
 	chained_irq_exit(chip, desc);
@@ -343,19 +334,14 @@ static void nwl_pcie_leg_handler(struct irq_desc *desc)
 
 static void nwl_pcie_handle_msi_irq(struct nwl_pcie *pcie, u32 status_reg)
 {
-	struct nwl_msi *msi;
+	struct nwl_msi *msi = &pcie->msi;
 	unsigned long status;
 	u32 bit;
-	u32 virq;
-
-	msi = &pcie->msi;
 
 	while ((status = nwl_bridge_readl(pcie, status_reg)) != 0) {
 		for_each_set_bit(bit, &status, 32) {
 			nwl_bridge_writel(pcie, 1 << bit, status_reg);
-			virq = irq_find_mapping(msi->dev_domain, bit);
-			if (virq)
-				generic_handle_irq(virq);
+			generic_handle_domain_irq(msi->dev_domain, bit);
 		}
 	}
 }
@@ -382,13 +368,11 @@ static void nwl_pcie_msi_handler_low(struct irq_desc *desc)
 
 static void nwl_mask_leg_irq(struct irq_data *data)
 {
-	struct irq_desc *desc = irq_to_desc(data->irq);
-	struct nwl_pcie *pcie;
+	struct nwl_pcie *pcie = irq_data_get_irq_chip_data(data);
 	unsigned long flags;
 	u32 mask;
 	u32 val;
 
-	pcie = irq_desc_get_chip_data(desc);
 	mask = 1 << (data->hwirq - 1);
 	raw_spin_lock_irqsave(&pcie->leg_mask_lock, flags);
 	val = nwl_bridge_readl(pcie, MSGF_LEG_MASK);
@@ -398,13 +382,11 @@ static void nwl_mask_leg_irq(struct irq_data *data)
 
 static void nwl_unmask_leg_irq(struct irq_data *data)
 {
-	struct irq_desc *desc = irq_to_desc(data->irq);
-	struct nwl_pcie *pcie;
+	struct nwl_pcie *pcie = irq_data_get_irq_chip_data(data);
 	unsigned long flags;
 	u32 mask;
 	u32 val;
 
-	pcie = irq_desc_get_chip_data(desc);
 	mask = 1 << (data->hwirq - 1);
 	raw_spin_lock_irqsave(&pcie->leg_mask_lock, flags);
 	val = nwl_bridge_readl(pcie, MSGF_LEG_MASK);
@@ -491,15 +473,15 @@ static int nwl_irq_domain_alloc(struct irq_domain *domain, unsigned int virq,
 
 	for (i = 0; i < nr_irqs; i++) {
 		irq_domain_set_info(domain, virq + i, bit + i, &nwl_irq_chip,
-				domain->host_data, handle_simple_irq,
-				NULL, NULL);
+				    domain->host_data, handle_simple_irq,
+				    NULL, NULL);
 	}
 	mutex_unlock(&msi->lock);
 	return 0;
 }
 
 static void nwl_irq_domain_free(struct irq_domain *domain, unsigned int virq,
-					unsigned int nr_irqs)
+				unsigned int nr_irqs)
 {
 	struct irq_data *data = irq_domain_get_irq_data(domain, virq);
 	struct nwl_pcie *pcie = irq_data_get_irq_chip_data(data);
@@ -575,32 +557,21 @@ static int nwl_pcie_enable_msi(struct nwl_pcie *pcie)
 	struct nwl_msi *msi = &pcie->msi;
 	unsigned long base;
 	int ret;
-	int size = BITS_TO_LONGS(INT_PCI_MSI_NR) * sizeof(long);
 
 	mutex_init(&msi->lock);
 
-	msi->bitmap = kzalloc(size, GFP_KERNEL);
-	if (!msi->bitmap)
-		return -ENOMEM;
-
 	/* Get msi_1 IRQ number */
 	msi->irq_msi1 = platform_get_irq_byname(pdev, "msi1");
-	if (msi->irq_msi1 < 0) {
-		dev_err(dev, "failed to get IRQ#%d\n", msi->irq_msi1);
-		ret = -EINVAL;
-		goto err;
-	}
+	if (msi->irq_msi1 < 0)
+		return -EINVAL;
 
 	irq_set_chained_handler_and_data(msi->irq_msi1,
 					 nwl_pcie_msi_handler_high, pcie);
 
 	/* Get msi_0 IRQ number */
 	msi->irq_msi0 = platform_get_irq_byname(pdev, "msi0");
-	if (msi->irq_msi0 < 0) {
-		dev_err(dev, "failed to get IRQ#%d\n", msi->irq_msi0);
-		ret = -EINVAL;
-		goto err;
-	}
+	if (msi->irq_msi0 < 0)
+		return -EINVAL;
 
 	irq_set_chained_handler_and_data(msi->irq_msi0,
 					 nwl_pcie_msi_handler_low, pcie);
@@ -609,8 +580,7 @@ static int nwl_pcie_enable_msi(struct nwl_pcie *pcie)
 	ret = nwl_bridge_readl(pcie, I_MSII_CAPABILITIES) & MSII_PRESENT;
 	if (!ret) {
 		dev_err(dev, "MSI not present\n");
-		ret = -EIO;
-		goto err;
+		return -EIO;
 	}
 
 	/* Enable MSII */
@@ -649,10 +619,6 @@ static int nwl_pcie_enable_msi(struct nwl_pcie *pcie)
 	nwl_bridge_writel(pcie, MSGF_MSI_SR_LO_MASK, MSGF_MSI_MASK_LO);
 
 	return 0;
-err:
-	kfree(msi->bitmap);
-	msi->bitmap = NULL;
-	return ret;
 }
 
 static int nwl_pcie_bridge_init(struct nwl_pcie *pcie)
@@ -688,6 +654,11 @@ static int nwl_pcie_bridge_init(struct nwl_pcie *pcie)
 	/* Enable msg filtering details */
 	nwl_bridge_writel(pcie, CFG_ENABLE_MSG_FILTER_MASK,
 			  BRCFG_PCIE_RX_MSG_FILTER);
+
+	/* This routes the PCIe DMA traffic to go through CCI path */
+	if (of_dma_is_coherent(dev->of_node))
+		nwl_bridge_writel(pcie, nwl_bridge_readl(pcie, BRCFG_PCIE_RX1) |
+				  CFG_PCIE_CACHE, BRCFG_PCIE_RX1);
 
 	err = nwl_wait_for_link(pcie);
 	if (err)
@@ -728,11 +699,8 @@ static int nwl_pcie_bridge_init(struct nwl_pcie *pcie)
 
 	/* Get misc IRQ number */
 	pcie->irq_misc = platform_get_irq_byname(pdev, "misc");
-	if (pcie->irq_misc < 0) {
-		dev_err(dev, "failed to get misc IRQ %d\n",
-			pcie->irq_misc);
+	if (pcie->irq_misc < 0)
 		return -EINVAL;
-	}
 
 	err = devm_request_irq(dev, pcie->irq_misc,
 			       nwl_pcie_misc_handler, IRQF_SHARED,
@@ -752,7 +720,6 @@ static int nwl_pcie_bridge_init(struct nwl_pcie *pcie)
 
 	/* Enable all misc interrupts */
 	nwl_bridge_writel(pcie, MSGF_MISC_SR_MASKALL, MSGF_MISC_MASK);
-
 
 	/* Disable all legacy interrupts */
 	nwl_bridge_writel(pcie, (u32)~MSGF_LEG_SR_MASKALL, MSGF_LEG_MASK);
@@ -797,10 +764,8 @@ static int nwl_pcie_parse_dt(struct nwl_pcie *pcie,
 
 	/* Get intx IRQ number */
 	pcie->irq_intx = platform_get_irq_byname(pdev, "intx");
-	if (pcie->irq_intx < 0) {
-		dev_err(dev, "failed to get intx IRQ %d\n", pcie->irq_intx);
+	if (pcie->irq_intx < 0)
 		return pcie->irq_intx;
-	}
 
 	irq_set_chained_handler_and_data(pcie->irq_intx,
 					 nwl_pcie_leg_handler, pcie);
@@ -817,8 +782,6 @@ static int nwl_pcie_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct nwl_pcie *pcie;
-	struct pci_bus *bus;
-	struct pci_bus *child;
 	struct pci_host_bridge *bridge;
 	int err;
 
@@ -837,16 +800,19 @@ static int nwl_pcie_probe(struct platform_device *pdev)
 		return err;
 	}
 
-	err = nwl_pcie_bridge_init(pcie);
+	pcie->clk = devm_clk_get(dev, NULL);
+	if (IS_ERR(pcie->clk))
+		return PTR_ERR(pcie->clk);
+
+	err = clk_prepare_enable(pcie->clk);
 	if (err) {
-		dev_err(dev, "HW Initialization failed\n");
+		dev_err(dev, "can't enable PCIe ref clock\n");
 		return err;
 	}
 
-	err = pci_parse_request_of_pci_ranges(dev, &bridge->windows,
-					      &bridge->dma_ranges, NULL);
+	err = nwl_pcie_bridge_init(pcie);
 	if (err) {
-		dev_err(dev, "Getting bridge resources failed\n");
+		dev_err(dev, "HW Initialization failed\n");
 		return err;
 	}
 
@@ -856,12 +822,8 @@ static int nwl_pcie_probe(struct platform_device *pdev)
 		return err;
 	}
 
-	bridge->dev.parent = dev;
 	bridge->sysdata = pcie;
-	bridge->busnr = pcie->root_busno;
 	bridge->ops = &nwl_pcie_ops;
-	bridge->map_irq = of_irq_parse_and_map_pci;
-	bridge->swizzle_irq = pci_common_swizzle;
 
 	if (IS_ENABLED(CONFIG_PCI_MSI)) {
 		err = nwl_pcie_enable_msi(pcie);
@@ -871,17 +833,7 @@ static int nwl_pcie_probe(struct platform_device *pdev)
 		}
 	}
 
-	err = pci_scan_root_bus_bridge(bridge);
-	if (err)
-		return err;
-
-	bus = bridge->bus;
-
-	pci_assign_unassigned_bus_resources(bus);
-	list_for_each_entry(child, &bus->children, node)
-		pcie_bus_configure_settings(child);
-	pci_bus_add_devices(bus);
-	return 0;
+	return pci_host_probe(bridge);
 }
 
 static struct platform_driver nwl_pcie_driver = {

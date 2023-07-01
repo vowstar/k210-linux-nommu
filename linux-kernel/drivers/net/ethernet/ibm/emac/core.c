@@ -38,6 +38,7 @@
 #include <linux/of_irq.h>
 #include <linux/of_net.h>
 #include <linux/of_mdio.h>
+#include <linux/platform_device.h>
 #include <linux/slab.h>
 
 #include <asm/processor.h>
@@ -872,7 +873,7 @@ static void __emac_mdio_write(struct emac_instance *dev, u8 id, u8 reg,
 {
 	struct emac_regs __iomem *p = dev->emacp;
 	u32 r = 0;
-	int n, err = -ETIMEDOUT;
+	int n;
 
 	mutex_lock(&dev->mdio_lock);
 
@@ -919,7 +920,6 @@ static void __emac_mdio_write(struct emac_instance *dev, u8 id, u8 reg,
 			goto bail;
 		}
 	}
-	err = 0;
  bail:
 	if (emac_has_feature(dev, EMAC_FTR_HAS_RGMII))
 		rgmii_put_mdio(dev->rgmii_dev, dev->rgmii_port);
@@ -1013,7 +1013,7 @@ static int emac_set_mac_address(struct net_device *ndev, void *sa)
 
 	mutex_lock(&dev->link_lock);
 
-	memcpy(ndev->dev_addr, addr->sa_data, ndev->addr_len);
+	eth_hw_addr_set(ndev, addr->sa_data);
 
 	emac_rx_disable(dev);
 	emac_tx_disable(dev);
@@ -2137,8 +2137,11 @@ emac_ethtool_set_link_ksettings(struct net_device *ndev,
 	return 0;
 }
 
-static void emac_ethtool_get_ringparam(struct net_device *ndev,
-				       struct ethtool_ringparam *rp)
+static void
+emac_ethtool_get_ringparam(struct net_device *ndev,
+			   struct ethtool_ringparam *rp,
+			   struct kernel_ethtool_ringparam *kernel_rp,
+			   struct netlink_ext_ack *extack)
 {
 	rp->rx_max_pending = rp->rx_pending = NUM_RX_BUFF;
 	rp->tx_max_pending = rp->tx_pending = NUM_TX_BUFF;
@@ -2281,8 +2284,8 @@ static void emac_ethtool_get_drvinfo(struct net_device *ndev,
 {
 	struct emac_instance *dev = netdev_priv(ndev);
 
-	strlcpy(info->driver, "ibm_emac", sizeof(info->driver));
-	strlcpy(info->version, DRV_VERSION, sizeof(info->version));
+	strscpy(info->driver, "ibm_emac", sizeof(info->driver));
+	strscpy(info->version, DRV_VERSION, sizeof(info->version));
 	snprintf(info->bus_info, sizeof(info->bus_info), "PPC 4xx EMAC-%d %pOF",
 		 dev->cell_index, dev->ofdev->dev.of_node);
 }
@@ -2320,7 +2323,7 @@ static int emac_ioctl(struct net_device *ndev, struct ifreq *rq, int cmd)
 	switch (cmd) {
 	case SIOCGMIIPHY:
 		data->phy_id = dev->phy.address;
-		/* Fall through */
+		fallthrough;
 	case SIOCGMIIREG:
 		data->val_out = emac_mdio_read(ndev, dev->phy.address,
 					       data->reg_num);
@@ -2391,11 +2394,11 @@ static int emac_check_deps(struct emac_instance *dev,
 
 static void emac_put_deps(struct emac_instance *dev)
 {
-	of_dev_put(dev->mal_dev);
-	of_dev_put(dev->zmii_dev);
-	of_dev_put(dev->rgmii_dev);
-	of_dev_put(dev->mdio_dev);
-	of_dev_put(dev->tah_dev);
+	platform_device_put(dev->mal_dev);
+	platform_device_put(dev->zmii_dev);
+	platform_device_put(dev->rgmii_dev);
+	platform_device_put(dev->mdio_dev);
+	platform_device_put(dev->tah_dev);
 }
 
 static int emac_of_bus_notify(struct notifier_block *nb, unsigned long action,
@@ -2436,7 +2439,7 @@ static int emac_wait_deps(struct emac_instance *dev)
 	for (i = 0; i < EMAC_DEP_COUNT; i++) {
 		of_node_put(deps[i].node);
 		if (err)
-			of_dev_put(deps[i].ofdev);
+			platform_device_put(deps[i].ofdev);
 	}
 	if (err == 0) {
 		dev->mal_dev = deps[EMAC_DEP_MAL_IDX].ofdev;
@@ -2445,7 +2448,7 @@ static int emac_wait_deps(struct emac_instance *dev)
 		dev->tah_dev = deps[EMAC_DEP_TAH_IDX].ofdev;
 		dev->mdio_dev = deps[EMAC_DEP_MDIO_IDX].ofdev;
 	}
-	of_dev_put(deps[EMAC_DEP_PREV_IDX].ofdev);
+	platform_device_put(deps[EMAC_DEP_PREV_IDX].ofdev);
 	return err;
 }
 
@@ -2848,7 +2851,6 @@ static int emac_init_phy(struct emac_instance *dev)
 static int emac_init_config(struct emac_instance *dev)
 {
 	struct device_node *np = dev->ofdev->dev.of_node;
-	const void *p;
 	int err;
 
 	/* Read config from device-tree */
@@ -2937,9 +2939,9 @@ static int emac_init_config(struct emac_instance *dev)
 	}
 
 	/* Fixup some feature bits based on the device tree */
-	if (of_get_property(np, "has-inverted-stacr-oc", NULL))
+	if (of_property_read_bool(np, "has-inverted-stacr-oc"))
 		dev->features |= EMAC_FTR_STACR_OC_INVERT;
-	if (of_get_property(np, "has-new-stacr-staopc", NULL))
+	if (of_property_read_bool(np, "has-new-stacr-staopc"))
 		dev->features |= EMAC_FTR_HAS_NEW_STACR;
 
 	/* CAB lacks the appropriate properties */
@@ -2976,13 +2978,10 @@ static int emac_init_config(struct emac_instance *dev)
 	}
 
 	/* Read MAC-address */
-	p = of_get_property(np, "local-mac-address", NULL);
-	if (p == NULL) {
-		printk(KERN_ERR "%pOF: Can't find local-mac-address property\n",
-		       np);
-		return -ENXIO;
-	}
-	memcpy(dev->ndev->dev_addr, p, ETH_ALEN);
+	err = of_get_ethdev_address(np, dev->ndev);
+	if (err)
+		return dev_err_probe(&dev->ofdev->dev, err,
+				     "Can't get valid [local-]mac-address from OF !\n");
 
 	/* IAHT and GAHT filter parameterization */
 	if (emac_has_feature(dev, EMAC_FTR_EMAC4SYNC)) {
@@ -3011,7 +3010,7 @@ static const struct net_device_ops emac_netdev_ops = {
 	.ndo_stop		= emac_close,
 	.ndo_get_stats		= emac_stats,
 	.ndo_set_rx_mode	= emac_set_multicast_list,
-	.ndo_do_ioctl		= emac_ioctl,
+	.ndo_eth_ioctl		= emac_ioctl,
 	.ndo_tx_timeout		= emac_tx_timeout,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= emac_set_mac_address,
@@ -3023,7 +3022,7 @@ static const struct net_device_ops emac_gige_netdev_ops = {
 	.ndo_stop		= emac_close,
 	.ndo_get_stats		= emac_stats,
 	.ndo_set_rx_mode	= emac_set_multicast_list,
-	.ndo_do_ioctl		= emac_ioctl,
+	.ndo_eth_ioctl		= emac_ioctl,
 	.ndo_tx_timeout		= emac_tx_timeout,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= emac_set_mac_address,
@@ -3043,7 +3042,7 @@ static int emac_probe(struct platform_device *ofdev)
 	 * property here for now, but new flat device trees should set a
 	 * status property to "disabled" instead.
 	 */
-	if (of_get_property(np, "unused", NULL) || !of_device_is_available(np))
+	if (of_property_read_bool(np, "unused") || !of_device_is_available(np))
 		return -ENODEV;
 
 	/* Find ourselves in the bootlist if we are there */
@@ -3334,7 +3333,7 @@ static void __init emac_make_bootlist(void)
 
 		if (of_match_node(emac_match, np) == NULL)
 			continue;
-		if (of_get_property(np, "unused", NULL))
+		if (of_property_read_bool(np, "unused"))
 			continue;
 		idx = of_get_property(np, "cell-index", NULL);
 		if (idx == NULL)

@@ -5,7 +5,7 @@
  * conversion of analog signals like battery temperature,
  * battery type, battery level etc.
  *
- * Copyright (C) 2011 Texas Instruments Incorporated - http://www.ti.com/
+ * Copyright (C) 2011 Texas Instruments Incorporated - https://www.ti.com/
  * J Keerthy <j-keerthy@ti.com>
  *
  * Based on twl4030-madc.c
@@ -30,6 +30,7 @@
 #include <linux/types.h>
 #include <linux/gfp.h>
 #include <linux/err.h>
+#include <linux/of.h>
 #include <linux/regulator/consumer.h>
 
 #include <linux/iio/iio.h>
@@ -153,7 +154,7 @@ enum sample_type {
  * struct twl4030_madc_data - a container for madc info
  * @dev:		Pointer to device structure for madc
  * @lock:		Mutex protecting this data structure
- * @regulator:		Pointer to bias regulator for madc
+ * @usb3v1:		Pointer to bias regulator for madc
  * @requests:		Array of request struct corresponding to SW1, SW2 and RT
  * @use_second_irq:	IRQ selection (main or co-processor)
  * @imr:		Interrupt mask register of MADC
@@ -161,7 +162,7 @@ enum sample_type {
  */
 struct twl4030_madc_data {
 	struct device *dev;
-	struct mutex lock;	/* mutex protecting this data structure */
+	struct mutex lock;
 	struct regulator *usb3v1;
 	struct twl4030_madc_request requests[TWL4030_MADC_NUM_METHODS];
 	bool use_second_irq;
@@ -231,13 +232,7 @@ static const struct iio_chan_spec twl4030_madc_iio_channels[] = {
 
 static struct twl4030_madc_data *twl4030_madc;
 
-struct twl4030_prescale_divider_ratios {
-	s16 numerator;
-	s16 denominator;
-};
-
-static const struct twl4030_prescale_divider_ratios
-twl4030_divider_ratios[16] = {
+static const struct s16_fract twl4030_divider_ratios[16] = {
 	{1, 1},		/* CHANNEL 0 No Prescaler */
 	{1, 1},		/* CHANNEL 1 No Prescaler */
 	{6, 10},	/* CHANNEL 2 */
@@ -255,7 +250,6 @@ twl4030_divider_ratios[16] = {
 	{1, 1},		/* CHANNEL 14 Reseved channels */
 	{5, 11},	/* CHANNEL 15 */
 };
-
 
 /* Conversion table from -3 to 55 degrees Celcius */
 static int twl4030_therm_tbl[] = {
@@ -472,7 +466,7 @@ static irqreturn_t twl4030_madc_threaded_irq_handler(int irq, void *_madc)
 	struct twl4030_madc_data *madc = _madc;
 	const struct twl4030_madc_conversion_method *method;
 	u8 isr_val, imr_val;
-	int i, len, ret;
+	int i, ret;
 	struct twl4030_madc_request *r;
 
 	mutex_lock(&madc->lock);
@@ -504,8 +498,8 @@ static irqreturn_t twl4030_madc_threaded_irq_handler(int irq, void *_madc)
 			continue;
 		method = &twl4030_conversion_methods[r->method];
 		/* Read results */
-		len = twl4030_madc_read_channels(madc, method->rbase,
-						 r->channels, r->rbuf, r->raw);
+		twl4030_madc_read_channels(madc, method->rbase,
+					   r->channels, r->rbuf, r->raw);
 		/* Free request */
 		r->result_pending = false;
 		r->active = false;
@@ -525,8 +519,8 @@ err_i2c:
 			continue;
 		method = &twl4030_conversion_methods[r->method];
 		/* Read results */
-		len = twl4030_madc_read_channels(madc, method->rbase,
-						 r->channels, r->rbuf, r->raw);
+		twl4030_madc_read_channels(madc, method->rbase,
+					   r->channels, r->rbuf, r->raw);
 		/* Free request */
 		r->result_pending = false;
 		r->active = false;
@@ -772,8 +766,6 @@ static int twl4030_madc_probe(struct platform_device *pdev)
 	madc->dev = &pdev->dev;
 
 	iio_dev->name = dev_name(&pdev->dev);
-	iio_dev->dev.parent = &pdev->dev;
-	iio_dev->dev.of_node = pdev->dev.of_node;
 	iio_dev->info = &twl4030_madc_iio_info;
 	iio_dev->modes = INDIO_DIRECT_MODE;
 	iio_dev->channels = twl4030_madc_iio_channels;

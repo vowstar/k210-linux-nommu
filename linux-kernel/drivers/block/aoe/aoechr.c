@@ -140,10 +140,8 @@ bail:		spin_unlock_irqrestore(&emsgs_lock, flags);
 	}
 
 	mp = kmemdup(msg, n, GFP_ATOMIC);
-	if (mp == NULL) {
-		printk(KERN_ERR "aoe: allocation failure, len=%ld\n", n);
+	if (!mp)
 		goto bail;
-	}
 
 	em->msg = mp;
 	em->flags |= EMFL_VALID;
@@ -275,7 +273,7 @@ static const struct file_operations aoe_fops = {
 	.llseek = noop_llseek,
 };
 
-static char *aoe_devnode(struct device *dev, umode_t *mode)
+static char *aoe_devnode(const struct device *dev, umode_t *mode)
 {
 	return kasprintf(GFP_KERNEL, "etherd/%s", dev_name(dev));
 }

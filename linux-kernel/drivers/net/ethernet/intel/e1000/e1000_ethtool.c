@@ -513,7 +513,7 @@ static int e1000_set_eeprom(struct net_device *netdev,
 	memcpy(ptr, bytes, eeprom->len);
 
 	for (i = 0; i < last_word - first_word + 1; i++)
-		eeprom_buff[i] = cpu_to_le16(eeprom_buff[i]);
+		cpu_to_le16s(&eeprom_buff[i]);
 
 	ret_val = e1000_write_eeprom(hw, first_word,
 				     last_word - first_word + 1, eeprom_buff);
@@ -531,17 +531,17 @@ static void e1000_get_drvinfo(struct net_device *netdev,
 {
 	struct e1000_adapter *adapter = netdev_priv(netdev);
 
-	strlcpy(drvinfo->driver,  e1000_driver_name,
+	strscpy(drvinfo->driver,  e1000_driver_name,
 		sizeof(drvinfo->driver));
-	strlcpy(drvinfo->version, e1000_driver_version,
-		sizeof(drvinfo->version));
 
-	strlcpy(drvinfo->bus_info, pci_name(adapter->pdev),
+	strscpy(drvinfo->bus_info, pci_name(adapter->pdev),
 		sizeof(drvinfo->bus_info));
 }
 
 static void e1000_get_ringparam(struct net_device *netdev,
-				struct ethtool_ringparam *ring)
+				struct ethtool_ringparam *ring,
+				struct kernel_ethtool_ringparam *kernel_ring,
+				struct netlink_ext_ack *extack)
 {
 	struct e1000_adapter *adapter = netdev_priv(netdev);
 	struct e1000_hw *hw = &adapter->hw;
@@ -558,7 +558,9 @@ static void e1000_get_ringparam(struct net_device *netdev,
 }
 
 static int e1000_set_ringparam(struct net_device *netdev,
-			       struct ethtool_ringparam *ring)
+			       struct ethtool_ringparam *ring,
+			       struct kernel_ethtool_ringparam *kernel_ring,
+			       struct netlink_ext_ack *extack)
 {
 	struct e1000_adapter *adapter = netdev_priv(netdev);
 	struct e1000_hw *hw = &adapter->hw;
@@ -1358,8 +1360,8 @@ static void e1000_create_lbtest_frame(struct sk_buff *skb,
 	memset(skb->data, 0xFF, frame_size);
 	frame_size &= ~1;
 	memset(&skb->data[frame_size / 2], 0xAA, frame_size / 2 - 1);
-	memset(&skb->data[frame_size / 2 + 10], 0xBE, 1);
-	memset(&skb->data[frame_size / 2 + 12], 0xAF, 1);
+	skb->data[frame_size / 2 + 10] = 0xBE;
+	skb->data[frame_size / 2 + 12] = 0xAF;
 }
 
 static int e1000_check_lbtest_frame(const unsigned char *data,
@@ -1741,7 +1743,9 @@ static int e1000_set_phys_id(struct net_device *netdev,
 }
 
 static int e1000_get_coalesce(struct net_device *netdev,
-			      struct ethtool_coalesce *ec)
+			      struct ethtool_coalesce *ec,
+			      struct kernel_ethtool_coalesce *kernel_coal,
+			      struct netlink_ext_ack *extack)
 {
 	struct e1000_adapter *adapter = netdev_priv(netdev);
 
@@ -1757,7 +1761,9 @@ static int e1000_get_coalesce(struct net_device *netdev,
 }
 
 static int e1000_set_coalesce(struct net_device *netdev,
-			      struct ethtool_coalesce *ec)
+			      struct ethtool_coalesce *ec,
+			      struct kernel_ethtool_coalesce *kernel_coal,
+			      struct netlink_ext_ack *extack)
 {
 	struct e1000_adapter *adapter = netdev_priv(netdev);
 	struct e1000_hw *hw = &adapter->hw;
@@ -1852,6 +1858,7 @@ static void e1000_get_strings(struct net_device *netdev, u32 stringset,
 }
 
 static const struct ethtool_ops e1000_ethtool_ops = {
+	.supported_coalesce_params = ETHTOOL_COALESCE_RX_USECS,
 	.get_drvinfo		= e1000_get_drvinfo,
 	.get_regs_len		= e1000_get_regs_len,
 	.get_regs		= e1000_get_regs,

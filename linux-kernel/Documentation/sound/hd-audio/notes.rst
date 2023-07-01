@@ -42,7 +42,7 @@ If you are interested in the deep debugging of HD-audio, read the
 HD-audio specification at first.  The specification is found on
 Intel's web page, for example:
 
-* http://www.intel.com/standards/hdaudio/
+* https://www.intel.com/standards/hdaudio/
 
 
 HD-Audio Controller
@@ -214,6 +214,17 @@ There are a few special model option values:
   parser are skipped.
 * when ``generic`` is passed, the codec-specific parser is skipped and
   only the generic parser is used.
+
+A new style for the model option that was introduced since 5.15 kernel
+is to pass the PCI or codec SSID in the form of ``model=XXXX:YYYY``
+where XXXX and YYYY are the sub-vendor and sub-device IDs in hex
+numbers, respectively.  This is a kind of aliasing to another device;
+when this form is given, the driver will refer to that SSID as a
+reference to the quirk table.  It'd be useful especially when the
+target quirk isn't listed in the model table.  For example, passing
+model=103c:8862 will apply the quirk for HP ProBook 445 G8 (which
+isn't found in the model table as of writing) as long as the device is
+handled equivalently by the same driver.
 
 
 Speaker and Headphone Output
@@ -489,7 +500,7 @@ add_jack_modes (bool)
     change the headphone amp and mic bias VREF capabilities
 power_save_node (bool)
     advanced power management for each widget, controlling the power
-    sate (D0/D3) of each widget node depending on the actual pin and
+    state (D0/D3) of each widget node depending on the actual pin and
     stream states
 power_down_unused (bool)
     power down the unused widgets, a subset of power_save_node, and
@@ -640,14 +651,14 @@ via power-saving behavior.
 Enabling all tracepoints can be done like
 ::
 
-    # echo 1 > /sys/kernel/debug/tracing/events/hda/enable
+    # echo 1 > /sys/kernel/tracing/events/hda/enable
 
 then after some commands, you can traces from
-/sys/kernel/debug/tracing/trace file.  For example, when you want to
+/sys/kernel/tracing/trace file.  For example, when you want to
 trace what codec command is sent, enable the tracepoint like:
 ::
 
-    # cat /sys/kernel/debug/tracing/trace
+    # cat /sys/kernel/tracing/trace
     # tracer: nop
     #
     #       TASK-PID    CPU#    TIMESTAMP  FUNCTION
@@ -728,7 +739,7 @@ version can be found on git repository:
 
 The script can be fetched directly from the following URL, too:
 
-* http://www.alsa-project.org/alsa-info.sh
+* https://www.alsa-project.org/alsa-info.sh
 
 Run this script as root, and it will gather the important information
 such as the module lists, module parameters, proc file contents
@@ -818,7 +829,7 @@ proc-compatible output.
 
 The hda-analyzer:
 
-* http://git.alsa-project.org/?p=alsa.git;a=tree;f=hda-analyzer
+* https://git.alsa-project.org/?p=alsa.git;a=tree;f=hda-analyzer
 
 is a part of alsa.git repository in alsa-project.org:
 

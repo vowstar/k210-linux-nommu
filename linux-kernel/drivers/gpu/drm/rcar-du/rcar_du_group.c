@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * rcar_du_group.c  --  R-Car Display Unit Channels Pair
+ * R-Car Display Unit Channels Pair
  *
  * Copyright (C) 2013-2015 Renesas Electronics Corporation
  *
@@ -107,7 +107,7 @@ static void rcar_du_group_setup_didsr(struct rcar_du_group *rgrp)
 		 */
 		rcrtc = rcdu->crtcs;
 		num_crtcs = rcdu->num_crtcs;
-	} else if (rcdu->info->gen == 3 && rgrp->num_crtcs > 1) {
+	} else if (rcdu->info->gen >= 3 && rgrp->num_crtcs > 1) {
 		/*
 		 * On Gen3 dot clocks are setup through per-group registers,
 		 * only available when the group has two channels.
@@ -122,10 +122,12 @@ static void rcar_du_group_setup_didsr(struct rcar_du_group *rgrp)
 	didsr = DIDSR_CODE;
 	for (i = 0; i < num_crtcs; ++i, ++rcrtc) {
 		if (rcdu->info->lvds_clk_mask & BIT(rcrtc->index))
-			didsr |= DIDSR_LCDS_LVDS0(i)
+			didsr |= DIDSR_LDCS_LVDS0(i)
 			      |  DIDSR_PDCS_CLK(i, 0);
+		else if (rcdu->info->dsi_clk_mask & BIT(rcrtc->index))
+			didsr |= DIDSR_LDCS_DSI(i);
 		else
-			didsr |= DIDSR_LCDS_DCLKIN(i)
+			didsr |= DIDSR_LDCS_DCLKIN(i)
 			      |  DIDSR_PDCS_CLK(i, 0);
 	}
 
@@ -146,19 +148,23 @@ static void rcar_du_group_setup(struct rcar_du_group *rgrp)
 	}
 	rcar_du_group_write(rgrp, DEFR5, DEFR5_CODE | DEFR5_DEFE5);
 
-	rcar_du_group_setup_pins(rgrp);
+	if (rcdu->info->gen < 4)
+		rcar_du_group_setup_pins(rgrp);
 
-	/*
-	 * TODO: Handle routing of the DU output to CMM dynamically, as we
-	 * should bypass CMM completely when no color management feature is
-	 * used.
-	 */
-	defr7 |= (rgrp->cmms_mask & BIT(1) ? DEFR7_CMME1 : 0) |
-		 (rgrp->cmms_mask & BIT(0) ? DEFR7_CMME0 : 0);
-	rcar_du_group_write(rgrp, DEFR7, defr7);
+	if (rcdu->info->gen < 4) {
+		/*
+		 * TODO: Handle routing of the DU output to CMM dynamically, as
+		 * we should bypass CMM completely when no color management
+		 * feature is used.
+		 */
+		defr7 |= (rgrp->cmms_mask & BIT(1) ? DEFR7_CMME1 : 0) |
+			 (rgrp->cmms_mask & BIT(0) ? DEFR7_CMME0 : 0);
+		rcar_du_group_write(rgrp, DEFR7, defr7);
+	}
 
 	if (rcdu->info->gen >= 2) {
-		rcar_du_group_setup_defr8(rgrp);
+		if (rcdu->info->gen < 4)
+			rcar_du_group_setup_defr8(rgrp);
 		rcar_du_group_setup_didsr(rgrp);
 	}
 

@@ -19,11 +19,12 @@
 #include <linux/gfp.h>
 #include <linux/delay.h>
 #include <linux/libata.h>
+#include <linux/of_address.h>
+#include <linux/of_irq.h>
 #include <linux/of_platform.h>
 #include <linux/types.h>
 
 #include <asm/cacheflush.h>
-#include <asm/prom.h>
 #include <asm/mpc52xx.h>
 
 #include <linux/fsl/bestcomm/bestcomm.h>
@@ -682,7 +683,7 @@ static int mpc52xx_ata_probe(struct platform_device *op)
 	struct bcom_task *dmatsk;
 
 	/* Get ipb frequency */
-	ipb_freq = mpc5xxx_get_bus_frequency(op->dev.of_node);
+	ipb_freq = mpc5xxx_get_bus_frequency(&op->dev);
 	if (!ipb_freq) {
 		dev_err(&op->dev, "could not determine IPB bus frequency\n");
 		return -ENODEV;
@@ -730,13 +731,13 @@ static int mpc52xx_ata_probe(struct platform_device *op)
 		udma_mask = ATA_UDMA2 & ((1 << (*prop + 1)) - 1);
 
 	ata_irq = irq_of_parse_and_map(op->dev.of_node, 0);
-	if (ata_irq == NO_IRQ) {
+	if (!ata_irq) {
 		dev_err(&op->dev, "error mapping irq\n");
 		return -EINVAL;
 	}
 
 	/* Prepare our private structure */
-	priv = devm_kzalloc(&op->dev, sizeof(*priv), GFP_ATOMIC);
+	priv = devm_kzalloc(&op->dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv) {
 		rv = -ENOMEM;
 		goto err1;
@@ -824,7 +825,8 @@ mpc52xx_ata_suspend(struct platform_device *op, pm_message_t state)
 {
 	struct ata_host *host = platform_get_drvdata(op);
 
-	return ata_host_suspend(host, state);
+	ata_host_suspend(host, state);
+	return 0;
 }
 
 static int
@@ -849,7 +851,7 @@ mpc52xx_ata_resume(struct platform_device *op)
 static const struct of_device_id mpc52xx_ata_of_match[] = {
 	{ .compatible = "fsl,mpc5200-ata", },
 	{ .compatible = "mpc5200-ata", },
-	{},
+	{ /* sentinel */ }
 };
 
 

@@ -83,7 +83,7 @@ struct xilinx_spi {
 	void __iomem	*regs;	/* virt. address of the control registers */
 
 	int		irq;
-
+	bool force_irq;		/* force irq to setup master inhibit */
 	u8 *rx_ptr;		/* pointer in the Tx buffer */
 	const u8 *tx_ptr;	/* pointer in the Rx buffer */
 	u8 bytes_per_word;
@@ -248,7 +248,8 @@ static int xilinx_spi_txrx_bufs(struct spi_device *spi, struct spi_transfer *t)
 	xspi->rx_ptr = t->rx_buf;
 	remaining_words = t->len / xspi->bytes_per_word;
 
-	if (xspi->irq >= 0 &&  remaining_words > xspi->buffer_size) {
+	if (xspi->irq >= 0 &&
+	    (xspi->force_irq || remaining_words > xspi->buffer_size)) {
 		u32 isr;
 		use_irq = true;
 		/* Inhibit irq to avoid spurious irqs on tx_empty*/
@@ -393,6 +394,7 @@ static int xilinx_spi_probe(struct platform_device *pdev)
 	struct resource *res;
 	int ret, num_cs = 0, bits_per_word;
 	struct spi_master *master;
+	bool force_irq = false;
 	u32 tmp;
 	u8 i;
 
@@ -400,6 +402,7 @@ static int xilinx_spi_probe(struct platform_device *pdev)
 	if (pdata) {
 		num_cs = pdata->num_chipselect;
 		bits_per_word = pdata->bits_per_word;
+		force_irq = pdata->force_irq;
 	} else {
 		of_property_read_u32(pdev->dev.of_node, "xlnx,num-ss-bits",
 					  &num_cs);
@@ -421,7 +424,7 @@ static int xilinx_spi_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	master = spi_alloc_master(&pdev->dev, sizeof(struct xilinx_spi));
+	master = devm_spi_alloc_master(&pdev->dev, sizeof(struct xilinx_spi));
 	if (!master)
 		return -ENODEV;
 
@@ -439,10 +442,8 @@ static int xilinx_spi_probe(struct platform_device *pdev)
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	xspi->regs = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(xspi->regs)) {
-		ret = PTR_ERR(xspi->regs);
-		goto put_master;
-	}
+	if (IS_ERR(xspi->regs))
+		return PTR_ERR(xspi->regs);
 
 	master->bus_num = pdev->id;
 	master->num_chipselect = num_cs;
@@ -472,14 +473,15 @@ static int xilinx_spi_probe(struct platform_device *pdev)
 
 	xspi->irq = platform_get_irq(pdev, 0);
 	if (xspi->irq < 0 && xspi->irq != -ENXIO) {
-		ret = xspi->irq;
-		goto put_master;
+		return xspi->irq;
 	} else if (xspi->irq >= 0) {
 		/* Register for SPI Interrupt */
 		ret = devm_request_irq(&pdev->dev, xspi->irq, xilinx_spi_irq, 0,
 				dev_name(&pdev->dev), xspi);
 		if (ret)
-			goto put_master;
+			return ret;
+
+		xspi->force_irq = force_irq;
 	}
 
 	/* SPI controller initializations */
@@ -488,11 +490,10 @@ static int xilinx_spi_probe(struct platform_device *pdev)
 	ret = spi_bitbang_start(&xspi->bitbang);
 	if (ret) {
 		dev_err(&pdev->dev, "spi_bitbang_start FAILED\n");
-		goto put_master;
+		return ret;
 	}
 
-	dev_info(&pdev->dev, "at 0x%08llX mapped to 0x%p, irq=%d\n",
-		(unsigned long long)res->start, xspi->regs, xspi->irq);
+	dev_info(&pdev->dev, "at %pR, irq=%d\n", res, xspi->irq);
 
 	if (pdata) {
 		for (i = 0; i < pdata->num_devices; i++)
@@ -501,11 +502,6 @@ static int xilinx_spi_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, master);
 	return 0;
-
-put_master:
-	spi_master_put(master);
-
-	return ret;
 }
 
 static int xilinx_spi_remove(struct platform_device *pdev)

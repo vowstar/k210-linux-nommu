@@ -39,7 +39,7 @@
 #include <linux/delay.h>
 #include <linux/of_device.h>
 
-#include <asm/io.h>
+#include <linux/io.h>
 #include <asm/irq.h>
 #include <asm/prom.h>
 #include <asm/setup.h>
@@ -127,7 +127,8 @@ static void serial_out(struct uart_sunsu_port *up, int offset, int value)
 	 * gate outputs a logical one. Since we use level triggered interrupts
 	 * we have lockup and watchdog reset. We cannot mask IRQ because
 	 * keyboard shares IRQ with us (Word has it as Bob Smelik's design).
-	 * This problem is similar to what Alpha people suffer, see serial.c.
+	 * This problem is similar to what Alpha people suffer, see
+	 * 8250_alpha.c.
 	 */
 	if (offset == UART_MCR)
 		value |= UART_MCR_OUT2;
@@ -416,8 +417,7 @@ static void transmit_chars(struct uart_sunsu_port *up)
 	count = up->port.fifosize;
 	do {
 		serial_out(up, UART_TX, xmit->buf[xmit->tail]);
-		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
-		up->port.icount.tx++;
+		uart_xmit_advance(&up->port, 1);
 		if (uart_circ_empty(xmit))
 			break;
 	} while (--count > 0);
@@ -466,11 +466,7 @@ static irqreturn_t sunsu_serial_interrupt(int irq, void *dev_id)
 		if (status & UART_LSR_THRE)
 			transmit_chars(up);
 
-		spin_unlock_irqrestore(&up->port.lock, flags);
-
 		tty_flip_buffer_push(&up->port.state->port);
-
-		spin_lock_irqsave(&up->port.lock, flags);
 
 	} while (!(serial_in(up, UART_IIR) & UART_IIR_NO_INT));
 
@@ -514,7 +510,7 @@ static void receive_kbd_ms_chars(struct uart_sunsu_port *up, int is_break)
 			switch (ret) {
 			case 2:
 				sunsu_change_mouse_baud(up);
-				/* fallthru */
+				fallthrough;
 			case 1:
 				break;
 
@@ -801,10 +797,8 @@ sunsu_change_speed(struct uart_port *port, unsigned int cflag,
 		cval |= UART_LCR_PARITY;
 	if (!(cflag & PARODD))
 		cval |= UART_LCR_EPAR;
-#ifdef CMSPAR
 	if (cflag & CMSPAR)
 		cval |= UART_LCR_SPAR;
-#endif
 
 	/*
 	 * Work around a bug in the Oxford Semiconductor 952 rev B
@@ -902,7 +896,7 @@ sunsu_change_speed(struct uart_port *port, unsigned int cflag,
 
 static void
 sunsu_set_termios(struct uart_port *port, struct ktermios *termios,
-		  struct ktermios *old)
+		  const struct ktermios *old)
 {
 	unsigned int baud, quot;
 
@@ -1222,13 +1216,13 @@ static int sunsu_kbd_ms_init(struct uart_sunsu_port *up)
 	serio->id.type = SERIO_RS232;
 	if (up->su_type == SU_PORT_KBD) {
 		serio->id.proto = SERIO_SUNKBD;
-		strlcpy(serio->name, "sukbd", sizeof(serio->name));
+		strscpy(serio->name, "sukbd", sizeof(serio->name));
 	} else {
 		serio->id.proto = SERIO_SUN;
 		serio->id.extra = 1;
-		strlcpy(serio->name, "sums", sizeof(serio->name));
+		strscpy(serio->name, "sums", sizeof(serio->name));
 	}
-	strlcpy(serio->phys,
+	strscpy(serio->phys,
 		(!(up->port.line & 1) ? "su/serio0" : "su/serio1"),
 		sizeof(serio->phys));
 
@@ -1254,8 +1248,6 @@ static int sunsu_kbd_ms_init(struct uart_sunsu_port *up)
 
 #ifdef CONFIG_SERIAL_SUNSU_CONSOLE
 
-#define BOTH_EMPTY (UART_LSR_TEMT | UART_LSR_THRE)
-
 /*
  *	Wait for transmitter & holding register to empty
  */
@@ -1273,7 +1265,7 @@ static void wait_for_xmitr(struct uart_sunsu_port *up)
 		if (--tmout == 0)
 			break;
 		udelay(1);
-	} while ((status & BOTH_EMPTY) != BOTH_EMPTY);
+	} while (!uart_lsr_tx_empty(status));
 
 	/* Wait up to 1s for flow control if necessary */
 	if (up->port.flags & UPF_CONS_FLOW) {
@@ -1284,7 +1276,7 @@ static void wait_for_xmitr(struct uart_sunsu_port *up)
 	}
 }
 
-static void sunsu_console_putchar(struct uart_port *port, int ch)
+static void sunsu_console_putchar(struct uart_port *port, unsigned char ch)
 {
 	struct uart_sunsu_port *up =
 		container_of(port, struct uart_sunsu_port, port);

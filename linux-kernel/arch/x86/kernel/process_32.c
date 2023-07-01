@@ -39,44 +39,40 @@
 #include <linux/kdebug.h>
 #include <linux/syscalls.h>
 
-#include <asm/pgtable.h>
 #include <asm/ldt.h>
 #include <asm/processor.h>
-#include <asm/fpu/internal.h>
+#include <asm/fpu/sched.h>
 #include <asm/desc.h>
 
 #include <linux/err.h>
 
 #include <asm/tlbflush.h>
 #include <asm/cpu.h>
-#include <asm/syscalls.h>
 #include <asm/debugreg.h>
 #include <asm/switch_to.h>
 #include <asm/vm86.h>
-#include <asm/resctrl_sched.h>
+#include <asm/resctrl.h>
 #include <asm/proto.h>
 
 #include "process.h"
 
-void __show_regs(struct pt_regs *regs, enum show_regs_mode mode)
+void __show_regs(struct pt_regs *regs, enum show_regs_mode mode,
+		 const char *log_lvl)
 {
 	unsigned long cr0 = 0L, cr2 = 0L, cr3 = 0L, cr4 = 0L;
 	unsigned long d0, d1, d2, d3, d6, d7;
 	unsigned short gs;
 
-	if (user_mode(regs))
-		gs = get_user_gs(regs);
-	else
-		savesegment(gs, gs);
+	savesegment(gs, gs);
 
-	show_ip(regs, KERN_DEFAULT);
+	show_ip(regs, log_lvl);
 
-	printk(KERN_DEFAULT "EAX: %08lx EBX: %08lx ECX: %08lx EDX: %08lx\n",
-		regs->ax, regs->bx, regs->cx, regs->dx);
-	printk(KERN_DEFAULT "ESI: %08lx EDI: %08lx EBP: %08lx ESP: %08lx\n",
-		regs->si, regs->di, regs->bp, regs->sp);
-	printk(KERN_DEFAULT "DS: %04x ES: %04x FS: %04x GS: %04x SS: %04x EFLAGS: %08lx\n",
-	       (u16)regs->ds, (u16)regs->es, (u16)regs->fs, gs, regs->ss, regs->flags);
+	printk("%sEAX: %08lx EBX: %08lx ECX: %08lx EDX: %08lx\n",
+		log_lvl, regs->ax, regs->bx, regs->cx, regs->dx);
+	printk("%sESI: %08lx EDI: %08lx EBP: %08lx ESP: %08lx\n",
+		log_lvl, regs->si, regs->di, regs->bp, regs->sp);
+	printk("%sDS: %04x ES: %04x FS: %04x GS: %04x SS: %04x EFLAGS: %08lx\n",
+	       log_lvl, (u16)regs->ds, (u16)regs->es, (u16)regs->fs, gs, regs->ss, regs->flags);
 
 	if (mode != SHOW_REGS_ALL)
 		return;
@@ -85,8 +81,8 @@ void __show_regs(struct pt_regs *regs, enum show_regs_mode mode)
 	cr2 = read_cr2();
 	cr3 = __read_cr3();
 	cr4 = __read_cr4();
-	printk(KERN_DEFAULT "CR0: %08lx CR2: %08lx CR3: %08lx CR4: %08lx\n",
-			cr0, cr2, cr3, cr4);
+	printk("%sCR0: %08lx CR2: %08lx CR3: %08lx CR4: %08lx\n",
+		log_lvl, cr0, cr2, cr3, cr4);
 
 	get_debugreg(d0, 0);
 	get_debugreg(d1, 1);
@@ -100,10 +96,10 @@ void __show_regs(struct pt_regs *regs, enum show_regs_mode mode)
 	    (d6 == DR6_RESERVED) && (d7 == 0x400))
 		return;
 
-	printk(KERN_DEFAULT "DR0: %08lx DR1: %08lx DR2: %08lx DR3: %08lx\n",
-			d0, d1, d2, d3);
-	printk(KERN_DEFAULT "DR6: %08lx DR7: %08lx\n",
-			d6, d7);
+	printk("%sDR0: %08lx DR1: %08lx DR2: %08lx DR3: %08lx\n",
+		log_lvl, d0, d1, d2, d3);
+	printk("%sDR6: %08lx DR7: %08lx\n",
+		log_lvl, d6, d7);
 }
 
 void release_thread(struct task_struct *dead_task)
@@ -115,7 +111,7 @@ void release_thread(struct task_struct *dead_task)
 void
 start_thread(struct pt_regs *regs, unsigned long new_ip, unsigned long new_sp)
 {
-	set_user_gs(regs, 0);
+	loadsegment(gs, 0);
 	regs->fs		= 0;
 	regs->ds		= __USER_DS;
 	regs->es		= __USER_DS;
@@ -161,7 +157,6 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 	struct thread_struct *prev = &prev_p->thread,
 			     *next = &next_p->thread;
 	struct fpu *prev_fpu = &prev->fpu;
-	struct fpu *next_fpu = &next->fpu;
 	int cpu = smp_processor_id();
 
 	/* never put a printk in __switch_to... printk() calls wake_up*() indirectly */
@@ -179,7 +174,7 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 	 * used %fs or %gs (it does not today), or if the kernel is
 	 * running inside of a hypervisor layer.
 	 */
-	lazy_save_gs(prev->gs);
+	savesegment(gs, prev->gs);
 
 	/*
 	 * Load the per-thread Thread-Local Storage descriptor.
@@ -196,13 +191,13 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 	arch_end_context_switch(next_p);
 
 	/*
-	 * Reload esp0 and cpu_current_top_of_stack.  This changes
+	 * Reload esp0 and pcpu_hot.top_of_stack.  This changes
 	 * current_thread_info().  Refresh the SYSENTER configuration in
 	 * case prev or next is vm86.
 	 */
 	update_task_stack(next_p);
 	refresh_sysenter_cs(next);
-	this_cpu_write(cpu_current_top_of_stack,
+	this_cpu_write(pcpu_hot.top_of_stack,
 		       (unsigned long)task_stack_page(next_p) +
 		       THREAD_SIZE);
 
@@ -210,19 +205,19 @@ __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 	 * Restore %gs if needed (which is common)
 	 */
 	if (prev->gs | next->gs)
-		lazy_load_gs(next->gs);
+		loadsegment(gs, next->gs);
 
-	this_cpu_write(current_task, next_p);
+	raw_cpu_write(pcpu_hot.current_task, next_p);
 
-	switch_fpu_finish(next_fpu);
+	switch_fpu_finish();
 
 	/* Load the Intel cache allocation PQR MSR. */
-	resctrl_sched_in();
+	resctrl_sched_in(next_p);
 
 	return prev_p;
 }
 
 SYSCALL_DEFINE2(arch_prctl, int, option, unsigned long, arg2)
 {
-	return do_arch_prctl_common(current, option, arg2);
+	return do_arch_prctl_common(option, arg2);
 }

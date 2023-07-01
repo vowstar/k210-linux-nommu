@@ -11,6 +11,7 @@
 #include "at91-sama5d27_som1.dtsi"
 #include <dt-bindings/mfd/atmel-flexcom.h>
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
 
 / {
 	model = "Atmel SAMA5D27 SOM1 EK";
@@ -20,8 +21,8 @@
 		serial0 = &uart1;	/* DBGU */
 		serial1 = &uart4;	/* mikro BUS 1 */
 		serial2 = &uart2;	/* mikro BUS 2 */
-		i2c1	= &i2c1;
-		i2c2	= &i2c2;
+		i2c1 = &i2c1;
+		i2c2 = &i2c3;
 	};
 
 	chosen {
@@ -70,7 +71,6 @@
 			isc: isc@f0008000 {
 				pinctrl-names = "default";
 				pinctrl-0 = <&pinctrl_isc_base &pinctrl_isc_data_8bit &pinctrl_isc_data_9_10 &pinctrl_isc_data_11_12>;
-				status = "okay";
 			};
 
 			qspi1: spi@f0024000 {
@@ -125,32 +125,26 @@
 				atmel,flexcom-mode = <ATMEL_FLEXCOM_MODE_TWI>;
 				status = "okay";
 
-				i2c2: i2c@600 {
-					compatible = "atmel,sama5d2-i2c";
-					reg = <0x600 0x200>;
-					interrupts = <20 IRQ_TYPE_LEVEL_HIGH 7>;
+				i2c3: i2c@600 {
 					dmas = <0>, <0>;
-					dma-names = "tx", "rx";
 					i2c-analog-filter;
 					i2c-digital-filter;
 					i2c-digital-filter-width-ns = <35>;
-					#address-cells = <1>;
-					#size-cells = <0>;
-					clocks = <&pmc PMC_TYPE_PERIPHERAL 20>;
-					pinctrl-names = "default";
+					pinctrl-names = "default", "gpio";
 					pinctrl-0 = <&pinctrl_mikrobus_i2c>;
-					atmel,fifo-size = <16>;
+					pinctrl-1 = <&pinctrl_i2c3_gpio>;
+					sda-gpios = <&pioA PIN_PA24 GPIO_ACTIVE_HIGH>;
+					scl-gpios = <&pioA PIN_PA23 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 					status = "okay";
 				};
 			};
 
 			shdwc@f8048010 {
-				atmel,shdwc-debouncer = <976>;
+				debounce-delay-us = <976>;
 				atmel,wakeup-rtc-timer;
 
 				input@0 {
 					reg = <0>;
-					atmel,wakeup-type = "low";
 				};
 			};
 
@@ -178,27 +172,17 @@
 				atmel,flexcom-mode = <ATMEL_FLEXCOM_MODE_SPI>;
 				status = "disabled";
 
-				uart7: serial@200 {
-					compatible = "atmel,at91sam9260-usart";
-					reg = <0x200 0x200>;
-					interrupts = <22 IRQ_TYPE_LEVEL_HIGH 7>;
-					clocks = <&pmc PMC_TYPE_PERIPHERAL 22>;
-					clock-names = "usart";
+				uart8: serial@200 {
+					dmas = <0>, <0>;
 					pinctrl-names = "default";
 					pinctrl-0 = <&pinctrl_flx3_default>;
-					atmel,fifo-size = <32>;
 					status = "disabled"; /* Conflict with isc. */
 				};
 
-				spi2: spi@400 {
-					compatible = "atmel,at91rm9200-spi";
-					reg = <0x400 0x200>;
-					interrupts = <22 IRQ_TYPE_LEVEL_HIGH 7>;
-					clocks = <&pmc PMC_TYPE_PERIPHERAL 22>;
-					clock-names = "spi_clk";
+				spi5: spi@400 {
+					dmas = <0>, <0>;
 					pinctrl-names = "default";
 					pinctrl-0 = <&pinctrl_flx3_default>;
-					atmel,fifo-size = <16>;
 					status = "disabled"; /* Conflict with isc. */
 				};
 			};
@@ -207,43 +191,25 @@
 				atmel,flexcom-mode = <ATMEL_FLEXCOM_MODE_SPI>;
 				status = "okay";
 
-				uart6: serial@200 {
-					compatible = "atmel,at91sam9260-usart";
-					reg = <0x200 0x200>;
-					interrupts = <23 IRQ_TYPE_LEVEL_HIGH 7>;
-					clocks = <&pmc PMC_TYPE_PERIPHERAL 23>;
-					clock-names = "usart";
+				uart9: serial@200 {
+					dmas = <0>, <0>;
 					pinctrl-names = "default";
 					pinctrl-0 = <&pinctrl_flx4_default>;
-					atmel,fifo-size = <32>;
-					status = "disabled"; /* Conflict with spi3 and i2c3. */
+					status = "disabled"; /* Conflict with spi6 and i2c6. */
 				};
 
-				spi3: spi@400 {
-					compatible = "atmel,at91rm9200-spi";
-					reg = <0x400 0x200>;
-					interrupts = <23 IRQ_TYPE_LEVEL_HIGH 7>;
-					clocks = <&pmc PMC_TYPE_PERIPHERAL 23>;
-					clock-names = "spi_clk";
+				spi6: spi@400 {
+					dmas = <0>, <0>;
 					pinctrl-names = "default";
 					pinctrl-0 = <&pinctrl_mikrobus_spi &pinctrl_mikrobus1_spi_cs &pinctrl_mikrobus2_spi_cs>;
-					atmel,fifo-size = <16>;
-					status = "okay"; /* Conflict with uart6 and i2c3. */
+					status = "okay"; /* Conflict with uart5 and i2c6. */
 				};
 
-				i2c3: i2c@600 {
-					compatible = "atmel,sama5d2-i2c";
-					reg = <0x600 0x200>;
-					interrupts = <23 IRQ_TYPE_LEVEL_HIGH 7>;
+				i2c6: i2c@600 {
 					dmas = <0>, <0>;
-					dma-names = "tx", "rx";
-					#address-cells = <1>;
-					#size-cells = <0>;
-					clocks = <&pmc PMC_TYPE_PERIPHERAL 23>;
 					pinctrl-names = "default";
 					pinctrl-0 = <&pinctrl_flx4_default>;
-					atmel,fifo-size = <16>;
-					status = "disabled"; /* Conflict with uart6 and spi3. */
+					status = "disabled"; /* Conflict with uart5 and spi6. */
 				};
 			};
 
@@ -252,16 +218,21 @@
 				i2c-analog-filter;
 				i2c-digital-filter;
 				i2c-digital-filter-width-ns = <35>;
-				pinctrl-names = "default";
+				pinctrl-names = "default", "gpio";
 				pinctrl-0 = <&pinctrl_i2c1_default>;
+				pinctrl-1 = <&pinctrl_i2c1_gpio>;
+				sda-gpios = <&pioA PIN_PD4 GPIO_ACTIVE_HIGH>;
+				scl-gpios = <&pioA PIN_PD5 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 				status = "okay";
 			};
 
 			adc: adc@fc030000 {
 				vddana-supply = <&vddana>;
 				vref-supply = <&advref>;
+				pinctrl-names = "default";
+				pinctrl-0 = <&pinctrl_mikrobus1_an &pinctrl_mikrobus2_an>;
 
-				status = "disabled";
+				status = "okay";
 			};
 
 			pinctrl@fc038000 {
@@ -286,6 +257,13 @@
 						 <PIN_PD5__TWCK1>;
 					bias-disable;
 				};
+
+				pinctrl_i2c1_gpio: i2c1_gpio {
+                                        pinmux = <PIN_PD4__GPIO>,
+                                                 <PIN_PD5__GPIO>;
+                                        bias-disable;
+                                };
+
 
 				pinctrl_isc_base: isc_base {
 					pinmux = <PIN_PC21__ISC_PCK>,
@@ -476,6 +454,12 @@
 					bias-disable;
 				};
 
+				pinctrl_i2c3_gpio: i2c3_gpio {
+					pinmux = <PIN_PA24__GPIO>,
+						 <PIN_PA23__GPIO>;
+					bias-disable;
+				};
+
 				pinctrl_flx4_default: flx4_uart_default {
 					pinmux = <PIN_PC28__FLEXCOM4_IO0>,
 						 <PIN_PC29__FLEXCOM4_IO1>,
@@ -494,16 +478,16 @@
 		};
 	};
 
-	gpio_keys {
+	gpio-keys {
 		compatible = "gpio-keys";
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&pinctrl_key_gpio_default>;
 
-		pb4 {
+		button {
 			label = "USER";
 			gpios = <&pioA PIN_PA29 GPIO_ACTIVE_LOW>;
-			linux,code = <0x104>;
+			linux,code = <KEY_PROG1>;
 			wakeup-source;
 		};
 	};
@@ -514,17 +498,17 @@
 		pinctrl-0 = <&pinctrl_led_gpio_default>;
 		status = "okay"; /* Conflict with pwm0. */
 
-		red {
+		led-red {
 			label = "red";
 			gpios = <&pioA PIN_PA10 GPIO_ACTIVE_HIGH>;
 		};
 
-		green {
+		led-green {
 			label = "green";
 			gpios = <&pioA PIN_PB1 GPIO_ACTIVE_HIGH>;
 		};
 
-		blue {
+		led-blue {
 			label = "blue";
 			gpios = <&pioA PIN_PA31 GPIO_ACTIVE_HIGH>;
 			linux,default-trigger = "heartbeat";

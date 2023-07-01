@@ -4,6 +4,8 @@
  */
 
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/linux-event-codes.h>
+#include <dt-bindings/interrupt-controller/irq.h>
 
 / {
 	/* these are used by bootloader for disabling nodes */
@@ -28,25 +30,70 @@
 		default-brightness-level = <7>;
 	};
 
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		user-pb {
+			label = "user_pb";
+			gpios = <&gsc_gpio 0 GPIO_ACTIVE_LOW>;
+			linux,code = <BTN_0>;
+		};
+
+		user-pb1x {
+			label = "user_pb1x";
+			linux,code = <BTN_1>;
+			interrupt-parent = <&gsc>;
+			interrupts = <0>;
+		};
+
+		key-erased {
+			label = "key-erased";
+			linux,code = <BTN_2>;
+			interrupt-parent = <&gsc>;
+			interrupts = <1>;
+		};
+
+		eeprom-wp {
+			label = "eeprom_wp";
+			linux,code = <BTN_3>;
+			interrupt-parent = <&gsc>;
+			interrupts = <2>;
+		};
+
+		tamper {
+			label = "tamper";
+			linux,code = <BTN_4>;
+			interrupt-parent = <&gsc>;
+			interrupts = <5>;
+		};
+
+		switch-hold {
+			label = "switch_hold";
+			linux,code = <BTN_5>;
+			interrupt-parent = <&gsc>;
+			interrupts = <7>;
+		};
+	};
+
 	leds {
 		compatible = "gpio-leds";
 		pinctrl-names = "default";
 		pinctrl-0 = <&pinctrl_gpio_leds>;
 
-		led0: user1 {
+		led0: led-user1 {
 			label = "user1";
 			gpios = <&gpio4 6 GPIO_ACTIVE_HIGH>; /* MX6_PANLEDG */
 			default-state = "on";
 			linux,default-trigger = "heartbeat";
 		};
 
-		led1: user2 {
+		led1: led-user2 {
 			label = "user2";
 			gpios = <&gpio4 7 GPIO_ACTIVE_HIGH>; /* MX6_PANLEDR */
 			default-state = "off";
 		};
 
-		led2: user3 {
+		led2: led-user3 {
 			label = "user3";
 			gpios = <&gpio4 15 GPIO_ACTIVE_LOW>; /* MX6_LOCLED# */
 			default-state = "off";
@@ -80,6 +127,16 @@
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
 		regulator-always-on;
+	};
+
+	reg_can1_stby: regulator-can1-stby {
+		compatible = "regulator-fixed";
+		pinctrl-names = "default";
+		pinctrl-0 = <&pinctrl_reg_can1>;
+		regulator-name = "can1_stby";
+		gpio = <&gpio1 2 GPIO_ACTIVE_LOW>;
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
 	};
 
 	reg_usb_h1_vbus: regulator-usb-h1-vbus {
@@ -123,6 +180,7 @@
 &can1 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_flexcan1>;
+	xceiver-supply = <&reg_can1_stby>;
 	status = "okay";
 };
 
@@ -158,6 +216,115 @@
 	pinctrl-0 = <&pinctrl_i2c1>;
 	status = "okay";
 
+	gsc: gsc@20 {
+		compatible = "gw,gsc";
+		reg = <0x20>;
+		interrupt-parent = <&gpio1>;
+		interrupts = <4 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-controller;
+		#interrupt-cells = <1>;
+		#size-cells = <0>;
+
+		adc {
+			compatible = "gw,gsc-adc";
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			channel@0 {
+				gw,mode = <0>;
+				reg = <0x00>;
+				label = "temp";
+			};
+
+			channel@2 {
+				gw,mode = <1>;
+				reg = <0x02>;
+				label = "vdd_vin";
+			};
+
+			channel@5 {
+				gw,mode = <1>;
+				reg = <0x05>;
+				label = "vdd_3p3";
+			};
+
+			channel@8 {
+				gw,mode = <1>;
+				reg = <0x08>;
+				label = "vdd_bat";
+			};
+
+			channel@b {
+				gw,mode = <1>;
+				reg = <0x0b>;
+				label = "vdd_5p0";
+			};
+
+			channel@e {
+				gw,mode = <1>;
+				reg = <0xe>;
+				label = "vdd_arm";
+			};
+
+			channel@11 {
+				gw,mode = <1>;
+				reg = <0x11>;
+				label = "vdd_soc";
+			};
+
+			channel@14 {
+				gw,mode = <1>;
+				reg = <0x14>;
+				label = "vdd_3p0";
+			};
+
+			channel@17 {
+				gw,mode = <1>;
+				reg = <0x17>;
+				label = "vdd_1p5";
+			};
+
+			channel@1d {
+				gw,mode = <1>;
+				reg = <0x1d>;
+				label = "vdd_1p8";
+			};
+
+			channel@20 {
+				gw,mode = <1>;
+				reg = <0x20>;
+				label = "vdd_1p0";
+			};
+
+			channel@23 {
+				gw,mode = <1>;
+				reg = <0x23>;
+				label = "vdd_2p5";
+			};
+
+			channel@26 {
+				gw,mode = <1>;
+				reg = <0x26>;
+				label = "vdd_gps";
+			};
+
+			channel@29 {
+				gw,mode = <1>;
+				reg = <0x29>;
+				label = "vdd_an1";
+			};
+		};
+	};
+
+	gsc_gpio: gpio@23 {
+		compatible = "nxp,pca9555";
+		reg = <0x23>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		interrupt-parent = <&gsc>;
+		interrupts = <4>;
+	};
+
 	eeprom1: eeprom@50 {
 		compatible = "atmel,24c02";
 		reg = <0x50>;
@@ -180,13 +347,6 @@
 		compatible = "atmel,24c02";
 		reg = <0x53>;
 		pagesize = <16>;
-	};
-
-	gpio: pca9555@23 {
-		compatible = "nxp,pca9555";
-		reg = <0x23>;
-		gpio-controller;
-		#gpio-cells = <2>;
 	};
 
 	rtc: ds1672@68 {
@@ -304,6 +464,11 @@
 		interrupts = <11 2>;
 		wakeup-gpios = <&gpio1 11 GPIO_ACTIVE_LOW>;
 	};
+
+	accel@1e {
+		compatible = "nxp,fxos8700";
+		reg = <0x1e>;
+	};
 };
 
 &ldb {
@@ -351,6 +516,7 @@
 };
 
 &pwm4 {
+	#pwm-cells = <2>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_pwm4>;
 	status = "okay";
@@ -445,7 +611,6 @@
 		fsl,pins = <
 			MX6QDL_PAD_KEY_ROW2__FLEXCAN1_RX	0x1b0b1
 			MX6QDL_PAD_KEY_COL2__FLEXCAN1_TX	0x1b0b1
-			MX6QDL_PAD_GPIO_2__GPIO1_IO02		0x4001b0b0 /* CAN_STBY */
 		>;
 	};
 
@@ -481,6 +646,7 @@
 		fsl,pins = <
 			MX6QDL_PAD_EIM_D21__I2C1_SCL		0x4001b8b1
 			MX6QDL_PAD_EIM_D28__I2C1_SDA		0x4001b8b1
+			MX6QDL_PAD_GPIO_4__GPIO1_IO04		0xb0b1
 		>;
 	};
 
@@ -532,6 +698,12 @@
 	pinctrl_pwm4: pwm4grp {
 		fsl,pins = <
 			MX6QDL_PAD_SD1_CMD__PWM4_OUT		0x1b0b1
+		>;
+	};
+
+	pinctrl_reg_can1: regcan1grp {
+		fsl,pins = <
+			MX6QDL_PAD_GPIO_2__GPIO1_IO02		0x4001b0b0 /* CAN_STBY */
 		>;
 	};
 

@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/arm/mrvl/mrvl.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Marvell Platforms Device Tree Bindings
+title: Marvell Platforms
 
 maintainers:
   - Lubomir Rintel <lkundrak@v3.sk>
@@ -28,8 +28,14 @@ properties:
         items:
           - enum:
               - mrvl,mmp2-brownstone
+              - olpc,xo-1.75
           - const: mrvl,mmp2
       - description: MMP3 based boards
         items:
-          - const: mrvl,mmp3
+          - enum:
+              - dell,wyse-ariel
+          - const: marvell,mmp3
+
+additionalProperties: true
+
 ...

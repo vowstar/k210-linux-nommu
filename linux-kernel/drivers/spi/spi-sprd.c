@@ -553,22 +553,15 @@ static int sprd_spi_dma_tx_config(struct sprd_spi *ss, struct spi_transfer *t)
 static int sprd_spi_dma_request(struct sprd_spi *ss)
 {
 	ss->dma.dma_chan[SPRD_SPI_RX] = dma_request_chan(ss->dev, "rx_chn");
-	if (IS_ERR_OR_NULL(ss->dma.dma_chan[SPRD_SPI_RX])) {
-		if (PTR_ERR(ss->dma.dma_chan[SPRD_SPI_RX]) == -EPROBE_DEFER)
-			return PTR_ERR(ss->dma.dma_chan[SPRD_SPI_RX]);
-
-		dev_err(ss->dev, "request RX DMA channel failed!\n");
-		return PTR_ERR(ss->dma.dma_chan[SPRD_SPI_RX]);
-	}
+	if (IS_ERR_OR_NULL(ss->dma.dma_chan[SPRD_SPI_RX]))
+		return dev_err_probe(ss->dev, PTR_ERR(ss->dma.dma_chan[SPRD_SPI_RX]),
+				     "request RX DMA channel failed!\n");
 
 	ss->dma.dma_chan[SPRD_SPI_TX]  = dma_request_chan(ss->dev, "tx_chn");
 	if (IS_ERR_OR_NULL(ss->dma.dma_chan[SPRD_SPI_TX])) {
-		if (PTR_ERR(ss->dma.dma_chan[SPRD_SPI_TX]) == -EPROBE_DEFER)
-			return PTR_ERR(ss->dma.dma_chan[SPRD_SPI_TX]);
-
-		dev_err(ss->dev, "request TX DMA channel failed!\n");
 		dma_release_channel(ss->dma.dma_chan[SPRD_SPI_RX]);
-		return PTR_ERR(ss->dma.dma_chan[SPRD_SPI_TX]);
+		return dev_err_probe(ss->dev, PTR_ERR(ss->dma.dma_chan[SPRD_SPI_TX]),
+				     "request TX DMA channel failed!\n");
 	}
 
 	return 0;
@@ -1015,7 +1008,7 @@ static int sprd_spi_remove(struct platform_device *pdev)
 	struct sprd_spi *ss = spi_controller_get_devdata(sctlr);
 	int ret;
 
-	ret = pm_runtime_get_sync(ss->dev);
+	ret = pm_runtime_resume_and_get(ss->dev);
 	if (ret < 0) {
 		dev_err(ss->dev, "failed to resume SPI controller\n");
 		return ret;
@@ -1074,6 +1067,7 @@ static const struct of_device_id sprd_spi_of_match[] = {
 	{ .compatible = "sprd,sc9860-spi", },
 	{ /* sentinel */ }
 };
+MODULE_DEVICE_TABLE(of, sprd_spi_of_match);
 
 static struct platform_driver sprd_spi_driver = {
 	.driver = {

@@ -23,6 +23,8 @@
 #include <linux/in.h>
 #include <linux/skbuff.h>
 #include <linux/jhash.h>
+#include <linux/sockptr.h>
+#include <linux/static_key.h>
 
 #include <net/inet_sock.h>
 #include <net/route.h>
@@ -30,6 +32,7 @@
 #include <net/flow.h>
 #include <net/flow_dissector.h>
 #include <net/netns/hash.h>
+#include <net/lwtunnel.h>
 
 #define IPV4_MAX_PMTU		65535U		/* RFC 2675, Section 5.1 */
 #define IPV4_MIN_MTU		68			/* RFC 791 */
@@ -53,6 +56,7 @@ struct inet_skb_parm {
 #define IPSKB_DOREDIRECT	BIT(5)
 #define IPSKB_FRAG_PMTU		BIT(6)
 #define IPSKB_L3SLAVE		BIT(7)
+#define IPSKB_NOPOLICY		BIT(8)
 
 	u16			frag_max_size;
 };
@@ -90,7 +94,7 @@ static inline void ipcm_init_sk(struct ipcm_cookie *ipcm,
 
 	ipcm->sockc.mark = inet->sk.sk_mark;
 	ipcm->sockc.tsflags = inet->sk.sk_tsflags;
-	ipcm->oif = inet->sk.sk_bound_dev_if;
+	ipcm->oif = READ_ONCE(inet->sk.sk_bound_dev_if);
 	ipcm->addr = inet->inet_saddr;
 }
 
@@ -98,7 +102,7 @@ static inline void ipcm_init_sk(struct ipcm_cookie *ipcm,
 #define PKTINFO_SKB_CB(skb) ((struct in_pktinfo *)((skb)->cb))
 
 /* return enslaved device index if relevant */
-static inline int inet_sdif(struct sk_buff *skb)
+static inline int inet_sdif(const struct sk_buff *skb)
 {
 #if IS_ENABLED(CONFIG_NET_L3_MASTER_DEV)
 	if (skb && ipv4_l3mdev_skb(IPCB(skb)->flags))
@@ -150,7 +154,7 @@ int igmp_mc_init(void);
 
 int ip_build_and_send_pkt(struct sk_buff *skb, const struct sock *sk,
 			  __be32 saddr, __be32 daddr,
-			  struct ip_options_rcu *opt);
+			  struct ip_options_rcu *opt, u8 tos);
 int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt,
 	   struct net_device *orig_dev);
 void ip_list_rcv(struct list_head *head, struct packet_type *pt,
@@ -231,11 +235,7 @@ struct sk_buff *ip_make_skb(struct sock *sk, struct flowi4 *fl4,
 			    struct ipcm_cookie *ipc, struct rtable **rtp,
 			    struct inet_cork *cork, unsigned int flags);
 
-static inline int ip_queue_xmit(struct sock *sk, struct sk_buff *skb,
-				struct flowi *fl)
-{
-	return __ip_queue_xmit(sk, skb, fl, inet_sk(sk)->tos);
-}
+int ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl);
 
 static inline struct sk_buff *ip_finish_skb(struct sock *sk, struct flowi4 *fl4)
 {
@@ -293,7 +293,11 @@ void ip_send_unicast_reply(struct sock *sk, struct sk_buff *skb,
 #define NET_ADD_STATS(net, field, adnd)	SNMP_ADD_STATS((net)->mib.net_statistics, field, adnd)
 #define __NET_ADD_STATS(net, field, adnd) __SNMP_ADD_STATS((net)->mib.net_statistics, field, adnd)
 
-u64 snmp_get_cpu_field(void __percpu *mib, int cpu, int offct);
+static inline u64 snmp_get_cpu_field(void __percpu *mib, int cpu, int offt)
+{
+	return  *(((unsigned long *)per_cpu_ptr(mib, cpu)) + offt);
+}
+
 unsigned long snmp_fold_field(void __percpu *mib, int offt);
 #if BITS_PER_LONG==32
 u64 snmp_get_cpu_field64(void __percpu *mib, int cpu, int offct,
@@ -336,7 +340,8 @@ static inline u64 snmp_fold_field64(void __percpu *mib, int offt, size_t syncp_o
 	} \
 }
 
-void inet_get_local_port_range(struct net *net, int *low, int *high);
+void inet_get_local_port_range(const struct net *net, int *low, int *high);
+void inet_sk_get_local_port_range(const struct sock *sk, int *low, int *high);
 
 #ifdef CONFIG_SYSCTL
 static inline bool inet_is_local_reserved_port(struct net *net, unsigned short port)
@@ -353,7 +358,7 @@ static inline bool sysctl_dev_name_is_allowed(const char *name)
 
 static inline bool inet_port_requires_bind_service(struct net *net, unsigned short port)
 {
-	return port < net->ipv4.sysctl_ip_prot_sock;
+	return port < READ_ONCE(net->ipv4.sysctl_ip_prot_sock);
 }
 
 #else
@@ -380,7 +385,7 @@ void ipfrag_init(void);
 void ip_static_sysctl_init(void);
 
 #define IP4_REPLY_MARK(net, mark) \
-	((net)->ipv4.sysctl_fwmark_reflect ? (mark) : 0)
+	(READ_ONCE((net)->ipv4.sysctl_fwmark_reflect) ? (mark) : 0)
 
 static inline bool ip_is_fragment(const struct iphdr *iph)
 {
@@ -438,26 +443,49 @@ static inline bool ip_sk_ignore_df(const struct sock *sk)
 static inline unsigned int ip_dst_mtu_maybe_forward(const struct dst_entry *dst,
 						    bool forwarding)
 {
+	const struct rtable *rt = container_of(dst, struct rtable, dst);
 	struct net *net = dev_net(dst->dev);
+	unsigned int mtu;
 
-	if (net->ipv4.sysctl_ip_fwd_use_pmtu ||
+	if (READ_ONCE(net->ipv4.sysctl_ip_fwd_use_pmtu) ||
 	    ip_mtu_locked(dst) ||
-	    !forwarding)
-		return dst_mtu(dst);
+	    !forwarding) {
+		mtu = rt->rt_pmtu;
+		if (mtu && time_before(jiffies, rt->dst.expires))
+			goto out;
+	}
 
-	return min(READ_ONCE(dst->dev->mtu), IP_MAX_MTU);
+	/* 'forwarding = true' case should always honour route mtu */
+	mtu = dst_metric_raw(dst, RTAX_MTU);
+	if (mtu)
+		goto out;
+
+	mtu = READ_ONCE(dst->dev->mtu);
+
+	if (unlikely(ip_mtu_locked(dst))) {
+		if (rt->rt_uses_gateway && mtu > 576)
+			mtu = 576;
+	}
+
+out:
+	mtu = min_t(unsigned int, mtu, IP_MAX_MTU);
+
+	return mtu - lwtunnel_headroom(dst->lwtstate, mtu);
 }
 
 static inline unsigned int ip_skb_dst_mtu(struct sock *sk,
 					  const struct sk_buff *skb)
 {
+	unsigned int mtu;
+
 	if (!sk || !sk_fullsock(sk) || ip_sk_use_pmtu(sk)) {
 		bool forwarding = IPCB(skb)->flags & IPSKB_FORWARDED;
 
 		return ip_dst_mtu_maybe_forward(skb_dst(skb), forwarding);
 	}
 
-	return min(READ_ONCE(skb_dst(skb)->dev->mtu), IP_MAX_MTU);
+	mtu = min(READ_ONCE(skb_dst(skb)->dev->mtu), IP_MAX_MTU);
+	return mtu - lwtunnel_headroom(skb_dst(skb)->lwtstate, mtu);
 }
 
 struct dst_metrics *ip_fib_metrics_init(struct net *net, struct nlattr *fc_mx,
@@ -491,7 +519,6 @@ void ip_dst_metrics_put(struct dst_entry *dst)
 		kfree(p);
 }
 
-u32 ip_idents_reserve(u32 hash, int segs);
 void __ip_select_ident(struct net *net, struct iphdr *iph, int segs);
 
 static inline void ip_select_ident_segs(struct net *net, struct sk_buff *skb,
@@ -499,19 +526,18 @@ static inline void ip_select_ident_segs(struct net *net, struct sk_buff *skb,
 {
 	struct iphdr *iph = ip_hdr(skb);
 
+	/* We had many attacks based on IPID, use the private
+	 * generator as much as we can.
+	 */
+	if (sk && inet_sk(sk)->inet_daddr) {
+		iph->id = htons(inet_sk(sk)->inet_id);
+		inet_sk(sk)->inet_id += segs;
+		return;
+	}
 	if ((iph->frag_off & htons(IP_DF)) && !skb->ignore_df) {
-		/* This is only to work around buggy Windows95/2000
-		 * VJ compression implementations.  If the ID field
-		 * does not change, they drop every other packet in
-		 * a TCP stream using header compression.
-		 */
-		if (sk && inet_sk(sk)->inet_daddr) {
-			iph->id = htons(inet_sk(sk)->inet_id);
-			inet_sk(sk)->inet_id += segs;
-		} else {
-			iph->id = 0;
-		}
+		iph->id = 0;
 	} else {
+		/* Unfortunately we need the big hammer to get a suitable IPID */
 		__ip_select_ident(net, iph, segs);
 	}
 }
@@ -538,16 +564,8 @@ static inline void iph_to_flow_copy_v4addrs(struct flow_keys *flow,
 	BUILD_BUG_ON(offsetof(typeof(flow->addrs), v4addrs.dst) !=
 		     offsetof(typeof(flow->addrs), v4addrs.src) +
 			      sizeof(flow->addrs.v4addrs.src));
-	memcpy(&flow->addrs.v4addrs, &iph->saddr, sizeof(flow->addrs.v4addrs));
+	memcpy(&flow->addrs.v4addrs, &iph->addrs, sizeof(flow->addrs.v4addrs));
 	flow->control.addr_type = FLOW_DISSECTOR_KEY_IPV4_ADDRS;
-}
-
-static inline __wsum inet_gro_compute_pseudo(struct sk_buff *skb, int proto)
-{
-	const struct iphdr *iph = skb_gro_network_header(skb);
-
-	return csum_tcpudp_nofold(iph->saddr, iph->daddr,
-				  skb_gro_len(skb), proto, 0);
 }
 
 /*
@@ -695,7 +713,7 @@ int ip_forward(struct sk_buff *skb);
  */
 
 void ip_options_build(struct sk_buff *skb, struct ip_options *opt,
-		      __be32 daddr, struct rtable *rt, int is_frag);
+		      __be32 daddr, struct rtable *rt);
 
 int __ip_options_echo(struct net *net, struct ip_options *dopt,
 		      struct sk_buff *skb, const struct ip_options *sopt);
@@ -711,9 +729,7 @@ int __ip_options_compile(struct net *net, struct ip_options *opt,
 int ip_options_compile(struct net *net, struct ip_options *opt,
 		       struct sk_buff *skb);
 int ip_options_get(struct net *net, struct ip_options_rcu **optp,
-		   unsigned char *data, int optlen);
-int ip_options_get_from_user(struct net *net, struct ip_options_rcu **optp,
-			     unsigned char __user *data, int optlen);
+		   sockptr_t data, int optlen);
 void ip_options_undo(struct ip_options *opt);
 void ip_forward_options(struct sk_buff *skb);
 int ip_options_rcv_srr(struct sk_buff *skb, struct net_device *dev);
@@ -727,14 +743,15 @@ void ip_cmsg_recv_offset(struct msghdr *msg, struct sock *sk,
 			 struct sk_buff *skb, int tlen, int offset);
 int ip_cmsg_send(struct sock *sk, struct msghdr *msg,
 		 struct ipcm_cookie *ipc, bool allow_ipv6);
-int ip_setsockopt(struct sock *sk, int level, int optname, char __user *optval,
+DECLARE_STATIC_KEY_FALSE(ip4_min_ttl);
+int do_ip_setsockopt(struct sock *sk, int level, int optname, sockptr_t optval,
+		     unsigned int optlen);
+int ip_setsockopt(struct sock *sk, int level, int optname, sockptr_t optval,
 		  unsigned int optlen);
+int do_ip_getsockopt(struct sock *sk, int level, int optname,
+		     sockptr_t optval, sockptr_t optlen);
 int ip_getsockopt(struct sock *sk, int level, int optname, char __user *optval,
 		  int __user *optlen);
-int compat_ip_setsockopt(struct sock *sk, int level, int optname,
-			 char __user *optval, unsigned int optlen);
-int compat_ip_getsockopt(struct sock *sk, int level, int optname,
-			 char __user *optval, int __user *optlen);
 int ip_ra_control(struct sock *sk, unsigned char on,
 		  void (*destructor)(struct sock *));
 
@@ -764,5 +781,12 @@ static inline bool inetdev_valid_mtu(unsigned int mtu)
 {
 	return likely(mtu >= IPV4_MIN_MTU);
 }
+
+void ip_sock_set_freebind(struct sock *sk);
+int ip_sock_set_mtu_discover(struct sock *sk, int val);
+void ip_sock_set_pktinfo(struct sock *sk);
+void ip_sock_set_recverr(struct sock *sk);
+void ip_sock_set_tos(struct sock *sk, int val);
+void  __ip_sock_set_tos(struct sock *sk, int val);
 
 #endif	/* _IP_H */

@@ -47,8 +47,7 @@ enum mod_hdcp_status mod_hdcp_hdcp2_transition(struct mod_hdcp *hdcp,
 		}
 		break;
 	case H2_A1_SEND_AKE_INIT:
-		if (input->add_topology != PASS ||
-				input->create_session != PASS ||
+		if (input->create_session != PASS ||
 				input->ake_init_prepare != PASS) {
 			/* out of sync with psp state */
 			adjust->hdcp2.disable = 1;
@@ -243,11 +242,11 @@ enum mod_hdcp_status mod_hdcp_hdcp2_transition(struct mod_hdcp *hdcp,
 		}
 		callback_in_ms(0, output);
 		set_state_id(hdcp, output, H2_A5_AUTHENTICATED);
-		HDCP_FULL_DDC_TRACE(hdcp);
+		set_auth_complete(hdcp, output);
 		break;
 	case H2_A5_AUTHENTICATED:
-		if (input->rxstatus_read != PASS ||
-				input->reauth_request_check != PASS) {
+		if (input->rxstatus_read == FAIL ||
+				input->reauth_request_check == FAIL) {
 			fail_and_restart_in_ms(0, &status, output);
 			break;
 		} else if (event_ctx->rx_id_list_ready && conn->is_repeater) {
@@ -389,8 +388,7 @@ enum mod_hdcp_status mod_hdcp_hdcp2_dp_transition(struct mod_hdcp *hdcp,
 		}
 		break;
 	case D2_A1_SEND_AKE_INIT:
-		if (input->add_topology != PASS ||
-				input->create_session != PASS ||
+		if (input->create_session != PASS ||
 				input->ake_init_prepare != PASS) {
 			/* out of sync with psp state */
 			adjust->hdcp2.disable = 1;
@@ -526,7 +524,7 @@ enum mod_hdcp_status mod_hdcp_hdcp2_dp_transition(struct mod_hdcp *hdcp,
 			set_watchdog_in_ms(hdcp, 3000, output);
 			set_state_id(hdcp, output, D2_A6_WAIT_FOR_RX_ID_LIST);
 		} else {
-			callback_in_ms(0, output);
+			callback_in_ms(1, output);
 			set_state_id(hdcp, output, D2_SEND_CONTENT_STREAM_TYPE);
 		}
 		break;
@@ -561,14 +559,14 @@ enum mod_hdcp_status mod_hdcp_hdcp2_dp_transition(struct mod_hdcp *hdcp,
 			break;
 		}
 		set_state_id(hdcp, output, D2_A5_AUTHENTICATED);
-		HDCP_FULL_DDC_TRACE(hdcp);
+		set_auth_complete(hdcp, output);
 		break;
 	case D2_A5_AUTHENTICATED:
-		if (input->rxstatus_read != PASS ||
-				input->reauth_request_check != PASS) {
-			fail_and_restart_in_ms(0, &status, output);
+		if (input->rxstatus_read == FAIL ||
+				input->reauth_request_check == FAIL) {
+			fail_and_restart_in_ms(100, &status, output);
 			break;
-		} else if (input->link_integrity_check_dp != PASS) {
+		} else if (input->link_integrity_check_dp == FAIL) {
 			if (hdcp->connection.hdcp2_retry_count >= 1)
 				adjust->hdcp2.force_type = MOD_HDCP_FORCE_TYPE_0;
 			fail_and_restart_in_ms(0, &status, output);

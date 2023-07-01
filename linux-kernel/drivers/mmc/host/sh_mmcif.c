@@ -43,12 +43,12 @@
 #include <linux/mmc/host.h>
 #include <linux/mmc/mmc.h>
 #include <linux/mmc/sdio.h>
-#include <linux/mmc/sh_mmcif.h>
 #include <linux/mmc/slot-gpio.h>
 #include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/of_device.h>
 #include <linux/pagemap.h>
+#include <linux/platform_data/sh_mmcif.h>
 #include <linux/platform_device.h>
 #include <linux/pm_qos.h>
 #include <linux/pm_runtime.h>
@@ -191,9 +191,9 @@
 				 STS2_AC12BSYTO | STS2_RSPBSYTO |	\
 				 STS2_AC12RSPTO | STS2_RSPTO)
 
-#define CLKDEV_EMMC_DATA	52000000 /* 52MHz */
-#define CLKDEV_MMC_DATA		20000000 /* 20MHz */
-#define CLKDEV_INIT		400000   /* 400 KHz */
+#define CLKDEV_EMMC_DATA	52000000 /* 52 MHz */
+#define CLKDEV_MMC_DATA		20000000 /* 20 MHz */
+#define CLKDEV_INIT		400000   /* 400 kHz */
 
 enum sh_mmcif_state {
 	STATE_IDLE,
@@ -405,6 +405,9 @@ static int sh_mmcif_dma_slave_config(struct sh_mmcif_host *host,
 	struct dma_slave_config cfg = { 0, };
 
 	res = platform_get_resource(host->pd, IORESOURCE_MEM, 0);
+	if (!res)
+		return -EINVAL;
+
 	cfg.direction = direction;
 
 	if (direction == DMA_DEV_TO_MEM) {
@@ -518,8 +521,7 @@ static void sh_mmcif_clock_control(struct sh_mmcif_host *host, unsigned int clk)
 		}
 
 		dev_dbg(dev, "clk %u/%u (%u, 0x%x)\n",
-			(best_freq / (1 << (clkdiv + 1))), clk,
-			best_freq, clkdiv);
+			(best_freq >> (clkdiv + 1)), clk, best_freq, clkdiv);
 
 		clk_set_rate(host->clk, best_freq);
 		clkdiv = clkdiv << 16;
@@ -1009,8 +1011,8 @@ static void sh_mmcif_clk_setup(struct sh_mmcif_host *host)
 		 */
 		host->clkdiv_map = 0x3ff;
 
-		host->mmc->f_max = f_max / (1 << ffs(host->clkdiv_map));
-		host->mmc->f_min = f_min / (1 << fls(host->clkdiv_map));
+		host->mmc->f_max = f_max >> ffs(host->clkdiv_map);
+		host->mmc->f_min = f_min >> fls(host->clkdiv_map);
 	} else {
 		unsigned int clk = clk_get_rate(host->clk);
 
@@ -1164,9 +1166,9 @@ static bool sh_mmcif_end_cmd(struct sh_mmcif_host *host)
 		data->bytes_xfered = 0;
 		/* Abort DMA */
 		if (data->flags & MMC_DATA_READ)
-			dmaengine_terminate_all(host->chan_rx);
+			dmaengine_terminate_sync(host->chan_rx);
 		else
-			dmaengine_terminate_all(host->chan_tx);
+			dmaengine_terminate_sync(host->chan_tx);
 	}
 
 	return false;
@@ -1562,6 +1564,7 @@ static struct platform_driver sh_mmcif_driver = {
 	.remove		= sh_mmcif_remove,
 	.driver		= {
 		.name	= DRIVER_NAME,
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.pm	= &sh_mmcif_dev_pm_ops,
 		.of_match_table = sh_mmcif_of_match,
 	},

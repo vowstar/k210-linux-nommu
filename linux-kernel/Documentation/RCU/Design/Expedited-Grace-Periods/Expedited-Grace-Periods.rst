@@ -38,7 +38,7 @@ sections.
 RCU-preempt Expedited Grace Periods
 ===================================
 
-``CONFIG_PREEMPT=y`` kernels implement RCU-preempt.
+``CONFIG_PREEMPTION=y`` kernels implement RCU-preempt.
 The overall flow of the handling of a given CPU by an RCU-preempt
 expedited grace period is shown in the following diagram:
 
@@ -112,7 +112,7 @@ things.
 RCU-sched Expedited Grace Periods
 ---------------------------------
 
-``CONFIG_PREEMPT=n`` kernels implement RCU-sched. The overall flow of
+``CONFIG_PREEMPTION=n`` kernels implement RCU-sched. The overall flow of
 the handling of a given CPU by an RCU-sched expedited grace period is
 shown in the following diagram:
 
@@ -406,7 +406,7 @@ In earlier implementations, the task requesting the expedited grace
 period also drove it to completion. This straightforward approach had
 the disadvantage of needing to account for POSIX signals sent to user
 tasks, so more recent implemementations use the Linux kernel's
-`workqueues <https://www.kernel.org/doc/Documentation/core-api/workqueue.rst>`__.
+workqueues (see Documentation/core-api/workqueue.rst).
 
 The requesting task still does counter snapshotting and funnel-lock
 processing, but the task reaching the top of the funnel lock does a

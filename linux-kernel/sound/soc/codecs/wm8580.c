@@ -511,7 +511,7 @@ static int wm8580_set_dai_pll(struct snd_soc_dai *codec_dai, int pll_id,
 	snd_soc_component_write(component, WM8580_PLLA3 + offset,
 		     (pll_div.k >> 18 & 0xf) | (pll_div.n << 4));
 
-	reg = snd_soc_component_read32(component, WM8580_PLLA4 + offset);
+	reg = snd_soc_component_read(component, WM8580_PLLA4 + offset);
 	reg &= ~0x1b;
 	reg |= pll_div.prescale | pll_div.postscale << 1 |
 		pll_div.freqmode << 3;
@@ -608,8 +608,8 @@ static int wm8580_set_paif_dai_fmt(struct snd_soc_dai *codec_dai,
 	unsigned int aifb;
 	int can_invert_lrclk;
 
-	aifa = snd_soc_component_read32(component, WM8580_PAIF1 + codec_dai->driver->id);
-	aifb = snd_soc_component_read32(component, WM8580_PAIF3 + codec_dai->driver->id);
+	aifa = snd_soc_component_read(component, WM8580_PAIF1 + codec_dai->driver->id);
+	aifb = snd_soc_component_read(component, WM8580_PAIF3 + codec_dai->driver->id);
 
 	aifb &= ~(WM8580_AIF_FMT_MASK | WM8580_AIF_LRP | WM8580_AIF_BCP);
 
@@ -689,7 +689,7 @@ static int wm8580_set_dai_clkdiv(struct snd_soc_dai *codec_dai,
 
 	switch (div_id) {
 	case WM8580_MCLK:
-		reg = snd_soc_component_read32(component, WM8580_PLLB4);
+		reg = snd_soc_component_read(component, WM8580_PLLB4);
 		reg &= ~WM8580_PLLB4_MCLKOUTSRC_MASK;
 
 		switch (div) {
@@ -715,7 +715,7 @@ static int wm8580_set_dai_clkdiv(struct snd_soc_dai *codec_dai,
 		break;
 
 	case WM8580_CLKOUTSRC:
-		reg = snd_soc_component_read32(component, WM8580_PLLB4);
+		reg = snd_soc_component_read(component, WM8580_PLLB4);
 		reg &= ~WM8580_PLLB4_CLKOUTSRC_MASK;
 
 		switch (div) {
@@ -800,12 +800,12 @@ static int wm8580_set_sysclk(struct snd_soc_dai *dai, int clk_id,
 	return 0;
 }
 
-static int wm8580_digital_mute(struct snd_soc_dai *codec_dai, int mute)
+static int wm8580_mute(struct snd_soc_dai *codec_dai, int mute, int direction)
 {
 	struct snd_soc_component *component = codec_dai->component;
 	unsigned int reg;
 
-	reg = snd_soc_component_read32(component, WM8580_DAC_CONTROL5);
+	reg = snd_soc_component_read(component, WM8580_DAC_CONTROL5);
 
 	if (mute)
 		reg |= WM8580_DAC_CONTROL5_MUTEALL;
@@ -866,7 +866,8 @@ static const struct snd_soc_dai_ops wm8580_dai_ops_playback = {
 	.set_fmt	= wm8580_set_paif_dai_fmt,
 	.set_clkdiv	= wm8580_set_dai_clkdiv,
 	.set_pll	= wm8580_set_dai_pll,
-	.digital_mute	= wm8580_digital_mute,
+	.mute_stream	= wm8580_mute,
+	.no_capture_mute = 1,
 };
 
 static const struct snd_soc_dai_ops wm8580_dai_ops_capture = {
@@ -965,7 +966,6 @@ static const struct snd_soc_component_driver soc_component_dev_wm8580 = {
 	.idle_bias_on		= 1,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 static const struct regmap_config wm8580_regmap = {
@@ -995,8 +995,7 @@ static const struct of_device_id wm8580_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, wm8580_of_match);
 
-static int wm8580_i2c_probe(struct i2c_client *i2c,
-			    const struct i2c_device_id *id)
+static int wm8580_i2c_probe(struct i2c_client *i2c)
 {
 	const struct of_device_id *of_id;
 	struct wm8580_priv *wm8580;
@@ -1050,7 +1049,7 @@ static struct i2c_driver wm8580_i2c_driver = {
 		.name = "wm8580",
 		.of_match_table = wm8580_of_match,
 	},
-	.probe =    wm8580_i2c_probe,
+	.probe_new = wm8580_i2c_probe,
 	.id_table = wm8580_i2c_id,
 };
 

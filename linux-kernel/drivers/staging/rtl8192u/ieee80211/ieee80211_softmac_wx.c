@@ -459,8 +459,8 @@ int ieee80211_wx_set_rawtx(struct ieee80211_device *ieee,
 	else
 		ieee->raw_tx = 0;
 
-	printk(KERN_INFO"raw TX is %s\n",
-	      ieee->raw_tx ? "enabled" : "disabled");
+	netdev_info(ieee->dev, "raw TX is %s\n",
+		    ieee->raw_tx ? "enabled" : "disabled");
 
 	if (ieee->iw_mode == IW_MODE_MONITOR) {
 		if (prev == 0 && ieee->raw_tx) {
@@ -484,7 +484,7 @@ int ieee80211_wx_get_name(struct ieee80211_device *ieee,
 			     struct iw_request_info *info,
 			     union iwreq_data *wrqu, char *extra)
 {
-	strlcpy(wrqu->name, "802.11", IFNAMSIZ);
+	strscpy(wrqu->name, "802.11", IFNAMSIZ);
 	if (ieee->modulation & IEEE80211_CCK_MODULATION) {
 		strlcat(wrqu->name, "b", IFNAMSIZ);
 		if (ieee->modulation & IEEE80211_OFDM_MODULATION)

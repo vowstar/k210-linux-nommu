@@ -20,10 +20,9 @@
 /* Set us up to scrub parents. */
 int
 xchk_setup_parent(
-	struct xfs_scrub	*sc,
-	struct xfs_inode	*ip)
+	struct xfs_scrub	*sc)
 {
-	return xchk_setup_inode_contents(sc, ip, 0);
+	return xchk_setup_inode_contents(sc, 0);
 }
 
 /* Parent pointers */
@@ -39,7 +38,7 @@ struct xchk_parent_ctx {
 };
 
 /* Look for a single entry in a directory pointing to an inode. */
-STATIC int
+STATIC bool
 xchk_parent_actor(
 	struct dir_context	*dc,
 	const char		*name,
@@ -63,7 +62,7 @@ xchk_parent_actor(
 	if (xchk_should_terminate(spc->sc, &error))
 		spc->cancelled = true;
 
-	return error;
+	return !error;
 }
 
 /* Count the number of dentries in the parent dir that point to this inode. */
@@ -90,7 +89,7 @@ xchk_parent_count_parent_dentries(
 	 * if there is one.
 	 */
 	lock_mode = xfs_ilock_data_map_shared(parent);
-	if (parent->i_d.di_nextents > 0)
+	if (parent->i_df.if_nextents > 0)
 		error = xfs_dir3_data_readahead(parent, 0, 0);
 	xfs_iunlock(parent, lock_mode);
 	if (error)
@@ -102,7 +101,7 @@ xchk_parent_count_parent_dentries(
 	 * scanned.
 	 */
 	bufsize = (size_t)min_t(loff_t, XFS_READDIR_BUFSIZE,
-			parent->i_d.di_size);
+			parent->i_disk_size);
 	oldpos = 0;
 	while (true) {
 		error = xfs_readdir(sc->tp, parent, &spc.dc, bufsize);
@@ -164,13 +163,13 @@ xchk_parent_validate(
 	 * can't use DONTCACHE here because DONTCACHE inodes can trigger
 	 * immediate inactive cleanup of the inode.
 	 *
-	 * If _iget returns -EINVAL then the parent inode number is garbage
-	 * and the directory is corrupt.  If the _iget returns -EFSCORRUPTED
-	 * or -EFSBADCRC then the parent is corrupt which is a cross
-	 * referencing error.  Any other error is an operational error.
+	 * If _iget returns -EINVAL or -ENOENT then the parent inode number is
+	 * garbage and the directory is corrupt.  If the _iget returns
+	 * -EFSCORRUPTED or -EFSBADCRC then the parent is corrupt which is a
+	 *  cross referencing error.  Any other error is an operational error.
 	 */
 	error = xfs_iget(mp, sc->tp, dnum, XFS_IGET_UNTRUSTED, 0, &dp);
-	if (error == -EINVAL) {
+	if (error == -EINVAL || error == -ENOENT) {
 		error = -EFSCORRUPTED;
 		xchk_fblock_process_error(sc, XFS_DATA_FORK, 0, &error);
 		goto out;

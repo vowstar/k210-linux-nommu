@@ -456,8 +456,6 @@ static void sur40_poll(struct input_dev *input)
 {
 	struct sur40_state *sur40 = input_get_drvdata(input);
 	int result, bulk_read, need_blobs, packet_blobs, i;
-	u32 uninitialized_var(packet_id);
-
 	struct sur40_header *header = &sur40->bulk_in_buffer->header;
 	struct sur40_blob *inblob = &sur40->bulk_in_buffer->blobs[0];
 
@@ -491,7 +489,7 @@ static void sur40_poll(struct input_dev *input)
 		if (need_blobs == -1) {
 			need_blobs = le16_to_cpu(header->count);
 			dev_dbg(sur40->dev, "need %d blobs\n", need_blobs);
-			packet_id = le32_to_cpu(header->packet_id);
+			/* packet_id = le32_to_cpu(header->packet_id); */
 		}
 
 		/*
@@ -789,6 +787,7 @@ static int sur40_probe(struct usb_interface *interface,
 		dev_err(&interface->dev,
 			"Unable to register video controls.");
 		v4l2_ctrl_handler_free(&sur40->hdl);
+		error = sur40->hdl.error;
 		goto err_unreg_v4l2;
 	}
 
@@ -940,8 +939,8 @@ static int sur40_vidioc_querycap(struct file *file, void *priv,
 {
 	struct sur40_state *sur40 = video_drvdata(file);
 
-	strlcpy(cap->driver, DRIVER_SHORT, sizeof(cap->driver));
-	strlcpy(cap->card, DRIVER_LONG, sizeof(cap->card));
+	strscpy(cap->driver, DRIVER_SHORT, sizeof(cap->driver));
+	strscpy(cap->card, DRIVER_LONG, sizeof(cap->card));
 	usb_make_path(sur40->usbdev, cap->bus_info, sizeof(cap->bus_info));
 	return 0;
 }
@@ -953,7 +952,7 @@ static int sur40_vidioc_enum_input(struct file *file, void *priv,
 		return -EINVAL;
 	i->type = V4L2_INPUT_TYPE_TOUCH;
 	i->std = V4L2_STD_UNKNOWN;
-	strlcpy(i->name, "In-Cell Sensor", sizeof(i->name));
+	strscpy(i->name, "In-Cell Sensor", sizeof(i->name));
 	i->capabilities = 0;
 	return 0;
 }

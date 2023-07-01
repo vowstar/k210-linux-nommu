@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * Marvell Wireless LAN device driver: AP TX and RX data handling
+ * NXP Wireless LAN device driver: AP TX and RX data handling
  *
- * Copyright (C) 2012-2014, Marvell International Ltd.
- *
- * This software file (the "File") is distributed by Marvell International
- * Ltd. under the terms of the GNU General Public License Version 2, June 1991
- * (the "License").  You may use, redistribute and/or modify this File in
- * accordance with the terms and conditions of the License, a copy of which
- * is available by writing to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA or on the
- * worldwide web at http://www.gnu.org/licenses/old-licenses/gpl-2.0.txt.
- *
- * THE FILE IS DISTRIBUTED AS-IS, WITHOUT WARRANTY OF ANY KIND, AND THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE
- * ARE EXPRESSLY DISCLAIMED.  The License provides additional details about
- * this warranty disclaimer.
+ * Copyright 2011-2020 NXP
  */
 
 #include "decl.h"
@@ -350,11 +338,7 @@ int mwifiex_uap_recv_packet(struct mwifiex_private *priv,
 		skb->truesize += (skb->len - MWIFIEX_RX_DATA_BUF_SIZE);
 
 	/* Forward multicast/broadcast packet to upper layer*/
-	if (in_interrupt())
-		netif_rx(skb);
-	else
-		netif_rx_ni(skb);
-
+	netif_rx(skb);
 	return 0;
 }
 
@@ -479,8 +463,8 @@ void *mwifiex_process_uap_txpd(struct mwifiex_private *priv,
 
 	pkt_type = mwifiex_is_skb_mgmt_frame(skb) ? PKT_TYPE_MGMT : 0;
 
-	pad = ((void *)skb->data - (sizeof(*txpd) + hroom) - NULL) &
-			(MWIFIEX_DMA_ALIGN_SZ - 1);
+	pad = ((uintptr_t)skb->data - (sizeof(*txpd) + hroom)) &
+	       (MWIFIEX_DMA_ALIGN_SZ - 1);
 
 	skb_push(skb, sizeof(*txpd) + pad);
 

@@ -1,12 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-// Copyright (C) 2018 Hangzhou C-SKY Microsystems co.,ltd.
 
 #ifndef __ASM_CSKY_IO_H
 #define __ASM_CSKY_IO_H
 
-#include <asm/pgtable.h>
+#include <linux/pgtable.h>
 #include <linux/types.h>
-#include <linux/version.h>
 
 /*
  * I/O memory access primitives. Reads are ordered relative to any
@@ -32,6 +30,17 @@
 #define writew(v,c)		({ wmb(); writew_relaxed((v),(c)); mb(); })
 #define writel(v,c)		({ wmb(); writel_relaxed((v),(c)); mb(); })
 #endif
+
+/*
+ * String version of I/O memory access operations.
+ */
+extern void __memcpy_fromio(void *, const volatile void __iomem *, size_t);
+extern void __memcpy_toio(volatile void __iomem *, const void *, size_t);
+extern void __memset_io(volatile void __iomem *, int, size_t);
+
+#define memset_io(c,v,l)        __memset_io((c),(v),(l))
+#define memcpy_fromio(a,c,l)    __memcpy_fromio((a),(c),(l))
+#define memcpy_toio(c,a,l)      __memcpy_toio((c),(a),(l))
 
 /*
  * I/O memory mapping functions.

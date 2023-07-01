@@ -13,6 +13,7 @@ properties:
   compatible:
     items:
       - enum:
+          - renesas,pwm-r8a7742   # RZ/G1H
           - renesas,pwm-r8a7743   # RZ/G1M
           - renesas,pwm-r8a7744   # RZ/G1N
           - renesas,pwm-r8a7745   # RZ/G1E
@@ -20,6 +21,7 @@ properties:
           - renesas,pwm-r8a774a1  # RZ/G2M
           - renesas,pwm-r8a774b1  # RZ/G2N
           - renesas,pwm-r8a774c0  # RZ/G2E
+          - renesas,pwm-r8a774e1  # RZ/G2H
           - renesas,pwm-r8a7778   # R-Car M1A
           - renesas,pwm-r8a7779   # R-Car H1
           - renesas,pwm-r8a7790   # R-Car H2
@@ -27,11 +29,13 @@ properties:
           - renesas,pwm-r8a7794   # R-Car E2
           - renesas,pwm-r8a7795   # R-Car H3
           - renesas,pwm-r8a7796   # R-Car M3-W
+          - renesas,pwm-r8a77961  # R-Car M3-W+
           - renesas,pwm-r8a77965  # R-Car M3-N
           - renesas,pwm-r8a77970  # R-Car V3M
           - renesas,pwm-r8a77980  # R-Car V3H
           - renesas,pwm-r8a77990  # R-Car E3
           - renesas,pwm-r8a77995  # R-Car D3
+          - renesas,pwm-r8a779g0  # R-Car V4H
       - const: renesas,pwm-rcar
 
   reg:
@@ -56,8 +60,23 @@ properties:
 required:
   - compatible
   - reg
-  - '#pwm-cells'
   - clocks
+  - power-domains
+
+allOf:
+  - $ref: pwm.yaml#
+
+  - if:
+      not:
+        properties:
+          compatible:
+            contains:
+              enum:
+                - renesas,pwm-r8a7778
+                - renesas,pwm-r8a7779
+    then:
+      required:
+        - resets
 
 additionalProperties: false
 
@@ -68,7 +87,7 @@ examples:
 
     pwm0: pwm@e6e30000 {
         compatible = "renesas,pwm-r8a7743", "renesas,pwm-rcar";
-        reg = <0 0xe6e30000 0 0x8>;
+        reg = <0xe6e30000 0x8>;
         clocks = <&cpg CPG_MOD 523>;
         power-domains = <&sysc R8A7743_PD_ALWAYS_ON>;
         resets = <&cpg 523>;

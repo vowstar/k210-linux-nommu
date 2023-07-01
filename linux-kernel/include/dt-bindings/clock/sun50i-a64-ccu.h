@@ -113,7 +113,7 @@
 #define CLK_USB_OHCI0		91
 
 #define CLK_USB_OHCI1		93
-
+#define CLK_DRAM		94
 #define CLK_DRAM_VE		95
 #define CLK_DRAM_CSI		96
 #define CLK_DRAM_DEINTERLACE	97
@@ -131,7 +131,7 @@
 #define CLK_AVS			109
 #define CLK_HDMI		110
 #define CLK_HDMI_DDC		111
-
+#define CLK_MBUS		112
 #define CLK_DSI_DPHY		113
 #define CLK_GPU			114
 

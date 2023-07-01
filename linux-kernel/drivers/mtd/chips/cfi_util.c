@@ -108,14 +108,14 @@ map_word cfi_build_cmd(u_long cmd, struct map_info *map, struct cfi_private *cfi
 #if BITS_PER_LONG >= 64
 	case 8:
 		onecmd |= (onecmd << (chip_mode * 32));
+		fallthrough;
 #endif
-		/* fall through */
 	case 4:
 		onecmd |= (onecmd << (chip_mode * 16));
-		/* fall through */
+		fallthrough;
 	case 2:
 		onecmd |= (onecmd << (chip_mode * 8));
-		/* fall through */
+		fallthrough;
 	case 1:
 		;
 	}
@@ -164,14 +164,14 @@ unsigned long cfi_merge_status(map_word val, struct map_info *map,
 #if BITS_PER_LONG >= 64
 	case 8:
 		res |= (onestat >> (chip_mode * 32));
+		fallthrough;
 #endif
-		/* fall through */
 	case 4:
 		res |= (onestat >> (chip_mode * 16));
-		/* fall through */
+		fallthrough;
 	case 2:
 		res |= (onestat >> (chip_mode * 8));
-		/* fall through */
+		fallthrough;
 	case 1:
 		;
 	}

@@ -23,6 +23,7 @@
 
 #ifndef __AMDGPU_SDMA_H__
 #define __AMDGPU_SDMA_H__
+#include "amdgpu_ras.h"
 
 /* max number of IP instances */
 #define AMDGPU_MAX_SDMA_INSTANCES		8
@@ -50,26 +51,25 @@ struct amdgpu_sdma_instance {
 	bool			burst_nop;
 };
 
-struct amdgpu_sdma_ras_funcs {
-	int (*ras_late_init)(struct amdgpu_device *adev,
-			void *ras_ih_info);
-	void (*ras_fini)(struct amdgpu_device *adev);
-	int (*query_ras_error_count)(struct amdgpu_device *adev,
-			uint32_t instance, void *ras_error_status);
+struct amdgpu_sdma_ras {
+	struct amdgpu_ras_block_object ras_block;
 };
 
 struct amdgpu_sdma {
 	struct amdgpu_sdma_instance instance[AMDGPU_MAX_SDMA_INSTANCES];
-	struct drm_gpu_scheduler    *sdma_sched[AMDGPU_MAX_SDMA_INSTANCES];
-	uint32_t		    num_sdma_sched;
 	struct amdgpu_irq_src	trap_irq;
 	struct amdgpu_irq_src	illegal_inst_irq;
 	struct amdgpu_irq_src	ecc_irq;
+	struct amdgpu_irq_src	vm_hole_irq;
+	struct amdgpu_irq_src	doorbell_invalid_irq;
+	struct amdgpu_irq_src	pool_timeout_irq;
+	struct amdgpu_irq_src	srbm_write_irq;
+
 	int			num_instances;
 	uint32_t                    srbm_soft_reset;
 	bool			has_page_queue;
 	struct ras_common_if	*ras_if;
-	const struct amdgpu_sdma_ras_funcs	*funcs;
+	struct amdgpu_sdma_ras	*ras;
 };
 
 /*
@@ -90,7 +90,8 @@ struct amdgpu_buffer_funcs {
 				 /* dst addr in bytes */
 				 uint64_t dst_offset,
 				 /* number of byte to transfer */
-				 uint32_t byte_count);
+				 uint32_t byte_count,
+				 bool tmz);
 
 	/* maximum bytes in a single operation */
 	uint32_t	fill_max_bytes;
@@ -108,7 +109,7 @@ struct amdgpu_buffer_funcs {
 				 uint32_t byte_count);
 };
 
-#define amdgpu_emit_copy_buffer(adev, ib, s, d, b) (adev)->mman.buffer_funcs->emit_copy_buffer((ib),  (s), (d), (b))
+#define amdgpu_emit_copy_buffer(adev, ib, s, d, b, t) (adev)->mman.buffer_funcs->emit_copy_buffer((ib),  (s), (d), (b), (t))
 #define amdgpu_emit_fill_buffer(adev, ib, s, d, b) (adev)->mman.buffer_funcs->emit_fill_buffer((ib), (s), (d), (b))
 
 struct amdgpu_sdma_instance *
@@ -116,12 +117,18 @@ amdgpu_sdma_get_instance_from_ring(struct amdgpu_ring *ring);
 int amdgpu_sdma_get_index_from_ring(struct amdgpu_ring *ring, uint32_t *index);
 uint64_t amdgpu_sdma_get_csa_mc_addr(struct amdgpu_ring *ring, unsigned vmid);
 int amdgpu_sdma_ras_late_init(struct amdgpu_device *adev,
-			      void *ras_ih_info);
-void amdgpu_sdma_ras_fini(struct amdgpu_device *adev);
+			      struct ras_common_if *ras_block);
 int amdgpu_sdma_process_ras_data_cb(struct amdgpu_device *adev,
 		void *err_data,
 		struct amdgpu_iv_entry *entry);
 int amdgpu_sdma_process_ecc_irq(struct amdgpu_device *adev,
 				      struct amdgpu_irq_src *source,
 				      struct amdgpu_iv_entry *entry);
+int amdgpu_sdma_init_microcode(struct amdgpu_device *adev, u32 instance,
+			       bool duplicate);
+void amdgpu_sdma_destroy_inst_ctx(struct amdgpu_device *adev,
+        bool duplicate);
+void amdgpu_sdma_unset_buffer_funcs_helper(struct amdgpu_device *adev);
+int amdgpu_sdma_ras_sw_init(struct amdgpu_device *adev);
+
 #endif

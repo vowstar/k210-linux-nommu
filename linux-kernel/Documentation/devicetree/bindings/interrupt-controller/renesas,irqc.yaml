@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/interrupt-controller/renesas,irqc.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: DT bindings for the R-Mobile/R-Car/RZ/G interrupt controller
+title: R-Mobile/R-Car/RZ/G interrupt controller
 
 maintainers:
   - Geert Uytterhoeven <geert+renesas@glider.be>
@@ -14,6 +14,7 @@ properties:
     items:
       - enum:
           - renesas,irqc-r8a73a4        # R-Mobile APE6
+          - renesas,irqc-r8a7742        # RZ/G1H
           - renesas,irqc-r8a7743        # RZ/G1M
           - renesas,irqc-r8a7744        # RZ/G1N
           - renesas,irqc-r8a7745        # RZ/G1E
@@ -26,13 +27,17 @@ properties:
           - renesas,intc-ex-r8a774a1    # RZ/G2M
           - renesas,intc-ex-r8a774b1    # RZ/G2N
           - renesas,intc-ex-r8a774c0    # RZ/G2E
+          - renesas,intc-ex-r8a774e1    # RZ/G2H
           - renesas,intc-ex-r8a7795     # R-Car H3
           - renesas,intc-ex-r8a7796     # R-Car M3-W
+          - renesas,intc-ex-r8a77961    # R-Car M3-W+
           - renesas,intc-ex-r8a77965    # R-Car M3-N
           - renesas,intc-ex-r8a77970    # R-Car V3M
           - renesas,intc-ex-r8a77980    # R-Car V3H
           - renesas,intc-ex-r8a77990    # R-Car E3
           - renesas,intc-ex-r8a77995    # R-Car D3
+          - renesas,intc-ex-r8a779a0    # R-Car V3U
+          - renesas,intc-ex-r8a779g0    # R-Car V4H
       - const: renesas,irqc
 
   '#interrupt-cells':
@@ -78,7 +83,7 @@ examples:
         compatible = "renesas,irqc-r8a7790", "renesas,irqc";
         #interrupt-cells = <2>;
         interrupt-controller;
-        reg = <0 0xe61c0000 0 0x200>;
+        reg = <0xe61c0000 0x200>;
         interrupts = <GIC_SPI 0 IRQ_TYPE_LEVEL_HIGH>,
                      <GIC_SPI 1 IRQ_TYPE_LEVEL_HIGH>,
                      <GIC_SPI 2 IRQ_TYPE_LEVEL_HIGH>,

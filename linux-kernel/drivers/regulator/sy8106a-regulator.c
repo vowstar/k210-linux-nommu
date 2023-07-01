@@ -138,7 +138,7 @@ MODULE_DEVICE_TABLE(i2c, sy8106a_i2c_id);
 static struct i2c_driver sy8106a_regulator_driver = {
 	.driver = {
 		.name = "sy8106a",
-		.of_match_table	= of_match_ptr(sy8106a_i2c_of_match),
+		.of_match_table	= sy8106a_i2c_of_match,
 	},
 	.probe_new = sy8106a_i2c_probe,
 	.id_table = sy8106a_i2c_id,

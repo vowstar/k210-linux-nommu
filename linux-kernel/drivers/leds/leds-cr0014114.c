@@ -188,9 +188,6 @@ static int cr0014114_probe_dt(struct cr0014114 *priv)
 	device_for_each_child_node(priv->dev, child) {
 		led = &priv->leds[i];
 
-		fwnode_property_read_string(child, "linux,default-trigger",
-					    &led->ldev.default_trigger);
-
 		led->priv			  = priv;
 		led->ldev.max_brightness	  = CR_MAX_BRIGHTNESS;
 		led->ldev.brightness_set_blocking = cr0014114_set_sync;
@@ -269,14 +266,12 @@ static int cr0014114_probe(struct spi_device *spi)
 	return 0;
 }
 
-static int cr0014114_remove(struct spi_device *spi)
+static void cr0014114_remove(struct spi_device *spi)
 {
 	struct cr0014114 *priv = spi_get_drvdata(spi);
 
 	cancel_delayed_work_sync(&priv->work);
 	mutex_destroy(&priv->lock);
-
-	return 0;
 }
 
 static const struct of_device_id cr0014114_dt_ids[] = {

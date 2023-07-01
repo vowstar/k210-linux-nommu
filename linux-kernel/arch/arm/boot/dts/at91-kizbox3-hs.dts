@@ -15,47 +15,47 @@
 	model = "Overkiz KIZBOX3-HS";
 	compatible = "overkiz,kizbox3-hs", "atmel,sama5d2", "atmel,sama5";
 
-	pwm_leds {
+	led-controller-1 {
 		status = "okay";
 
-		red {
+		led-1 {
 			status = "okay";
 		};
 
-		green {
+		led-2 {
 			status = "okay";
 		};
 
-		blue {
+		led-3 {
 			status = "okay";
 		};
 
-		white {
+		led-4 {
 			status = "okay";
 		};
 	};
 
-	leds  {
+	led-controller-2  {
 		compatible = "gpio-leds";
 		pinctrl-names = "default";
 		pinctrl-0 = <&pinctrl_led_red
 			     &pinctrl_led_white>;
 		status = "okay";
 
-		red {
+		led-5 {
 			label = "pio:red:user";
 			gpios = <&pioA PIN_PB1 GPIO_ACTIVE_HIGH>;
 			default-state = "off";
 		};
 
-		white {
+		led-6 {
 			label = "pio:white:user";
 			gpios = <&pioA PIN_PB8 GPIO_ACTIVE_HIGH>;
 			default-state = "off";
 		};
 	};
 
-	gpio_keys {
+	gpio-keys {
 		compatible = "gpio-keys";
 		pinctrl-names = "default" , "default", "default",
 				"default", "default" ;
@@ -68,35 +68,35 @@
 			     &pinctrl_pio_zbe_rst>;
 		pinctrl-4 = <&pinctrl_pio_input>;
 
-		SW1 {
+		switch-1 {
 			label = "SW1";
 			gpios = <&pioA PIN_PA29 GPIO_ACTIVE_LOW>;
 			linux,code = <0x101>;
 			wakeup-source;
 		};
 
-		SW2 {
+		switch-2 {
 			label = "SW2";
 			gpios = <&pioA PIN_PA18 GPIO_ACTIVE_LOW>;
 			linux,code = <0x102>;
 			wakeup-source;
 		};
 
-		SW3 {
+		switch-3 {
 			label = "SW3";
 			gpios = <&pioA PIN_PA22 GPIO_ACTIVE_LOW>;
 			linux,code = <0x103>;
 			wakeup-source;
 		};
 
-		SW7 {
+		switch-7 {
 			label = "SW7";
 			gpios = <&pioA PIN_PA26 GPIO_ACTIVE_LOW>;
 			linux,code = <0x107>;
 			wakeup-source;
 		};
 
-		SW8 {
+		switch-8 {
 			label = "SW8";
 			gpios = <&pioA PIN_PA24 GPIO_ACTIVE_LOW>;
 			linux,code = <0x108>;
@@ -186,7 +186,7 @@
 
 &pioA {
 	pinctrl_key_gpio_default: key_gpio_default {
-		pinmux=  <PIN_PA22__GPIO>,
+		pinmux = <PIN_PA22__GPIO>,
 		<PIN_PA24__GPIO>,
 		<PIN_PA26__GPIO>,
 		<PIN_PA29__GPIO>,
@@ -283,7 +283,7 @@
 
 &flx3 {
 	status = "okay";
-	uart6: serial@200 {
+	uart8: serial@200 {
 		status = "okay";
 	};
 };
@@ -291,7 +291,7 @@
 &flx4 {
 	status = "okay";
 
-	i2c2: i2c@600 {
+	i2c6: i2c@600 {
 		status = "okay";
 	};
 };

@@ -131,7 +131,7 @@ int dce_get_dp_ref_freq_khz(struct clk_mgr *clk_mgr_base)
 	struct clk_mgr_internal *clk_mgr = TO_CLK_MGR_INTERNAL(clk_mgr_base);
 	int dprefclk_wdivider;
 	int dprefclk_src_sel;
-	int dp_ref_clk_khz = 600000;
+	int dp_ref_clk_khz;
 	int target_div;
 
 	/* ASSERT DP Reference Clock source is from DFS*/
@@ -374,6 +374,8 @@ void dce_clock_read_ss_info(struct clk_mgr_internal *clk_mgr_dce)
 				clk_mgr_dce->dprefclk_ss_percentage =
 						info.spread_spectrum_percentage;
 			}
+			if (clk_mgr_dce->base.ctx->dc->config.ignore_dpref_ss)
+				clk_mgr_dce->dprefclk_ss_percentage = 0;
 		}
 	}
 }

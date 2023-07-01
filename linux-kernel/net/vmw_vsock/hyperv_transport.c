@@ -78,6 +78,9 @@ struct hvs_send_buf {
 					 ALIGN((payload_len), 8) + \
 					 VMBUS_PKT_TRAILER_SIZE)
 
+/* Upper bound on the size of a VMbus packet for hv_sock */
+#define HVS_MAX_PKT_SIZE	HVS_PKT_LEN(HVS_MTU_SIZE)
+
 union hvs_service_id {
 	guid_t	srv_id;
 
@@ -225,14 +228,20 @@ static size_t hvs_channel_writable_bytes(struct vmbus_channel *chan)
 	return round_down(ret, 8);
 }
 
+static int __hvs_send_data(struct vmbus_channel *chan,
+			   struct vmpipe_proto_header *hdr,
+			   size_t to_write)
+{
+	hdr->pkt_type = 1;
+	hdr->data_size = to_write;
+	return vmbus_sendpacket(chan, hdr, sizeof(*hdr) + to_write,
+				0, VM_PKT_DATA_INBAND, 0);
+}
+
 static int hvs_send_data(struct vmbus_channel *chan,
 			 struct hvs_send_buf *send_buf, size_t to_write)
 {
-	send_buf->hdr.pkt_type = 1;
-	send_buf->hdr.data_size = to_write;
-	return vmbus_sendpacket(chan, &send_buf->hdr,
-				sizeof(send_buf->hdr) + to_write,
-				0, VM_PKT_DATA_INBAND, 0);
+	return __hvs_send_data(chan, &send_buf->hdr, to_write);
 }
 
 static void hvs_channel_cb(void *ctx)
@@ -372,6 +381,8 @@ static void hvs_open_connection(struct vmbus_channel *chan)
 		rcvbuf = ALIGN(rcvbuf, HV_HYP_PAGE_SIZE);
 	}
 
+	chan->max_pkt_size = HVS_MAX_PKT_SIZE;
+
 	ret = vmbus_open(chan, sndbuf, rcvbuf, NULL, 0, hvs_channel_cb,
 			 conn_from_host ? new : sk);
 	if (ret != 0) {
@@ -468,20 +479,16 @@ static void hvs_shutdown_lock_held(struct hvsock *hvs, int mode)
 		return;
 
 	/* It can't fail: see hvs_channel_writable_bytes(). */
-	(void)hvs_send_data(hvs->chan, (struct hvs_send_buf *)&hdr, 0);
+	(void)__hvs_send_data(hvs->chan, &hdr, 0);
 	hvs->fin_sent = true;
 }
 
 static int hvs_shutdown(struct vsock_sock *vsk, int mode)
 {
-	struct sock *sk = sk_vsock(vsk);
-
 	if (!(mode & SEND_SHUTDOWN))
 		return 0;
 
-	lock_sock(sk);
 	hvs_shutdown_lock_held(vsk->trans, mode);
-	release_sock(sk);
 	return 0;
 }
 
@@ -526,12 +533,9 @@ static bool hvs_close_lock_held(struct vsock_sock *vsk)
 
 static void hvs_release(struct vsock_sock *vsk)
 {
-	struct sock *sk = sk_vsock(vsk);
 	bool remove_sock;
 
-	lock_sock_nested(sk, SINGLE_DEPTH_NESTING);
 	remove_sock = hvs_close_lock_held(vsk);
-	release_sock(sk);
 	if (remove_sock)
 		vsock_remove_sock(vsk);
 }
@@ -573,12 +577,18 @@ static bool hvs_dgram_allow(u32 cid, u32 port)
 static int hvs_update_recv_data(struct hvsock *hvs)
 {
 	struct hvs_recv_buf *recv_buf;
-	u32 payload_len;
+	u32 pkt_len, payload_len;
+
+	pkt_len = hv_pkt_len(hvs->recv_desc);
+
+	if (pkt_len < HVS_HEADER_LEN)
+		return -EIO;
 
 	recv_buf = (struct hvs_recv_buf *)(hvs->recv_desc + 1);
 	payload_len = recv_buf->hdr.data_size;
 
-	if (payload_len > HVS_MTU_SIZE)
+	if (payload_len > pkt_len - HVS_HEADER_LEN ||
+	    payload_len > HVS_MTU_SIZE)
 		return -EIO;
 
 	if (payload_len == 0)
@@ -604,6 +614,8 @@ static ssize_t hvs_stream_dequeue(struct vsock_sock *vsk, struct msghdr *msg,
 
 	if (need_refill) {
 		hvs->recv_desc = hv_pkt_iter_first(hvs->chan);
+		if (!hvs->recv_desc)
+			return -ENOBUFS;
 		ret = hvs_update_recv_data(hvs);
 		if (ret)
 			return ret;
@@ -803,6 +815,12 @@ int hvs_notify_send_post_enqueue(struct vsock_sock *vsk, ssize_t written,
 	return 0;
 }
 
+static
+int hvs_set_rcvlowat(struct vsock_sock *vsk, int val)
+{
+	return -EOPNOTSUPP;
+}
+
 static struct vsock_transport hvs_transport = {
 	.module                   = THIS_MODULE,
 
@@ -838,6 +856,7 @@ static struct vsock_transport hvs_transport = {
 	.notify_send_pre_enqueue  = hvs_notify_send_pre_enqueue,
 	.notify_send_post_enqueue = hvs_notify_send_post_enqueue,
 
+	.set_rcvlowat             = hvs_set_rcvlowat
 };
 
 static bool hvs_check_transport(struct vsock_sock *vsk)
@@ -860,13 +879,11 @@ static int hvs_probe(struct hv_device *hdev,
 	return 0;
 }
 
-static int hvs_remove(struct hv_device *hdev)
+static void hvs_remove(struct hv_device *hdev)
 {
 	struct vmbus_channel *chan = hdev->channel;
 
 	vmbus_close(chan);
-
-	return 0;
 }
 
 /* hv_sock connections can not persist across hibernation, and all the hv_sock

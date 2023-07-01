@@ -45,8 +45,15 @@ void mpc1_set_bg_color(struct mpc *mpc,
 	struct mpcc *bottommost_mpcc = mpc1_get_mpcc(mpc, mpcc_id);
 	uint32_t bg_r_cr, bg_g_y, bg_b_cb;
 
+	bottommost_mpcc->blnd_cfg.black_color = *bg_color;
+
 	/* find bottommost mpcc. */
 	while (bottommost_mpcc->mpcc_bot) {
+		/* avoid circular linked link */
+		ASSERT(bottommost_mpcc != bottommost_mpcc->mpcc_bot);
+		if (bottommost_mpcc == bottommost_mpcc->mpcc_bot)
+			break;
+
 		bottommost_mpcc = bottommost_mpcc->mpcc_bot;
 	}
 
@@ -81,7 +88,6 @@ static void mpc1_update_blending(
 			MPCC_GLOBAL_ALPHA,		blnd_cfg->global_alpha,
 			MPCC_GLOBAL_GAIN,		blnd_cfg->global_gain);
 
-	mpc1_set_bg_color(mpc, &blnd_cfg->black_color, mpcc_id);
 	mpcc->blnd_cfg = *blnd_cfg;
 }
 
@@ -125,6 +131,12 @@ struct mpcc *mpc1_get_mpcc_for_dpp(struct mpc_tree *tree, int dpp_id)
 	while (tmp_mpcc != NULL) {
 		if (tmp_mpcc->dpp_id == dpp_id)
 			return tmp_mpcc;
+
+		/* avoid circular linked list */
+		ASSERT(tmp_mpcc != tmp_mpcc->mpcc_bot);
+		if (tmp_mpcc == tmp_mpcc->mpcc_bot)
+			break;
+
 		tmp_mpcc = tmp_mpcc->mpcc_bot;
 	}
 	return NULL;
@@ -223,6 +235,9 @@ struct mpcc *mpc1_insert_plane(
 	REG_SET(MPCC_TOP_SEL[mpcc_id], 0, MPCC_TOP_SEL, dpp_id);
 	REG_SET(MPCC_OPP_ID[mpcc_id], 0, MPCC_OPP_ID, tree->opp_id);
 
+	/* Configure VUPDATE lock set for this MPCC to map to the OPP */
+	REG_SET(MPCC_UPDATE_LOCK_SEL[mpcc_id], 0, MPCC_UPDATE_LOCK_SEL, tree->opp_id);
+
 	/* update mpc tree mux setting */
 	if (tree->opp_list == insert_above_mpcc) {
 		/* insert the toppest mpcc */
@@ -318,6 +333,7 @@ void mpc1_remove_mpcc(
 		REG_SET(MPCC_TOP_SEL[mpcc_id], 0, MPCC_TOP_SEL, 0xf);
 		REG_SET(MPCC_BOT_SEL[mpcc_id], 0, MPCC_BOT_SEL, 0xf);
 		REG_SET(MPCC_OPP_ID[mpcc_id],  0, MPCC_OPP_ID,  0xf);
+		REG_SET(MPCC_UPDATE_LOCK_SEL[mpcc_id], 0, MPCC_UPDATE_LOCK_SEL, 0xf);
 
 		/* mark this mpcc as not in use */
 		mpc10->mpcc_in_use_mask &= ~(1 << mpcc_id);
@@ -328,6 +344,7 @@ void mpc1_remove_mpcc(
 		REG_SET(MPCC_TOP_SEL[mpcc_id], 0, MPCC_TOP_SEL, 0xf);
 		REG_SET(MPCC_BOT_SEL[mpcc_id], 0, MPCC_BOT_SEL, 0xf);
 		REG_SET(MPCC_OPP_ID[mpcc_id],  0, MPCC_OPP_ID,  0xf);
+		REG_SET(MPCC_UPDATE_LOCK_SEL[mpcc_id], 0, MPCC_UPDATE_LOCK_SEL, 0xf);
 	}
 }
 
@@ -361,6 +378,7 @@ void mpc1_mpc_init(struct mpc *mpc)
 		REG_SET(MPCC_TOP_SEL[mpcc_id], 0, MPCC_TOP_SEL, 0xf);
 		REG_SET(MPCC_BOT_SEL[mpcc_id], 0, MPCC_BOT_SEL, 0xf);
 		REG_SET(MPCC_OPP_ID[mpcc_id],  0, MPCC_OPP_ID,  0xf);
+		REG_SET(MPCC_UPDATE_LOCK_SEL[mpcc_id], 0, MPCC_UPDATE_LOCK_SEL, 0xf);
 
 		mpc1_init_mpcc(&(mpc->mpcc_array[mpcc_id]), mpcc_id);
 	}
@@ -381,6 +399,7 @@ void mpc1_mpc_init_single_inst(struct mpc *mpc, unsigned int mpcc_id)
 	REG_SET(MPCC_TOP_SEL[mpcc_id], 0, MPCC_TOP_SEL, 0xf);
 	REG_SET(MPCC_BOT_SEL[mpcc_id], 0, MPCC_BOT_SEL, 0xf);
 	REG_SET(MPCC_OPP_ID[mpcc_id],  0, MPCC_OPP_ID,  0xf);
+	REG_SET(MPCC_UPDATE_LOCK_SEL[mpcc_id], 0, MPCC_UPDATE_LOCK_SEL, 0xf);
 
 	mpc1_init_mpcc(&(mpc->mpcc_array[mpcc_id]), mpcc_id);
 
@@ -453,6 +472,24 @@ void mpc1_read_mpcc_state(
 			MPCC_BUSY, &s->busy);
 }
 
+void mpc1_cursor_lock(struct mpc *mpc, int opp_id, bool lock)
+{
+	struct dcn10_mpc *mpc10 = TO_DCN10_MPC(mpc);
+
+	REG_SET(CUR[opp_id], 0, CUR_VUPDATE_LOCK_SET, lock ? 1 : 0);
+}
+
+unsigned int mpc1_get_mpc_out_mux(struct mpc *mpc, int opp_id)
+{
+	struct dcn10_mpc *mpc10 = TO_DCN10_MPC(mpc);
+	uint32_t val = 0xf;
+
+	if (opp_id < MAX_OPP && REG(MUX[opp_id]))
+		REG_GET(MUX[opp_id], MPC_OUT_MUX, &val);
+
+	return val;
+}
+
 static const struct mpc_funcs dcn10_mpc_funcs = {
 	.read_mpcc_state = mpc1_read_mpcc_state,
 	.insert_plane = mpc1_insert_plane,
@@ -464,10 +501,13 @@ static const struct mpc_funcs dcn10_mpc_funcs = {
 	.assert_mpcc_idle_before_connect = mpc1_assert_mpcc_idle_before_connect,
 	.init_mpcc_list_from_hw = mpc1_init_mpcc_list_from_hw,
 	.update_blending = mpc1_update_blending,
+	.cursor_lock = mpc1_cursor_lock,
 	.set_denorm = NULL,
 	.set_denorm_clamp = NULL,
 	.set_output_csc = NULL,
 	.set_output_gamma = NULL,
+	.get_mpc_out_mux = mpc1_get_mpc_out_mux,
+	.set_bg_color = mpc1_set_bg_color,
 };
 
 void dcn10_mpc_construct(struct dcn10_mpc *mpc10,

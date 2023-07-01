@@ -23,24 +23,24 @@ xfs_fill_statvfs_from_dquot(
 {
 	uint64_t		limit;
 
-	limit = dqp->q_core.d_blk_softlimit ?
-		be64_to_cpu(dqp->q_core.d_blk_softlimit) :
-		be64_to_cpu(dqp->q_core.d_blk_hardlimit);
+	limit = dqp->q_blk.softlimit ?
+		dqp->q_blk.softlimit :
+		dqp->q_blk.hardlimit;
 	if (limit && statp->f_blocks > limit) {
 		statp->f_blocks = limit;
 		statp->f_bfree = statp->f_bavail =
-			(statp->f_blocks > dqp->q_res_bcount) ?
-			 (statp->f_blocks - dqp->q_res_bcount) : 0;
+			(statp->f_blocks > dqp->q_blk.reserved) ?
+			 (statp->f_blocks - dqp->q_blk.reserved) : 0;
 	}
 
-	limit = dqp->q_core.d_ino_softlimit ?
-		be64_to_cpu(dqp->q_core.d_ino_softlimit) :
-		be64_to_cpu(dqp->q_core.d_ino_hardlimit);
+	limit = dqp->q_ino.softlimit ?
+		dqp->q_ino.softlimit :
+		dqp->q_ino.hardlimit;
 	if (limit && statp->f_files > limit) {
 		statp->f_files = limit;
 		statp->f_ffree =
-			(statp->f_files > dqp->q_res_icount) ?
-			 (statp->f_files - dqp->q_res_icount) : 0;
+			(statp->f_files > dqp->q_ino.reserved) ?
+			 (statp->f_files - dqp->q_ino.reserved) : 0;
 	}
 }
 
@@ -60,7 +60,7 @@ xfs_qm_statvfs(
 	struct xfs_mount	*mp = ip->i_mount;
 	struct xfs_dquot	*dqp;
 
-	if (!xfs_qm_dqget(mp, ip->i_d.di_projid, XFS_DQ_PROJ, false, &dqp)) {
+	if (!xfs_qm_dqget(mp, ip->i_projid, XFS_DQTYPE_PROJ, false, &dqp)) {
 		xfs_fill_statvfs_from_dquot(statp, dqp);
 		xfs_qm_dqput(dqp);
 	}
@@ -75,7 +75,7 @@ xfs_qm_newmount(
 	uint		quotaondisk;
 	uint		uquotaondisk = 0, gquotaondisk = 0, pquotaondisk = 0;
 
-	quotaondisk = xfs_sb_version_hasquota(&mp->m_sb) &&
+	quotaondisk = xfs_has_quota(mp) &&
 				(mp->m_sb.sb_qflags & XFS_ALL_QUOTA_ACCT);
 
 	if (quotaondisk) {

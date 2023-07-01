@@ -9,6 +9,7 @@
  *
  */
 
+#include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/interrupt.h>
 #include <linux/irqchip/chained_irq.h>
@@ -21,6 +22,7 @@
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
+#include <linux/units.h>
 
 #include "stm32-adc-core.h"
 
@@ -41,18 +43,16 @@
  * struct stm32_adc_common_regs - stm32 common registers
  * @csr:	common status register offset
  * @ccr:	common control register offset
- * @eoc1_msk:	adc1 end of conversion flag in @csr
- * @eoc2_msk:	adc2 end of conversion flag in @csr
- * @eoc3_msk:	adc3 end of conversion flag in @csr
+ * @eoc_msk:    array of eoc (end of conversion flag) masks in csr for adc1..n
+ * @ovr_msk:    array of ovr (overrun flag) masks in csr for adc1..n
  * @ier:	interrupt enable register offset for each adc
  * @eocie_msk:	end of conversion interrupt enable mask in @ier
  */
 struct stm32_adc_common_regs {
 	u32 csr;
 	u32 ccr;
-	u32 eoc1_msk;
-	u32 eoc2_msk;
-	u32 eoc3_msk;
+	u32 eoc_msk[STM32_ADC_MAX_ADCS];
+	u32 ovr_msk[STM32_ADC_MAX_ADCS];
 	u32 ier;
 	u32 eocie_msk;
 };
@@ -64,18 +64,25 @@ struct stm32_adc_priv;
  * @regs:	common registers for all instances
  * @clk_sel:	clock selection routine
  * @max_clk_rate_hz: maximum analog clock rate (Hz, from datasheet)
+ * @ipid:	adc identification number
  * @has_syscfg: SYSCFG capability flags
+ * @num_irqs:	number of interrupt lines
+ * @num_adcs:   maximum number of ADC instances in the common registers
  */
 struct stm32_adc_priv_cfg {
 	const struct stm32_adc_common_regs *regs;
 	int (*clk_sel)(struct platform_device *, struct stm32_adc_priv *);
 	u32 max_clk_rate_hz;
+	u32 ipid;
 	unsigned int has_syscfg;
+	unsigned int num_irqs;
+	unsigned int num_adcs;
 };
 
 /**
  * struct stm32_adc_priv - stm32 ADC core private data
  * @irq:		irq(s) for ADC block
+ * @nb_adc_max:		actual maximum number of instance per ADC block
  * @domain:		irq domain reference
  * @aclk:		clock reference for the analog circuitry
  * @bclk:		bus clock common for all ADCs, depends on part used
@@ -93,6 +100,7 @@ struct stm32_adc_priv_cfg {
  */
 struct stm32_adc_priv {
 	int				irq[STM32_ADC_MAX_ADCS];
+	unsigned int			nb_adc_max;
 	struct irq_domain		*domain;
 	struct clk			*aclk;
 	struct clk			*bclk;
@@ -200,7 +208,7 @@ static int stm32h7_adc_clk_sel(struct platform_device *pdev,
 {
 	u32 ckmode, presc, val;
 	unsigned long rate;
-	int i, div;
+	int i, div, duty;
 
 	/* stm32h7 bus clock is common for all ADC instances (mandatory) */
 	if (!priv->bclk) {
@@ -224,12 +232,24 @@ static int stm32h7_adc_clk_sel(struct platform_device *pdev,
 			return -EINVAL;
 		}
 
+		/* If duty is an error, kindly use at least /2 divider */
+		duty = clk_get_scaled_duty_cycle(priv->aclk, 100);
+		if (duty < 0)
+			dev_warn(&pdev->dev, "adc clock duty: %d\n", duty);
+
 		for (i = 0; i < ARRAY_SIZE(stm32h7_adc_ckmodes_spec); i++) {
 			ckmode = stm32h7_adc_ckmodes_spec[i].ckmode;
 			presc = stm32h7_adc_ckmodes_spec[i].presc;
 			div = stm32h7_adc_ckmodes_spec[i].div;
 
 			if (ckmode)
+				continue;
+
+			/*
+			 * For proper operation, clock duty cycle range is 49%
+			 * to 51%. Apply at least /2 prescaler otherwise.
+			 */
+			if (div == 1 && (duty < 49 || duty > 51))
 				continue;
 
 			if ((rate / div) <= priv->max_clk_rate)
@@ -244,12 +264,19 @@ static int stm32h7_adc_clk_sel(struct platform_device *pdev,
 		return -EINVAL;
 	}
 
+	duty = clk_get_scaled_duty_cycle(priv->bclk, 100);
+	if (duty < 0)
+		dev_warn(&pdev->dev, "bus clock duty: %d\n", duty);
+
 	for (i = 0; i < ARRAY_SIZE(stm32h7_adc_ckmodes_spec); i++) {
 		ckmode = stm32h7_adc_ckmodes_spec[i].ckmode;
 		presc = stm32h7_adc_ckmodes_spec[i].presc;
 		div = stm32h7_adc_ckmodes_spec[i].div;
 
 		if (!ckmode)
+			continue;
+
+		if (div == 1 && (duty < 49 || duty > 51))
 			continue;
 
 		if ((rate / div) <= priv->max_clk_rate)
@@ -280,21 +307,30 @@ out:
 static const struct stm32_adc_common_regs stm32f4_adc_common_regs = {
 	.csr = STM32F4_ADC_CSR,
 	.ccr = STM32F4_ADC_CCR,
-	.eoc1_msk = STM32F4_EOC1 | STM32F4_OVR1,
-	.eoc2_msk = STM32F4_EOC2 | STM32F4_OVR2,
-	.eoc3_msk = STM32F4_EOC3 | STM32F4_OVR3,
+	.eoc_msk = { STM32F4_EOC1, STM32F4_EOC2, STM32F4_EOC3 },
+	.ovr_msk = { STM32F4_OVR1, STM32F4_OVR2, STM32F4_OVR3 },
 	.ier = STM32F4_ADC_CR1,
-	.eocie_msk = STM32F4_EOCIE | STM32F4_OVRIE,
+	.eocie_msk = STM32F4_EOCIE,
 };
 
 /* STM32H7 common registers definitions */
 static const struct stm32_adc_common_regs stm32h7_adc_common_regs = {
 	.csr = STM32H7_ADC_CSR,
 	.ccr = STM32H7_ADC_CCR,
-	.eoc1_msk = STM32H7_EOC_MST | STM32H7_OVR_MST,
-	.eoc2_msk = STM32H7_EOC_SLV | STM32H7_OVR_SLV,
+	.eoc_msk = { STM32H7_EOC_MST, STM32H7_EOC_SLV },
+	.ovr_msk = { STM32H7_OVR_MST, STM32H7_OVR_SLV },
 	.ier = STM32H7_ADC_IER,
-	.eocie_msk = STM32H7_EOCIE | STM32H7_OVRIE,
+	.eocie_msk = STM32H7_EOCIE,
+};
+
+/* STM32MP13 common registers definitions */
+static const struct stm32_adc_common_regs stm32mp13_adc_common_regs = {
+	.csr = STM32H7_ADC_CSR,
+	.ccr = STM32H7_ADC_CCR,
+	.eoc_msk = { STM32H7_EOC_MST },
+	.ovr_msk = { STM32H7_OVR_MST },
+	.ier = STM32H7_ADC_IER,
+	.eocie_msk = STM32H7_EOCIE,
 };
 
 static const unsigned int stm32_adc_offset[STM32_ADC_MAX_ADCS] = {
@@ -316,6 +352,7 @@ static void stm32_adc_irq_handler(struct irq_desc *desc)
 {
 	struct stm32_adc_priv *priv = irq_desc_get_handler_data(desc);
 	struct irq_chip *chip = irq_desc_get_chip(desc);
+	int i;
 	u32 status;
 
 	chained_irq_enter(chip, desc);
@@ -333,17 +370,12 @@ static void stm32_adc_irq_handler(struct irq_desc *desc)
 	 * before invoking the interrupt handler (e.g. call ISR only for
 	 * IRQ-enabled ADCs).
 	 */
-	if (status & priv->cfg->regs->eoc1_msk &&
-	    stm32_adc_eoc_enabled(priv, 0))
-		generic_handle_irq(irq_find_mapping(priv->domain, 0));
-
-	if (status & priv->cfg->regs->eoc2_msk &&
-	    stm32_adc_eoc_enabled(priv, 1))
-		generic_handle_irq(irq_find_mapping(priv->domain, 1));
-
-	if (status & priv->cfg->regs->eoc3_msk &&
-	    stm32_adc_eoc_enabled(priv, 2))
-		generic_handle_irq(irq_find_mapping(priv->domain, 2));
+	for (i = 0; i < priv->nb_adc_max; i++) {
+		if ((status & priv->cfg->regs->eoc_msk[i] &&
+		     stm32_adc_eoc_enabled(priv, i)) ||
+		     (status & priv->cfg->regs->ovr_msk[i]))
+			generic_handle_domain_irq(priv->domain, i);
+	}
 
 	chained_irq_exit(chip, desc);
 };
@@ -375,21 +407,15 @@ static int stm32_adc_irq_probe(struct platform_device *pdev,
 	struct device_node *np = pdev->dev.of_node;
 	unsigned int i;
 
-	for (i = 0; i < STM32_ADC_MAX_ADCS; i++) {
+	/*
+	 * Interrupt(s) must be provided, depending on the compatible:
+	 * - stm32f4/h7 shares a common interrupt line.
+	 * - stm32mp1, has one line per ADC
+	 */
+	for (i = 0; i < priv->cfg->num_irqs; i++) {
 		priv->irq[i] = platform_get_irq(pdev, i);
-		if (priv->irq[i] < 0) {
-			/*
-			 * At least one interrupt must be provided, make others
-			 * optional:
-			 * - stm32f4/h7 shares a common interrupt.
-			 * - stm32mp1, has one line per ADC (either for ADC1,
-			 *   ADC2 or both).
-			 */
-			if (i && priv->irq[i] == -ENXIO)
-				continue;
-
+		if (priv->irq[i] < 0)
 			return priv->irq[i];
-		}
 	}
 
 	priv->domain = irq_domain_add_simple(np, STM32_ADC_MAX_ADCS, 0,
@@ -400,9 +426,7 @@ static int stm32_adc_irq_probe(struct platform_device *pdev,
 		return -ENOMEM;
 	}
 
-	for (i = 0; i < STM32_ADC_MAX_ADCS; i++) {
-		if (priv->irq[i] < 0)
-			continue;
+	for (i = 0; i < priv->cfg->num_irqs; i++) {
 		irq_set_chained_handler(priv->irq[i], stm32_adc_irq_handler);
 		irq_set_handler_data(priv->irq[i], priv);
 	}
@@ -416,15 +440,12 @@ static void stm32_adc_irq_remove(struct platform_device *pdev,
 	int hwirq;
 	unsigned int i;
 
-	for (hwirq = 0; hwirq < STM32_ADC_MAX_ADCS; hwirq++)
+	for (hwirq = 0; hwirq < priv->nb_adc_max; hwirq++)
 		irq_dispose_mapping(irq_find_mapping(priv->domain, hwirq));
 	irq_domain_remove(priv->domain);
 
-	for (i = 0; i < STM32_ADC_MAX_ADCS; i++) {
-		if (priv->irq[i] < 0)
-			continue;
+	for (i = 0; i < priv->cfg->num_irqs; i++)
 		irq_set_chained_handler(priv->irq[i], NULL);
-	}
 }
 
 static int stm32_adc_core_switches_supply_en(struct stm32_adc_priv *priv,
@@ -532,20 +553,16 @@ static int stm32_adc_core_hw_start(struct device *dev)
 		goto err_switches_dis;
 	}
 
-	if (priv->bclk) {
-		ret = clk_prepare_enable(priv->bclk);
-		if (ret < 0) {
-			dev_err(dev, "bus clk enable failed\n");
-			goto err_regulator_disable;
-		}
+	ret = clk_prepare_enable(priv->bclk);
+	if (ret < 0) {
+		dev_err(dev, "bus clk enable failed\n");
+		goto err_regulator_disable;
 	}
 
-	if (priv->aclk) {
-		ret = clk_prepare_enable(priv->aclk);
-		if (ret < 0) {
-			dev_err(dev, "adc clk enable failed\n");
-			goto err_bclk_disable;
-		}
+	ret = clk_prepare_enable(priv->aclk);
+	if (ret < 0) {
+		dev_err(dev, "adc clk enable failed\n");
+		goto err_bclk_disable;
 	}
 
 	writel_relaxed(priv->ccr_bak, priv->common.base + priv->cfg->regs->ccr);
@@ -553,8 +570,7 @@ static int stm32_adc_core_hw_start(struct device *dev)
 	return 0;
 
 err_bclk_disable:
-	if (priv->bclk)
-		clk_disable_unprepare(priv->bclk);
+	clk_disable_unprepare(priv->bclk);
 err_regulator_disable:
 	regulator_disable(priv->vref);
 err_switches_dis:
@@ -572,10 +588,8 @@ static void stm32_adc_core_hw_stop(struct device *dev)
 
 	/* Backup CCR that may be lost (depends on power state to achieve) */
 	priv->ccr_bak = readl_relaxed(priv->common.base + priv->cfg->regs->ccr);
-	if (priv->aclk)
-		clk_disable_unprepare(priv->aclk);
-	if (priv->bclk)
-		clk_disable_unprepare(priv->bclk);
+	clk_disable_unprepare(priv->aclk);
+	clk_disable_unprepare(priv->bclk);
 	regulator_disable(priv->vref);
 	stm32_adc_core_switches_supply_dis(priv);
 	regulator_disable(priv->vdda);
@@ -591,11 +605,9 @@ static int stm32_adc_core_switches_probe(struct device *dev,
 	priv->syscfg = syscon_regmap_lookup_by_phandle(np, "st,syscfg");
 	if (IS_ERR(priv->syscfg)) {
 		ret = PTR_ERR(priv->syscfg);
-		if (ret != -ENODEV) {
-			if (ret != -EPROBE_DEFER)
-				dev_err(dev, "Can't probe syscfg: %d\n", ret);
-			return ret;
-		}
+		if (ret != -ENODEV)
+			return dev_err_probe(dev, ret, "Can't probe syscfg\n");
+
 		priv->syscfg = NULL;
 	}
 
@@ -605,12 +617,9 @@ static int stm32_adc_core_switches_probe(struct device *dev,
 		priv->booster = devm_regulator_get_optional(dev, "booster");
 		if (IS_ERR(priv->booster)) {
 			ret = PTR_ERR(priv->booster);
-			if (ret != -ENODEV) {
-				if (ret != -EPROBE_DEFER)
-					dev_err(dev, "can't get booster %d\n",
-						ret);
-				return ret;
-			}
+			if (ret != -ENODEV)
+				return dev_err_probe(dev, ret, "can't get booster\n");
+
 			priv->booster = NULL;
 		}
 	}
@@ -621,11 +630,9 @@ static int stm32_adc_core_switches_probe(struct device *dev,
 		priv->vdd = devm_regulator_get_optional(dev, "vdd");
 		if (IS_ERR(priv->vdd)) {
 			ret = PTR_ERR(priv->vdd);
-			if (ret != -ENODEV) {
-				if (ret != -EPROBE_DEFER)
-					dev_err(dev, "can't get vdd %d\n", ret);
-				return ret;
-			}
+			if (ret != -ENODEV)
+				return dev_err_probe(dev, ret, "can't get vdd\n");
+
 			priv->vdd = NULL;
 		}
 	}
@@ -651,6 +658,49 @@ static int stm32_adc_core_switches_probe(struct device *dev,
 	return 0;
 }
 
+static int stm32_adc_probe_identification(struct platform_device *pdev,
+					  struct stm32_adc_priv *priv)
+{
+	struct device_node *np = pdev->dev.of_node;
+	struct device_node *child;
+	const char *compat;
+	int ret, count = 0;
+	u32 id, val;
+
+	if (!priv->cfg->ipid)
+		return 0;
+
+	id = FIELD_GET(STM32MP1_IPIDR_MASK,
+		       readl_relaxed(priv->common.base + STM32MP1_ADC_IPDR));
+	if (id != priv->cfg->ipid) {
+		dev_err(&pdev->dev, "Unexpected IP version: 0x%x", id);
+		return -EINVAL;
+	}
+
+	for_each_child_of_node(np, child) {
+		ret = of_property_read_string(child, "compatible", &compat);
+		if (ret)
+			continue;
+		/* Count child nodes with stm32 adc compatible */
+		if (strstr(compat, "st,stm32") && strstr(compat, "adc"))
+			count++;
+	}
+
+	val = readl_relaxed(priv->common.base + STM32MP1_ADC_HWCFGR0);
+	priv->nb_adc_max = FIELD_GET(STM32MP1_ADCNUM_MASK, val);
+	if (count > priv->nb_adc_max) {
+		dev_err(&pdev->dev, "Unexpected child number: %d", count);
+		return -EINVAL;
+	}
+
+	val = readl_relaxed(priv->common.base + STM32MP1_ADC_VERR);
+	dev_dbg(&pdev->dev, "ADC version: %lu.%lu\n",
+		FIELD_GET(STM32MP1_MAJREV_MASK, val),
+		FIELD_GET(STM32MP1_MINREV_MASK, val));
+
+	return 0;
+}
+
 static int stm32_adc_probe(struct platform_device *pdev)
 {
 	struct stm32_adc_priv *priv;
@@ -670,6 +720,8 @@ static int stm32_adc_probe(struct platform_device *pdev)
 
 	priv->cfg = (const struct stm32_adc_priv_cfg *)
 		of_match_device(dev->driver->of_match_table, dev)->data;
+	priv->nb_adc_max = priv->cfg->num_adcs;
+	spin_lock_init(&priv->common.lock);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	priv->common.base = devm_ioremap_resource(&pdev->dev, res);
@@ -678,42 +730,24 @@ static int stm32_adc_probe(struct platform_device *pdev)
 	priv->common.phys_base = res->start;
 
 	priv->vdda = devm_regulator_get(&pdev->dev, "vdda");
-	if (IS_ERR(priv->vdda)) {
-		ret = PTR_ERR(priv->vdda);
-		if (ret != -EPROBE_DEFER)
-			dev_err(&pdev->dev, "vdda get failed, %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(priv->vdda))
+		return dev_err_probe(&pdev->dev, PTR_ERR(priv->vdda),
+				     "vdda get failed\n");
 
 	priv->vref = devm_regulator_get(&pdev->dev, "vref");
-	if (IS_ERR(priv->vref)) {
-		ret = PTR_ERR(priv->vref);
-		if (ret != -EPROBE_DEFER)
-			dev_err(&pdev->dev, "vref get failed, %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(priv->vref))
+		return dev_err_probe(&pdev->dev, PTR_ERR(priv->vref),
+				     "vref get failed\n");
 
-	priv->aclk = devm_clk_get(&pdev->dev, "adc");
-	if (IS_ERR(priv->aclk)) {
-		ret = PTR_ERR(priv->aclk);
-		if (ret != -ENOENT) {
-			if (ret != -EPROBE_DEFER)
-				dev_err(&pdev->dev, "Can't get 'adc' clock\n");
-			return ret;
-		}
-		priv->aclk = NULL;
-	}
+	priv->aclk = devm_clk_get_optional(&pdev->dev, "adc");
+	if (IS_ERR(priv->aclk))
+		return dev_err_probe(&pdev->dev, PTR_ERR(priv->aclk),
+				     "Can't get 'adc' clock\n");
 
-	priv->bclk = devm_clk_get(&pdev->dev, "bus");
-	if (IS_ERR(priv->bclk)) {
-		ret = PTR_ERR(priv->bclk);
-		if (ret != -ENOENT) {
-			if (ret != -EPROBE_DEFER)
-				dev_err(&pdev->dev, "Can't get 'bus' clock\n");
-			return ret;
-		}
-		priv->bclk = NULL;
-	}
+	priv->bclk = devm_clk_get_optional(&pdev->dev, "bus");
+	if (IS_ERR(priv->bclk))
+		return dev_err_probe(&pdev->dev, PTR_ERR(priv->bclk),
+				     "Can't get 'bus' clock\n");
 
 	ret = stm32_adc_core_switches_probe(dev, priv);
 	if (ret)
@@ -728,6 +762,10 @@ static int stm32_adc_probe(struct platform_device *pdev)
 	ret = stm32_adc_core_hw_start(dev);
 	if (ret)
 		goto err_pm_stop;
+
+	ret = stm32_adc_probe_identification(pdev, priv);
+	if (ret < 0)
+		goto err_hw_stop;
 
 	ret = regulator_get_voltage(priv->vref);
 	if (ret < 0) {
@@ -791,7 +829,6 @@ static int stm32_adc_remove(struct platform_device *pdev)
 	return 0;
 }
 
-#if defined(CONFIG_PM)
 static int stm32_adc_core_runtime_suspend(struct device *dev)
 {
 	stm32_adc_core_hw_stop(dev);
@@ -803,20 +840,25 @@ static int stm32_adc_core_runtime_resume(struct device *dev)
 {
 	return stm32_adc_core_hw_start(dev);
 }
-#endif
 
-static const struct dev_pm_ops stm32_adc_core_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
-	SET_RUNTIME_PM_OPS(stm32_adc_core_runtime_suspend,
-			   stm32_adc_core_runtime_resume,
-			   NULL)
-};
+static int stm32_adc_core_runtime_idle(struct device *dev)
+{
+	pm_runtime_mark_last_busy(dev);
+
+	return 0;
+}
+
+static DEFINE_RUNTIME_DEV_PM_OPS(stm32_adc_core_pm_ops,
+				stm32_adc_core_runtime_suspend,
+				stm32_adc_core_runtime_resume,
+				stm32_adc_core_runtime_idle);
 
 static const struct stm32_adc_priv_cfg stm32f4_adc_priv_cfg = {
 	.regs = &stm32f4_adc_common_regs,
 	.clk_sel = stm32f4_adc_clk_sel,
 	.max_clk_rate_hz = 36000000,
+	.num_irqs = 1,
+	.num_adcs = 3,
 };
 
 static const struct stm32_adc_priv_cfg stm32h7_adc_priv_cfg = {
@@ -824,13 +866,25 @@ static const struct stm32_adc_priv_cfg stm32h7_adc_priv_cfg = {
 	.clk_sel = stm32h7_adc_clk_sel,
 	.max_clk_rate_hz = 36000000,
 	.has_syscfg = HAS_VBOOSTER,
+	.num_irqs = 1,
+	.num_adcs = 2,
 };
 
 static const struct stm32_adc_priv_cfg stm32mp1_adc_priv_cfg = {
 	.regs = &stm32h7_adc_common_regs,
 	.clk_sel = stm32h7_adc_clk_sel,
-	.max_clk_rate_hz = 40000000,
+	.max_clk_rate_hz = 36000000,
 	.has_syscfg = HAS_VBOOSTER | HAS_ANASWVDD,
+	.ipid = STM32MP15_IPIDR_NUMBER,
+	.num_irqs = 2,
+};
+
+static const struct stm32_adc_priv_cfg stm32mp13_adc_priv_cfg = {
+	.regs = &stm32mp13_adc_common_regs,
+	.clk_sel = stm32h7_adc_clk_sel,
+	.max_clk_rate_hz = 75 * HZ_PER_MHZ,
+	.ipid = STM32MP13_IPIDR_NUMBER,
+	.num_irqs = 1,
 };
 
 static const struct of_device_id stm32_adc_of_match[] = {
@@ -844,6 +898,9 @@ static const struct of_device_id stm32_adc_of_match[] = {
 		.compatible = "st,stm32mp1-adc-core",
 		.data = (void *)&stm32mp1_adc_priv_cfg
 	}, {
+		.compatible = "st,stm32mp13-adc-core",
+		.data = (void *)&stm32mp13_adc_priv_cfg
+	}, {
 	},
 };
 MODULE_DEVICE_TABLE(of, stm32_adc_of_match);
@@ -854,7 +911,7 @@ static struct platform_driver stm32_adc_driver = {
 	.driver = {
 		.name = "stm32-adc-core",
 		.of_match_table = stm32_adc_of_match,
-		.pm = &stm32_adc_core_pm_ops,
+		.pm = pm_ptr(&stm32_adc_core_pm_ops),
 	},
 };
 module_platform_driver(stm32_adc_driver);

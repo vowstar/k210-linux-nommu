@@ -1,6 +1,5 @@
+// SPDX-License-Identifier: MIT
 /*
- * SPDX-License-Identifier: MIT
- *
  * Copyright © 2019 Intel Corporation
  */
 
@@ -18,10 +17,8 @@ static int gen6_verify_ring_freq(struct intel_llc *llc)
 
 	wakeref = intel_runtime_pm_get(llc_to_gt(llc)->uncore->rpm);
 
-	if (!get_ia_constants(llc, &consts)) {
-		err = -ENODEV;
+	if (!get_ia_constants(llc, &consts))
 		goto out_rpm;
-	}
 
 	for (gpu_freq = consts.min_gpu_freq;
 	     gpu_freq <= consts.max_gpu_freq;
@@ -34,9 +31,8 @@ static int gen6_verify_ring_freq(struct intel_llc *llc)
 		calc_ia_freq(llc, gpu_freq, &consts, &ia_freq, &ring_freq);
 
 		val = gpu_freq;
-		if (sandybridge_pcode_read(i915,
-					   GEN6_PCODE_READ_MIN_FREQ_TABLE,
-					   &val, NULL)) {
+		if (snb_pcode_read(llc_to_gt(llc)->uncore, GEN6_PCODE_READ_MIN_FREQ_TABLE,
+				   &val, NULL)) {
 			pr_err("Failed to read freq table[%d], range [%d, %d]\n",
 			       gpu_freq, consts.min_gpu_freq, consts.max_gpu_freq);
 			err = -ENXIO;
@@ -47,7 +43,7 @@ static int gen6_verify_ring_freq(struct intel_llc *llc)
 		if (found != ia_freq) {
 			pr_err("Min freq table(%d/[%d, %d]):%dMHz did not match expected CPU freq, found %d, expected %d\n",
 			       gpu_freq, consts.min_gpu_freq, consts.max_gpu_freq,
-			       intel_gpu_freq(rps, gpu_freq * (INTEL_GEN(i915) >= 9 ? GEN9_FREQ_SCALER : 1)),
+			       intel_gpu_freq(rps, gpu_freq * (GRAPHICS_VER(i915) >= 9 ? GEN9_FREQ_SCALER : 1)),
 			       found, ia_freq);
 			err = -EINVAL;
 			break;
@@ -57,7 +53,7 @@ static int gen6_verify_ring_freq(struct intel_llc *llc)
 		if (found != ring_freq) {
 			pr_err("Min freq table(%d/[%d, %d]):%dMHz did not match expected ring freq, found %d, expected %d\n",
 			       gpu_freq, consts.min_gpu_freq, consts.max_gpu_freq,
-			       intel_gpu_freq(rps, gpu_freq * (INTEL_GEN(i915) >= 9 ? GEN9_FREQ_SCALER : 1)),
+			       intel_gpu_freq(rps, gpu_freq * (GRAPHICS_VER(i915) >= 9 ? GEN9_FREQ_SCALER : 1)),
 			       found, ring_freq);
 			err = -EINVAL;
 			break;
@@ -71,10 +67,5 @@ out_rpm:
 
 int st_llc_verify(struct intel_llc *llc)
 {
-	int err = 0;
-
-	if (HAS_LLC(llc_to_gt(llc)->i915))
-		err = gen6_verify_ring_freq(llc);
-
-	return err;
+	return gen6_verify_ring_freq(llc);
 }

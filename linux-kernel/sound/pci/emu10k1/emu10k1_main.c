@@ -623,7 +623,7 @@ static int snd_emu10k1_ecard_init(struct snd_emu10k1 *emu)
 static int snd_emu10k1_cardbus_init(struct snd_emu10k1 *emu)
 {
 	unsigned long special_port;
-	unsigned int value;
+	__always_unused unsigned int value;
 
 	/* Special initialisation routine
 	 * before the rest of the IO-Ports become active.
@@ -653,7 +653,7 @@ static int snd_emu1010_load_firmware_entry(struct snd_emu10k1 *emu,
 	int n, i;
 	int reg;
 	int value;
-	unsigned int write_post;
+	__always_unused unsigned int write_post;
 	unsigned long flags;
 
 	if (!fw_entry)
@@ -1242,8 +1242,10 @@ static int alloc_pm_buffer(struct snd_emu10k1 *emu);
 static void free_pm_buffer(struct snd_emu10k1 *emu);
 #endif
 
-static int snd_emu10k1_free(struct snd_emu10k1 *emu)
+static void snd_emu10k1_free(struct snd_card *card)
 {
+	struct snd_emu10k1 *emu = card->private_data;
+
 	if (emu->port) {	/* avoid access to already used hardware */
 		snd_emu10k1_fx8010_tram_setup(emu, 0);
 		snd_emu10k1_done(emu);
@@ -1256,8 +1258,6 @@ static int snd_emu10k1_free(struct snd_emu10k1 *emu)
 	cancel_delayed_work_sync(&emu->emu1010.firmware_work);
 	release_firmware(emu->firmware);
 	release_firmware(emu->dock_fw);
-	if (emu->irq >= 0)
-		free_irq(emu->irq, emu);
 	snd_util_memhdr_free(emu->memhdr);
 	if (emu->silent_page.area)
 		snd_dma_free_pages(&emu->silent_page);
@@ -1268,19 +1268,6 @@ static int snd_emu10k1_free(struct snd_emu10k1 *emu)
 #ifdef CONFIG_PM_SLEEP
 	free_pm_buffer(emu);
 #endif
-	if (emu->port)
-		pci_release_regions(emu->pci);
-	if (emu->card_capabilities->ca0151_chip) /* P16V */
-		snd_p16v_free(emu);
-	pci_disable_device(emu->pci);
-	kfree(emu);
-	return 0;
-}
-
-static int snd_emu10k1_dev_free(struct snd_device *device)
-{
-	struct snd_emu10k1 *emu = device->device_data;
-	return snd_emu10k1_free(emu);
 }
 
 static const struct snd_emu_chip_details emu_chip_details[] = {
@@ -1764,11 +1751,8 @@ static void snd_emu10k1_detect_iommu(struct snd_emu10k1 *emu)
 
 	emu->iommu_workaround = false;
 
-	if (!iommu_present(emu->card->dev->bus))
-		return;
-
 	domain = iommu_get_domain_for_dev(emu->card->dev);
-	if (domain && domain->type == IOMMU_DOMAIN_IDENTITY)
+	if (!domain || domain->type == IOMMU_DOMAIN_IDENTITY)
 		return;
 
 	dev_notice(emu->card->dev,
@@ -1782,31 +1766,22 @@ int snd_emu10k1_create(struct snd_card *card,
 		       unsigned short extout_mask,
 		       long max_cache_bytes,
 		       int enable_ir,
-		       uint subsystem,
-		       struct snd_emu10k1 **remu)
+		       uint subsystem)
 {
-	struct snd_emu10k1 *emu;
+	struct snd_emu10k1 *emu = card->private_data;
 	int idx, err;
 	int is_audigy;
 	size_t page_table_size;
+	__le32 *pgtbl;
 	unsigned int silent_page;
 	const struct snd_emu_chip_details *c;
-	static const struct snd_device_ops ops = {
-		.dev_free =	snd_emu10k1_dev_free,
-	};
-
-	*remu = NULL;
 
 	/* enable PCI device */
-	err = pci_enable_device(pci);
+	err = pcim_enable_device(pci);
 	if (err < 0)
 		return err;
 
-	emu = kzalloc(sizeof(*emu), GFP_KERNEL);
-	if (emu == NULL) {
-		pci_disable_device(pci);
-		return -ENOMEM;
-	}
+	card->private_free = snd_emu10k1_free;
 	emu->card = card;
 	spin_lock_init(&emu->reg_lock);
 	spin_lock_init(&emu->emu_lock);
@@ -1849,8 +1824,6 @@ int snd_emu10k1_create(struct snd_card *card,
 	}
 	if (c->vendor == 0) {
 		dev_err(card->dev, "emu10k1: Card not recognised\n");
-		kfree(emu);
-		pci_disable_device(pci);
 		return -ENOENT;
 	}
 	emu->card_capabilities = c;
@@ -1868,7 +1841,7 @@ int snd_emu10k1_create(struct snd_card *card,
 			emu->serial);
 
 	if (!*card->id && c->id)
-		strlcpy(card->id, c->id, sizeof(card->id));
+		strscpy(card->id, c->id, sizeof(card->id));
 
 	is_audigy = emu->audigy = c->emu10k2_chip;
 
@@ -1882,8 +1855,6 @@ int snd_emu10k1_create(struct snd_card *card,
 		dev_err(card->dev,
 			"architecture does not support PCI busmaster DMA with mask 0x%lx\n",
 			emu->dma_mask);
-		kfree(emu);
-		pci_disable_device(pci);
 		return -ENXIO;
 	}
 	if (is_audigy)
@@ -1892,11 +1863,8 @@ int snd_emu10k1_create(struct snd_card *card,
 		emu->gpr_base = FXGPREGBASE;
 
 	err = pci_request_regions(pci, "EMU10K1");
-	if (err < 0) {
-		kfree(emu);
-		pci_disable_device(pci);
+	if (err < 0)
 		return err;
-	}
 	emu->port = pci_resource_start(pci, 0);
 
 	emu->max_cache_pages = max_cache_bytes >> PAGE_SHIFT;
@@ -1904,10 +1872,8 @@ int snd_emu10k1_create(struct snd_card *card,
 	page_table_size = sizeof(u32) * (emu->address_mode ? MAXPAGES1 :
 					 MAXPAGES0);
 	if (snd_emu10k1_alloc_pages_maybe_wider(emu, page_table_size,
-						&emu->ptb_pages) < 0) {
-		err = -ENOMEM;
-		goto error;
-	}
+						&emu->ptb_pages) < 0)
+		return -ENOMEM;
 	dev_dbg(card->dev, "page table address range is %.8lx:%.8lx\n",
 		(unsigned long)emu->ptb_pages.addr,
 		(unsigned long)(emu->ptb_pages.addr + emu->ptb_pages.bytes));
@@ -1916,26 +1882,20 @@ int snd_emu10k1_create(struct snd_card *card,
 						 emu->max_cache_pages));
 	emu->page_addr_table = vmalloc(array_size(sizeof(unsigned long),
 						  emu->max_cache_pages));
-	if (emu->page_ptr_table == NULL || emu->page_addr_table == NULL) {
-		err = -ENOMEM;
-		goto error;
-	}
+	if (!emu->page_ptr_table || !emu->page_addr_table)
+		return -ENOMEM;
 
 	if (snd_emu10k1_alloc_pages_maybe_wider(emu, EMUPAGESIZE,
-						&emu->silent_page) < 0) {
-		err = -ENOMEM;
-		goto error;
-	}
+						&emu->silent_page) < 0)
+		return -ENOMEM;
 	dev_dbg(card->dev, "silent page range is %.8lx:%.8lx\n",
 		(unsigned long)emu->silent_page.addr,
 		(unsigned long)(emu->silent_page.addr +
 				emu->silent_page.bytes));
 
 	emu->memhdr = snd_util_memhdr_new(emu->max_cache_pages * PAGE_SIZE);
-	if (emu->memhdr == NULL) {
-		err = -ENOMEM;
-		goto error;
-	}
+	if (!emu->memhdr)
+		return -ENOMEM;
 	emu->memhdr->block_extra_size = sizeof(struct snd_emu10k1_memblk) -
 		sizeof(struct snd_util_memblk);
 
@@ -1953,18 +1913,16 @@ int snd_emu10k1_create(struct snd_card *card,
 	if (emu->card_capabilities->ca_cardbus_chip) {
 		err = snd_emu10k1_cardbus_init(emu);
 		if (err < 0)
-			goto error;
+			return err;
 	}
 	if (emu->card_capabilities->ecard) {
 		err = snd_emu10k1_ecard_init(emu);
 		if (err < 0)
-			goto error;
+			return err;
 	} else if (emu->card_capabilities->emu_model) {
 		err = snd_emu10k1_emu1010_init(emu);
-		if (err < 0) {
-			snd_emu10k1_free(emu);
+		if (err < 0)
 			return err;
-		}
 	} else {
 		/* 5.1: Enable the additional AC97 Slots. If the emu10k1 version
 			does not support this, it shouldn't do any harm */
@@ -1978,11 +1936,9 @@ int snd_emu10k1_create(struct snd_card *card,
 	emu->fx8010.etram_pages.bytes = 0;
 
 	/* irq handler must be registered after I/O ports are activated */
-	if (request_irq(pci->irq, snd_emu10k1_interrupt, IRQF_SHARED,
-			KBUILD_MODNAME, emu)) {
-		err = -EBUSY;
-		goto error;
-	}
+	if (devm_request_irq(&pci->dev, pci->irq, snd_emu10k1_interrupt,
+			     IRQF_SHARED, KBUILD_MODNAME, emu))
+		return -EBUSY;
 	emu->irq = pci->irq;
 	card->sync_irq = emu->irq;
 
@@ -2009,8 +1965,9 @@ int snd_emu10k1_create(struct snd_card *card,
 	/* Clear silent pages and set up pointers */
 	memset(emu->silent_page.area, 0, emu->silent_page.bytes);
 	silent_page = emu->silent_page.addr << emu->address_mode;
+	pgtbl = (__le32 *)emu->ptb_pages.area;
 	for (idx = 0; idx < (emu->address_mode ? MAXPAGES1 : MAXPAGES0); idx++)
-		((u32 *)emu->ptb_pages.area)[idx] = cpu_to_le32(silent_page | idx);
+		pgtbl[idx] = cpu_to_le32(silent_page | idx);
 
 	/* set up voice indices */
 	for (idx = 0; idx < NUM_G; idx++) {
@@ -2020,33 +1977,23 @@ int snd_emu10k1_create(struct snd_card *card,
 
 	err = snd_emu10k1_init(emu, enable_ir, 0);
 	if (err < 0)
-		goto error;
+		return err;
 #ifdef CONFIG_PM_SLEEP
 	err = alloc_pm_buffer(emu);
 	if (err < 0)
-		goto error;
+		return err;
 #endif
 
 	/*  Initialize the effect engine */
 	err = snd_emu10k1_init_efx(emu);
 	if (err < 0)
-		goto error;
+		return err;
 	snd_emu10k1_audio_enable(emu);
-
-	err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, emu, &ops);
-	if (err < 0)
-		goto error;
 
 #ifdef CONFIG_SND_PROC_FS
 	snd_emu10k1_proc_init(emu);
 #endif
-
-	*remu = emu;
 	return 0;
-
- error:
-	snd_emu10k1_free(emu);
-	return err;
 }
 
 #ifdef CONFIG_PM_SLEEP

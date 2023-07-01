@@ -207,13 +207,13 @@ static int octeon_mmc_probe(struct platform_device *pdev)
 	base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(base))
 		return PTR_ERR(base);
-	host->base = (void __iomem *)base;
+	host->base = base;
 	host->reg_off = 0;
 
 	base = devm_platform_ioremap_resource(pdev, 1);
 	if (IS_ERR(base))
 		return PTR_ERR(base);
-	host->dma_base = (void __iomem *)base;
+	host->dma_base = base;
 	/*
 	 * To keep the register addresses shared we intentionaly use
 	 * a negative offset here, first register used on Octeon therefore
@@ -277,6 +277,7 @@ static int octeon_mmc_probe(struct platform_device *pdev)
 		if (ret) {
 			dev_err(&pdev->dev, "Error populating slots\n");
 			octeon_mmc_set_shared_power(host, 0);
+			of_node_put(cn);
 			goto error;
 		}
 		i++;
@@ -327,6 +328,7 @@ static struct platform_driver octeon_mmc_driver = {
 	.remove		= octeon_mmc_remove,
 	.driver		= {
 		.name	= KBUILD_MODNAME,
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = octeon_mmc_match,
 	},
 };

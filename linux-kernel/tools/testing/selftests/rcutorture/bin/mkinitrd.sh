@@ -64,13 +64,13 @@ ___EOF___
 # build using nolibc on supported archs (smaller executable) and fall
 # back to regular glibc on other ones.
 if echo -e "#if __x86_64__||__i386__||__i486__||__i586__||__i686__" \
-           "||__ARM_EABI__||__aarch64__\nyes\n#endif" \
+           "||__ARM_EABI__||__aarch64__||__s390x__\nyes\n#endif" \
    | ${CROSS_COMPILE}gcc -E -nostdlib -xc - \
    | grep -q '^yes'; then
 	# architecture supported by nolibc
         ${CROSS_COMPILE}gcc -fno-asynchronous-unwind-tables -fno-ident \
 		-nostdlib -include ../../../../include/nolibc/nolibc.h \
-		-lgcc -s -static -Os -o init init.c
+		-s -static -Os -o init init.c -lgcc
 else
 	${CROSS_COMPILE}gcc -s -static -Os -o init init.c
 fi

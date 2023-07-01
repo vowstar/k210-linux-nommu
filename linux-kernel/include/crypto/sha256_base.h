@@ -9,9 +9,10 @@
 #define _CRYPTO_SHA256_BASE_H
 
 #include <crypto/internal/hash.h>
-#include <crypto/sha.h>
+#include <crypto/sha2.h>
 #include <linux/crypto.h>
 #include <linux/module.h>
+#include <linux/string.h>
 
 #include <asm/unaligned.h>
 
@@ -22,14 +23,16 @@ static inline int sha224_base_init(struct shash_desc *desc)
 {
 	struct sha256_state *sctx = shash_desc_ctx(desc);
 
-	return sha224_init(sctx);
+	sha224_init(sctx);
+	return 0;
 }
 
 static inline int sha256_base_init(struct shash_desc *desc)
 {
 	struct sha256_state *sctx = shash_desc_ctx(desc);
 
-	return sha256_init(sctx);
+	sha256_init(sctx);
+	return 0;
 }
 
 static inline int sha256_base_do_update(struct shash_desc *desc,
@@ -103,7 +106,7 @@ static inline int sha256_base_finish(struct shash_desc *desc, u8 *out)
 	for (i = 0; digest_size > 0; i++, digest_size -= sizeof(__be32))
 		put_unaligned_be32(sctx->state[i], digest++);
 
-	*sctx = (struct sha256_state){};
+	memzero_explicit(sctx, sizeof(*sctx));
 	return 0;
 }
 

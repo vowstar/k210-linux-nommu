@@ -22,7 +22,6 @@
 #include <linux/platform_data/spi-omap2-mcspi.h>
 #include <linux/platform_data/mmc-omap.h>
 #include <linux/mfd/menelaus.h>
-#include <sound/tlv320aic3x.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach-types.h>
@@ -322,6 +321,7 @@ static int n8x0_mmc_get_cover_state(struct device *dev, int slot)
 
 static void n8x0_mmc_callback(void *data, u8 card_mask)
 {
+#ifdef CONFIG_MMC_OMAP
 	int bit, *openp, index;
 
 	if (board_is_n800()) {
@@ -339,7 +339,6 @@ static void n8x0_mmc_callback(void *data, u8 card_mask)
 	else
 		*openp = 0;
 
-#ifdef CONFIG_MMC_OMAP
 	omap_mmc_notify_cover_event(mmc_device, index, *openp);
 #else
 	pr_warn("MMC: notify cover event not available\n");
@@ -505,7 +504,7 @@ static void __init n8x0_mmc_init(void)
 }
 #else
 static struct omap_mmc_platform_data mmc1_data;
-void __init n8x0_mmc_init(void)
+static void __init n8x0_mmc_init(void)
 {
 }
 #endif	/* CONFIG_MMC_OMAP */
@@ -565,10 +564,6 @@ static int n8x0_menelaus_late_init(struct device *dev)
 
 struct menelaus_platform_data n8x0_menelaus_platform_data = {
 	.late_init = n8x0_menelaus_late_init,
-};
-
-struct aic3x_pdata n810_aic33_data = {
-	.gpio_reset = 118,
 };
 
 static int __init n8x0_late_initcall(void)

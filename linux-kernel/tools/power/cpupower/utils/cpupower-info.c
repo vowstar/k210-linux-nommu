@@ -62,14 +62,14 @@ int cmd_info(int argc, char **argv)
 		default:
 			print_wrong_arg_exit();
 		}
-	};
+	}
 
 	if (!params.params)
 		params.params = 0x7;
 
-	/* Default is: show output of CPU 0 only */
+	/* Default is: show output of base_cpu only */
 	if (bitmask_isallclear(cpus_chosen))
-		bitmask_setbit(cpus_chosen, 0);
+		bitmask_setbit(cpus_chosen, base_cpu);
 
 	/* Add more per cpu options here */
 	if (!params.perf_bias)
@@ -101,7 +101,7 @@ int cmd_info(int argc, char **argv)
 		}
 
 		if (params.perf_bias) {
-			ret = msr_intel_get_perf_bias(cpu);
+			ret = cpupower_intel_get_perf_bias(cpu);
 			if (ret < 0) {
 				fprintf(stderr,
 			_("Could not read perf-bias value[%d]\n"), ret);

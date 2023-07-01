@@ -1,5 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 /*
- * Copyright 2016-2018 Advanced Micro Devices, Inc.
+ * Copyright 2016-2022 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -58,21 +59,27 @@ static int update_qpd_v9(struct device_queue_manager *dqm,
 
 	/* check if sh_mem_config register already configured */
 	if (qpd->sh_mem_config == 0) {
-		qpd->sh_mem_config =
-				SH_MEM_ALIGNMENT_MODE_UNALIGNED <<
+		qpd->sh_mem_config = SH_MEM_ALIGNMENT_MODE_UNALIGNED <<
 					SH_MEM_CONFIG__ALIGNMENT_MODE__SHIFT;
-		if (amdgpu_noretry &&
-		    !dqm->dev->device_info->needs_iommu_device)
-			qpd->sh_mem_config |=
-				1 << SH_MEM_CONFIG__RETRY_DISABLE__SHIFT;
+
+		if (dqm->dev->noretry && !dqm->dev->use_iommu_v2)
+			qpd->sh_mem_config |= 1 << SH_MEM_CONFIG__RETRY_DISABLE__SHIFT;
 
 		qpd->sh_mem_ape1_limit = 0;
 		qpd->sh_mem_ape1_base = 0;
 	}
 
+	if (KFD_SUPPORT_XNACK_PER_PROCESS(dqm->dev)) {
+		if (!pdd->process->xnack_enabled)
+			qpd->sh_mem_config |= 1 << SH_MEM_CONFIG__RETRY_DISABLE__SHIFT;
+		else
+			qpd->sh_mem_config &= ~(1 << SH_MEM_CONFIG__RETRY_DISABLE__SHIFT);
+	}
+
 	qpd->sh_mem_bases = compute_sh_mem_bases_64bit(pdd);
 
-	pr_debug("sh_mem_bases 0x%X\n", qpd->sh_mem_bases);
+	pr_debug("sh_mem_bases 0x%X sh_mem_config 0x%X\n", qpd->sh_mem_bases,
+		 qpd->sh_mem_config);
 
 	return 0;
 }

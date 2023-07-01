@@ -25,6 +25,8 @@
 #include "w1_netlink.h"
 
 #define W1_FAMILY_DEFAULT	0
+#define W1_FAMILY_DS28E04       0x1C /* for crc quirk */
+
 
 static int w1_timeout = 10;
 module_param_named(timeout, w1_timeout, int, 0);
@@ -160,7 +162,7 @@ static const struct attribute_group *w1_slave_default_groups[] = {
 	NULL,
 };
 
-static struct w1_family_ops w1_default_fops = {
+static const struct w1_family_ops w1_default_fops = {
 	.groups		= w1_slave_default_groups,
 };
 
@@ -168,7 +170,7 @@ static struct w1_family w1_default_family = {
 	.fops = &w1_default_fops,
 };
 
-static int w1_uevent(struct device *dev, struct kobj_uevent_env *env);
+static int w1_uevent(const struct device *dev, struct kobj_uevent_env *env);
 
 static struct bus_type w1_bus_type = {
 	.name = "w1",
@@ -575,11 +577,11 @@ void w1_destroy_master_attributes(struct w1_master *master)
 	sysfs_remove_group(&master->dev.kobj, &w1_master_defattr_group);
 }
 
-static int w1_uevent(struct device *dev, struct kobj_uevent_env *env)
+static int w1_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
-	struct w1_master *md = NULL;
-	struct w1_slave *sl = NULL;
-	char *event_owner, *name;
+	const struct w1_master *md = NULL;
+	const struct w1_slave *sl = NULL;
+	const char *event_owner, *name;
 	int err = 0;
 
 	if (dev->driver == &w1_master_driver) {
@@ -613,7 +615,7 @@ end:
 
 static int w1_family_notify(unsigned long action, struct w1_slave *sl)
 {
-	struct w1_family_ops *fops;
+	const struct w1_family_ops *fops;
 	int err;
 
 	fops = sl->family->fops;
@@ -913,11 +915,44 @@ void w1_reconnect_slaves(struct w1_family *f, int attach)
 	mutex_unlock(&w1_mlock);
 }
 
+static int w1_addr_crc_is_valid(struct w1_master *dev, u64 rn)
+{
+	u64 rn_le = cpu_to_le64(rn);
+	struct w1_reg_num *tmp = (struct w1_reg_num *)&rn;
+	u8 crc;
+
+	crc = w1_calc_crc8((u8 *)&rn_le, 7);
+
+	/* quirk:
+	 *   DS28E04 (1w eeprom) has strapping pins to change
+	 *   address, but will not update the crc. So normal rules
+	 *   for consistent w1 addresses are violated. We test
+	 *   with the 7 LSBs of the address forced high.
+	 *
+	 *   (char*)&rn_le = { family, addr_lsb, ..., addr_msb, crc }.
+	 */
+	if (crc != tmp->crc && tmp->family == W1_FAMILY_DS28E04) {
+		u64 corr_le = rn_le;
+
+		((u8 *)&corr_le)[1] |= 0x7f;
+		crc = w1_calc_crc8((u8 *)&corr_le, 7);
+
+		dev_info(&dev->dev, "DS28E04 crc workaround on %02x.%012llx.%02x\n",
+			tmp->family, (unsigned long long)tmp->id, tmp->crc);
+	}
+
+	if (crc != tmp->crc) {
+		dev_dbg(&dev->dev, "w1 addr crc mismatch: %02x.%012llx.%02x != 0x%02x.\n",
+			tmp->family, (unsigned long long)tmp->id, tmp->crc, crc);
+		return 0;
+	}
+	return 1;
+}
+
 void w1_slave_found(struct w1_master *dev, u64 rn)
 {
 	struct w1_slave *sl;
 	struct w1_reg_num *tmp;
-	u64 rn_le = cpu_to_le64(rn);
 
 	atomic_inc(&dev->refcnt);
 
@@ -927,7 +962,7 @@ void w1_slave_found(struct w1_master *dev, u64 rn)
 	if (sl) {
 		set_bit(W1_SLAVE_ACTIVE, &sl->flags);
 	} else {
-		if (rn && tmp->crc == w1_calc_crc8((u8 *)&rn_le, 7))
+		if (rn && w1_addr_crc_is_valid(dev, rn))
 			w1_attach_slave_device(dev, tmp);
 	}
 
@@ -1131,6 +1166,8 @@ int w1_process(void *data)
 	/* remainder if it woke up early */
 	unsigned long jremain = 0;
 
+	atomic_inc(&dev->refcnt);
+
 	for (;;) {
 
 		if (!jremain && dev->search_count) {
@@ -1158,8 +1195,10 @@ int w1_process(void *data)
 		 */
 		mutex_unlock(&dev->list_mutex);
 
-		if (kthread_should_stop())
+		if (kthread_should_stop()) {
+			__set_current_state(TASK_RUNNING);
 			break;
+		}
 
 		/* Only sleep when the search is active. */
 		if (dev->search_count) {

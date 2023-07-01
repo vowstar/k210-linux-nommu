@@ -59,6 +59,7 @@ EXPORT_SYMBOL(name)
 VBG_LOG(vbg_info, pr_info);
 VBG_LOG(vbg_warn, pr_warn);
 VBG_LOG(vbg_err, pr_err);
+VBG_LOG(vbg_err_ratelimited, pr_err_ratelimited);
 #if defined(DEBUG) && !defined(CONFIG_DYNAMIC_DEBUG)
 VBG_LOG(vbg_debug, pr_debug);
 #endif
@@ -311,7 +312,7 @@ static u32 hgcm_call_linear_addr_type_to_pagelist_flags(
 	switch (type) {
 	default:
 		WARN_ON(1);
-		/* Fall through */
+		fallthrough;
 	case VMMDEV_HGCM_PARM_TYPE_LINADDR:
 	case VMMDEV_HGCM_PARM_TYPE_LINADDR_KERNEL:
 		return VMMDEV_HGCM_F_PARM_DIRECTION_BOTH;
@@ -467,7 +468,7 @@ static int hgcm_cancel_call(struct vbg_dev *gdev, struct vmmdev_hgcm_call *call)
  *               Cancellation fun.
  */
 static int vbg_hgcm_do_call(struct vbg_dev *gdev, struct vmmdev_hgcm_call *call,
-			    u32 timeout_ms, bool *leak_it)
+			    u32 timeout_ms, bool interruptible, bool *leak_it)
 {
 	int rc, cancel_rc, ret;
 	long timeout;
@@ -494,10 +495,15 @@ static int vbg_hgcm_do_call(struct vbg_dev *gdev, struct vmmdev_hgcm_call *call,
 	else
 		timeout = msecs_to_jiffies(timeout_ms);
 
-	timeout = wait_event_interruptible_timeout(
-					gdev->hgcm_wq,
-					hgcm_req_done(gdev, &call->header),
-					timeout);
+	if (interruptible) {
+		timeout = wait_event_interruptible_timeout(gdev->hgcm_wq,
+							   hgcm_req_done(gdev, &call->header),
+							   timeout);
+	} else {
+		timeout = wait_event_timeout(gdev->hgcm_wq,
+					     hgcm_req_done(gdev, &call->header),
+					     timeout);
+	}
 
 	/* timeout > 0 means hgcm_req_done has returned true, so success */
 	if (timeout > 0)
@@ -630,7 +636,8 @@ int vbg_hgcm_call(struct vbg_dev *gdev, u32 requestor, u32 client_id,
 	hgcm_call_init_call(call, client_id, function, parms, parm_count,
 			    bounce_bufs);
 
-	ret = vbg_hgcm_do_call(gdev, call, timeout_ms, &leak_it);
+	ret = vbg_hgcm_do_call(gdev, call, timeout_ms,
+			       requestor & VMMDEV_REQUESTOR_USERMODE, &leak_it);
 	if (ret == 0) {
 		*vbox_status = call->header.result;
 		ret = hgcm_call_copy_back_result(call, parms, parm_count,

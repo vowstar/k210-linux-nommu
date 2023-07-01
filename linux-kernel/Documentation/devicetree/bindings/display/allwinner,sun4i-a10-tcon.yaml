@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/display/allwinner,sun4i-a10-tcon.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Allwinner A10 Timings Controller (TCON) Device Tree Bindings
+title: Allwinner A10 Timings Controller (TCON)
 
 maintainers:
   - Chen-Yu Tsai <wens@csie.org>
@@ -33,18 +33,30 @@ properties:
       - const: allwinner,sun8i-v3s-tcon
       - const: allwinner,sun9i-a80-tcon-lcd
       - const: allwinner,sun9i-a80-tcon-tv
+      - const: allwinner,sun20i-d1-tcon-lcd
+      - const: allwinner,sun20i-d1-tcon-tv
 
       - items:
-        - enum:
-            - allwinner,sun50i-a64-tcon-lcd
-        - const: allwinner,sun8i-a83t-tcon-lcd
+          - enum:
+              - allwinner,sun7i-a20-tcon0
+              - allwinner,sun7i-a20-tcon1
+          - const: allwinner,sun7i-a20-tcon
 
       - items:
-        - enum:
-          - allwinner,sun8i-h3-tcon-tv
-          - allwinner,sun50i-a64-tcon-tv
-          - allwinner,sun50i-h6-tcon-tv
-        - const: allwinner,sun8i-a83t-tcon-tv
+          - enum:
+              - allwinner,sun50i-a64-tcon-lcd
+          - const: allwinner,sun8i-a83t-tcon-lcd
+
+      - items:
+          - enum:
+              - allwinner,sun8i-h3-tcon-tv
+              - allwinner,sun50i-a64-tcon-tv
+          - const: allwinner,sun8i-a83t-tcon-tv
+
+      - items:
+          - enum:
+              - allwinner,sun50i-h6-tcon-tv
+          - const: allwinner,sun8i-r40-tcon-tv
 
   reg:
     maxItems: 1
@@ -61,11 +73,9 @@ properties:
     maxItems: 4
 
   clock-output-names:
-    allOf:
-      - $ref: /schemas/types.yaml#/definitions/string-array
-      - maxItems: 1
     description:
       Name of the LCD pixel clock created.
+    maxItems: 1
 
   dmas:
     maxItems: 1
@@ -73,64 +83,57 @@ properties:
   resets:
     anyOf:
       - items:
-        - description: TCON Reset Line
+          - description: TCON Reset Line
 
       - items:
-        - description: TCON Reset Line
-        - description: TCON LVDS Reset Line
+          - description: TCON Reset Line
+          - description: TCON LVDS Reset Line
 
       - items:
-        - description: TCON Reset Line
-        - description: TCON eDP Reset Line
+          - description: TCON Reset Line
+          - description: TCON eDP Reset Line
 
       - items:
-        - description: TCON Reset Line
-        - description: TCON eDP Reset Line
-        - description: TCON LVDS Reset Line
+          - description: TCON Reset Line
+          - description: TCON eDP Reset Line
+          - description: TCON LVDS Reset Line
 
   reset-names:
     oneOf:
       - const: lcd
 
       - items:
-        - const: lcd
-        - const: lvds
+          - const: lcd
+          - const: lvds
 
       - items:
-        - const: lcd
-        - const: edp
+          - const: lcd
+          - const: edp
 
       - items:
-        - const: lcd
-        - const: edp
-        - const: lvds
+          - const: lcd
+          - const: edp
+          - const: lvds
 
   ports:
-    type: object
-    description: |
-      A ports node with endpoint definitions as defined in
-      Documentation/devicetree/bindings/media/video-interfaces.txt.
+    $ref: /schemas/graph.yaml#/properties/ports
 
     properties:
-      "#address-cells":
-        const: 1
-
-      "#size-cells":
-        const: 0
-
       port@0:
-        type: object
+        $ref: /schemas/graph.yaml#/properties/port
         description: |
           Input endpoints of the controller.
 
       port@1:
-        type: object
+        $ref: /schemas/graph.yaml#/$defs/port-base
+        unevaluatedProperties: false
         description: |
           Output endpoints of the controller.
 
         patternProperties:
           "^endpoint(@[0-9])$":
-            type: object
+            $ref: /schemas/graph.yaml#/$defs/endpoint-base
+            unevaluatedProperties: false
 
             properties:
               allwinner,tcon-channel:
@@ -147,15 +150,9 @@ properties:
                   property is not present, the endpoint number will be
                   used as the channel number.
 
-            unevaluatedProperties: true
-
     required:
-      - "#address-cells"
-      - "#size-cells"
       - port@0
       - port@1
-
-    additionalProperties: false
 
 required:
   - compatible
@@ -236,6 +233,7 @@ allOf:
               - allwinner,sun8i-a83t-tcon-lcd
               - allwinner,sun8i-v3s-tcon
               - allwinner,sun9i-a80-tcon-lcd
+              - allwinner,sun20i-d1-tcon-lcd
 
     then:
       properties:
@@ -255,6 +253,7 @@ allOf:
               - allwinner,sun8i-a83t-tcon-tv
               - allwinner,sun8i-r40-tcon-tv
               - allwinner,sun9i-a80-tcon-tv
+              - allwinner,sun20i-d1-tcon-tv
 
     then:
       properties:
@@ -281,6 +280,7 @@ allOf:
               - allwinner,sun9i-a80-tcon-lcd
               - allwinner,sun4i-a10-tcon
               - allwinner,sun8i-a83t-tcon-lcd
+              - allwinner,sun20i-d1-tcon-lcd
 
     then:
       required:
@@ -297,6 +297,7 @@ allOf:
               - allwinner,sun8i-a23-tcon
               - allwinner,sun8i-a33-tcon
               - allwinner,sun8i-a83t-tcon-lcd
+              - allwinner,sun20i-d1-tcon-lcd
 
     then:
       properties:

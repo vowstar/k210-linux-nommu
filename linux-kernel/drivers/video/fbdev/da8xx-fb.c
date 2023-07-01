@@ -1066,7 +1066,7 @@ static void lcd_da8xx_cpufreq_deregister(struct da8xx_fb_par *par)
 
 static int fb_remove(struct platform_device *dev)
 {
-	struct fb_info *info = dev_get_drvdata(&dev->dev);
+	struct fb_info *info = platform_get_drvdata(dev);
 	struct da8xx_fb_par *par = info->par;
 	int ret;
 
@@ -1076,7 +1076,8 @@ static int fb_remove(struct platform_device *dev)
 	if (par->lcd_supply) {
 		ret = regulator_disable(par->lcd_supply);
 		if (ret)
-			return ret;
+			dev_warn(&dev->dev, "Failed to disable regulator (%pe)\n",
+				 ERR_PTR(ret));
 	}
 
 	lcd_disable_raster(DA8XX_FRAME_WAIT);
@@ -1354,10 +1355,9 @@ static int fb_probe(struct platform_device *device)
 		return PTR_ERR(da8xx_fb_reg_base);
 
 	tmp_lcdc_clk = devm_clk_get(&device->dev, "fck");
-	if (IS_ERR(tmp_lcdc_clk)) {
-		dev_err(&device->dev, "Can not get device clock\n");
-		return PTR_ERR(tmp_lcdc_clk);
-	}
+	if (IS_ERR(tmp_lcdc_clk))
+		return dev_err_probe(&device->dev, PTR_ERR(tmp_lcdc_clk),
+				     "Can not get device clock\n");
 
 	pm_runtime_enable(&device->dev);
 	pm_runtime_get_sync(&device->dev);
@@ -1402,14 +1402,14 @@ static int fb_probe(struct platform_device *device)
 	if (IS_ERR(par->lcd_supply)) {
 		if (PTR_ERR(par->lcd_supply) == -EPROBE_DEFER) {
 			ret = -EPROBE_DEFER;
-			goto err_pm_runtime_disable;
+			goto err_release_fb;
 		}
 
 		par->lcd_supply = NULL;
 	} else {
 		ret = regulator_enable(par->lcd_supply);
 		if (ret)
-			goto err_pm_runtime_disable;
+			goto err_release_fb;
 	}
 
 	fb_videomode_to_var(&da8xx_fb_var, lcdc_info);
@@ -1431,7 +1431,7 @@ static int fb_probe(struct platform_device *device)
 		dev_err(&device->dev,
 			"GLCD: kmalloc for frame buffer failed\n");
 		ret = -EINVAL;
-		goto err_release_fb;
+		goto err_disable_reg;
 	}
 
 	da8xx_fb_info->screen_base = (char __iomem *) par->vram_virt;
@@ -1475,14 +1475,14 @@ static int fb_probe(struct platform_device *device)
 
 	ret = fb_alloc_cmap(&da8xx_fb_info->cmap, PALETTE_SIZE, 0);
 	if (ret)
-		goto err_release_fb;
+		goto err_disable_reg;
 	da8xx_fb_info->cmap.len = par->palette_sz;
 
 	/* initialize var_screeninfo */
 	da8xx_fb_var.activate = FB_ACTIVATE_FORCE;
 	fb_set_var(da8xx_fb_info, &da8xx_fb_var);
 
-	dev_set_drvdata(&device->dev, da8xx_fb_info);
+	platform_set_drvdata(device, da8xx_fb_info);
 
 	/* initialize the vsync wait queue */
 	init_waitqueue_head(&par->vsync_wait);
@@ -1529,6 +1529,9 @@ err_cpu_freq:
 err_dealloc_cmap:
 	fb_dealloc_cmap(&da8xx_fb_info->cmap);
 
+err_disable_reg:
+	if (par->lcd_supply)
+		regulator_disable(par->lcd_supply);
 err_release_fb:
 	framebuffer_release(da8xx_fb_info);
 

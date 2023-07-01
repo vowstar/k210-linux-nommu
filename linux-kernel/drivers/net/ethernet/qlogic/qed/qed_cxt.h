@@ -1,33 +1,7 @@
+/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause) */
 /* QLogic qed NIC Driver
  * Copyright (c) 2015-2017  QLogic Corporation
- *
- * This software is available to you under a choice of one of two
- * licenses.  You may choose to be licensed under the terms of the GNU
- * General Public License (GPL) Version 2, available from the file
- * COPYING in the main directory of this source tree, or the
- * OpenIB.org BSD license below:
- *
- *     Redistribution and use in source and binary forms, with or
- *     without modification, are permitted provided that the following
- *     conditions are met:
- *
- *      - Redistributions of source code must retain the above
- *        copyright notice, this list of conditions and the following
- *        disclaimer.
- *
- *      - Redistributions in binary form must reproduce the above
- *        copyright notice, this list of conditions and the following
- *        disclaimer in the documentation and /or other materials
- *        provided with the distribution.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright (c) 2019-2020 Marvell International Ltd.
  */
 
 #ifndef _QED_CXT_H
@@ -54,177 +28,190 @@ struct qed_tid_mem {
 };
 
 /**
- * @brief qedo_cid_get_cxt_info - Returns the context info for a specific cid
+ * qed_cxt_get_cid_info(): Returns the context info for a specific cidi.
  *
+ * @p_hwfn: HW device data.
+ * @p_info: In/out.
  *
- * @param p_hwfn
- * @param p_info in/out
- *
- * @return int
+ * Return: Int.
  */
 int qed_cxt_get_cid_info(struct qed_hwfn *p_hwfn,
 			 struct qed_cxt_info *p_info);
 
 /**
- * @brief qed_cxt_get_tid_mem_info
+ * qed_cxt_get_tid_mem_info(): Returns the tid mem info.
  *
- * @param p_hwfn
- * @param p_info
+ * @p_hwfn: HW device data.
+ * @p_info: in/out.
  *
- * @return int
+ * Return: int.
  */
 int qed_cxt_get_tid_mem_info(struct qed_hwfn *p_hwfn,
 			     struct qed_tid_mem *p_info);
 
-#define QED_CXT_ISCSI_TID_SEG	PROTOCOLID_ISCSI
+#define QED_CXT_TCP_ULP_TID_SEG	PROTOCOLID_TCP_ULP
 #define QED_CXT_ROCE_TID_SEG	PROTOCOLID_ROCE
 #define QED_CXT_FCOE_TID_SEG	PROTOCOLID_FCOE
 enum qed_cxt_elem_type {
 	QED_ELEM_CXT,
 	QED_ELEM_SRQ,
-	QED_ELEM_TASK
+	QED_ELEM_TASK,
+	QED_ELEM_XRC_SRQ,
 };
 
 u32 qed_cxt_get_proto_cid_count(struct qed_hwfn *p_hwfn,
 				enum protocol_type type, u32 *vf_cid);
 
 /**
- * @brief qed_cxt_set_pf_params - Set the PF params for cxt init
+ * qed_cxt_set_pf_params(): Set the PF params for cxt init.
  *
- * @param p_hwfn
- * @param rdma_tasks - requested maximum
- * @return int
+ * @p_hwfn: HW device data.
+ * @rdma_tasks: Requested maximum.
+ *
+ * Return: int.
  */
 int qed_cxt_set_pf_params(struct qed_hwfn *p_hwfn, u32 rdma_tasks);
 
 /**
- * @brief qed_cxt_cfg_ilt_compute - compute ILT init parameters
+ * qed_cxt_cfg_ilt_compute(): Compute ILT init parameters.
  *
- * @param p_hwfn
- * @param last_line
+ * @p_hwfn: HW device data.
+ * @last_line: Last_line.
  *
- * @return int
+ * Return: Int
  */
 int qed_cxt_cfg_ilt_compute(struct qed_hwfn *p_hwfn, u32 *last_line);
 
 /**
- * @brief qed_cxt_cfg_ilt_compute_excess - how many lines can be decreased
+ * qed_cxt_cfg_ilt_compute_excess(): How many lines can be decreased.
  *
- * @param p_hwfn
- * @param used_lines
+ * @p_hwfn: HW device data.
+ * @used_lines: Used lines.
+ *
+ * Return: Int.
  */
 u32 qed_cxt_cfg_ilt_compute_excess(struct qed_hwfn *p_hwfn, u32 used_lines);
 
 /**
- * @brief qed_cxt_mngr_alloc - Allocate and init the context manager struct
+ * qed_cxt_mngr_alloc(): Allocate and init the context manager struct.
  *
- * @param p_hwfn
+ * @p_hwfn: HW device data.
  *
- * @return int
+ * Return: Int.
  */
 int qed_cxt_mngr_alloc(struct qed_hwfn *p_hwfn);
 
 /**
- * @brief qed_cxt_mngr_free
+ * qed_cxt_mngr_free() - Context manager free.
  *
- * @param p_hwfn
+ * @p_hwfn: HW device data.
+ *
+ * Return: Void.
  */
 void qed_cxt_mngr_free(struct qed_hwfn *p_hwfn);
 
 /**
- * @brief qed_cxt_tables_alloc - Allocate ILT shadow, Searcher T2, acquired map
+ * qed_cxt_tables_alloc(): Allocate ILT shadow, Searcher T2, acquired map.
  *
- * @param p_hwfn
+ * @p_hwfn: HW device data.
  *
- * @return int
+ * Return: Int.
  */
 int qed_cxt_tables_alloc(struct qed_hwfn *p_hwfn);
 
 /**
- * @brief qed_cxt_mngr_setup - Reset the acquired CIDs
+ * qed_cxt_mngr_setup(): Reset the acquired CIDs.
  *
- * @param p_hwfn
+ * @p_hwfn: HW device data.
  */
 void qed_cxt_mngr_setup(struct qed_hwfn *p_hwfn);
 
 /**
- * @brief qed_cxt_hw_init_common - Initailze ILT and DQ, common phase, per path.
+ * qed_cxt_hw_init_common(): Initailze ILT and DQ, common phase, per path.
  *
+ * @p_hwfn: HW device data.
  *
- *
- * @param p_hwfn
+ * Return: Void.
  */
 void qed_cxt_hw_init_common(struct qed_hwfn *p_hwfn);
 
 /**
- * @brief qed_cxt_hw_init_pf - Initailze ILT and DQ, PF phase, per path.
+ * qed_cxt_hw_init_pf(): Initailze ILT and DQ, PF phase, per path.
  *
- * @param p_hwfn
- * @param p_ptt
+ * @p_hwfn: HW device data.
+ * @p_ptt: P_ptt.
+ *
+ * Return: Void.
  */
 void qed_cxt_hw_init_pf(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt);
 
 /**
- * @brief qed_qm_init_pf - Initailze the QM PF phase, per path
+ * qed_qm_init_pf(): Initailze the QM PF phase, per path.
  *
- * @param p_hwfn
- * @param p_ptt
- * @param is_pf_loading
+ * @p_hwfn: HW device data.
+ * @p_ptt: P_ptt.
+ * @is_pf_loading: Is pf pending.
+ *
+ * Return: Void.
  */
 void qed_qm_init_pf(struct qed_hwfn *p_hwfn,
 		    struct qed_ptt *p_ptt, bool is_pf_loading);
 
 /**
- * @brief Reconfigures QM pf on the fly
+ * qed_qm_reconf(): Reconfigures QM pf on the fly.
  *
- * @param p_hwfn
- * @param p_ptt
+ * @p_hwfn: HW device data.
+ * @p_ptt: P_ptt.
  *
- * @return int
+ * Return: Int.
  */
 int qed_qm_reconf(struct qed_hwfn *p_hwfn, struct qed_ptt *p_ptt);
 
 #define QED_CXT_PF_CID (0xff)
 
 /**
- * @brief qed_cxt_release - Release a cid
+ * qed_cxt_release_cid(): Release a cid.
  *
- * @param p_hwfn
- * @param cid
+ * @p_hwfn: HW device data.
+ * @cid: Cid.
+ *
+ * Return: Void.
  */
 void qed_cxt_release_cid(struct qed_hwfn *p_hwfn, u32 cid);
 
 /**
- * @brief qed_cxt_release - Release a cid belonging to a vf-queue
+ * _qed_cxt_release_cid(): Release a cid belonging to a vf-queue.
  *
- * @param p_hwfn
- * @param cid
- * @param vfid - engine relative index. QED_CXT_PF_CID if belongs to PF
+ * @p_hwfn: HW device data.
+ * @cid: Cid.
+ * @vfid: Engine relative index. QED_CXT_PF_CID if belongs to PF.
+ *
+ * Return: Void.
  */
 void _qed_cxt_release_cid(struct qed_hwfn *p_hwfn, u32 cid, u8 vfid);
 
 /**
- * @brief qed_cxt_acquire - Acquire a new cid of a specific protocol type
+ * qed_cxt_acquire_cid(): Acquire a new cid of a specific protocol type.
  *
- * @param p_hwfn
- * @param type
- * @param p_cid
+ * @p_hwfn: HW device data.
+ * @type: Type.
+ * @p_cid: Pointer cid.
  *
- * @return int
+ * Return: Int.
  */
 int qed_cxt_acquire_cid(struct qed_hwfn *p_hwfn,
 			enum protocol_type type, u32 *p_cid);
 
 /**
- * @brief _qed_cxt_acquire - Acquire a new cid of a specific protocol type
- *                           for a vf-queue
+ * _qed_cxt_acquire_cid(): Acquire a new cid of a specific protocol type
+ *                         for a vf-queue.
  *
- * @param p_hwfn
- * @param type
- * @param p_cid
- * @param vfid - engine relative index. QED_CXT_PF_CID if belongs to PF
+ * @p_hwfn: HW device data.
+ * @type: Type.
+ * @p_cid: Pointer cid.
+ * @vfid: Engine relative index. QED_CXT_PF_CID if belongs to PF.
  *
- * @return int
+ * Return: Int.
  */
 int _qed_cxt_acquire_cid(struct qed_hwfn *p_hwfn,
 			 enum protocol_type type, u32 *p_cid, u8 vfid);
@@ -235,7 +222,6 @@ u32 qed_cxt_get_proto_tid_count(struct qed_hwfn *p_hwfn,
 				enum protocol_type type);
 u32 qed_cxt_get_proto_cid_start(struct qed_hwfn *p_hwfn,
 				enum protocol_type type);
-u32 qed_cxt_get_srq_count(struct qed_hwfn *p_hwfn);
 int qed_cxt_free_proto_ilt(struct qed_hwfn *p_hwfn, enum protocol_type proto);
 
 #define QED_CTX_WORKING_MEM 0
@@ -352,17 +338,18 @@ struct qed_cxt_mngr {
 
 	/* SRC T2 */
 	struct qed_src_t2 src_t2;
-	u32 t2_num_pages;
-	u64 first_free;
-	u64 last_free;
 
 	/* total number of SRQ's for this hwfn */
 	u32 srq_count;
+	u32 xrc_srq_count;
 
 	/* Maximal number of L2 steering filters */
 	u32 arfs_count;
 
-	u8 task_type_id;
+	u16 iscsi_task_pages;
+	u16 fcoe_task_pages;
+	u16 roce_task_pages;
+	u16 eth_task_pages;
 	u16 task_ctx_size;
 	u16 conn_ctx_size;
 };
@@ -371,5 +358,10 @@ u16 qed_get_cdut_num_pf_init_pages(struct qed_hwfn *p_hwfn);
 u16 qed_get_cdut_num_vf_init_pages(struct qed_hwfn *p_hwfn);
 u16 qed_get_cdut_num_pf_work_pages(struct qed_hwfn *p_hwfn);
 u16 qed_get_cdut_num_vf_work_pages(struct qed_hwfn *p_hwfn);
+
+u32 qed_cxt_get_ilt_page_size(struct qed_hwfn *p_hwfn,
+			      enum ilt_clients ilt_client);
+
+u32 qed_cxt_get_total_srq_count(struct qed_hwfn *p_hwfn);
 
 #endif

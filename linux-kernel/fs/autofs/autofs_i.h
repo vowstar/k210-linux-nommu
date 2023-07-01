@@ -51,8 +51,6 @@ extern struct file_system_type autofs_fs_type;
  */
 struct autofs_info {
 	struct dentry	*dentry;
-	struct inode	*inode;
-
 	int		flags;
 
 	struct completion expire_complete;
@@ -87,6 +85,7 @@ struct autofs_wait_queue {
 	autofs_wqt_t wait_queue_token;
 	/* We use the following to see what we are waiting for */
 	struct qstr name;
+	u32 offset;
 	u32 dev;
 	u64 ino;
 	kuid_t uid;
@@ -145,6 +144,11 @@ static inline int autofs_oz_mode(struct autofs_sb_info *sbi)
 {
 	return ((sbi->flags & AUTOFS_SBI_CATATONIC) ||
 		 task_pgrp(current) == sbi->oz_pgrp);
+}
+
+static inline bool autofs_empty(struct autofs_info *ino)
+{
+	return ino->count < 2;
 }
 
 struct inode *autofs_get_inode(struct super_block *, umode_t);

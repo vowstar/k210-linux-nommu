@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2010-2011 Neil Brown
  * Copyright (C) 2010-2018 Red Hat, Inc. All rights reserved.
@@ -29,10 +30,10 @@
  */
 #define	MIN_RAID456_JOURNAL_SPACE (4*2048)
 
-static bool devices_handle_discard_safely = false;
+static bool devices_handle_discard_safely;
 
 /*
- * The following flags are used by dm-raid.c to set up the array state.
+ * The following flags are used by dm-raid to set up the array state.
  * They must be cleared before md_run is called.
  */
 #define FirstUse 10		/* rdev flag */
@@ -242,7 +243,6 @@ struct raid_set {
 
 	struct mddev md;
 	struct raid_type *raid_type;
-	struct dm_target_callbacks callbacks;
 
 	sector_t array_sectors;
 	sector_t dev_sectors;
@@ -254,7 +254,7 @@ struct raid_set {
 		int mode;
 	} journal_dev;
 
-	struct raid_dev dev[0];
+	struct raid_dev dev[];
 };
 
 static void rs_config_backup(struct raid_set *rs, struct rs_layout *l)
@@ -363,8 +363,8 @@ static struct {
 	const int mode;
 	const char *param;
 } _raid456_journal_mode[] = {
-	{ R5C_JOURNAL_MODE_WRITE_THROUGH , "writethrough" },
-	{ R5C_JOURNAL_MODE_WRITE_BACK    , "writeback" }
+	{ R5C_JOURNAL_MODE_WRITE_THROUGH, "writethrough" },
+	{ R5C_JOURNAL_MODE_WRITE_BACK,    "writeback" }
 };
 
 /* Return MD raid4/5/6 journal mode for dm @journal_mode one */
@@ -701,8 +701,7 @@ static void rs_set_capacity(struct raid_set *rs)
 {
 	struct gendisk *gendisk = dm_disk(dm_table_get_md(rs->ti->table));
 
-	set_capacity(gendisk, rs->md.array_sectors);
-	revalidate_disk(gendisk);
+	set_capacity_and_notify(gendisk, rs->md.array_sectors);
 }
 
 /*
@@ -1003,12 +1002,13 @@ static int validate_region_size(struct raid_set *rs, unsigned long region_size)
 static int validate_raid_redundancy(struct raid_set *rs)
 {
 	unsigned int i, rebuild_cnt = 0;
-	unsigned int rebuilds_per_group = 0, copies;
+	unsigned int rebuilds_per_group = 0, copies, raid_disks;
 	unsigned int group_size, last_group_start;
 
-	for (i = 0; i < rs->md.raid_disks; i++)
-		if (!test_bit(In_sync, &rs->dev[i].rdev.flags) ||
-		    !rs->dev[i].rdev.sb_page)
+	for (i = 0; i < rs->raid_disks; i++)
+		if (!test_bit(FirstUse, &rs->dev[i].rdev.flags) &&
+		    ((!test_bit(In_sync, &rs->dev[i].rdev.flags) ||
+		      !rs->dev[i].rdev.sb_page)))
 			rebuild_cnt++;
 
 	switch (rs->md.level) {
@@ -1048,8 +1048,9 @@ static int validate_raid_redundancy(struct raid_set *rs)
 		 *	    A	 A    B	   B	C
 		 *	    C	 D    D	   E	E
 		 */
+		raid_disks = min(rs->raid_disks, rs->md.raid_disks);
 		if (__is_raid10_near(rs->md.new_layout)) {
-			for (i = 0; i < rs->md.raid_disks; i++) {
+			for (i = 0; i < raid_disks; i++) {
 				if (!(i % copies))
 					rebuilds_per_group = 0;
 				if ((!rs->dev[i].rdev.sb_page ||
@@ -1072,16 +1073,16 @@ static int validate_raid_redundancy(struct raid_set *rs)
 		 * results in the need to treat the last (potentially larger)
 		 * set differently.
 		 */
-		group_size = (rs->md.raid_disks / copies);
-		last_group_start = (rs->md.raid_disks / group_size) - 1;
+		group_size = (raid_disks / copies);
+		last_group_start = (raid_disks / group_size) - 1;
 		last_group_start *= group_size;
-		for (i = 0; i < rs->md.raid_disks; i++) {
+		for (i = 0; i < raid_disks; i++) {
 			if (!(i % copies) && !(i > last_group_start))
 				rebuilds_per_group = 0;
 			if ((!rs->dev[i].rdev.sb_page ||
 			     !test_bit(In_sync, &rs->dev[i].rdev.flags)) &&
 			    (++rebuilds_per_group >= copies))
-					goto too_many;
+				goto too_many;
 		}
 		break;
 	default:
@@ -1114,7 +1115,7 @@ too_many:
  *    [stripe_cache <sectors>]		Stripe cache size for higher RAIDs
  *    [region_size <sectors>]		Defines granularity of bitmap
  *    [journal_dev <dev>]		raid4/5/6 journaling deviice
- *    					(i.e. write hole closing log)
+ *					(i.e. write hole closing log)
  *
  * RAID10-only options:
  *    [raid10_copies <# copies>]	Number of copies.  (Default: 2)
@@ -1263,7 +1264,7 @@ static int parse_raid_params(struct raid_set *rs, struct dm_arg_set *as,
 			md_rdev_init(jdev);
 			jdev->mddev = &rs->md;
 			jdev->bdev = rs->journal_dev.dev->bdev;
-			jdev->sectors = to_sector(i_size_read(jdev->bdev->bd_inode));
+			jdev->sectors = bdev_nr_sectors(jdev->bdev);
 			if (jdev->sectors < MIN_RAID456_JOURNAL_SPACE) {
 				rs->ti->error = "No space for raid4/5/6 journal";
 				return -ENOSPC;
@@ -1369,7 +1370,7 @@ static int parse_raid_params(struct raid_set *rs, struct dm_arg_set *as,
 			}
 			rs->md.bitmap_info.daemon_sleep = value;
 		} else if (!strcasecmp(key, dm_raid_arg_name_by_flag(CTR_FLAG_DATA_OFFSET))) {
-			/* Userspace passes new data_offset after having extended the the data image LV */
+			/* Userspace passes new data_offset after having extended the data image LV */
 			if (test_and_set_bit(__CTR_FLAG_DATA_OFFSET, &rs->ctr_flags)) {
 				rs->ti->error = "Only one data_offset argument pair allowed";
 				return -EINVAL;
@@ -1590,7 +1591,7 @@ static sector_t __rdev_sectors(struct raid_set *rs)
 {
 	int i;
 
-	for (i = 0; i < rs->md.raid_disks; i++) {
+	for (i = 0; i < rs->raid_disks; i++) {
 		struct md_rdev *rdev = &rs->dev[i].rdev;
 
 		if (!test_bit(Journal, &rdev->flags) &&
@@ -1609,7 +1610,7 @@ static int _check_data_dev_sectors(struct raid_set *rs)
 
 	rdev_for_each(rdev, &rs->md)
 		if (!test_bit(Journal, &rdev->flags) && rdev->bdev) {
-			ds = min(ds, to_sector(i_size_read(rdev->bdev->bd_inode)));
+			ds = min(ds, bdev_nr_sectors(rdev->bdev));
 			if (ds < rs->md.dev_sectors) {
 				rs->ti->error = "Component device(s) too small";
 				return -EINVAL;
@@ -1703,13 +1704,6 @@ static void do_table_event(struct work_struct *ws)
 		rs_set_capacity(rs);
 	}
 	dm_table_event(rs->ti->table);
-}
-
-static int raid_is_congested(struct dm_target_callbacks *cb, int bits)
-{
-	struct raid_set *rs = container_of(cb, struct raid_set, callbacks);
-
-	return mddev_congested(&rs->md, bits);
 }
 
 /*
@@ -1862,6 +1856,7 @@ static int rs_check_takeover(struct raid_set *rs)
 		    ((mddev->layout == ALGORITHM_PARITY_N && mddev->new_layout == ALGORITHM_PARITY_N) ||
 		     __within_range(mddev->new_layout, ALGORITHM_LEFT_ASYMMETRIC, ALGORITHM_RIGHT_SYMMETRIC)))
 			return 0;
+		break;
 
 	default:
 		break;
@@ -1877,6 +1872,14 @@ static bool rs_takeover_requested(struct raid_set *rs)
 	return rs->md.new_level != rs->md.level;
 }
 
+/* True if layout is set to reshape. */
+static bool rs_is_layout_change(struct raid_set *rs, bool use_mddev)
+{
+	return (use_mddev ? rs->md.delta_disks : rs->delta_disks) ||
+	       rs->md.new_layout != rs->md.layout ||
+	       rs->md.new_chunk_sectors != rs->md.chunk_sectors;
+}
+
 /* True if @rs is requested to reshape by ctr */
 static bool rs_reshape_requested(struct raid_set *rs)
 {
@@ -1889,9 +1892,7 @@ static bool rs_reshape_requested(struct raid_set *rs)
 	if (rs_is_raid0(rs))
 		return false;
 
-	change = mddev->new_layout != mddev->layout ||
-		 mddev->new_chunk_sectors != mddev->chunk_sectors ||
-		 rs->delta_disks;
+	change = rs_is_layout_change(rs, false);
 
 	/* Historical case to support raid1 reshape without delta disks */
 	if (rs_is_raid1(rs)) {
@@ -1988,7 +1989,7 @@ struct dm_raid_superblock {
 	__le64 sectors; /* Used device size in sectors */
 
 	/*
-	 * Additonal Bit field of devices indicating failures to support
+	 * Additional Bit field of devices indicating failures to support
 	 * up to 256 devices with the 1.9.0 on-disk metadata format
 	 */
 	__le64 extended_failed_devices[DISKS_ARRAY_ELEMS - 1];
@@ -2038,7 +2039,7 @@ static int read_disk_sb(struct md_rdev *rdev, int size, bool force_reload)
 
 	rdev->sb_loaded = 0;
 
-	if (!sync_page_io(rdev, 0, size, rdev->sb_page, REQ_OP_READ, 0, true)) {
+	if (!sync_page_io(rdev, 0, size, rdev->sb_page, REQ_OP_READ, true)) {
 		DMERR("Failed to read superblock of device at position %d",
 		      rdev->raid_disk);
 		md_error(rdev->mddev, rdev);
@@ -2345,8 +2346,6 @@ static int super_init_validation(struct raid_set *rs, struct md_rdev *rdev)
 
 	if (new_devs == rs->raid_disks || !rebuilds) {
 		/* Replace a broken device */
-		if (new_devs == 1 && !rs->delta_disks)
-			;
 		if (new_devs == rs->raid_disks) {
 			DMINFO("Superblocks created for new raid set");
 			set_bit(MD_ARRAY_FIRST_USE, &mddev->flags);
@@ -2531,7 +2530,7 @@ static int analyse_superblocks(struct dm_target *ti, struct raid_set *rs)
 		 * of the "sync" directive.
 		 *
 		 * With reshaping capability added, we must ensure that
-		 * that the "sync" directive is disallowed during the reshape.
+		 * the "sync" directive is disallowed during the reshape.
 		 */
 		if (test_bit(__CTR_FLAG_SYNC, &rs->ctr_flags))
 			continue;
@@ -2592,7 +2591,7 @@ static int analyse_superblocks(struct dm_target *ti, struct raid_set *rs)
 
 /*
  * Adjust data_offset and new_data_offset on all disk members of @rs
- * for out of place reshaping if requested by contructor
+ * for out of place reshaping if requested by constructor
  *
  * We need free space at the beginning of each raid disk for forward
  * and at the end for backward reshapes which userspace has to provide
@@ -2666,7 +2665,7 @@ static int rs_adjust_data_offsets(struct raid_set *rs)
 	 * Make sure we got a minimum amount of free sectors per device
 	 */
 	if (rs->data_offset &&
-	    to_sector(i_size_read(rdev->bdev->bd_inode)) - rs->md.dev_sectors < MIN_FREE_RESHAPE_SPACE) {
+	    bdev_nr_sectors(rdev->bdev) - rs->md.dev_sectors < MIN_FREE_RESHAPE_SPACE) {
 		rs->ti->error = data_offset ? "No space for forward reshape" :
 					      "No space for backward reshape";
 		return -ENOSPC;
@@ -2828,7 +2827,7 @@ static sector_t _get_reshape_sectors(struct raid_set *rs)
 }
 
 /*
- *
+ * Reshape:
  * - change raid layout
  * - change chunk size
  * - add disks
@@ -2857,7 +2856,7 @@ static int rs_setup_reshape(struct raid_set *rs)
 	 *
 	 * - in case of adding disk(s), array size has
 	 *   to grow after the disk adding reshape,
-	 *   which'll hapen in the event handler;
+	 *   which'll happen in the event handler;
 	 *   reshape will happen forward, so space has to
 	 *   be available at the beginning of each disk
 	 *
@@ -2938,6 +2937,20 @@ static int rs_setup_reshape(struct raid_set *rs)
 }
 
 /*
+ * If the md resync thread has updated superblock with max reshape position
+ * at the end of a reshape but not (yet) reset the layout configuration
+ * changes -> reset the latter.
+ */
+static void rs_reset_inconclusive_reshape(struct raid_set *rs)
+{
+	if (!rs_is_reshaping(rs) && rs_is_layout_change(rs, true)) {
+		rs_set_cur(rs);
+		rs->md.delta_disks = 0;
+		rs->md.reshape_backwards = 0;
+	}
+}
+
+/*
  * Enable/disable discard support on RAID set depending on
  * RAID level and discard properties of underlying RAID members.
  */
@@ -2953,13 +2966,8 @@ static void configure_discard_support(struct raid_set *rs)
 	raid456 = rs_is_raid456(rs);
 
 	for (i = 0; i < rs->raid_disks; i++) {
-		struct request_queue *q;
-
-		if (!rs->dev[i].rdev.bdev)
-			continue;
-
-		q = bdev_get_queue(rs->dev[i].rdev.bdev);
-		if (!q || !blk_queue_discard(q))
+		if (!rs->dev[i].rdev.bdev ||
+		    !bdev_max_discard_sectors(rs->dev[i].rdev.bdev))
 			return;
 
 		if (raid456) {
@@ -3090,6 +3098,7 @@ static int raid_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	INIT_WORK(&rs->md.event_work, do_table_event);
 	ti->private = rs;
 	ti->num_flush_bios = 1;
+	ti->needs_bio_set_dev = true;
 
 	/* Restore any requested new layout for conversion decision */
 	rs_config_restore(rs, &rs_layout);
@@ -3140,7 +3149,7 @@ static int raid_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		 * If a takeover is needed, userspace sets any additional
 		 * devices to rebuild and we can check for a valid request here.
 		 *
-		 * If acceptible, set the level to the new requested
+		 * If acceptable, set the level to the new requested
 		 * one, prohibit requesting recovery, allow the raid
 		 * set to run and store superblocks during resume.
 		 */
@@ -3175,12 +3184,12 @@ static int raid_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		/* Out-of-place space has to be available to allow for a reshape unless raid1! */
 		if (reshape_sectors || rs_is_raid1(rs)) {
 			/*
-			  * We can only prepare for a reshape here, because the
-			  * raid set needs to run to provide the repective reshape
-			  * check functions via its MD personality instance.
-			  *
-			  * So do the reshape check after md_run() succeeded.
-			  */
+			 * We can only prepare for a reshape here, because the
+			 * raid set needs to run to provide the repective reshape
+			 * check functions via its MD personality instance.
+			 *
+			 * So do the reshape check after md_run() succeeded.
+			 */
 			r = rs_prepare_reshape(rs);
 			if (r)
 				goto bad;
@@ -3223,11 +3232,14 @@ size_check:
 	if (r)
 		goto bad;
 
+	/* Catch any inconclusive reshape superblock content. */
+	rs_reset_inconclusive_reshape(rs);
+
 	/* Start raid set read-only and assumed clean to change in raid_resume() */
 	rs->md.ro = 1;
 	rs->md.in_sync = 1;
 
-	/* Keep array frozen */
+	/* Keep array frozen until resume. */
 	set_bit(MD_RECOVERY_FROZEN, &rs->md.recovery);
 
 	/* Has to be held on running the array */
@@ -3241,15 +3253,11 @@ size_check:
 	}
 
 	r = md_start(&rs->md);
-
 	if (r) {
 		ti->error = "Failed to start raid array";
 		mddev_unlock(&rs->md);
 		goto bad_md_start;
 	}
-
-	rs->callbacks.congested_fn = raid_is_congested;
-	dm_table_add_target_callbacks(ti->table, &rs->callbacks);
 
 	/* If raid4/5/6 journal mode explicitly requested (only possible with journal dev) -> set it */
 	if (test_bit(__CTR_FLAG_JOURNAL_MODE, &rs->ctr_flags)) {
@@ -3310,7 +3318,6 @@ static void raid_dtr(struct dm_target *ti)
 {
 	struct raid_set *rs = ti->private;
 
-	list_del_init(&rs->callbacks.list);
 	md_stop(&rs->md);
 	raid_set_free(rs);
 }
@@ -3504,7 +3511,7 @@ static void raid_status(struct dm_target *ti, status_type_t type,
 {
 	struct raid_set *rs = ti->private;
 	struct mddev *mddev = &rs->md;
-	struct r5conf *conf = mddev->private;
+	struct r5conf *conf = rs_is_raid456(rs) ? mddev->private : NULL;
 	int i, max_nr_stripes = conf ? conf->max_nr_stripes : 0;
 	unsigned long recovery;
 	unsigned int raid_param_cnt = 1; /* at least 1 for chunksize */
@@ -3663,11 +3670,50 @@ static void raid_status(struct dm_target *ti, status_type_t type,
 		for (i = 0; i < rs->raid_disks; i++)
 			DMEMIT(" %s %s", __get_dev_name(rs->dev[i].meta_dev),
 					 __get_dev_name(rs->dev[i].data_dev));
+		break;
+
+	case STATUSTYPE_IMA:
+		rt = get_raid_type_by_ll(mddev->new_level, mddev->new_layout);
+		if (!rt)
+			return;
+
+		DMEMIT_TARGET_NAME_VERSION(ti->type);
+		DMEMIT(",raid_type=%s,raid_disks=%d", rt->name, mddev->raid_disks);
+
+		/* Access most recent mddev properties for status output */
+		smp_rmb();
+		recovery = rs->md.recovery;
+		state = decipher_sync_action(mddev, recovery);
+		DMEMIT(",raid_state=%s", sync_str(state));
+
+		for (i = 0; i < rs->raid_disks; i++) {
+			DMEMIT(",raid_device_%d_status=", i);
+			DMEMIT(__raid_dev_status(rs, &rs->dev[i].rdev));
+		}
+
+		if (rt_is_raid456(rt)) {
+			DMEMIT(",journal_dev_mode=");
+			switch (rs->journal_dev.mode) {
+			case R5C_JOURNAL_MODE_WRITE_THROUGH:
+				DMEMIT("%s",
+				       _raid456_journal_mode[R5C_JOURNAL_MODE_WRITE_THROUGH].param);
+				break;
+			case R5C_JOURNAL_MODE_WRITE_BACK:
+				DMEMIT("%s",
+				       _raid456_journal_mode[R5C_JOURNAL_MODE_WRITE_BACK].param);
+				break;
+			default:
+				DMEMIT("invalid");
+				break;
+			}
+		}
+		DMEMIT(";");
+		break;
 	}
 }
 
 static int raid_message(struct dm_target *ti, unsigned int argc, char **argv,
-			char *result, unsigned maxlen)
+			char *result, unsigned int maxlen)
 {
 	struct raid_set *rs = ti->private;
 	struct mddev *mddev = &rs->md;
@@ -3683,6 +3729,7 @@ static int raid_message(struct dm_target *ti, unsigned int argc, char **argv,
 	if (!strcasecmp(argv[0], "idle") || !strcasecmp(argv[0], "frozen")) {
 		if (mddev->sync_thread) {
 			set_bit(MD_RECOVERY_INTR, &mddev->recovery);
+			md_unregister_thread(&mddev->sync_thread);
 			md_reap_sync_thread(mddev);
 		}
 	} else if (decipher_sync_action(mddev, mddev->recovery) != st_idle)
@@ -3724,13 +3771,13 @@ static int raid_iterate_devices(struct dm_target *ti,
 	unsigned int i;
 	int r = 0;
 
-	for (i = 0; !r && i < rs->md.raid_disks; i++)
-		if (rs->dev[i].data_dev)
-			r = fn(ti,
-				 rs->dev[i].data_dev,
-				 0, /* No offset on data devs */
-				 rs->md.dev_sectors,
-				 data);
+	for (i = 0; !r && i < rs->raid_disks; i++) {
+		if (rs->dev[i].data_dev) {
+			r = fn(ti, rs->dev[i].data_dev,
+			       0, /* No offset on data devs */
+			       rs->md.dev_sectors, data);
+		}
+	}
 
 	return r;
 }
@@ -3742,15 +3789,6 @@ static void raid_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 	blk_limits_io_min(limits, chunk_size_bytes);
 	blk_limits_io_opt(limits, chunk_size_bytes * mddev_data_stripes(rs));
-
-	/*
-	 * RAID1 and RAID10 personalities require bio splitting,
-	 * RAID0/4/5/6 don't and process large discard bios properly.
-	 */
-	if (rs_is_raid1(rs) || rs_is_raid10(rs)) {
-		limits->discard_granularity = chunk_size_bytes;
-		limits->max_discard_sectors = rs->md.chunk_sectors;
-	}
 }
 
 static void raid_postsuspend(struct dm_target *ti)
@@ -3784,7 +3822,7 @@ static void attempt_restore_of_faulty_devices(struct raid_set *rs)
 
 	memset(cleared_failed_devices, 0, sizeof(cleared_failed_devices));
 
-	for (i = 0; i < mddev->raid_disks; i++) {
+	for (i = 0; i < rs->raid_disks; i++) {
 		r = &rs->dev[i].rdev;
 		/* HM FIXME: enhance journal device recovery processing */
 		if (test_bit(Journal, &r->flags))
@@ -3964,7 +4002,7 @@ static int raid_preresume(struct dm_target *ti)
 	}
 
 	/* Resize bitmap to adjust to changed region size (aka MD bitmap chunksize) or grown device size */
-        if (test_bit(RT_FLAG_RS_BITMAP_LOADED, &rs->runtime_flags) && mddev->bitmap &&
+	if (test_bit(RT_FLAG_RS_BITMAP_LOADED, &rs->runtime_flags) && mddev->bitmap &&
 	    (test_bit(RT_FLAG_RS_GROW, &rs->runtime_flags) ||
 	     (rs->requested_bitmap_chunk_sectors &&
 	       mddev->bitmap_info.chunksize != to_bytes(rs->requested_bitmap_chunk_sectors)))) {

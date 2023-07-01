@@ -61,7 +61,8 @@ enum ring_buffer_type {
 
 unsigned ring_buffer_event_length(struct ring_buffer_event *event);
 void *ring_buffer_event_data(struct ring_buffer_event *event);
-u64 ring_buffer_event_time_stamp(struct ring_buffer_event *event);
+u64 ring_buffer_event_time_stamp(struct trace_buffer *buffer,
+				 struct ring_buffer_event *event);
 
 /*
  * ring_buffer_discard_commit will remove an event that has not
@@ -99,8 +100,8 @@ __ring_buffer_alloc(unsigned long size, unsigned flags, struct lock_class_key *k
 
 int ring_buffer_wait(struct trace_buffer *buffer, int cpu, int full);
 __poll_t ring_buffer_poll_wait(struct trace_buffer *buffer, int cpu,
-			  struct file *filp, poll_table *poll_table);
-
+			  struct file *filp, poll_table *poll_table, int full);
+void ring_buffer_wake_waiters(struct trace_buffer *buffer, int cpu);
 
 #define RING_BUFFER_ALL_CPUS -1
 
@@ -112,8 +113,7 @@ void ring_buffer_change_overwrite(struct trace_buffer *buffer, int val);
 
 struct ring_buffer_event *ring_buffer_lock_reserve(struct trace_buffer *buffer,
 						   unsigned long length);
-int ring_buffer_unlock_commit(struct trace_buffer *buffer,
-			      struct ring_buffer_event *event);
+int ring_buffer_unlock_commit(struct trace_buffer *buffer);
 int ring_buffer_write(struct trace_buffer *buffer,
 		      unsigned long length, void *data);
 
@@ -135,14 +135,15 @@ void ring_buffer_read_finish(struct ring_buffer_iter *iter);
 
 struct ring_buffer_event *
 ring_buffer_iter_peek(struct ring_buffer_iter *iter, u64 *ts);
-struct ring_buffer_event *
-ring_buffer_read(struct ring_buffer_iter *iter, u64 *ts);
+void ring_buffer_iter_advance(struct ring_buffer_iter *iter);
 void ring_buffer_iter_reset(struct ring_buffer_iter *iter);
 int ring_buffer_iter_empty(struct ring_buffer_iter *iter);
+bool ring_buffer_iter_dropped(struct ring_buffer_iter *iter);
 
 unsigned long ring_buffer_size(struct trace_buffer *buffer, int cpu);
 
 void ring_buffer_reset_cpu(struct trace_buffer *buffer, int cpu);
+void ring_buffer_reset_online_cpus(struct trace_buffer *buffer);
 void ring_buffer_reset(struct trace_buffer *buffer);
 
 #ifdef CONFIG_RING_BUFFER_ALLOW_SWAP
@@ -179,7 +180,7 @@ unsigned long ring_buffer_commit_overrun_cpu(struct trace_buffer *buffer, int cp
 unsigned long ring_buffer_dropped_events_cpu(struct trace_buffer *buffer, int cpu);
 unsigned long ring_buffer_read_events_cpu(struct trace_buffer *buffer, int cpu);
 
-u64 ring_buffer_time_stamp(struct trace_buffer *buffer, int cpu);
+u64 ring_buffer_time_stamp(struct trace_buffer *buffer);
 void ring_buffer_normalize_time_stamp(struct trace_buffer *buffer,
 				      int cpu, u64 *ts);
 void ring_buffer_set_clock(struct trace_buffer *buffer,

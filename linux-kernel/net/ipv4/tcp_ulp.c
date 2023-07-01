@@ -22,7 +22,8 @@ static struct tcp_ulp_ops *tcp_ulp_find(const char *name)
 {
 	struct tcp_ulp_ops *e;
 
-	list_for_each_entry_rcu(e, &tcp_ulp_list, list) {
+	list_for_each_entry_rcu(e, &tcp_ulp_list, list,
+				lockdep_is_held(&tcp_ulp_list_lock)) {
 		if (strcmp(e->name, name) == 0)
 			return e;
 	}
@@ -104,12 +105,6 @@ void tcp_update_ulp(struct sock *sk, struct proto *proto,
 {
 	struct inet_connection_sock *icsk = inet_csk(sk);
 
-	if (!icsk->icsk_ulp_ops) {
-		sk->sk_write_space = write_space;
-		sk->sk_prot = proto;
-		return;
-	}
-
 	if (icsk->icsk_ulp_ops->update)
 		icsk->icsk_ulp_ops->update(sk, proto, write_space);
 }
@@ -139,6 +134,13 @@ static int __tcp_set_ulp(struct sock *sk, const struct tcp_ulp_ops *ulp_ops)
 
 	err = -EEXIST;
 	if (icsk->icsk_ulp_ops)
+		goto out_err;
+
+	if (sk->sk_socket)
+		clear_bit(SOCK_SUPPORT_ZC, &sk->sk_socket->flags);
+
+	err = -ENOTCONN;
+	if (!ulp_ops->clone && sk->sk_state == TCP_LISTEN)
 		goto out_err;
 
 	err = ulp_ops->init(sk);

@@ -234,7 +234,7 @@ static int kvmppc_mmu_book3s_32_xlate_pte(struct kvm_vcpu *vcpu, gva_t eaddr,
 				case 2:
 				case 6:
 					pte->may_write = true;
-					/* fall through */
+					fallthrough;
 				case 3:
 				case 5:
 				case 7:
@@ -337,7 +337,7 @@ static void kvmppc_mmu_book3s_32_mtsrin(struct kvm_vcpu *vcpu, u32 srnum,
 
 static void kvmppc_mmu_book3s_32_tlbie(struct kvm_vcpu *vcpu, ulong ea, bool large)
 {
-	int i;
+	unsigned long i;
 	struct kvm_vcpu *v;
 
 	/* flush this VA on all cpus */

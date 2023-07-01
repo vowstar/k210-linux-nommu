@@ -15,6 +15,7 @@
  *     of fds to overcome nfds < 16390 descriptors limit (Tigran Aivazian).
  */
 
+#include <linux/compat.h>
 #include <linux/kernel.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/rt.h>
@@ -97,7 +98,7 @@ u64 select_estimate_accuracy(struct timespec64 *tv)
 struct poll_table_page {
 	struct poll_table_page * next;
 	struct poll_table_entry * entry;
-	struct poll_table_entry entries[0];
+	struct poll_table_entry entries[];
 };
 
 #define POLL_TABLE_FULL(table) \
@@ -458,9 +459,11 @@ get_max:
 	return max;
 }
 
-#define POLLIN_SET (EPOLLRDNORM | EPOLLRDBAND | EPOLLIN | EPOLLHUP | EPOLLERR)
-#define POLLOUT_SET (EPOLLWRBAND | EPOLLWRNORM | EPOLLOUT | EPOLLERR)
-#define POLLEX_SET (EPOLLPRI)
+#define POLLIN_SET (EPOLLRDNORM | EPOLLRDBAND | EPOLLIN | EPOLLHUP | EPOLLERR |\
+			EPOLLNVAL)
+#define POLLOUT_SET (EPOLLWRBAND | EPOLLWRNORM | EPOLLOUT | EPOLLERR |\
+			 EPOLLNVAL)
+#define POLLEX_SET (EPOLLPRI | EPOLLNVAL)
 
 static inline void wait_key_set(poll_table *wait, unsigned long in,
 				unsigned long out, unsigned long bit,
@@ -527,6 +530,7 @@ static int do_select(int n, fd_set_bits *fds, struct timespec64 *end_time)
 					break;
 				if (!(bit & all_bits))
 					continue;
+				mask = EPOLLNVAL;
 				f = fdget(i);
 				if (f.file) {
 					wait_key_set(wait, in, out, bit,
@@ -534,34 +538,34 @@ static int do_select(int n, fd_set_bits *fds, struct timespec64 *end_time)
 					mask = vfs_poll(f.file, wait);
 
 					fdput(f);
-					if ((mask & POLLIN_SET) && (in & bit)) {
-						res_in |= bit;
-						retval++;
-						wait->_qproc = NULL;
-					}
-					if ((mask & POLLOUT_SET) && (out & bit)) {
-						res_out |= bit;
-						retval++;
-						wait->_qproc = NULL;
-					}
-					if ((mask & POLLEX_SET) && (ex & bit)) {
-						res_ex |= bit;
-						retval++;
-						wait->_qproc = NULL;
-					}
-					/* got something, stop busy polling */
-					if (retval) {
-						can_busy_loop = false;
-						busy_flag = 0;
-
-					/*
-					 * only remember a returned
-					 * POLL_BUSY_LOOP if we asked for it
-					 */
-					} else if (busy_flag & mask)
-						can_busy_loop = true;
-
 				}
+				if ((mask & POLLIN_SET) && (in & bit)) {
+					res_in |= bit;
+					retval++;
+					wait->_qproc = NULL;
+				}
+				if ((mask & POLLOUT_SET) && (out & bit)) {
+					res_out |= bit;
+					retval++;
+					wait->_qproc = NULL;
+				}
+				if ((mask & POLLEX_SET) && (ex & bit)) {
+					res_ex |= bit;
+					retval++;
+					wait->_qproc = NULL;
+				}
+				/* got something, stop busy polling */
+				if (retval) {
+					can_busy_loop = false;
+					busy_flag = 0;
+
+				/*
+				 * only remember a returned
+				 * POLL_BUSY_LOOP if we asked for it
+				 */
+				} else if (busy_flag & mask)
+					can_busy_loop = true;
+
 			}
 			if (res_in)
 				*rinp = res_in;
@@ -766,22 +770,38 @@ static long do_pselect(int n, fd_set __user *inp, fd_set __user *outp,
  * which has a pointer to the sigset_t itself followed by a size_t containing
  * the sigset size.
  */
+struct sigset_argpack {
+	sigset_t __user *p;
+	size_t size;
+};
+
+static inline int get_sigset_argpack(struct sigset_argpack *to,
+				     struct sigset_argpack __user *from)
+{
+	// the path is hot enough for overhead of copy_from_user() to matter
+	if (from) {
+		if (!user_read_access_begin(from, sizeof(*from)))
+			return -EFAULT;
+		unsafe_get_user(to->p, &from->p, Efault);
+		unsafe_get_user(to->size, &from->size, Efault);
+		user_read_access_end();
+	}
+	return 0;
+Efault:
+	user_access_end();
+	return -EFAULT;
+}
+
 SYSCALL_DEFINE6(pselect6, int, n, fd_set __user *, inp, fd_set __user *, outp,
 		fd_set __user *, exp, struct __kernel_timespec __user *, tsp,
 		void __user *, sig)
 {
-	size_t sigsetsize = 0;
-	sigset_t __user *up = NULL;
+	struct sigset_argpack x = {NULL, 0};
 
-	if (sig) {
-		if (!access_ok(sig, sizeof(void *)+sizeof(size_t))
-		    || __get_user(up, (sigset_t __user * __user *)sig)
-		    || __get_user(sigsetsize,
-				(size_t __user *)(sig+sizeof(void *))))
-			return -EFAULT;
-	}
+	if (get_sigset_argpack(&x, sig))
+		return -EFAULT;
 
-	return do_pselect(n, inp, outp, exp, tsp, up, sigsetsize, PT_TIMESPEC);
+	return do_pselect(n, inp, outp, exp, tsp, x.p, x.size, PT_TIMESPEC);
 }
 
 #if defined(CONFIG_COMPAT_32BIT_TIME) && !defined(CONFIG_64BIT)
@@ -790,18 +810,12 @@ SYSCALL_DEFINE6(pselect6_time32, int, n, fd_set __user *, inp, fd_set __user *, 
 		fd_set __user *, exp, struct old_timespec32 __user *, tsp,
 		void __user *, sig)
 {
-	size_t sigsetsize = 0;
-	sigset_t __user *up = NULL;
+	struct sigset_argpack x = {NULL, 0};
 
-	if (sig) {
-		if (!access_ok(sig, sizeof(void *)+sizeof(size_t))
-		    || __get_user(up, (sigset_t __user * __user *)sig)
-		    || __get_user(sigsetsize,
-				(size_t __user *)(sig+sizeof(void *))))
-			return -EFAULT;
-	}
+	if (get_sigset_argpack(&x, sig))
+		return -EFAULT;
 
-	return do_pselect(n, inp, outp, exp, tsp, up, sigsetsize, PT_OLD_TIMESPEC);
+	return do_pselect(n, inp, outp, exp, tsp, x.p, x.size, PT_OLD_TIMESPEC);
 }
 
 #endif
@@ -826,7 +840,7 @@ SYSCALL_DEFINE1(old_select, struct sel_arg_struct __user *, arg)
 struct poll_list {
 	struct poll_list *next;
 	int len;
-	struct pollfd entries[0];
+	struct pollfd entries[];
 };
 
 #define POLLFD_PER_PAGE  ((PAGE_SIZE-sizeof(struct poll_list)) / sizeof(struct pollfd))
@@ -1001,14 +1015,17 @@ static int do_sys_poll(struct pollfd __user *ufds, unsigned int nfds,
 	fdcount = do_poll(head, &table, end_time);
 	poll_freewait(&table);
 
+	if (!user_write_access_begin(ufds, nfds * sizeof(*ufds)))
+		goto out_fds;
+
 	for (walk = head; walk; walk = walk->next) {
 		struct pollfd *fds = walk->entries;
 		int j;
 
-		for (j = 0; j < walk->len; j++, ufds++)
-			if (__put_user(fds[j].revents, &ufds->revents))
-				goto out_fds;
+		for (j = walk->len; j; fds++, ufds++, j--)
+			unsafe_put_user(fds->revents, &ufds->revents, Efault);
   	}
+	user_write_access_end();
 
 	err = fdcount;
 out_fds:
@@ -1020,6 +1037,11 @@ out_fds:
 	}
 
 	return err;
+
+Efault:
+	user_write_access_end();
+	err = -EFAULT;
+	goto out_fds;
 }
 
 static long do_restart_poll(struct restart_block *restart_block)
@@ -1037,10 +1059,9 @@ static long do_restart_poll(struct restart_block *restart_block)
 
 	ret = do_sys_poll(ufds, nfds, to);
 
-	if (ret == -ERESTARTNOHAND) {
-		restart_block->fn = do_restart_poll;
-		ret = -ERESTART_RESTARTBLOCK;
-	}
+	if (ret == -ERESTARTNOHAND)
+		ret = set_restart_fn(restart_block, do_restart_poll);
+
 	return ret;
 }
 
@@ -1062,7 +1083,6 @@ SYSCALL_DEFINE3(poll, struct pollfd __user *, ufds, unsigned int, nfds,
 		struct restart_block *restart_block;
 
 		restart_block = &current->restart_block;
-		restart_block->fn = do_restart_poll;
 		restart_block->poll.ufds = ufds;
 		restart_block->poll.nfds = nfds;
 
@@ -1073,7 +1093,7 @@ SYSCALL_DEFINE3(poll, struct pollfd __user *, ufds, unsigned int, nfds,
 		} else
 			restart_block->poll.has_timeout = 0;
 
-		ret = -ERESTART_RESTARTBLOCK;
+		ret = set_restart_fn(restart_block, do_restart_poll);
 	}
 	return ret;
 }
@@ -1325,24 +1345,37 @@ static long do_compat_pselect(int n, compat_ulong_t __user *inp,
 	return poll_select_finish(&end_time, tsp, type, ret);
 }
 
+struct compat_sigset_argpack {
+	compat_uptr_t p;
+	compat_size_t size;
+};
+static inline int get_compat_sigset_argpack(struct compat_sigset_argpack *to,
+					    struct compat_sigset_argpack __user *from)
+{
+	if (from) {
+		if (!user_read_access_begin(from, sizeof(*from)))
+			return -EFAULT;
+		unsafe_get_user(to->p, &from->p, Efault);
+		unsafe_get_user(to->size, &from->size, Efault);
+		user_read_access_end();
+	}
+	return 0;
+Efault:
+	user_access_end();
+	return -EFAULT;
+}
+
 COMPAT_SYSCALL_DEFINE6(pselect6_time64, int, n, compat_ulong_t __user *, inp,
 	compat_ulong_t __user *, outp, compat_ulong_t __user *, exp,
 	struct __kernel_timespec __user *, tsp, void __user *, sig)
 {
-	compat_size_t sigsetsize = 0;
-	compat_uptr_t up = 0;
+	struct compat_sigset_argpack x = {0, 0};
 
-	if (sig) {
-		if (!access_ok(sig,
-				sizeof(compat_uptr_t)+sizeof(compat_size_t)) ||
-				__get_user(up, (compat_uptr_t __user *)sig) ||
-				__get_user(sigsetsize,
-				(compat_size_t __user *)(sig+sizeof(up))))
-			return -EFAULT;
-	}
+	if (get_compat_sigset_argpack(&x, sig))
+		return -EFAULT;
 
-	return do_compat_pselect(n, inp, outp, exp, tsp, compat_ptr(up),
-				 sigsetsize, PT_TIMESPEC);
+	return do_compat_pselect(n, inp, outp, exp, tsp, compat_ptr(x.p),
+				 x.size, PT_TIMESPEC);
 }
 
 #if defined(CONFIG_COMPAT_32BIT_TIME)
@@ -1351,20 +1384,13 @@ COMPAT_SYSCALL_DEFINE6(pselect6_time32, int, n, compat_ulong_t __user *, inp,
 	compat_ulong_t __user *, outp, compat_ulong_t __user *, exp,
 	struct old_timespec32 __user *, tsp, void __user *, sig)
 {
-	compat_size_t sigsetsize = 0;
-	compat_uptr_t up = 0;
+	struct compat_sigset_argpack x = {0, 0};
 
-	if (sig) {
-		if (!access_ok(sig,
-				sizeof(compat_uptr_t)+sizeof(compat_size_t)) ||
-		    	__get_user(up, (compat_uptr_t __user *)sig) ||
-		    	__get_user(sigsetsize,
-				(compat_size_t __user *)(sig+sizeof(up))))
-			return -EFAULT;
-	}
+	if (get_compat_sigset_argpack(&x, sig))
+		return -EFAULT;
 
-	return do_compat_pselect(n, inp, outp, exp, tsp, compat_ptr(up),
-				 sigsetsize, PT_OLD_TIMESPEC);
+	return do_compat_pselect(n, inp, outp, exp, tsp, compat_ptr(x.p),
+				 x.size, PT_OLD_TIMESPEC);
 }
 
 #endif

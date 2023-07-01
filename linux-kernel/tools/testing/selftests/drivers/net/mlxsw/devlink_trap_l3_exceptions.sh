@@ -111,6 +111,9 @@ router_destroy()
 	__addr_add_del $rp1 del 192.0.2.2/24 2001:db8:1::2/64
 
 	tc qdisc del dev $rp2 clsact
+
+	ip link set dev $rp2 down
+	ip link set dev $rp1 down
 }
 
 setup_prepare()
@@ -169,7 +172,6 @@ trap_action_check()
 mtu_value_is_too_small_test()
 {
 	local trap_name="mtu_value_is_too_small"
-	local group_name="l3_drops"
 	local expected_action="trap"
 	local mz_pid
 
@@ -191,7 +193,7 @@ mtu_value_is_too_small_test()
 		-B 198.51.100.1 -q &
 	mz_pid=$!
 
-	devlink_trap_exception_test $trap_name $group_name
+	devlink_trap_exception_test $trap_name
 
 	tc_check_packets_hitting "dev $h1 ingress" 101
 	check_err $? "Packets were not received to h1"
@@ -208,7 +210,6 @@ __ttl_value_is_too_small_test()
 {
 	local ttl_val=$1; shift
 	local trap_name="ttl_value_is_too_small"
-	local group_name="l3_drops"
 	local expected_action="trap"
 	local mz_pid
 
@@ -227,7 +228,7 @@ __ttl_value_is_too_small_test()
 		-b $rp1mac -B 198.51.100.1 -q &
 	mz_pid=$!
 
-	devlink_trap_exception_test $trap_name $group_name
+	devlink_trap_exception_test $trap_name
 
 	tc_check_packets_hitting "dev $h1 ingress" 101
 	check_err $? "Packets were not received to h1"
@@ -271,7 +272,6 @@ __mc_reverse_path_forwarding_test()
 	local proto=$1; shift
 	local flags=${1:-""}; shift
 	local trap_name="mc_reverse_path_forwarding"
-	local group_name="l3_drops"
 	local expected_action="trap"
 	local mz_pid
 
@@ -292,7 +292,7 @@ __mc_reverse_path_forwarding_test()
 
 	mz_pid=$!
 
-	devlink_trap_exception_test $trap_name $group_name
+	devlink_trap_exception_test $trap_name
 
 	tc_check_packets "dev $rp2 egress" 101 0
 	check_err $? "Packets were not dropped"
@@ -322,7 +322,6 @@ __reject_route_test()
 	local unreachable=$1; shift
 	local flags=${1:-""}; shift
 	local trap_name="reject_route"
-	local group_name="l3_drops"
 	local expected_action="trap"
 	local mz_pid
 
@@ -341,7 +340,7 @@ __reject_route_test()
 		-B $dst_ip -q &
 	mz_pid=$!
 
-	devlink_trap_exception_test $trap_name $group_name
+	devlink_trap_exception_test $trap_name
 
 	tc_check_packets_hitting "dev $h1 ingress" 101
 	check_err $? "ICMP packet was not received to h1"
@@ -370,7 +369,6 @@ __host_miss_test()
 	local desc=$1; shift
 	local dip=$1; shift
 	local trap_name="unresolved_neigh"
-	local group_name="l3_drops"
 	local expected_action="trap"
 	local mz_pid
 
@@ -405,7 +403,6 @@ __invalid_nexthop_test()
 	local subnet=$1; shift
 	local via_add=$1; shift
 	local trap_name="unresolved_neigh"
-	local group_name="l3_drops"
 	local expected_action="trap"
 	local mz_pid
 
@@ -452,6 +449,35 @@ __invalid_nexthop_test()
 	log_test "Unresolved neigh: nexthop does not exist: $desc"
 }
 
+__invalid_nexthop_bucket_test()
+{
+	local desc=$1; shift
+	local dip=$1; shift
+	local via_add=$1; shift
+	local trap_name="unresolved_neigh"
+
+	RET=0
+
+	# Check that route to nexthop that does not exist triggers
+	# unresolved_neigh
+	ip nexthop add id 1 via $via_add dev $rp2
+	ip nexthop add id 10 group 1 type resilient buckets 32
+	ip route add $dip nhid 10
+
+	t0_packets=$(devlink_trap_rx_packets_get $trap_name)
+	ping_do $h1 $dip
+	t1_packets=$(devlink_trap_rx_packets_get $trap_name)
+
+	if [[ $t0_packets -eq $t1_packets ]]; then
+		check_err 1 "Trap counter did not increase"
+	fi
+
+	ip route del $dip nhid 10
+	ip nexthop del id 10
+	ip nexthop del id 1
+	log_test "Unresolved neigh: nexthop bucket does not exist: $desc"
+}
+
 unresolved_neigh_test()
 {
 	__host_miss_test "IPv4" 198.51.100.1
@@ -459,6 +485,8 @@ unresolved_neigh_test()
 	__invalid_nexthop_test "IPv4" 198.51.100.1 198.51.100.3 24 198.51.100.4
 	__invalid_nexthop_test "IPv6" 2001:db8:2::1 2001:db8:2::3 64 \
 		2001:db8:2::4
+	__invalid_nexthop_bucket_test "IPv4" 198.51.100.1 198.51.100.4
+	__invalid_nexthop_bucket_test "IPv6" 2001:db8:2::1 2001:db8:2::4
 }
 
 vrf_without_routes_create()
@@ -494,7 +522,6 @@ vrf_without_routes_destroy()
 ipv4_lpm_miss_test()
 {
 	local trap_name="ipv4_lpm_miss"
-	local group_name="l3_drops"
 	local expected_action="trap"
 	local mz_pid
 
@@ -511,7 +538,7 @@ ipv4_lpm_miss_test()
 		-B 203.0.113.1 -q &
 	mz_pid=$!
 
-	devlink_trap_exception_test $trap_name $group_name
+	devlink_trap_exception_test $trap_name
 
 	log_test "LPM miss: IPv4"
 
@@ -522,7 +549,6 @@ ipv4_lpm_miss_test()
 ipv6_lpm_miss_test()
 {
 	local trap_name="ipv6_lpm_miss"
-	local group_name="l3_drops"
 	local expected_action="trap"
 	local mz_pid
 
@@ -539,7 +565,7 @@ ipv6_lpm_miss_test()
 		-B 2001:db8::1 -q &
 	mz_pid=$!
 
-	devlink_trap_exception_test $trap_name $group_name
+	devlink_trap_exception_test $trap_name
 
 	log_test "LPM miss: IPv6"
 

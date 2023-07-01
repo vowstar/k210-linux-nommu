@@ -159,7 +159,9 @@ static int wm8524_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 
 #define WM8524_RATES SNDRV_PCM_RATE_8000_192000
 
-#define WM8524_FORMATS (SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S24_LE)
+#define WM8524_FORMATS (SNDRV_PCM_FMTBIT_S16_LE |\
+			SNDRV_PCM_FMTBIT_S24_LE |\
+			SNDRV_PCM_FMTBIT_S32_LE)
 
 static const struct snd_soc_dai_ops wm8524_dai_ops = {
 	.startup	= wm8524_startup,
@@ -201,7 +203,6 @@ static const struct snd_soc_component_driver soc_component_dev_wm8524 = {
 	.idle_bias_on		= 1,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 static const struct of_device_id wm8524_of_match[] = {
@@ -225,7 +226,7 @@ static int wm8524_codec_probe(struct platform_device *pdev)
 	wm8524->mute = devm_gpiod_get(&pdev->dev, "wlf,mute", GPIOD_OUT_LOW);
 	if (IS_ERR(wm8524->mute)) {
 		ret = PTR_ERR(wm8524->mute);
-		dev_err(&pdev->dev, "Failed to get mute line: %d\n", ret);
+		dev_err_probe(&pdev->dev, ret, "Failed to get mute line\n");
 		return ret;
 	}
 

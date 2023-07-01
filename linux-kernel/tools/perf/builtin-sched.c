@@ -7,6 +7,7 @@
 #include "util/evlist.h"
 #include "util/evsel.h"
 #include "util/evsel_fprintf.h"
+#include "util/mutex.h"
 #include "util/symbol.h"
 #include "util/thread.h"
 #include "util/header.h"
@@ -130,7 +131,8 @@ struct work_atoms {
 	struct thread		*thread;
 	struct rb_node		node;
 	u64			max_lat;
-	u64			max_lat_at;
+	u64			max_lat_start;
+	u64			max_lat_end;
 	u64			total_lat;
 	u64			nb_atoms;
 	u64			total_runtime;
@@ -166,7 +168,7 @@ struct trace_sched_handler {
 
 struct perf_sched_map {
 	DECLARE_BITMAP(comp_cpus_mask, MAX_CPUS);
-	int			*comp_cpus;
+	struct perf_cpu		*comp_cpus;
 	bool			 comp;
 	struct perf_thread_map *color_pids;
 	const char		*color_pids_str;
@@ -183,14 +185,14 @@ struct perf_sched {
 	struct task_desc **pid_to_task;
 	struct task_desc **tasks;
 	const struct trace_sched_handler *tp_handler;
-	pthread_mutex_t	 start_work_mutex;
-	pthread_mutex_t	 work_done_wait_mutex;
+	struct mutex	 start_work_mutex;
+	struct mutex	 work_done_wait_mutex;
 	int		 profile_cpu;
 /*
  * Track the current task - that way we can know whether there's any
  * weird events, such as a task being switched away that is not current.
  */
-	int		 max_cpu;
+	struct perf_cpu	 max_cpu;
 	u32		 curr_pid[MAX_CPUS];
 	struct thread	 *curr_thread[MAX_CPUS];
 	char		 next_shortname1;
@@ -244,6 +246,7 @@ struct perf_sched {
 	const char	*time_str;
 	struct perf_time_interval ptime;
 	struct perf_time_interval hist_time;
+	volatile bool   thread_funcs_exit;
 };
 
 /* per thread run time data */
@@ -631,35 +634,34 @@ static void *thread_func(void *ctx)
 	prctl(PR_SET_NAME, comm2);
 	if (fd < 0)
 		return NULL;
-again:
-	ret = sem_post(&this_task->ready_for_work);
-	BUG_ON(ret);
-	ret = pthread_mutex_lock(&sched->start_work_mutex);
-	BUG_ON(ret);
-	ret = pthread_mutex_unlock(&sched->start_work_mutex);
-	BUG_ON(ret);
 
-	cpu_usage_0 = get_cpu_usage_nsec_self(fd);
+	while (!sched->thread_funcs_exit) {
+		ret = sem_post(&this_task->ready_for_work);
+		BUG_ON(ret);
+		mutex_lock(&sched->start_work_mutex);
+		mutex_unlock(&sched->start_work_mutex);
 
-	for (i = 0; i < this_task->nr_events; i++) {
-		this_task->curr_event = i;
-		perf_sched__process_event(sched, this_task->atoms[i]);
+		cpu_usage_0 = get_cpu_usage_nsec_self(fd);
+
+		for (i = 0; i < this_task->nr_events; i++) {
+			this_task->curr_event = i;
+			perf_sched__process_event(sched, this_task->atoms[i]);
+		}
+
+		cpu_usage_1 = get_cpu_usage_nsec_self(fd);
+		this_task->cpu_usage = cpu_usage_1 - cpu_usage_0;
+		ret = sem_post(&this_task->work_done_sem);
+		BUG_ON(ret);
+
+		mutex_lock(&sched->work_done_wait_mutex);
+		mutex_unlock(&sched->work_done_wait_mutex);
 	}
-
-	cpu_usage_1 = get_cpu_usage_nsec_self(fd);
-	this_task->cpu_usage = cpu_usage_1 - cpu_usage_0;
-	ret = sem_post(&this_task->work_done_sem);
-	BUG_ON(ret);
-
-	ret = pthread_mutex_lock(&sched->work_done_wait_mutex);
-	BUG_ON(ret);
-	ret = pthread_mutex_unlock(&sched->work_done_wait_mutex);
-	BUG_ON(ret);
-
-	goto again;
+	return NULL;
 }
 
 static void create_tasks(struct perf_sched *sched)
+	EXCLUSIVE_LOCK_FUNCTION(sched->start_work_mutex)
+	EXCLUSIVE_LOCK_FUNCTION(sched->work_done_wait_mutex)
 {
 	struct task_desc *task;
 	pthread_attr_t attr;
@@ -669,12 +671,10 @@ static void create_tasks(struct perf_sched *sched)
 	err = pthread_attr_init(&attr);
 	BUG_ON(err);
 	err = pthread_attr_setstacksize(&attr,
-			(size_t) max(16 * 1024, PTHREAD_STACK_MIN));
+			(size_t) max(16 * 1024, (int)PTHREAD_STACK_MIN));
 	BUG_ON(err);
-	err = pthread_mutex_lock(&sched->start_work_mutex);
-	BUG_ON(err);
-	err = pthread_mutex_lock(&sched->work_done_wait_mutex);
-	BUG_ON(err);
+	mutex_lock(&sched->start_work_mutex);
+	mutex_lock(&sched->work_done_wait_mutex);
 	for (i = 0; i < sched->nr_tasks; i++) {
 		struct sched_thread_parms *parms = malloc(sizeof(*parms));
 		BUG_ON(parms == NULL);
@@ -690,7 +690,30 @@ static void create_tasks(struct perf_sched *sched)
 	}
 }
 
+static void destroy_tasks(struct perf_sched *sched)
+	UNLOCK_FUNCTION(sched->start_work_mutex)
+	UNLOCK_FUNCTION(sched->work_done_wait_mutex)
+{
+	struct task_desc *task;
+	unsigned long i;
+	int err;
+
+	mutex_unlock(&sched->start_work_mutex);
+	mutex_unlock(&sched->work_done_wait_mutex);
+	/* Get rid of threads so they won't be upset by mutex destrunction */
+	for (i = 0; i < sched->nr_tasks; i++) {
+		task = sched->tasks[i];
+		err = pthread_join(task->thread, NULL);
+		BUG_ON(err);
+		sem_destroy(&task->sleep_sem);
+		sem_destroy(&task->ready_for_work);
+		sem_destroy(&task->work_done_sem);
+	}
+}
+
 static void wait_for_tasks(struct perf_sched *sched)
+	EXCLUSIVE_LOCKS_REQUIRED(sched->work_done_wait_mutex)
+	EXCLUSIVE_LOCKS_REQUIRED(sched->start_work_mutex)
 {
 	u64 cpu_usage_0, cpu_usage_1;
 	struct task_desc *task;
@@ -698,7 +721,7 @@ static void wait_for_tasks(struct perf_sched *sched)
 
 	sched->start_time = get_nsecs();
 	sched->cpu_usage = 0;
-	pthread_mutex_unlock(&sched->work_done_wait_mutex);
+	mutex_unlock(&sched->work_done_wait_mutex);
 
 	for (i = 0; i < sched->nr_tasks; i++) {
 		task = sched->tasks[i];
@@ -706,12 +729,11 @@ static void wait_for_tasks(struct perf_sched *sched)
 		BUG_ON(ret);
 		sem_init(&task->ready_for_work, 0, 0);
 	}
-	ret = pthread_mutex_lock(&sched->work_done_wait_mutex);
-	BUG_ON(ret);
+	mutex_lock(&sched->work_done_wait_mutex);
 
 	cpu_usage_0 = get_cpu_usage_nsec_parent();
 
-	pthread_mutex_unlock(&sched->start_work_mutex);
+	mutex_unlock(&sched->start_work_mutex);
 
 	for (i = 0; i < sched->nr_tasks; i++) {
 		task = sched->tasks[i];
@@ -733,8 +755,7 @@ static void wait_for_tasks(struct perf_sched *sched)
 	sched->runavg_parent_cpu_usage = (sched->runavg_parent_cpu_usage * (sched->replay_repeat - 1) +
 					 sched->parent_cpu_usage)/sched->replay_repeat;
 
-	ret = pthread_mutex_lock(&sched->start_work_mutex);
-	BUG_ON(ret);
+	mutex_lock(&sched->start_work_mutex);
 
 	for (i = 0; i < sched->nr_tasks; i++) {
 		task = sched->tasks[i];
@@ -744,6 +765,8 @@ static void wait_for_tasks(struct perf_sched *sched)
 }
 
 static void run_one_test(struct perf_sched *sched)
+	EXCLUSIVE_LOCKS_REQUIRED(sched->work_done_wait_mutex)
+	EXCLUSIVE_LOCKS_REQUIRED(sched->start_work_mutex)
 {
 	u64 T0, T1, delta, avg_delta, fluct;
 
@@ -811,8 +834,8 @@ replay_wakeup_event(struct perf_sched *sched,
 		    struct evsel *evsel, struct perf_sample *sample,
 		    struct machine *machine __maybe_unused)
 {
-	const char *comm = perf_evsel__strval(evsel, sample, "comm");
-	const u32 pid	 = perf_evsel__intval(evsel, sample, "pid");
+	const char *comm = evsel__strval(evsel, sample, "comm");
+	const u32 pid	 = evsel__intval(evsel, sample, "pid");
 	struct task_desc *waker, *wakee;
 
 	if (verbose > 0) {
@@ -833,11 +856,11 @@ static int replay_switch_event(struct perf_sched *sched,
 			       struct perf_sample *sample,
 			       struct machine *machine __maybe_unused)
 {
-	const char *prev_comm  = perf_evsel__strval(evsel, sample, "prev_comm"),
-		   *next_comm  = perf_evsel__strval(evsel, sample, "next_comm");
-	const u32 prev_pid = perf_evsel__intval(evsel, sample, "prev_pid"),
-		  next_pid = perf_evsel__intval(evsel, sample, "next_pid");
-	const u64 prev_state = perf_evsel__intval(evsel, sample, "prev_state");
+	const char *prev_comm  = evsel__strval(evsel, sample, "prev_comm"),
+		   *next_comm  = evsel__strval(evsel, sample, "next_comm");
+	const u32 prev_pid = evsel__intval(evsel, sample, "prev_pid"),
+		  next_pid = evsel__intval(evsel, sample, "next_pid");
+	const u64 prev_state = evsel__intval(evsel, sample, "prev_state");
 	struct task_desc *prev, __maybe_unused *next;
 	u64 timestamp0, timestamp = sample->time;
 	int cpu = sample->cpu;
@@ -1096,7 +1119,8 @@ add_sched_in_event(struct work_atoms *atoms, u64 timestamp)
 	atoms->total_lat += delta;
 	if (delta > atoms->max_lat) {
 		atoms->max_lat = delta;
-		atoms->max_lat_at = timestamp;
+		atoms->max_lat_start = atom->wake_up_time;
+		atoms->max_lat_end = timestamp;
 	}
 	atoms->nb_atoms++;
 }
@@ -1106,9 +1130,9 @@ static int latency_switch_event(struct perf_sched *sched,
 				struct perf_sample *sample,
 				struct machine *machine)
 {
-	const u32 prev_pid = perf_evsel__intval(evsel, sample, "prev_pid"),
-		  next_pid = perf_evsel__intval(evsel, sample, "next_pid");
-	const u64 prev_state = perf_evsel__intval(evsel, sample, "prev_state");
+	const u32 prev_pid = evsel__intval(evsel, sample, "prev_pid"),
+		  next_pid = evsel__intval(evsel, sample, "next_pid");
+	const u64 prev_state = evsel__intval(evsel, sample, "prev_state");
 	struct work_atoms *out_events, *in_events;
 	struct thread *sched_out, *sched_in;
 	u64 timestamp0, timestamp = sample->time;
@@ -1176,8 +1200,8 @@ static int latency_runtime_event(struct perf_sched *sched,
 				 struct perf_sample *sample,
 				 struct machine *machine)
 {
-	const u32 pid	   = perf_evsel__intval(evsel, sample, "pid");
-	const u64 runtime  = perf_evsel__intval(evsel, sample, "runtime");
+	const u32 pid	   = evsel__intval(evsel, sample, "pid");
+	const u64 runtime  = evsel__intval(evsel, sample, "runtime");
 	struct thread *thread = machine__findnew_thread(machine, -1, pid);
 	struct work_atoms *atoms = thread_atoms_search(&sched->atom_root, thread, &sched->cmp_pid);
 	u64 timestamp = sample->time;
@@ -1211,7 +1235,7 @@ static int latency_wakeup_event(struct perf_sched *sched,
 				struct perf_sample *sample,
 				struct machine *machine)
 {
-	const u32 pid	  = perf_evsel__intval(evsel, sample, "pid");
+	const u32 pid	  = evsel__intval(evsel, sample, "pid");
 	struct work_atoms *atoms;
 	struct work_atom *atom;
 	struct thread *wakee;
@@ -1272,7 +1296,7 @@ static int latency_migrate_task_event(struct perf_sched *sched,
 				      struct perf_sample *sample,
 				      struct machine *machine)
 {
-	const u32 pid = perf_evsel__intval(evsel, sample, "pid");
+	const u32 pid = evsel__intval(evsel, sample, "pid");
 	u64 timestamp = sample->time;
 	struct work_atoms *atoms;
 	struct work_atom *atom;
@@ -1322,7 +1346,7 @@ static void output_lat_thread(struct perf_sched *sched, struct work_atoms *work_
 	int i;
 	int ret;
 	u64 avg;
-	char max_lat_at[32];
+	char max_lat_start[32], max_lat_end[32];
 
 	if (!work_list->nb_atoms)
 		return;
@@ -1344,13 +1368,14 @@ static void output_lat_thread(struct perf_sched *sched, struct work_atoms *work_
 		printf(" ");
 
 	avg = work_list->total_lat / work_list->nb_atoms;
-	timestamp__scnprintf_usec(work_list->max_lat_at, max_lat_at, sizeof(max_lat_at));
+	timestamp__scnprintf_usec(work_list->max_lat_start, max_lat_start, sizeof(max_lat_start));
+	timestamp__scnprintf_usec(work_list->max_lat_end, max_lat_end, sizeof(max_lat_end));
 
-	printf("|%11.3f ms |%9" PRIu64 " | avg:%9.3f ms | max:%9.3f ms | max at: %13s s\n",
+	printf("|%11.3f ms |%9" PRIu64 " | avg:%8.3f ms | max:%8.3f ms | max start: %12s s | max end: %12s s\n",
 	      (double)work_list->total_runtime / NSEC_PER_MSEC,
 		 work_list->nb_atoms, (double)avg / NSEC_PER_MSEC,
 		 (double)work_list->max_lat / NSEC_PER_MSEC,
-		 max_lat_at);
+		 max_lat_start, max_lat_end);
 }
 
 static int pid_cmp(struct work_atoms *l, struct work_atoms *r)
@@ -1526,34 +1551,37 @@ map__findnew_thread(struct perf_sched *sched, struct machine *machine, pid_t pid
 static int map_switch_event(struct perf_sched *sched, struct evsel *evsel,
 			    struct perf_sample *sample, struct machine *machine)
 {
-	const u32 next_pid = perf_evsel__intval(evsel, sample, "next_pid");
+	const u32 next_pid = evsel__intval(evsel, sample, "next_pid");
 	struct thread *sched_in;
 	struct thread_runtime *tr;
 	int new_shortname;
 	u64 timestamp0, timestamp = sample->time;
 	s64 delta;
-	int i, this_cpu = sample->cpu;
+	int i;
+	struct perf_cpu this_cpu = {
+		.cpu = sample->cpu,
+	};
 	int cpus_nr;
 	bool new_cpu = false;
 	const char *color = PERF_COLOR_NORMAL;
 	char stimestamp[32];
 
-	BUG_ON(this_cpu >= MAX_CPUS || this_cpu < 0);
+	BUG_ON(this_cpu.cpu >= MAX_CPUS || this_cpu.cpu < 0);
 
-	if (this_cpu > sched->max_cpu)
+	if (this_cpu.cpu > sched->max_cpu.cpu)
 		sched->max_cpu = this_cpu;
 
 	if (sched->map.comp) {
 		cpus_nr = bitmap_weight(sched->map.comp_cpus_mask, MAX_CPUS);
-		if (!test_and_set_bit(this_cpu, sched->map.comp_cpus_mask)) {
+		if (!__test_and_set_bit(this_cpu.cpu, sched->map.comp_cpus_mask)) {
 			sched->map.comp_cpus[cpus_nr++] = this_cpu;
 			new_cpu = true;
 		}
 	} else
-		cpus_nr = sched->max_cpu;
+		cpus_nr = sched->max_cpu.cpu;
 
-	timestamp0 = sched->cpu_last_switched[this_cpu];
-	sched->cpu_last_switched[this_cpu] = timestamp;
+	timestamp0 = sched->cpu_last_switched[this_cpu.cpu];
+	sched->cpu_last_switched[this_cpu.cpu] = timestamp;
 	if (timestamp0)
 		delta = timestamp - timestamp0;
 	else
@@ -1574,7 +1602,7 @@ static int map_switch_event(struct perf_sched *sched, struct evsel *evsel,
 		return -1;
 	}
 
-	sched->curr_thread[this_cpu] = thread__get(sched_in);
+	sched->curr_thread[this_cpu.cpu] = thread__get(sched_in);
 
 	printf("  ");
 
@@ -1605,8 +1633,10 @@ static int map_switch_event(struct perf_sched *sched, struct evsel *evsel,
 	}
 
 	for (i = 0; i < cpus_nr; i++) {
-		int cpu = sched->map.comp ? sched->map.comp_cpus[i] : i;
-		struct thread *curr_thread = sched->curr_thread[cpu];
+		struct perf_cpu cpu = {
+			.cpu = sched->map.comp ? sched->map.comp_cpus[i].cpu : i,
+		};
+		struct thread *curr_thread = sched->curr_thread[cpu.cpu];
 		struct thread_runtime *curr_tr;
 		const char *pid_color = color;
 		const char *cpu_color = color;
@@ -1614,19 +1644,19 @@ static int map_switch_event(struct perf_sched *sched, struct evsel *evsel,
 		if (curr_thread && thread__has_color(curr_thread))
 			pid_color = COLOR_PIDS;
 
-		if (sched->map.cpus && !cpu_map__has(sched->map.cpus, cpu))
+		if (sched->map.cpus && !perf_cpu_map__has(sched->map.cpus, cpu))
 			continue;
 
-		if (sched->map.color_cpus && cpu_map__has(sched->map.color_cpus, cpu))
+		if (sched->map.color_cpus && perf_cpu_map__has(sched->map.color_cpus, cpu))
 			cpu_color = COLOR_CPUS;
 
-		if (cpu != this_cpu)
+		if (cpu.cpu != this_cpu.cpu)
 			color_fprintf(stdout, color, " ");
 		else
 			color_fprintf(stdout, cpu_color, "*");
 
-		if (sched->curr_thread[cpu]) {
-			curr_tr = thread__get_runtime(sched->curr_thread[cpu]);
+		if (sched->curr_thread[cpu.cpu]) {
+			curr_tr = thread__get_runtime(sched->curr_thread[cpu.cpu]);
 			if (curr_tr == NULL) {
 				thread__put(sched_in);
 				return -1;
@@ -1636,7 +1666,7 @@ static int map_switch_event(struct perf_sched *sched, struct evsel *evsel,
 			color_fprintf(stdout, color, "   ");
 	}
 
-	if (sched->map.cpus && !cpu_map__has(sched->map.cpus, this_cpu))
+	if (sched->map.cpus && !perf_cpu_map__has(sched->map.cpus, this_cpu))
 		goto out;
 
 	timestamp__scnprintf_usec(timestamp, stimestamp, sizeof(stimestamp));
@@ -1670,8 +1700,8 @@ static int process_sched_switch_event(struct perf_tool *tool,
 {
 	struct perf_sched *sched = container_of(tool, struct perf_sched, tool);
 	int this_cpu = sample->cpu, err = 0;
-	u32 prev_pid = perf_evsel__intval(evsel, sample, "prev_pid"),
-	    next_pid = perf_evsel__intval(evsel, sample, "next_pid");
+	u32 prev_pid = evsel__intval(evsel, sample, "prev_pid"),
+	    next_pid = evsel__intval(evsel, sample, "next_pid");
 
 	if (sched->curr_pid[this_cpu] != (u32)-1) {
 		/*
@@ -1709,7 +1739,7 @@ static int perf_sched__process_fork_event(struct perf_tool *tool,
 {
 	struct perf_sched *sched = container_of(tool, struct perf_sched, tool);
 
-	/* run the fork event through the perf machineruy */
+	/* run the fork event through the perf machinery */
 	perf_event__process_fork(tool, event, sample, machine);
 
 	/* and then run additional processing needed for this command */
@@ -1801,7 +1831,7 @@ static int perf_sched__read_events(struct perf_sched *sched)
 	};
 	int rc = -1;
 
-	session = perf_session__new(&data, false, &sched->tool);
+	session = perf_session__new(&data, &sched->tool);
 	if (IS_ERR(session)) {
 		pr_debug("Error creating perf session");
 		return PTR_ERR(session);
@@ -1848,7 +1878,7 @@ static inline void print_sched_time(unsigned long long nsecs, int width)
  * returns runtime data for event, allocating memory for it the
  * first time it is used.
  */
-static struct evsel_runtime *perf_evsel__get_runtime(struct evsel *evsel)
+static struct evsel_runtime *evsel__get_runtime(struct evsel *evsel)
 {
 	struct evsel_runtime *r = evsel->priv;
 
@@ -1863,10 +1893,9 @@ static struct evsel_runtime *perf_evsel__get_runtime(struct evsel *evsel)
 /*
  * save last time event was seen per cpu
  */
-static void perf_evsel__save_time(struct evsel *evsel,
-				  u64 timestamp, u32 cpu)
+static void evsel__save_time(struct evsel *evsel, u64 timestamp, u32 cpu)
 {
-	struct evsel_runtime *r = perf_evsel__get_runtime(evsel);
+	struct evsel_runtime *r = evsel__get_runtime(evsel);
 
 	if (r == NULL)
 		return;
@@ -1890,9 +1919,9 @@ static void perf_evsel__save_time(struct evsel *evsel,
 }
 
 /* returns last time this event was seen on the given cpu */
-static u64 perf_evsel__get_time(struct evsel *evsel, u32 cpu)
+static u64 evsel__get_time(struct evsel *evsel, u32 cpu)
 {
-	struct evsel_runtime *r = perf_evsel__get_runtime(evsel);
+	struct evsel_runtime *r = evsel__get_runtime(evsel);
 
 	if ((r == NULL) || (r->last_time == NULL) || (cpu >= r->ncpu))
 		return 0;
@@ -1927,7 +1956,7 @@ static char *timehist_get_commstr(struct thread *thread)
 
 static void timehist_header(struct perf_sched *sched)
 {
-	u32 ncpus = sched->max_cpu + 1;
+	u32 ncpus = sched->max_cpu.cpu + 1;
 	u32 i, j;
 
 	printf("%15s %6s ", "time", "cpu");
@@ -2004,9 +2033,9 @@ static void timehist_print_sample(struct perf_sched *sched,
 				  u64 t, int state)
 {
 	struct thread_runtime *tr = thread__priv(thread);
-	const char *next_comm = perf_evsel__strval(evsel, sample, "next_comm");
-	const u32 next_pid = perf_evsel__intval(evsel, sample, "next_pid");
-	u32 max_cpus = sched->max_cpu + 1;
+	const char *next_comm = evsel__strval(evsel, sample, "next_comm");
+	const u32 next_pid = evsel__intval(evsel, sample, "next_pid");
+	u32 max_cpus = sched->max_cpu.cpu + 1;
 	char tstr[64];
 	char nstr[30];
 	u64 wait_time;
@@ -2136,8 +2165,8 @@ static bool is_idle_sample(struct perf_sample *sample,
 			   struct evsel *evsel)
 {
 	/* pid 0 == swapper == idle task */
-	if (strcmp(perf_evsel__name(evsel), "sched:sched_switch") == 0)
-		return perf_evsel__intval(evsel, sample, "prev_pid") == 0;
+	if (strcmp(evsel__name(evsel), "sched:sched_switch") == 0)
+		return evsel__intval(evsel, sample, "prev_pid") == 0;
 
 	return sample->pid == 0;
 }
@@ -2334,7 +2363,7 @@ static struct thread *timehist_get_thread(struct perf_sched *sched,
 			itr->last_thread = thread;
 
 			/* copy task callchain when entering to idle */
-			if (perf_evsel__intval(evsel, sample, "next_pid") == 0)
+			if (evsel__intval(evsel, sample, "next_pid") == 0)
 				save_idle_callchain(sched, itr, sample);
 		}
 	}
@@ -2355,10 +2384,10 @@ static bool timehist_skip_sample(struct perf_sched *sched,
 	}
 
 	if (sched->idle_hist) {
-		if (strcmp(perf_evsel__name(evsel), "sched:sched_switch"))
+		if (strcmp(evsel__name(evsel), "sched:sched_switch"))
 			rc = true;
-		else if (perf_evsel__intval(evsel, sample, "prev_pid") != 0 &&
-			 perf_evsel__intval(evsel, sample, "next_pid") != 0)
+		else if (evsel__intval(evsel, sample, "prev_pid") != 0 &&
+			 evsel__intval(evsel, sample, "next_pid") != 0)
 			rc = true;
 	}
 
@@ -2387,7 +2416,7 @@ static void timehist_print_wakeup_event(struct perf_sched *sched,
 	timestamp__scnprintf_usec(sample->time, tstr, sizeof(tstr));
 	printf("%15s [%04d] ", tstr, sample->cpu);
 	if (sched->show_cpu_visual)
-		printf(" %*s ", sched->max_cpu + 1, "");
+		printf(" %*s ", sched->max_cpu.cpu + 1, "");
 
 	printf(" %-*s ", comm_width, timehist_get_commstr(thread));
 
@@ -2397,6 +2426,15 @@ static void timehist_print_wakeup_event(struct perf_sched *sched,
 	printf("awakened: %s", timehist_get_commstr(awakened));
 
 	printf("\n");
+}
+
+static int timehist_sched_wakeup_ignore(struct perf_tool *tool __maybe_unused,
+					union perf_event *event __maybe_unused,
+					struct evsel *evsel __maybe_unused,
+					struct perf_sample *sample __maybe_unused,
+					struct machine *machine __maybe_unused)
+{
+	return 0;
 }
 
 static int timehist_sched_wakeup_event(struct perf_tool *tool,
@@ -2409,7 +2447,7 @@ static int timehist_sched_wakeup_event(struct perf_tool *tool,
 	struct thread *thread;
 	struct thread_runtime *tr = NULL;
 	/* want pid of awakened task not pid in sample */
-	const u32 pid = perf_evsel__intval(evsel, sample, "pid");
+	const u32 pid = evsel__intval(evsel, sample, "pid");
 
 	thread = machine__findnew_thread(machine, 0, pid);
 	if (thread == NULL)
@@ -2438,15 +2476,15 @@ static void timehist_print_migration_event(struct perf_sched *sched,
 {
 	struct thread *thread;
 	char tstr[64];
-	u32 max_cpus = sched->max_cpu + 1;
+	u32 max_cpus;
 	u32 ocpu, dcpu;
 
 	if (sched->summary_only)
 		return;
 
-	max_cpus = sched->max_cpu + 1;
-	ocpu = perf_evsel__intval(evsel, sample, "orig_cpu");
-	dcpu = perf_evsel__intval(evsel, sample, "dest_cpu");
+	max_cpus = sched->max_cpu.cpu + 1;
+	ocpu = evsel__intval(evsel, sample, "orig_cpu");
+	dcpu = evsel__intval(evsel, sample, "dest_cpu");
 
 	thread = machine__findnew_thread(machine, sample->pid, sample->tid);
 	if (thread == NULL)
@@ -2493,7 +2531,7 @@ static int timehist_migrate_task_event(struct perf_tool *tool,
 	struct thread *thread;
 	struct thread_runtime *tr = NULL;
 	/* want pid of migrated task not pid in sample */
-	const u32 pid = perf_evsel__intval(evsel, sample, "pid");
+	const u32 pid = evsel__intval(evsel, sample, "pid");
 
 	thread = machine__findnew_thread(machine, 0, pid);
 	if (thread == NULL)
@@ -2524,8 +2562,7 @@ static int timehist_sched_change_event(struct perf_tool *tool,
 	struct thread_runtime *tr = NULL;
 	u64 tprev, t = sample->time;
 	int rc = 0;
-	int state = perf_evsel__intval(evsel, sample, "prev_state");
-
+	int state = evsel__intval(evsel, sample, "prev_state");
 
 	if (machine__resolve(machine, &al, sample) < 0) {
 		pr_err("problem processing %d event. skipping it\n",
@@ -2549,7 +2586,7 @@ static int timehist_sched_change_event(struct perf_tool *tool,
 		goto out;
 	}
 
-	tprev = perf_evsel__get_time(evsel, sample->cpu);
+	tprev = evsel__get_time(evsel, sample->cpu);
 
 	/*
 	 * If start time given:
@@ -2577,7 +2614,8 @@ static int timehist_sched_change_event(struct perf_tool *tool,
 	}
 
 	if (!sched->idle_hist || thread->tid == 0) {
-		timehist_update_runtime_stats(tr, t, tprev);
+		if (!cpu_list || test_bit(sample->cpu, cpu_bitmap))
+			timehist_update_runtime_stats(tr, t, tprev);
 
 		if (sched->idle_hist) {
 			struct idle_thread_runtime *itr = (void *)tr;
@@ -2632,7 +2670,7 @@ out:
 		tr->ready_to_run = 0;
 	}
 
-	perf_evsel__save_time(evsel, sample->time, sample->cpu);
+	evsel__save_time(evsel, sample->time, sample->cpu);
 
 	return rc;
 }
@@ -2850,6 +2888,9 @@ static void timehist_print_summary(struct perf_sched *sched,
 
 	printf("\nIdle stats:\n");
 	for (i = 0; i < idle_max_cpu; ++i) {
+		if (cpu_list && !test_bit(i, cpu_bitmap))
+			continue;
+
 		t = idle_threads[i];
 		if (!t)
 			continue;
@@ -2904,7 +2945,7 @@ static void timehist_print_summary(struct perf_sched *sched,
 
 	printf("    Total scheduling time (msec): ");
 	print_sched_time(hist_time, 2);
-	printf(" (x %d)\n", sched->max_cpu);
+	printf(" (x %d)\n", sched->max_cpu.cpu);
 }
 
 typedef int (*sched_handler)(struct perf_tool *tool,
@@ -2921,9 +2962,11 @@ static int perf_timehist__process_sample(struct perf_tool *tool,
 {
 	struct perf_sched *sched = container_of(tool, struct perf_sched, tool);
 	int err = 0;
-	int this_cpu = sample->cpu;
+	struct perf_cpu this_cpu = {
+		.cpu = sample->cpu,
+	};
 
-	if (this_cpu > sched->max_cpu)
+	if (this_cpu.cpu > sched->max_cpu.cpu)
 		sched->max_cpu = this_cpu;
 
 	if (evsel->handler != NULL) {
@@ -2942,7 +2985,7 @@ static int timehist_check_attr(struct perf_sched *sched,
 	struct evsel_runtime *er;
 
 	list_for_each_entry(evsel, &evlist->core.entries, core.node) {
-		er = perf_evsel__get_runtime(evsel);
+		er = evsel__get_runtime(evsel);
 		if (er == NULL) {
 			pr_err("Failed to allocate memory for evsel runtime data\n");
 			return -1;
@@ -2960,9 +3003,10 @@ static int timehist_check_attr(struct perf_sched *sched,
 
 static int perf_sched__timehist(struct perf_sched *sched)
 {
-	const struct evsel_str_handler handlers[] = {
+	struct evsel_str_handler handlers[] = {
 		{ "sched:sched_switch",       timehist_sched_switch_event, },
 		{ "sched:sched_wakeup",	      timehist_sched_wakeup_event, },
+		{ "sched:sched_waking",       timehist_sched_wakeup_event, },
 		{ "sched:sched_wakeup_new",   timehist_sched_wakeup_event, },
 	};
 	const struct evsel_str_handler migrate_handlers[] = {
@@ -2996,7 +3040,7 @@ static int perf_sched__timehist(struct perf_sched *sched)
 
 	symbol_conf.use_callchain = sched->show_callchain;
 
-	session = perf_session__new(&data, false, &sched->tool);
+	session = perf_session__new(&data, &sched->tool);
 	if (IS_ERR(session))
 		return PTR_ERR(session);
 
@@ -3020,13 +3064,16 @@ static int perf_sched__timehist(struct perf_sched *sched)
 
 	setup_pager();
 
+	/* prefer sched_waking if it is captured */
+	if (evlist__find_tracepoint_by_name(session->evlist, "sched:sched_waking"))
+		handlers[1].handler = timehist_sched_wakeup_ignore;
+
 	/* setup per-evsel handlers */
 	if (perf_session__set_tracepoints_handlers(session, handlers))
 		goto out;
 
 	/* sched_switch event at a minimum needs to exist */
-	if (!perf_evlist__find_tracepoint_by_name(session->evlist,
-						  "sched:sched_switch")) {
+	if (!evlist__find_tracepoint_by_name(session->evlist, "sched:sched_switch")) {
 		pr_err("No sched_switch events found. Have you run 'perf sched record'?\n");
 		goto out;
 	}
@@ -3036,10 +3083,10 @@ static int perf_sched__timehist(struct perf_sched *sched)
 		goto out;
 
 	/* pre-allocate struct for per-CPU idle stats */
-	sched->max_cpu = session->header.env.nr_cpus_online;
-	if (sched->max_cpu == 0)
-		sched->max_cpu = 4;
-	if (init_idle_threads(sched->max_cpu))
+	sched->max_cpu.cpu = session->header.env.nr_cpus_online;
+	if (sched->max_cpu.cpu == 0)
+		sched->max_cpu.cpu = 4;
+	if (init_idle_threads(sched->max_cpu.cpu))
 		goto out;
 
 	/* summary_only implies summary option, but don't overwrite summary if set */
@@ -3120,7 +3167,8 @@ static void __merge_work_atoms(struct rb_root_cached *root, struct work_atoms *d
 			list_splice(&data->work_list, &this->work_list);
 			if (this->max_lat < data->max_lat) {
 				this->max_lat = data->max_lat;
-				this->max_lat_at = data->max_lat_at;
+				this->max_lat_start = data->max_lat_start;
+				this->max_lat_end = data->max_lat_end;
 			}
 			zfree(&data);
 			return;
@@ -3159,9 +3207,9 @@ static int perf_sched__lat(struct perf_sched *sched)
 	perf_sched__merge_lat(sched);
 	perf_sched__sort_lat(sched);
 
-	printf("\n -----------------------------------------------------------------------------------------------------------------\n");
-	printf("  Task                  |   Runtime ms  | Switches | Average delay ms | Maximum delay ms | Maximum delay at       |\n");
-	printf(" -----------------------------------------------------------------------------------------------------------------\n");
+	printf("\n -------------------------------------------------------------------------------------------------------------------------------------------\n");
+	printf("  Task                  |   Runtime ms  | Switches | Avg delay ms    | Max delay ms    | Max delay start           | Max delay end          |\n");
+	printf(" -------------------------------------------------------------------------------------------------------------------------------------------\n");
 
 	next = rb_first_cached(&sched->sorted_atom_root);
 
@@ -3190,10 +3238,10 @@ static int setup_map_cpus(struct perf_sched *sched)
 {
 	struct perf_cpu_map *map;
 
-	sched->max_cpu  = sysconf(_SC_NPROCESSORS_CONF);
+	sched->max_cpu.cpu  = sysconf(_SC_NPROCESSORS_CONF);
 
 	if (sched->map.comp) {
-		sched->map.comp_cpus = zalloc(sched->max_cpu * sizeof(int));
+		sched->map.comp_cpus = zalloc(sched->max_cpu.cpu * sizeof(int));
 		if (!sched->map.comp_cpus)
 			return -1;
 	}
@@ -3290,11 +3338,14 @@ static int perf_sched__replay(struct perf_sched *sched)
 	print_task_traces(sched);
 	add_cross_task_wakeups(sched);
 
+	sched->thread_funcs_exit = false;
 	create_tasks(sched);
 	printf("------------------------------------------------------------\n");
 	for (i = 0; i < sched->replay_repeat; i++)
 		run_one_test(sched);
 
+	sched->thread_funcs_exit = true;
+	destroy_tasks(sched);
 	return 0;
 }
 
@@ -3316,10 +3367,21 @@ static void setup_sorting(struct perf_sched *sched, const struct option *options
 	sort_dimension__add("pid", &sched->cmp_pid);
 }
 
+static bool schedstat_events_exposed(void)
+{
+	/*
+	 * Select "sched:sched_stat_wait" event to check
+	 * whether schedstat tracepoints are exposed.
+	 */
+	return IS_ERR(trace_event__tp_format("sched", "sched_stat_wait")) ?
+		false : true;
+}
+
 static int __cmd_record(int argc, const char **argv)
 {
 	unsigned int rec_argc, i, j;
-	const char **rec_argv;
+	char **rec_argv;
+	const char **rec_argv_copy;
 	const char * const record_args[] = {
 		"record",
 		"-a",
@@ -3327,31 +3389,70 @@ static int __cmd_record(int argc, const char **argv)
 		"-m", "1024",
 		"-c", "1",
 		"-e", "sched:sched_switch",
-		"-e", "sched:sched_stat_wait",
-		"-e", "sched:sched_stat_sleep",
-		"-e", "sched:sched_stat_iowait",
 		"-e", "sched:sched_stat_runtime",
 		"-e", "sched:sched_process_fork",
-		"-e", "sched:sched_wakeup",
 		"-e", "sched:sched_wakeup_new",
 		"-e", "sched:sched_migrate_task",
 	};
 
-	rec_argc = ARRAY_SIZE(record_args) + argc - 1;
-	rec_argv = calloc(rec_argc + 1, sizeof(char *));
+	/*
+	 * The tracepoints trace_sched_stat_{wait, sleep, iowait}
+	 * are not exposed to user if CONFIG_SCHEDSTATS is not set,
+	 * to prevent "perf sched record" execution failure, determine
+	 * whether to record schedstat events according to actual situation.
+	 */
+	const char * const schedstat_args[] = {
+		"-e", "sched:sched_stat_wait",
+		"-e", "sched:sched_stat_sleep",
+		"-e", "sched:sched_stat_iowait",
+	};
+	unsigned int schedstat_argc = schedstat_events_exposed() ?
+		ARRAY_SIZE(schedstat_args) : 0;
 
+	struct tep_event *waking_event;
+	int ret;
+
+	/*
+	 * +2 for either "-e", "sched:sched_wakeup" or
+	 * "-e", "sched:sched_waking"
+	 */
+	rec_argc = ARRAY_SIZE(record_args) + 2 + schedstat_argc + argc - 1;
+	rec_argv = calloc(rec_argc + 1, sizeof(char *));
 	if (rec_argv == NULL)
 		return -ENOMEM;
+	rec_argv_copy = calloc(rec_argc + 1, sizeof(char *));
+	if (rec_argv_copy == NULL) {
+		free(rec_argv);
+		return -ENOMEM;
+	}
 
 	for (i = 0; i < ARRAY_SIZE(record_args); i++)
 		rec_argv[i] = strdup(record_args[i]);
 
+	rec_argv[i++] = strdup("-e");
+	waking_event = trace_event__tp_format("sched", "sched_waking");
+	if (!IS_ERR(waking_event))
+		rec_argv[i++] = strdup("sched:sched_waking");
+	else
+		rec_argv[i++] = strdup("sched:sched_wakeup");
+
+	for (j = 0; j < schedstat_argc; j++)
+		rec_argv[i++] = strdup(schedstat_args[j]);
+
 	for (j = 1; j < (unsigned int)argc; j++, i++)
-		rec_argv[i] = argv[j];
+		rec_argv[i] = strdup(argv[j]);
 
 	BUG_ON(i != rec_argc);
 
-	return cmd_record(i, rec_argv);
+	memcpy(rec_argv_copy, rec_argv, sizeof(char *) * rec_argc);
+	ret = cmd_record(rec_argc, rec_argv_copy);
+
+	for (i = 0; i < rec_argc; i++)
+		free(rec_argv[i]);
+	free(rec_argv);
+	free(rec_argv_copy);
+
+	return ret;
 }
 
 int cmd_sched(int argc, const char **argv)
@@ -3368,8 +3469,6 @@ int cmd_sched(int argc, const char **argv)
 		},
 		.cmp_pid	      = LIST_HEAD_INIT(sched.cmp_pid),
 		.sort_list	      = LIST_HEAD_INIT(sched.sort_list),
-		.start_work_mutex     = PTHREAD_MUTEX_INITIALIZER,
-		.work_done_wait_mutex = PTHREAD_MUTEX_INITIALIZER,
 		.sort_order	      = default_sort_order,
 		.replay_repeat	      = 10,
 		.profile_cpu	      = -1,
@@ -3483,7 +3582,10 @@ int cmd_sched(int argc, const char **argv)
 		.fork_event	    = replay_fork_event,
 	};
 	unsigned int i;
+	int ret = 0;
 
+	mutex_init(&sched.start_work_mutex);
+	mutex_init(&sched.work_done_wait_mutex);
 	for (i = 0; i < ARRAY_SIZE(sched.curr_pid); i++)
 		sched.curr_pid[i] = -1;
 
@@ -3495,12 +3597,11 @@ int cmd_sched(int argc, const char **argv)
 	/*
 	 * Aliased to 'perf script' for now:
 	 */
-	if (!strcmp(argv[0], "script"))
-		return cmd_script(argc, argv);
-
-	if (!strncmp(argv[0], "rec", 3)) {
-		return __cmd_record(argc, argv);
-	} else if (!strncmp(argv[0], "lat", 3)) {
+	if (!strcmp(argv[0], "script")) {
+		ret = cmd_script(argc, argv);
+	} else if (strlen(argv[0]) > 2 && strstarts("record", argv[0])) {
+		ret = __cmd_record(argc, argv);
+	} else if (strlen(argv[0]) > 2 && strstarts("latency", argv[0])) {
 		sched.tp_handler = &lat_ops;
 		if (argc > 1) {
 			argc = parse_options(argc, argv, latency_options, latency_usage, 0);
@@ -3508,7 +3609,7 @@ int cmd_sched(int argc, const char **argv)
 				usage_with_options(latency_usage, latency_options);
 		}
 		setup_sorting(&sched, latency_options, latency_usage);
-		return perf_sched__lat(&sched);
+		ret = perf_sched__lat(&sched);
 	} else if (!strcmp(argv[0], "map")) {
 		if (argc) {
 			argc = parse_options(argc, argv, map_options, map_usage, 0);
@@ -3517,15 +3618,15 @@ int cmd_sched(int argc, const char **argv)
 		}
 		sched.tp_handler = &map_ops;
 		setup_sorting(&sched, latency_options, latency_usage);
-		return perf_sched__map(&sched);
-	} else if (!strncmp(argv[0], "rep", 3)) {
+		ret = perf_sched__map(&sched);
+	} else if (strlen(argv[0]) > 2 && strstarts("replay", argv[0])) {
 		sched.tp_handler = &replay_ops;
 		if (argc) {
 			argc = parse_options(argc, argv, replay_options, replay_usage, 0);
 			if (argc)
 				usage_with_options(replay_usage, replay_options);
 		}
-		return perf_sched__replay(&sched);
+		ret = perf_sched__replay(&sched);
 	} else if (!strcmp(argv[0], "timehist")) {
 		if (argc) {
 			argc = parse_options(argc, argv, timehist_options,
@@ -3541,13 +3642,21 @@ int cmd_sched(int argc, const char **argv)
 				parse_options_usage(NULL, timehist_options, "w", true);
 			if (sched.show_next)
 				parse_options_usage(NULL, timehist_options, "n", true);
-			return -EINVAL;
+			ret = -EINVAL;
+			goto out;
 		}
+		ret = symbol__validate_sym_arguments();
+		if (ret)
+			goto out;
 
-		return perf_sched__timehist(&sched);
+		ret = perf_sched__timehist(&sched);
 	} else {
 		usage_with_options(sched_usage, sched_options);
 	}
 
-	return 0;
+out:
+	mutex_destroy(&sched.start_work_mutex);
+	mutex_destroy(&sched.work_done_wait_mutex);
+
+	return ret;
 }

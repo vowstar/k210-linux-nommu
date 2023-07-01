@@ -67,8 +67,9 @@ static const struct of_device_id stmpe_of_match[] = {
 MODULE_DEVICE_TABLE(of, stmpe_of_match);
 
 static int
-stmpe_i2c_probe(struct i2c_client *i2c, const struct i2c_device_id *id)
+stmpe_i2c_probe(struct i2c_client *i2c)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(i2c);
 	enum stmpe_partnum partnum;
 	const struct of_device_id *of_id;
 
@@ -91,11 +92,11 @@ stmpe_i2c_probe(struct i2c_client *i2c, const struct i2c_device_id *id)
 	return stmpe_probe(&i2c_ci, partnum);
 }
 
-static int stmpe_i2c_remove(struct i2c_client *i2c)
+static void stmpe_i2c_remove(struct i2c_client *i2c)
 {
 	struct stmpe *stmpe = dev_get_drvdata(&i2c->dev);
 
-	return stmpe_remove(stmpe);
+	stmpe_remove(stmpe);
 }
 
 static const struct i2c_device_id stmpe_i2c_id[] = {
@@ -109,17 +110,15 @@ static const struct i2c_device_id stmpe_i2c_id[] = {
 	{ "stmpe2403", STMPE2403 },
 	{ }
 };
-MODULE_DEVICE_TABLE(i2c, stmpe_id);
+MODULE_DEVICE_TABLE(i2c, stmpe_i2c_id);
 
 static struct i2c_driver stmpe_i2c_driver = {
 	.driver = {
 		.name = "stmpe-i2c",
-#ifdef CONFIG_PM
-		.pm = &stmpe_dev_pm_ops,
-#endif
+		.pm = pm_sleep_ptr(&stmpe_dev_pm_ops),
 		.of_match_table = stmpe_of_match,
 	},
-	.probe		= stmpe_i2c_probe,
+	.probe_new	= stmpe_i2c_probe,
 	.remove		= stmpe_i2c_remove,
 	.id_table	= stmpe_i2c_id,
 };

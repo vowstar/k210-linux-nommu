@@ -26,6 +26,9 @@
 #include "core_types.h"
 #include "clk_mgr_internal.h"
 #include "reg_helper.h"
+#include <linux/delay.h>
+
+#include "rv1_clk_mgr_vbios_smu.h"
 
 #define MAX_INSTANCE	5
 #define MAX_SEGMENT		5
@@ -68,10 +71,43 @@ static const struct IP_BASE MP1_BASE  = { { { { 0x00016000, 0, 0, 0, 0 } },
 #define VBIOSSMC_MSG_SetDispclkFreq           0x4
 #define VBIOSSMC_MSG_SetDprefclkFreq          0x5
 
-int rv1_vbios_smu_send_msg_with_param(struct clk_mgr_internal *clk_mgr, unsigned int msg_id, unsigned int param)
+#define VBIOSSMC_Status_BUSY                      0x0
+#define VBIOSSMC_Result_OK                        0x1
+#define VBIOSSMC_Result_Failed                    0xFF
+#define VBIOSSMC_Result_UnknownCmd                0xFE
+#define VBIOSSMC_Result_CmdRejectedPrereq         0xFD
+#define VBIOSSMC_Result_CmdRejectedBusy           0xFC
+
+/*
+ * Function to be used instead of REG_WAIT macro because the wait ends when
+ * the register is NOT EQUAL to zero, and because the translation in msg_if.h
+ * won't work with REG_WAIT.
+ */
+static uint32_t rv1_smu_wait_for_response(struct clk_mgr_internal *clk_mgr, unsigned int delay_us, unsigned int max_retries)
 {
+	uint32_t res_val = VBIOSSMC_Status_BUSY;
+
+	do {
+		res_val = REG_READ(MP1_SMN_C2PMSG_91);
+		if (res_val != VBIOSSMC_Status_BUSY)
+			break;
+
+		if (delay_us >= 1000)
+			msleep(delay_us/1000);
+		else if (delay_us > 0)
+			udelay(delay_us);
+	} while (max_retries--);
+
+	return res_val;
+}
+
+static int rv1_vbios_smu_send_msg_with_param(struct clk_mgr_internal *clk_mgr,
+		unsigned int msg_id, unsigned int param)
+{
+	uint32_t result;
+
 	/* First clear response register */
-	REG_WRITE(MP1_SMN_C2PMSG_91, 0);
+	REG_WRITE(MP1_SMN_C2PMSG_91, VBIOSSMC_Status_BUSY);
 
 	/* Set the parameter register for the SMU message, unit is Mhz */
 	REG_WRITE(MP1_SMN_C2PMSG_83, param);
@@ -79,7 +115,9 @@ int rv1_vbios_smu_send_msg_with_param(struct clk_mgr_internal *clk_mgr, unsigned
 	/* Trigger the message transaction by writing the message ID */
 	REG_WRITE(MP1_SMN_C2PMSG_67, msg_id);
 
-	REG_WAIT(MP1_SMN_C2PMSG_91, CONTENT, 1, 10, 200000);
+	result = rv1_smu_wait_for_response(clk_mgr, 10, 1000);
+
+	ASSERT(result == VBIOSSMC_Result_OK);
 
 	/* Actual dispclk set is returned in the parameter register */
 	return REG_READ(MP1_SMN_C2PMSG_83);
@@ -95,10 +133,7 @@ int rv1_vbios_smu_set_dispclk(struct clk_mgr_internal *clk_mgr, int requested_di
 	actual_dispclk_set_mhz = rv1_vbios_smu_send_msg_with_param(
 			clk_mgr,
 			VBIOSSMC_MSG_SetDispclkFreq,
-			requested_dispclk_khz / 1000);
-
-	/* Actual dispclk set is returned in the parameter register */
-	actual_dispclk_set_mhz = REG_READ(MP1_SMN_C2PMSG_83) * 1000;
+			khz_to_mhz_ceil(requested_dispclk_khz));
 
 	if (!IS_FPGA_MAXIMUS_DC(dc->ctx->dce_environment)) {
 		if (dmcu && dmcu->funcs->is_dmcu_initialized(dmcu)) {
@@ -118,7 +153,7 @@ int rv1_vbios_smu_set_dprefclk(struct clk_mgr_internal *clk_mgr)
 	actual_dprefclk_set_mhz = rv1_vbios_smu_send_msg_with_param(
 			clk_mgr,
 			VBIOSSMC_MSG_SetDprefclkFreq,
-			clk_mgr->base.dprefclk_khz / 1000);
+			khz_to_mhz_ceil(clk_mgr->base.dprefclk_khz));
 
 	/* TODO: add code for programing DP DTO, currently this is down by command table */
 

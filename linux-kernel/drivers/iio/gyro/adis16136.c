@@ -6,19 +6,14 @@
  *   Author: Lars-Peter Clausen <lars@metafoo.de>
  */
 
-#include <linux/interrupt.h>
-#include <linux/delay.h>
-#include <linux/mutex.h>
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/spi/spi.h>
-#include <linux/slab.h>
 #include <linux/sysfs.h>
 #include <linux/module.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
-#include <linux/iio/buffer.h>
 #include <linux/iio/imu/adis.h>
 
 #include <linux/debugfs.h>
@@ -59,7 +54,7 @@
 struct adis16136_chip_info {
 	unsigned int precision;
 	unsigned int fullscale;
-	const struct adis_timeout *timeouts;
+	const struct adis_data adis_data;
 };
 
 struct adis16136 {
@@ -148,16 +143,14 @@ DEFINE_DEBUGFS_ATTRIBUTE(adis16136_flash_count_fops,
 static int adis16136_debugfs_init(struct iio_dev *indio_dev)
 {
 	struct adis16136 *adis16136 = iio_priv(indio_dev);
+	struct dentry *d = iio_get_debugfs_dentry(indio_dev);
 
 	debugfs_create_file_unsafe("serial_number", 0400,
-		indio_dev->debugfs_dentry, adis16136,
-		&adis16136_serial_fops);
+		d, adis16136, &adis16136_serial_fops);
 	debugfs_create_file_unsafe("product_id", 0400,
-		indio_dev->debugfs_dentry,
-		adis16136, &adis16136_product_id_fops);
+		d, adis16136, &adis16136_product_id_fops);
 	debugfs_create_file_unsafe("flash_count", 0400,
-		indio_dev->debugfs_dentry,
-		adis16136, &adis16136_flash_count_fops);
+		d, adis16136, &adis16136_flash_count_fops);
 
 	return 0;
 }
@@ -225,13 +218,12 @@ static ssize_t adis16136_read_frequency(struct device *dev,
 {
 	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
 	struct adis16136 *adis16136 = iio_priv(indio_dev);
-	struct mutex *slock = &adis16136->adis.state_lock;
 	unsigned int freq;
 	int ret;
 
-	mutex_lock(slock);
+	adis_dev_lock(&adis16136->adis);
 	ret = __adis16136_get_freq(adis16136, &freq);
-	mutex_unlock(slock);
+	adis_dev_unlock(&adis16136->adis);
 	if (ret)
 		return ret;
 
@@ -256,11 +248,10 @@ static const unsigned adis16136_3db_divisors[] = {
 static int adis16136_set_filter(struct iio_dev *indio_dev, int val)
 {
 	struct adis16136 *adis16136 = iio_priv(indio_dev);
-	struct mutex *slock = &adis16136->adis.state_lock;
 	unsigned int freq;
 	int i, ret;
 
-	mutex_lock(slock);
+	adis_dev_lock(&adis16136->adis);
 	ret = __adis16136_get_freq(adis16136, &freq);
 	if (ret)
 		goto out_unlock;
@@ -272,7 +263,7 @@ static int adis16136_set_filter(struct iio_dev *indio_dev, int val)
 
 	ret = __adis_write_reg_16(&adis16136->adis, ADIS16136_REG_AVG_CNT, i);
 out_unlock:
-	mutex_unlock(slock);
+	adis_dev_unlock(&adis16136->adis);
 
 	return ret;
 }
@@ -280,12 +271,11 @@ out_unlock:
 static int adis16136_get_filter(struct iio_dev *indio_dev, int *val)
 {
 	struct adis16136 *adis16136 = iio_priv(indio_dev);
-	struct mutex *slock = &adis16136->adis.state_lock;
 	unsigned int freq;
 	uint16_t val16;
 	int ret;
 
-	mutex_lock(slock);
+	adis_dev_lock(&adis16136->adis);
 
 	ret = __adis_read_reg_16(&adis16136->adis, ADIS16136_REG_AVG_CNT,
 				 &val16);
@@ -299,7 +289,7 @@ static int adis16136_get_filter(struct iio_dev *indio_dev, int *val)
 	*val = freq / adis16136_3db_divisors[val16 & 0x07];
 
 err_unlock:
-	mutex_unlock(slock);
+	adis_dev_unlock(&adis16136->adis);
 
 	return ret ? ret : IIO_VAL_INT;
 }
@@ -439,7 +429,7 @@ static int adis16136_initial_setup(struct iio_dev *indio_dev)
 	uint16_t prod_id;
 	int ret;
 
-	ret = adis_initial_startup(&adis16136->adis);
+	ret = __adis_initial_startup(&adis16136->adis);
 	if (ret)
 		return ret;
 
@@ -466,22 +456,22 @@ static const char * const adis16136_status_error_msgs[] = {
 	[ADIS16136_DIAG_STAT_FLASH_CHKSUM_FAIL] = "Flash checksum error",
 };
 
-static const struct adis_data adis16136_data = {
-	.diag_stat_reg = ADIS16136_REG_DIAG_STAT,
-	.glob_cmd_reg = ADIS16136_REG_GLOB_CMD,
-	.msc_ctrl_reg = ADIS16136_REG_MSC_CTRL,
-
-	.self_test_mask = ADIS16136_MSC_CTRL_SELF_TEST,
-
-	.read_delay = 10,
-	.write_delay = 10,
-
-	.status_error_msgs = adis16136_status_error_msgs,
-	.status_error_mask = BIT(ADIS16136_DIAG_STAT_FLASH_UPDATE_FAIL) |
-		BIT(ADIS16136_DIAG_STAT_SPI_FAIL) |
-		BIT(ADIS16136_DIAG_STAT_SELF_TEST_FAIL) |
-		BIT(ADIS16136_DIAG_STAT_FLASH_CHKSUM_FAIL),
-};
+#define ADIS16136_DATA(_timeouts)					\
+{									\
+	.diag_stat_reg = ADIS16136_REG_DIAG_STAT,			\
+	.glob_cmd_reg = ADIS16136_REG_GLOB_CMD,				\
+	.msc_ctrl_reg = ADIS16136_REG_MSC_CTRL,				\
+	.self_test_reg = ADIS16136_REG_MSC_CTRL,			\
+	.self_test_mask = ADIS16136_MSC_CTRL_SELF_TEST,			\
+	.read_delay = 10,						\
+	.write_delay = 10,						\
+	.status_error_msgs = adis16136_status_error_msgs,		\
+	.status_error_mask = BIT(ADIS16136_DIAG_STAT_FLASH_UPDATE_FAIL) |	\
+		BIT(ADIS16136_DIAG_STAT_SPI_FAIL) |			\
+		BIT(ADIS16136_DIAG_STAT_SELF_TEST_FAIL) |		\
+		BIT(ADIS16136_DIAG_STAT_FLASH_CHKSUM_FAIL),		\
+	.timeouts = (_timeouts),					\
+}
 
 enum adis16136_id {
 	ID_ADIS16133,
@@ -506,39 +496,28 @@ static const struct adis16136_chip_info adis16136_chip_info[] = {
 	[ID_ADIS16133] = {
 		.precision = IIO_DEGREE_TO_RAD(1200),
 		.fullscale = 24000,
-		.timeouts = &adis16133_timeouts,
+		.adis_data = ADIS16136_DATA(&adis16133_timeouts),
 	},
 	[ID_ADIS16135] = {
 		.precision = IIO_DEGREE_TO_RAD(300),
 		.fullscale = 24000,
-		.timeouts = &adis16133_timeouts,
+		.adis_data = ADIS16136_DATA(&adis16133_timeouts),
 	},
 	[ID_ADIS16136] = {
 		.precision = IIO_DEGREE_TO_RAD(450),
 		.fullscale = 24623,
-		.timeouts = &adis16136_timeouts,
+		.adis_data = ADIS16136_DATA(&adis16136_timeouts),
 	},
 	[ID_ADIS16137] = {
 		.precision = IIO_DEGREE_TO_RAD(1000),
 		.fullscale = 24609,
-		.timeouts = &adis16136_timeouts,
+		.adis_data = ADIS16136_DATA(&adis16136_timeouts),
 	},
 };
 
-static struct adis_data *adis16136_adis_data_alloc(struct adis16136 *st,
-						   struct device *dev)
+static void adis16136_stop(void *data)
 {
-	struct adis_data *data;
-
-	data = devm_kmalloc(dev, sizeof(struct adis_data), GFP_KERNEL);
-	if (!data)
-		return ERR_PTR(-ENOMEM);
-
-	memcpy(data, &adis16136_data, sizeof(*data));
-
-	data->timeouts = st->chip_info->timeouts;
-
-	return data;
+	adis16136_stop_device(data);
 }
 
 static int adis16136_probe(struct spi_device *spi)
@@ -558,53 +537,35 @@ static int adis16136_probe(struct spi_device *spi)
 	adis16136 = iio_priv(indio_dev);
 
 	adis16136->chip_info = &adis16136_chip_info[id->driver_data];
-	indio_dev->dev.parent = &spi->dev;
 	indio_dev->name = spi_get_device_id(spi)->name;
 	indio_dev->channels = adis16136_channels;
 	indio_dev->num_channels = ARRAY_SIZE(adis16136_channels);
 	indio_dev->info = &adis16136_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 
-	adis16136_data = adis16136_adis_data_alloc(adis16136, &spi->dev);
-	if (IS_ERR(adis16136_data))
-		return PTR_ERR(adis16136_data);
+	adis16136_data = &adis16136->chip_info->adis_data;
 
 	ret = adis_init(&adis16136->adis, indio_dev, spi, adis16136_data);
 	if (ret)
 		return ret;
 
-	ret = adis_setup_buffer_and_trigger(&adis16136->adis, indio_dev, NULL);
+	ret = devm_adis_setup_buffer_and_trigger(&adis16136->adis, indio_dev, NULL);
 	if (ret)
 		return ret;
 
 	ret = adis16136_initial_setup(indio_dev);
 	if (ret)
-		goto error_cleanup_buffer;
+		return ret;
 
-	ret = iio_device_register(indio_dev);
+	ret = devm_add_action_or_reset(&spi->dev, adis16136_stop, indio_dev);
 	if (ret)
-		goto error_stop_device;
+		return ret;
+
+	ret = devm_iio_device_register(&spi->dev, indio_dev);
+	if (ret)
+		return ret;
 
 	adis16136_debugfs_init(indio_dev);
-
-	return 0;
-
-error_stop_device:
-	adis16136_stop_device(indio_dev);
-error_cleanup_buffer:
-	adis_cleanup_buffer_and_trigger(&adis16136->adis, indio_dev);
-	return ret;
-}
-
-static int adis16136_remove(struct spi_device *spi)
-{
-	struct iio_dev *indio_dev = spi_get_drvdata(spi);
-	struct adis16136 *adis16136 = iio_priv(indio_dev);
-
-	iio_device_unregister(indio_dev);
-	adis16136_stop_device(indio_dev);
-
-	adis_cleanup_buffer_and_trigger(&adis16136->adis, indio_dev);
 
 	return 0;
 }
@@ -624,10 +585,10 @@ static struct spi_driver adis16136_driver = {
 	},
 	.id_table = adis16136_ids,
 	.probe = adis16136_probe,
-	.remove = adis16136_remove,
 };
 module_spi_driver(adis16136_driver);
 
 MODULE_AUTHOR("Lars-Peter Clausen <lars@metafoo.de>");
 MODULE_DESCRIPTION("Analog Devices ADIS16133/ADIS16135/ADIS16136 gyroscope driver");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS(IIO_ADISLIB);

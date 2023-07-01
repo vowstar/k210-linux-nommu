@@ -292,7 +292,7 @@ static void sh_tmu_clocksource_suspend(struct clocksource *cs)
 
 	if (--ch->enable_count == 0) {
 		__sh_tmu_disable(ch);
-		pm_genpd_syscore_poweroff(&ch->tmu->pdev->dev);
+		dev_pm_genpd_suspend(&ch->tmu->pdev->dev);
 	}
 }
 
@@ -304,7 +304,7 @@ static void sh_tmu_clocksource_resume(struct clocksource *cs)
 		return;
 
 	if (ch->enable_count++ == 0) {
-		pm_genpd_syscore_poweron(&ch->tmu->pdev->dev);
+		dev_pm_genpd_resume(&ch->tmu->pdev->dev);
 		__sh_tmu_enable(ch);
 	}
 }
@@ -394,12 +394,12 @@ static int sh_tmu_clock_event_next(unsigned long delta,
 
 static void sh_tmu_clock_event_suspend(struct clock_event_device *ced)
 {
-	pm_genpd_syscore_poweroff(&ced_to_sh_tmu(ced)->tmu->pdev->dev);
+	dev_pm_genpd_suspend(&ced_to_sh_tmu(ced)->tmu->pdev->dev);
 }
 
 static void sh_tmu_clock_event_resume(struct clock_event_device *ced)
 {
-	pm_genpd_syscore_poweron(&ced_to_sh_tmu(ced)->tmu->pdev->dev);
+	dev_pm_genpd_resume(&ced_to_sh_tmu(ced)->tmu->pdev->dev);
 }
 
 static void sh_tmu_register_clockevent(struct sh_tmu_channel *ch,
@@ -632,11 +632,6 @@ static int sh_tmu_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int sh_tmu_remove(struct platform_device *pdev)
-{
-	return -EBUSY; /* cannot unregister clockevent and clocksource */
-}
-
 static const struct platform_device_id sh_tmu_id_table[] = {
 	{ "sh-tmu", SH_TMU },
 	{ "sh-tmu-sh3", SH_TMU_SH3 },
@@ -652,10 +647,10 @@ MODULE_DEVICE_TABLE(of, sh_tmu_of_table);
 
 static struct platform_driver sh_tmu_device_driver = {
 	.probe		= sh_tmu_probe,
-	.remove		= sh_tmu_remove,
 	.driver		= {
 		.name	= "sh_tmu",
 		.of_match_table = of_match_ptr(sh_tmu_of_table),
+		.suppress_bind_attrs = true,
 	},
 	.id_table	= sh_tmu_id_table,
 };

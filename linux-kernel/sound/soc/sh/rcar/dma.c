@@ -44,7 +44,8 @@ struct rsnd_dma {
 };
 
 struct rsnd_dma_ctrl {
-	void __iomem *base;
+	void __iomem *ppbase;
+	phys_addr_t ppres;
 	int dmaen_num;
 	int dmapp_num;
 };
@@ -101,7 +102,7 @@ static int rsnd_dmaen_stop(struct rsnd_mod *mod,
 	struct rsnd_dmaen *dmaen = rsnd_dma_to_dmaen(dma);
 
 	if (dmaen->chan)
-		dmaengine_terminate_all(dmaen->chan);
+		dmaengine_terminate_async(dmaen->chan);
 
 	return 0;
 }
@@ -236,16 +237,25 @@ static int rsnd_dmaen_start(struct rsnd_mod *mod,
 	return 0;
 }
 
-struct dma_chan *rsnd_dma_request_channel(struct device_node *of_node,
-					  struct rsnd_mod *mod, char *name)
+struct dma_chan *rsnd_dma_request_channel(struct device_node *of_node, char *name,
+					  struct rsnd_mod *mod, char *x)
 {
+	struct rsnd_priv *priv = rsnd_mod_to_priv(mod);
+	struct device *dev = rsnd_priv_to_dev(priv);
 	struct dma_chan *chan = NULL;
 	struct device_node *np;
 	int i = 0;
 
 	for_each_child_of_node(of_node, np) {
+		i = rsnd_node_fixed_index(dev, np, name, i);
+		if (i < 0) {
+			chan = NULL;
+			of_node_put(np);
+			break;
+		}
+
 		if (i == rsnd_mod_id_raw(mod) && (!chan))
-			chan = of_dma_request_slave_channel(np, name);
+			chan = of_dma_request_slave_channel(np, x);
 		i++;
 	}
 
@@ -415,7 +425,7 @@ static u32 rsnd_dmapp_get_chcr(struct rsnd_dai_stream *io,
 }
 
 #define rsnd_dmapp_addr(dmac, dma, reg) \
-	(dmac->base + 0x20 + reg + \
+	(dmac->ppbase + 0x20 + reg + \
 	 (0x10 * rsnd_dma_to_dmapp(dma)->dmapp_id))
 static void rsnd_dmapp_write(struct rsnd_dma *dma, u32 data, u32 reg)
 {
@@ -504,12 +514,31 @@ static int rsnd_dmapp_attach(struct rsnd_dai_stream *io,
 	return 0;
 }
 
+#ifdef CONFIG_DEBUG_FS
+static void rsnd_dmapp_debug_info(struct seq_file *m,
+				  struct rsnd_dai_stream *io,
+				  struct rsnd_mod *mod)
+{
+	struct rsnd_priv *priv = rsnd_mod_to_priv(mod);
+	struct rsnd_dma_ctrl *dmac = rsnd_priv_to_dmac(priv);
+	struct rsnd_dma *dma = rsnd_mod_to_dma(mod);
+	struct rsnd_dmapp *dmapp = rsnd_dma_to_dmapp(dma);
+
+	rsnd_debugfs_reg_show(m, dmac->ppres, dmac->ppbase,
+			      0x20 + 0x10 * dmapp->dmapp_id, 0x10);
+}
+#define DEBUG_INFO .debug_info = rsnd_dmapp_debug_info
+#else
+#define DEBUG_INFO
+#endif
+
 static struct rsnd_mod_ops rsnd_dmapp_ops = {
 	.name		= "audmac-pp",
 	.start		= rsnd_dmapp_start,
 	.stop		= rsnd_dmapp_stop,
 	.quit		= rsnd_dmapp_stop,
 	.get_status	= rsnd_mod_get_status,
+	DEBUG_INFO
 };
 
 /*
@@ -624,22 +653,54 @@ rsnd_gen2_dma_addr(struct rsnd_dai_stream *io,
 		dma_addrs[is_ssi][is_play][use_src + use_cmd].in_addr;
 }
 
+/*
+ *	Gen4 DMA read/write register offset
+ *
+ *	ex) R-Car V4H case
+ *		  mod		/ SYS-DMAC in	/ SYS-DMAC out
+ *	SSI_SDMC: 0xec400000	/ 0xec400000	/ 0xec400000
+ */
+#define RDMA_SSI_SDMC(addr, i)	(addr + (0x8000 * i))
+static dma_addr_t
+rsnd_gen4_dma_addr(struct rsnd_dai_stream *io, struct rsnd_mod *mod,
+		   int is_play, int is_from)
+{
+	struct rsnd_priv *priv = rsnd_io_to_priv(io);
+	phys_addr_t addr = rsnd_gen_get_phy_addr(priv, RSND_GEN4_SDMC);
+	int id = rsnd_mod_id(mod);
+	int busif = rsnd_mod_id_sub(mod);
+
+	/*
+	 * SSI0 only is supported
+	 */
+	if (id != 0) {
+		struct device *dev = rsnd_priv_to_dev(priv);
+
+		dev_err(dev, "This driver doesn't support non SSI0");
+		return -EINVAL;
+	}
+
+	return RDMA_SSI_SDMC(addr, busif);
+}
+
 static dma_addr_t rsnd_dma_addr(struct rsnd_dai_stream *io,
 				struct rsnd_mod *mod,
 				int is_play, int is_from)
 {
 	struct rsnd_priv *priv = rsnd_io_to_priv(io);
 
+	if (!mod)
+		return 0;
+
 	/*
 	 * gen1 uses default DMA addr
 	 */
 	if (rsnd_is_gen1(priv))
 		return 0;
-
-	if (!mod)
-		return 0;
-
-	return rsnd_gen2_dma_addr(io, mod, is_play, is_from);
+	else if (rsnd_is_gen4(priv))
+		return rsnd_gen4_dma_addr(io, mod, is_play, is_from);
+	else
+		return rsnd_gen2_dma_addr(io, mod, is_play, is_from);
 }
 
 #define MOD_MAX (RSND_MOD_MAX + 1) /* +Memory */
@@ -856,18 +917,28 @@ int rsnd_dma_probe(struct rsnd_priv *priv)
 	/*
 	 * for Gen2 or later
 	 */
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "audmapp");
 	dmac = devm_kzalloc(dev, sizeof(*dmac), GFP_KERNEL);
-	if (!dmac || !res) {
+	if (!dmac) {
 		dev_err(dev, "dma allocate failed\n");
 		return 0; /* it will be PIO mode */
 	}
 
-	dmac->dmapp_num = 0;
-	dmac->base = devm_ioremap_resource(dev, res);
-	if (IS_ERR(dmac->base))
-		return PTR_ERR(dmac->base);
+	/* for Gen4 doesn't have DMA-pp */
+	if (rsnd_is_gen4(priv))
+		goto audmapp_end;
 
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "audmapp");
+	if (!res) {
+		dev_err(dev, "lack of audmapp in DT\n");
+		return 0; /* it will be PIO mode */
+	}
+
+	dmac->dmapp_num = 0;
+	dmac->ppres  = res->start;
+	dmac->ppbase = devm_ioremap_resource(dev, res);
+	if (IS_ERR(dmac->ppbase))
+		return PTR_ERR(dmac->ppbase);
+audmapp_end:
 	priv->dma = dmac;
 
 	/* dummy mem mod for debug */

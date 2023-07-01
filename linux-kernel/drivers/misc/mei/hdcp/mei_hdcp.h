@@ -9,7 +9,7 @@
 #ifndef __MEI_HDCP_H__
 #define __MEI_HDCP_H__
 
-#include <drm/drm_hdcp.h>
+#include <drm/display/drm_hdcp.h>
 
 /* me_hdcp_status: Enumeration of all HDCP Status Codes */
 enum me_hdcp_status {
@@ -358,7 +358,7 @@ struct wired_cmd_repeater_auth_stream_req_in {
 	u8				seq_num_m[HDCP_2_2_SEQ_NUM_LEN];
 	u8				m_prime[HDCP_2_2_MPRIME_LEN];
 	__be16				k;
-	struct hdcp2_streamid_type	streams[1];
+	struct hdcp2_streamid_type	streams[];
 } __packed;
 
 struct wired_cmd_repeater_auth_stream_req_out {

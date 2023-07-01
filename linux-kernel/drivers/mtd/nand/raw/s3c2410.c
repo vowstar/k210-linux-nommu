@@ -30,7 +30,6 @@
 
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/rawnand.h>
-#include <linux/mtd/nand_ecc.h>
 #include <linux/mtd/partitions.h>
 
 #include <linux/platform_data/mtd-nand-s3c2410.h>
@@ -134,7 +133,8 @@ enum s3c_nand_clk_state {
 
 /**
  * struct s3c2410_nand_info - NAND controller state.
- * @mtds: An array of MTD instances on this controoler.
+ * @controller: Base controller structure.
+ * @mtds: An array of MTD instances on this controller.
  * @platform: The platform data for this board.
  * @device: The platform device we bound to.
  * @clk: The clock resource for this controller.
@@ -146,6 +146,7 @@ enum s3c_nand_clk_state {
  * @clk_rate: The clock rate from @clk.
  * @clk_state: The current clock state.
  * @cpu_type: The exact type of this controller.
+ * @freq_transition: CPUFreq notifier block
  */
 struct s3c2410_nand_info {
 	/* mtd info */
@@ -165,10 +166,6 @@ struct s3c2410_nand_info {
 	enum s3c_nand_clk_state		clk_state;
 
 	enum s3c_cpu_type		cpu_type;
-
-#ifdef CONFIG_ARM_S3C24XX_CPUFREQ
-	struct notifier_block	freq_transition;
-#endif
 };
 
 struct s3c24XX_nand_devtype_data {
@@ -291,7 +288,7 @@ static int s3c2410_nand_setrate(struct s3c2410_nand_info *info)
 	int tacls_max = (info->cpu_type == TYPE_S3C2412) ? 8 : 4;
 	int tacls, twrph0, twrph1;
 	unsigned long clkrate = clk_get_rate(info->clk);
-	unsigned long uninitialized_var(set), cfg, uninitialized_var(mask);
+	unsigned long set, cfg, mask;
 	unsigned long flags;
 
 	/* calculate the timing information for the controller */
@@ -710,54 +707,6 @@ static void s3c2440_nand_write_buf(struct nand_chip *this, const u_char *buf,
 	}
 }
 
-/* cpufreq driver support */
-
-#ifdef CONFIG_ARM_S3C24XX_CPUFREQ
-
-static int s3c2410_nand_cpufreq_transition(struct notifier_block *nb,
-					  unsigned long val, void *data)
-{
-	struct s3c2410_nand_info *info;
-	unsigned long newclk;
-
-	info = container_of(nb, struct s3c2410_nand_info, freq_transition);
-	newclk = clk_get_rate(info->clk);
-
-	if ((val == CPUFREQ_POSTCHANGE && newclk < info->clk_rate) ||
-	    (val == CPUFREQ_PRECHANGE && newclk > info->clk_rate)) {
-		s3c2410_nand_setrate(info);
-	}
-
-	return 0;
-}
-
-static inline int s3c2410_nand_cpufreq_register(struct s3c2410_nand_info *info)
-{
-	info->freq_transition.notifier_call = s3c2410_nand_cpufreq_transition;
-
-	return cpufreq_register_notifier(&info->freq_transition,
-					 CPUFREQ_TRANSITION_NOTIFIER);
-}
-
-static inline void
-s3c2410_nand_cpufreq_deregister(struct s3c2410_nand_info *info)
-{
-	cpufreq_unregister_notifier(&info->freq_transition,
-				    CPUFREQ_TRANSITION_NOTIFIER);
-}
-
-#else
-static inline int s3c2410_nand_cpufreq_register(struct s3c2410_nand_info *info)
-{
-	return 0;
-}
-
-static inline void
-s3c2410_nand_cpufreq_deregister(struct s3c2410_nand_info *info)
-{
-}
-#endif
-
 /* device management functions */
 
 static int s3c24xx_nand_remove(struct platform_device *pdev)
@@ -766,8 +715,6 @@ static int s3c24xx_nand_remove(struct platform_device *pdev)
 
 	if (info == NULL)
 		return 0;
-
-	s3c2410_nand_cpufreq_deregister(info);
 
 	/* Release all our mtds  and their partitions, then go through
 	 * freeing the resources used
@@ -779,7 +726,8 @@ static int s3c24xx_nand_remove(struct platform_device *pdev)
 
 		for (mtdno = 0; mtdno < info->mtd_count; mtdno++, ptr++) {
 			pr_debug("releasing mtd %d (%p)\n", mtdno, ptr);
-			nand_release(&ptr->chip);
+			WARN_ON(mtd_device_unregister(nand_to_mtd(&ptr->chip)));
+			nand_cleanup(&ptr->chip);
 		}
 	}
 
@@ -807,8 +755,8 @@ static int s3c2410_nand_add_partition(struct s3c2410_nand_info *info,
 	return -ENODEV;
 }
 
-static int s3c2410_nand_setup_data_interface(struct nand_chip *chip, int csline,
-					const struct nand_data_interface *conf)
+static int s3c2410_nand_setup_interface(struct nand_chip *chip, int csline,
+					const struct nand_interface_config *conf)
 {
 	struct mtd_info *mtd = nand_to_mtd(chip);
 	struct s3c2410_nand_info *info = s3c2410_nand_mtd_toinfo(mtd);
@@ -903,7 +851,7 @@ static void s3c2410_nand_init_chip(struct s3c2410_nand_info *info,
 	nmtd->info	   = info;
 	nmtd->set	   = set;
 
-	chip->ecc.mode = info->platform->ecc_mode;
+	chip->ecc.engine_type = info->platform->engine_type;
 
 	/*
 	 * If you use u-boot BBT creation code, specifying this flag will
@@ -928,24 +876,24 @@ static int s3c2410_nand_attach_chip(struct nand_chip *chip)
 	struct mtd_info *mtd = nand_to_mtd(chip);
 	struct s3c2410_nand_info *info = s3c2410_nand_mtd_toinfo(mtd);
 
-	switch (chip->ecc.mode) {
+	switch (chip->ecc.engine_type) {
 
-	case NAND_ECC_NONE:
+	case NAND_ECC_ENGINE_TYPE_NONE:
 		dev_info(info->device, "ECC disabled\n");
 		break;
 
-	case NAND_ECC_SOFT:
+	case NAND_ECC_ENGINE_TYPE_SOFT:
 		/*
-		 * This driver expects Hamming based ECC when ecc_mode is set
-		 * to NAND_ECC_SOFT. Force ecc.algo to NAND_ECC_HAMMING to
-		 * avoid adding an extra ecc_algo field to
-		 * s3c2410_platform_nand.
+		 * This driver expects Hamming based ECC when engine_type is set
+		 * to NAND_ECC_ENGINE_TYPE_SOFT. Force ecc.algo to
+		 * NAND_ECC_ALGO_HAMMING to avoid adding an extra ecc_algo field
+		 * to s3c2410_platform_nand.
 		 */
-		chip->ecc.algo = NAND_ECC_HAMMING;
+		chip->ecc.algo = NAND_ECC_ALGO_HAMMING;
 		dev_info(info->device, "soft ECC\n");
 		break;
 
-	case NAND_ECC_HW:
+	case NAND_ECC_ENGINE_TYPE_ON_HOST:
 		chip->ecc.calculate = s3c2410_nand_calculate_ecc;
 		chip->ecc.correct   = s3c2410_nand_correct_data;
 		chip->ecc.strength  = 1;
@@ -998,7 +946,7 @@ static int s3c2410_nand_attach_chip(struct nand_chip *chip)
 
 static const struct nand_controller_ops s3c24xx_nand_controller_ops = {
 	.attach_chip = s3c2410_nand_attach_chip,
-	.setup_data_interface = s3c2410_nand_setup_data_interface,
+	.setup_interface = s3c2410_nand_setup_interface,
 };
 
 static const struct of_device_id s3c24xx_nand_dt_ids[] = {
@@ -1181,12 +1129,6 @@ static int s3c24xx_nand_probe(struct platform_device *pdev)
 	err = s3c2410_nand_inithw(info);
 	if (err != 0)
 		goto exit_error;
-
-	err = s3c2410_nand_cpufreq_register(info);
-	if (err < 0) {
-		dev_err(&pdev->dev, "failed to init cpufreq support\n");
-		goto exit_error;
-	}
 
 	if (allow_clk_suspend(info)) {
 		dev_info(&pdev->dev, "clock idle support enabled\n");

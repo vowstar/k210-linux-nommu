@@ -73,7 +73,7 @@ struct da9062_regulators {
 	int					irq_ldo_lim;
 	unsigned				n_regulators;
 	/* Array size to be defined during init. Keep at end. */
-	struct da9062_regulator			regulator[0];
+	struct da9062_regulator			regulator[];
 };
 
 /* Regulator operations */
@@ -907,10 +907,8 @@ static irqreturn_t da9062_ldo_lim_event(int irq, void *data)
 			continue;
 
 		if (BIT(regl->info->oc_event.lsb) & bits) {
-			regulator_lock(regl->rdev);
 			regulator_notifier_call_chain(regl->rdev,
 					REGULATOR_EVENT_OVER_CURRENT, NULL);
-			regulator_unlock(regl->rdev);
 			handled = IRQ_HANDLED;
 		}
 	}

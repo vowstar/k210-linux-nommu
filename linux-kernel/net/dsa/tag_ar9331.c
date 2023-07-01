@@ -7,7 +7,9 @@
 #include <linux/bitfield.h>
 #include <linux/etherdevice.h>
 
-#include "dsa_priv.h"
+#include "tag.h"
+
+#define AR9331_NAME			"ar9331"
 
 #define AR9331_HDR_LEN			2
 #define AR9331_HDR_VERSION		1
@@ -31,9 +33,6 @@ static struct sk_buff *ar9331_tag_xmit(struct sk_buff *skb,
 	__le16 *phdr;
 	u16 hdr;
 
-	if (skb_cow_head(skb, 0) < 0)
-		return NULL;
-
 	phdr = skb_push(skb, AR9331_HDR_LEN);
 
 	hdr = FIELD_PREP(AR9331_HDR_VERSION_MASK, AR9331_HDR_VERSION);
@@ -47,8 +46,7 @@ static struct sk_buff *ar9331_tag_xmit(struct sk_buff *skb,
 }
 
 static struct sk_buff *ar9331_tag_rcv(struct sk_buff *skb,
-				      struct net_device *ndev,
-				      struct packet_type *pt)
+				      struct net_device *ndev)
 {
 	u8 ver, port;
 	u16 hdr;
@@ -84,13 +82,13 @@ static struct sk_buff *ar9331_tag_rcv(struct sk_buff *skb,
 }
 
 static const struct dsa_device_ops ar9331_netdev_ops = {
-	.name	= "ar9331",
+	.name	= AR9331_NAME,
 	.proto	= DSA_TAG_PROTO_AR9331,
 	.xmit	= ar9331_tag_xmit,
 	.rcv	= ar9331_tag_rcv,
-	.overhead = AR9331_HDR_LEN,
+	.needed_headroom = AR9331_HDR_LEN,
 };
 
 MODULE_LICENSE("GPL v2");
-MODULE_ALIAS_DSA_TAG_DRIVER(DSA_TAG_PROTO_AR9331);
+MODULE_ALIAS_DSA_TAG_DRIVER(DSA_TAG_PROTO_AR9331, AR9331_NAME);
 module_dsa_tag_driver(ar9331_netdev_ops);

@@ -12,7 +12,8 @@
 #include <linux/pci.h>
 #include <linux/dma-buf.h>
 #include <linux/vmalloc.h>
-#include <drm/i915_drm.h>
+
+#include "gt/intel_gt_requests.h"
 
 #include "i915_trace.h"
 
@@ -28,18 +29,6 @@ static bool can_release_pages(struct drm_i915_gem_object *obj)
 		return false;
 
 	/*
-	 * Only report true if by unbinding the object and putting its pages
-	 * we can actually make forward progress towards freeing physical
-	 * pages.
-	 *
-	 * If the pages are pinned for any other reason than being bound
-	 * to the GPU, simply unbinding from the GPU is not going to succeed
-	 * in releasing our pin count on the pages themselves.
-	 */
-	if (atomic_read(&obj->mm.pages_pin_count) > atomic_read(&obj->bind_count))
-		return false;
-
-	/*
 	 * We can only return physical pages to the system if we can either
 	 * discard the contents (because the user has marked them as being
 	 * purgeable) or if we can move their contents out to swap.
@@ -47,37 +36,45 @@ static bool can_release_pages(struct drm_i915_gem_object *obj)
 	return swap_available() || obj->mm.madv == I915_MADV_DONTNEED;
 }
 
-static bool unsafe_drop_pages(struct drm_i915_gem_object *obj,
-			      unsigned long shrink)
+static bool drop_pages(struct drm_i915_gem_object *obj,
+		       unsigned long shrink, bool trylock_vm)
 {
 	unsigned long flags;
 
 	flags = 0;
 	if (shrink & I915_SHRINK_ACTIVE)
-		flags = I915_GEM_OBJECT_UNBIND_ACTIVE;
+		flags |= I915_GEM_OBJECT_UNBIND_ACTIVE;
+	if (!(shrink & I915_SHRINK_BOUND))
+		flags |= I915_GEM_OBJECT_UNBIND_TEST;
+	if (trylock_vm)
+		flags |= I915_GEM_OBJECT_UNBIND_VM_TRYLOCK;
 
 	if (i915_gem_object_unbind(obj, flags) == 0)
-		__i915_gem_object_put_pages(obj);
+		return true;
 
-	return !i915_gem_object_has_pages(obj);
+	return false;
 }
 
-static void try_to_writeback(struct drm_i915_gem_object *obj,
-			     unsigned int flags)
+static int try_to_writeback(struct drm_i915_gem_object *obj, unsigned int flags)
 {
-	switch (obj->mm.madv) {
-	case I915_MADV_DONTNEED:
-		i915_gem_object_truncate(obj);
-	case __I915_MADV_PURGED:
-		return;
+	if (obj->ops->shrink) {
+		unsigned int shrink_flags = 0;
+
+		if (!(flags & I915_SHRINK_ACTIVE))
+			shrink_flags |= I915_GEM_OBJECT_SHRINK_NO_GPU_WAIT;
+
+		if (flags & I915_SHRINK_WRITEBACK)
+			shrink_flags |= I915_GEM_OBJECT_SHRINK_WRITEBACK;
+
+		return obj->ops->shrink(obj, shrink_flags);
 	}
 
-	if (flags & I915_SHRINK_WRITEBACK)
-		i915_gem_object_writeback(obj);
+	return 0;
 }
 
 /**
  * i915_gem_shrink - Shrink buffer object caches
+ * @ww: i915 gem ww acquire ctx, or NULL
  * @i915: i915 device
  * @target: amount of memory to make available, in pages
  * @nr_scanned: optional output for number of pages scanned (incremental)
@@ -102,7 +99,8 @@ static void try_to_writeback(struct drm_i915_gem_object *obj,
  * The number of pages of backing storage actually released.
  */
 unsigned long
-i915_gem_shrink(struct drm_i915_private *i915,
+i915_gem_shrink(struct i915_gem_ww_ctx *ww,
+		struct drm_i915_private *i915,
 		unsigned long target,
 		unsigned long *nr_scanned,
 		unsigned int shrink)
@@ -121,15 +119,10 @@ i915_gem_shrink(struct drm_i915_private *i915,
 	intel_wakeref_t wakeref = 0;
 	unsigned long count = 0;
 	unsigned long scanned = 0;
+	int err = 0;
 
-	/*
-	 * When shrinking the active list, we should also consider active
-	 * contexts. Active contexts are pinned until they are retired, and
-	 * so can not be simply unbound to retire and unpin their pages. To
-	 * shrink the contexts, we must wait until the gpu is idle and
-	 * completed its switch to the kernel context. In short, we do
-	 * not have a good mechanism for idling a specific context.
-	 */
+	/* CHV + VTD workaround use stop_machine(); need to trylock vm->mutex */
+	bool trylock_vm = !ww && intel_vm_no_concurrent_access_wa(i915);
 
 	trace_i915_gem_shrink(i915, target, shrink);
 
@@ -143,6 +136,20 @@ i915_gem_shrink(struct drm_i915_private *i915,
 		if (!wakeref)
 			shrink &= ~I915_SHRINK_BOUND;
 	}
+
+	/*
+	 * When shrinking the active list, we should also consider active
+	 * contexts. Active contexts are pinned until they are retired, and
+	 * so can not be simply unbound to retire and unpin their pages. To
+	 * shrink the contexts, we must wait until the gpu is idle and
+	 * completed its switch to the kernel context. In short, we do
+	 * not have a good mechanism for idling a specific context, but
+	 * what we can do is give them a kick so that we do not keep idle
+	 * contexts around longer than is necessary.
+	 */
+	if (shrink & I915_SHRINK_ACTIVE)
+		/* Retire requests to unpin all idle contexts */
+		intel_gt_retire_requests(to_gt(i915));
 
 	/*
 	 * As we may completely rewrite the (un)bound list whilst unbinding
@@ -195,10 +202,6 @@ i915_gem_shrink(struct drm_i915_private *i915,
 			    i915_gem_object_is_framebuffer(obj))
 				continue;
 
-			if (!(shrink & I915_SHRINK_BOUND) &&
-			    atomic_read(&obj->bind_count))
-				continue;
-
 			if (!can_release_pages(obj))
 				continue;
 
@@ -207,27 +210,43 @@ i915_gem_shrink(struct drm_i915_private *i915,
 
 			spin_unlock_irqrestore(&i915->mm.obj_lock, flags);
 
-			if (unsafe_drop_pages(obj, shrink)) {
-				/* May arrive from get_pages on another bo */
-				mutex_lock(&obj->mm.lock);
-				if (!i915_gem_object_has_pages(obj)) {
-					try_to_writeback(obj, shrink);
-					count += obj->base.size >> PAGE_SHIFT;
-				}
-				mutex_unlock(&obj->mm.lock);
+			/* May arrive from get_pages on another bo */
+			if (!ww) {
+				if (!i915_gem_object_trylock(obj, NULL))
+					goto skip;
+			} else {
+				err = i915_gem_object_lock(obj, ww);
+				if (err)
+					goto skip;
 			}
 
+			if (drop_pages(obj, shrink, trylock_vm) &&
+			    !__i915_gem_object_put_pages(obj) &&
+			    !try_to_writeback(obj, shrink))
+				count += obj->base.size >> PAGE_SHIFT;
+
+			if (!ww)
+				i915_gem_object_unlock(obj);
+
 			scanned += obj->base.size >> PAGE_SHIFT;
+skip:
 			i915_gem_object_put(obj);
 
 			spin_lock_irqsave(&i915->mm.obj_lock, flags);
+			if (err)
+				break;
 		}
 		list_splice_tail(&still_in_list, phase->list);
 		spin_unlock_irqrestore(&i915->mm.obj_lock, flags);
+		if (err)
+			break;
 	}
 
 	if (shrink & I915_SHRINK_BOUND)
 		intel_runtime_pm_put(&i915->runtime_pm, wakeref);
+
+	if (err)
+		return err;
 
 	if (nr_scanned)
 		*nr_scanned += scanned;
@@ -254,10 +273,9 @@ unsigned long i915_gem_shrink_all(struct drm_i915_private *i915)
 	unsigned long freed = 0;
 
 	with_intel_runtime_pm(&i915->runtime_pm, wakeref) {
-		freed = i915_gem_shrink(i915, -1UL, NULL,
+		freed = i915_gem_shrink(NULL, i915, -1UL, NULL,
 					I915_SHRINK_BOUND |
-					I915_SHRINK_UNBOUND |
-					I915_SHRINK_ACTIVE);
+					I915_SHRINK_UNBOUND);
 	}
 
 	return freed;
@@ -301,7 +319,7 @@ i915_gem_shrinker_scan(struct shrinker *shrinker, struct shrink_control *sc)
 
 	sc->nr_scanned = 0;
 
-	freed = i915_gem_shrink(i915,
+	freed = i915_gem_shrink(NULL, i915,
 				sc->nr_to_scan,
 				&sc->nr_scanned,
 				I915_SHRINK_BOUND |
@@ -310,7 +328,7 @@ i915_gem_shrinker_scan(struct shrinker *shrinker, struct shrink_control *sc)
 		intel_wakeref_t wakeref;
 
 		with_intel_runtime_pm(&i915->runtime_pm, wakeref) {
-			freed += i915_gem_shrink(i915,
+			freed += i915_gem_shrink(NULL, i915,
 						 sc->nr_to_scan - sc->nr_scanned,
 						 &sc->nr_scanned,
 						 I915_SHRINK_ACTIVE |
@@ -335,8 +353,7 @@ i915_gem_shrinker_oom(struct notifier_block *nb, unsigned long event, void *ptr)
 
 	freed_pages = 0;
 	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
-		freed_pages += i915_gem_shrink(i915, -1UL, NULL,
-					       I915_SHRINK_ACTIVE |
+		freed_pages += i915_gem_shrink(NULL, i915, -1UL, NULL,
 					       I915_SHRINK_BOUND |
 					       I915_SHRINK_UNBOUND |
 					       I915_SHRINK_WRITEBACK);
@@ -374,24 +391,30 @@ i915_gem_shrinker_vmap(struct notifier_block *nb, unsigned long event, void *ptr
 	intel_wakeref_t wakeref;
 
 	with_intel_runtime_pm(&i915->runtime_pm, wakeref)
-		freed_pages += i915_gem_shrink(i915, -1UL, NULL,
+		freed_pages += i915_gem_shrink(NULL, i915, -1UL, NULL,
 					       I915_SHRINK_BOUND |
 					       I915_SHRINK_UNBOUND |
 					       I915_SHRINK_VMAPS);
 
 	/* We also want to clear any cached iomaps as they wrap vmap */
-	mutex_lock(&i915->ggtt.vm.mutex);
+	mutex_lock(&to_gt(i915)->ggtt->vm.mutex);
 	list_for_each_entry_safe(vma, next,
-				 &i915->ggtt.vm.bound_list, vm_link) {
-		unsigned long count = vma->node.size >> PAGE_SHIFT;
+				 &to_gt(i915)->ggtt->vm.bound_list, vm_link) {
+		unsigned long count = i915_vma_size(vma) >> PAGE_SHIFT;
+		struct drm_i915_gem_object *obj = vma->obj;
 
 		if (!vma->iomap || i915_vma_is_active(vma))
 			continue;
 
+		if (!i915_gem_object_trylock(obj, NULL))
+			continue;
+
 		if (__i915_vma_unbind(vma) == 0)
 			freed_pages += count;
+
+		i915_gem_object_unlock(obj);
 	}
-	mutex_unlock(&i915->ggtt.vm.mutex);
+	mutex_unlock(&to_gt(i915)->ggtt->vm.mutex);
 
 	*(unsigned long *)ptr += freed_pages;
 	return NOTIFY_DONE;
@@ -403,35 +426,31 @@ void i915_gem_driver_register__shrinker(struct drm_i915_private *i915)
 	i915->mm.shrinker.count_objects = i915_gem_shrinker_count;
 	i915->mm.shrinker.seeks = DEFAULT_SEEKS;
 	i915->mm.shrinker.batch = 4096;
-	WARN_ON(register_shrinker(&i915->mm.shrinker));
+	drm_WARN_ON(&i915->drm, register_shrinker(&i915->mm.shrinker,
+						  "drm-i915_gem"));
 
 	i915->mm.oom_notifier.notifier_call = i915_gem_shrinker_oom;
-	WARN_ON(register_oom_notifier(&i915->mm.oom_notifier));
+	drm_WARN_ON(&i915->drm, register_oom_notifier(&i915->mm.oom_notifier));
 
 	i915->mm.vmap_notifier.notifier_call = i915_gem_shrinker_vmap;
-	WARN_ON(register_vmap_purge_notifier(&i915->mm.vmap_notifier));
+	drm_WARN_ON(&i915->drm,
+		    register_vmap_purge_notifier(&i915->mm.vmap_notifier));
 }
 
 void i915_gem_driver_unregister__shrinker(struct drm_i915_private *i915)
 {
-	WARN_ON(unregister_vmap_purge_notifier(&i915->mm.vmap_notifier));
-	WARN_ON(unregister_oom_notifier(&i915->mm.oom_notifier));
+	drm_WARN_ON(&i915->drm,
+		    unregister_vmap_purge_notifier(&i915->mm.vmap_notifier));
+	drm_WARN_ON(&i915->drm,
+		    unregister_oom_notifier(&i915->mm.oom_notifier));
 	unregister_shrinker(&i915->mm.shrinker);
 }
 
 void i915_gem_shrinker_taints_mutex(struct drm_i915_private *i915,
 				    struct mutex *mutex)
 {
-	bool unlock = false;
-
 	if (!IS_ENABLED(CONFIG_LOCKDEP))
 		return;
-
-	if (!lockdep_is_held_type(&i915->drm.struct_mutex, -1)) {
-		mutex_acquire(&i915->drm.struct_mutex.dep_map,
-			      I915_MM_NORMAL, 0, _RET_IP_);
-		unlock = true;
-	}
 
 	fs_reclaim_acquire(GFP_KERNEL);
 
@@ -439,13 +458,20 @@ void i915_gem_shrinker_taints_mutex(struct drm_i915_private *i915,
 	mutex_release(&mutex->dep_map, _RET_IP_);
 
 	fs_reclaim_release(GFP_KERNEL);
-
-	if (unlock)
-		mutex_release(&i915->drm.struct_mutex.dep_map, _RET_IP_);
 }
 
 #define obj_to_i915(obj__) to_i915((obj__)->base.dev)
 
+/**
+ * i915_gem_object_make_unshrinkable - Hide the object from the shrinker. By
+ * default all object types that support shrinking(see IS_SHRINKABLE), will also
+ * make the object visible to the shrinker after allocating the system memory
+ * pages.
+ * @obj: The GEM object.
+ *
+ * This is typically used for special kernel internal objects that can't be
+ * easily processed by the shrinker, like if they are perma-pinned.
+ */
 void i915_gem_object_make_unshrinkable(struct drm_i915_gem_object *obj)
 {
 	struct drm_i915_private *i915 = obj_to_i915(obj);
@@ -470,13 +496,12 @@ void i915_gem_object_make_unshrinkable(struct drm_i915_gem_object *obj)
 	spin_unlock_irqrestore(&i915->mm.obj_lock, flags);
 }
 
-static void __i915_gem_object_make_shrinkable(struct drm_i915_gem_object *obj,
-					      struct list_head *head)
+static void ___i915_gem_object_make_shrinkable(struct drm_i915_gem_object *obj,
+					       struct list_head *head)
 {
 	struct drm_i915_private *i915 = obj_to_i915(obj);
 	unsigned long flags;
 
-	GEM_BUG_ON(!i915_gem_object_has_pages(obj));
 	if (!i915_gem_object_is_shrinkable(obj))
 		return;
 
@@ -496,14 +521,67 @@ static void __i915_gem_object_make_shrinkable(struct drm_i915_gem_object *obj,
 	spin_unlock_irqrestore(&i915->mm.obj_lock, flags);
 }
 
-void i915_gem_object_make_shrinkable(struct drm_i915_gem_object *obj)
+/**
+ * __i915_gem_object_make_shrinkable - Move the object to the tail of the
+ * shrinkable list. Objects on this list might be swapped out. Used with
+ * WILLNEED objects.
+ * @obj: The GEM object.
+ *
+ * DO NOT USE. This is intended to be called on very special objects that don't
+ * yet have mm.pages, but are guaranteed to have potentially reclaimable pages
+ * underneath.
+ */
+void __i915_gem_object_make_shrinkable(struct drm_i915_gem_object *obj)
 {
-	__i915_gem_object_make_shrinkable(obj,
-					  &obj_to_i915(obj)->mm.shrink_list);
+	___i915_gem_object_make_shrinkable(obj,
+					   &obj_to_i915(obj)->mm.shrink_list);
 }
 
+/**
+ * __i915_gem_object_make_purgeable - Move the object to the tail of the
+ * purgeable list. Objects on this list might be swapped out. Used with
+ * DONTNEED objects.
+ * @obj: The GEM object.
+ *
+ * DO NOT USE. This is intended to be called on very special objects that don't
+ * yet have mm.pages, but are guaranteed to have potentially reclaimable pages
+ * underneath.
+ */
+void __i915_gem_object_make_purgeable(struct drm_i915_gem_object *obj)
+{
+	___i915_gem_object_make_shrinkable(obj,
+					   &obj_to_i915(obj)->mm.purge_list);
+}
+
+/**
+ * i915_gem_object_make_shrinkable - Move the object to the tail of the
+ * shrinkable list. Objects on this list might be swapped out. Used with
+ * WILLNEED objects.
+ * @obj: The GEM object.
+ *
+ * MUST only be called on objects which have backing pages.
+ *
+ * MUST be balanced with previous call to i915_gem_object_make_unshrinkable().
+ */
+void i915_gem_object_make_shrinkable(struct drm_i915_gem_object *obj)
+{
+	GEM_BUG_ON(!i915_gem_object_has_pages(obj));
+	__i915_gem_object_make_shrinkable(obj);
+}
+
+/**
+ * i915_gem_object_make_purgeable - Move the object to the tail of the purgeable
+ * list. Used with DONTNEED objects. Unlike with shrinkable objects, the
+ * shrinker will attempt to discard the backing pages, instead of trying to swap
+ * them out.
+ * @obj: The GEM object.
+ *
+ * MUST only be called on objects which have backing pages.
+ *
+ * MUST be balanced with previous call to i915_gem_object_make_unshrinkable().
+ */
 void i915_gem_object_make_purgeable(struct drm_i915_gem_object *obj)
 {
-	__i915_gem_object_make_shrinkable(obj,
-					  &obj_to_i915(obj)->mm.purge_list);
+	GEM_BUG_ON(!i915_gem_object_has_pages(obj));
+	__i915_gem_object_make_purgeable(obj);
 }

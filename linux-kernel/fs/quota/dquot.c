@@ -78,6 +78,8 @@
 #include <linux/namei.h>
 #include <linux/capability.h>
 #include <linux/quotaops.h>
+#include <linux/blkdev.h>
+#include <linux/sched/mm.h>
 #include "../internal.h" /* ugh */
 
 #include <linux/uaccess.h>
@@ -287,14 +289,12 @@ static inline void remove_dquot_hash(struct dquot *dquot)
 static struct dquot *find_dquot(unsigned int hashent, struct super_block *sb,
 				struct kqid qid)
 {
-	struct hlist_node *node;
 	struct dquot *dquot;
 
-	hlist_for_each (node, dquot_hash+hashent) {
-		dquot = hlist_entry(node, struct dquot, dq_hash);
+	hlist_for_each_entry(dquot, dquot_hash+hashent, dq_hash)
 		if (dquot->dq_sb == sb && qid_eq(dquot->dq_id, qid))
 			return dquot;
-	}
+
 	return NULL;
 }
 
@@ -426,9 +426,11 @@ EXPORT_SYMBOL(mark_info_dirty);
 int dquot_acquire(struct dquot *dquot)
 {
 	int ret = 0, ret2 = 0;
+	unsigned int memalloc;
 	struct quota_info *dqopt = sb_dqopt(dquot->dq_sb);
 
 	mutex_lock(&dquot->dq_lock);
+	memalloc = memalloc_nofs_save();
 	if (!test_bit(DQ_READ_B, &dquot->dq_flags)) {
 		ret = dqopt->ops[dquot->dq_id.type]->read_dqblk(dquot);
 		if (ret < 0)
@@ -459,6 +461,7 @@ int dquot_acquire(struct dquot *dquot)
 	smp_mb__before_atomic();
 	set_bit(DQ_ACTIVE_B, &dquot->dq_flags);
 out_iolock:
+	memalloc_nofs_restore(memalloc);
 	mutex_unlock(&dquot->dq_lock);
 	return ret;
 }
@@ -470,9 +473,11 @@ EXPORT_SYMBOL(dquot_acquire);
 int dquot_commit(struct dquot *dquot)
 {
 	int ret = 0;
+	unsigned int memalloc;
 	struct quota_info *dqopt = sb_dqopt(dquot->dq_sb);
 
 	mutex_lock(&dquot->dq_lock);
+	memalloc = memalloc_nofs_save();
 	if (!clear_dquot_dirty(dquot))
 		goto out_lock;
 	/* Inactive dquot can be only if there was error during read/init
@@ -482,6 +487,7 @@ int dquot_commit(struct dquot *dquot)
 	else
 		ret = -EIO;
 out_lock:
+	memalloc_nofs_restore(memalloc);
 	mutex_unlock(&dquot->dq_lock);
 	return ret;
 }
@@ -493,9 +499,11 @@ EXPORT_SYMBOL(dquot_commit);
 int dquot_release(struct dquot *dquot)
 {
 	int ret = 0, ret2 = 0;
+	unsigned int memalloc;
 	struct quota_info *dqopt = sb_dqopt(dquot->dq_sb);
 
 	mutex_lock(&dquot->dq_lock);
+	memalloc = memalloc_nofs_save();
 	/* Check whether we are not racing with some other dqget() */
 	if (dquot_is_busy(dquot))
 		goto out_dqlock;
@@ -511,6 +519,7 @@ int dquot_release(struct dquot *dquot)
 	}
 	clear_bit(DQ_ACTIVE_B, &dquot->dq_flags);
 out_dqlock:
+	memalloc_nofs_restore(memalloc);
 	mutex_unlock(&dquot->dq_lock);
 	return ret;
 }
@@ -691,9 +700,14 @@ int dquot_quota_sync(struct super_block *sb, int type)
 	/* This is not very clever (and fast) but currently I don't know about
 	 * any other simple way of getting quota data to disk and we must get
 	 * them there for userspace to be visible... */
-	if (sb->s_op->sync_fs)
-		sb->s_op->sync_fs(sb, 1);
-	sync_blockdev(sb->s_bdev);
+	if (sb->s_op->sync_fs) {
+		ret = sb->s_op->sync_fs(sb, 1);
+		if (ret)
+			return ret;
+	}
+	ret = sync_blockdev(sb->s_bdev);
+	if (ret)
+		return ret;
 
 	/*
 	 * Now when everything is written we can discard the pagecache so
@@ -2071,7 +2085,8 @@ EXPORT_SYMBOL(__dquot_transfer);
 /* Wrapper for transferring ownership of an inode for uid/gid only
  * Called from FSXXX_setattr()
  */
-int dquot_transfer(struct inode *inode, struct iattr *iattr)
+int dquot_transfer(struct mnt_idmap *idmap, struct inode *inode,
+		   struct iattr *iattr)
 {
 	struct dquot *transfer_to[MAXQUOTAS] = {};
 	struct dquot *dquot;
@@ -2081,8 +2096,11 @@ int dquot_transfer(struct inode *inode, struct iattr *iattr)
 	if (!dquot_active(inode))
 		return 0;
 
-	if (iattr->ia_valid & ATTR_UID && !uid_eq(iattr->ia_uid, inode->i_uid)){
-		dquot = dqget(sb, make_kqid_uid(iattr->ia_uid));
+	if (i_uid_needs_update(idmap, iattr, inode)) {
+		kuid_t kuid = from_vfsuid(idmap, i_user_ns(inode),
+					  iattr->ia_vfsuid);
+
+		dquot = dqget(sb, make_kqid_uid(kuid));
 		if (IS_ERR(dquot)) {
 			if (PTR_ERR(dquot) != -ESRCH) {
 				ret = PTR_ERR(dquot);
@@ -2092,8 +2110,11 @@ int dquot_transfer(struct inode *inode, struct iattr *iattr)
 		}
 		transfer_to[USRQUOTA] = dquot;
 	}
-	if (iattr->ia_valid & ATTR_GID && !gid_eq(iattr->ia_gid, inode->i_gid)){
-		dquot = dqget(sb, make_kqid_gid(iattr->ia_gid));
+	if (i_gid_needs_update(idmap, iattr, inode)) {
+		kgid_t kgid = from_vfsgid(idmap, i_user_ns(inode),
+					  iattr->ia_vfsgid);
+
+		dquot = dqget(sb, make_kqid_gid(kgid));
 		if (IS_ERR(dquot)) {
 			if (PTR_ERR(dquot) != -ESRCH) {
 				ret = PTR_ERR(dquot);
@@ -2303,6 +2324,8 @@ static int vfs_setup_quota_inode(struct inode *inode, int type)
 	struct super_block *sb = inode->i_sb;
 	struct quota_info *dqopt = sb_dqopt(sb);
 
+	if (is_bad_inode(inode))
+		return -EUCLEAN;
 	if (!S_ISREG(inode->i_mode))
 		return -EACCES;
 	if (IS_RDONLY(inode))
@@ -2454,7 +2477,7 @@ int dquot_resume(struct super_block *sb, int type)
 		ret = dquot_load_quota_sb(sb, cnt, dqopt->info[cnt].dqi_fmt_id,
 					  flags);
 		if (ret < 0)
-			vfs_cleanup_quota_inode(sb, type);
+			vfs_cleanup_quota_inode(sb, cnt);
 	}
 
 	return ret;
@@ -2841,7 +2864,7 @@ const struct quotactl_ops dquot_quotactl_sysfile_ops = {
 EXPORT_SYMBOL(dquot_quotactl_sysfile_ops);
 
 static int do_proc_dqstats(struct ctl_table *table, int write,
-		     void __user *buffer, size_t *lenp, loff_t *ppos)
+		     void *buffer, size_t *lenp, loff_t *ppos)
 {
 	unsigned int type = (unsigned long *)table->data - dqstats.stat;
 	s64 value = percpu_counter_sum(&dqstats.counter[type]);
@@ -2981,7 +3004,7 @@ static int __init dquot_init(void)
 	pr_info("VFS: Dquot-cache hash table entries: %ld (order %ld,"
 		" %ld bytes)\n", nr_hash, order, (PAGE_SIZE << order));
 
-	if (register_shrinker(&dqcache_shrinker))
+	if (register_shrinker(&dqcache_shrinker, "dquota-cache"))
 		panic("Cannot register dquot shrinker");
 
 	return 0;

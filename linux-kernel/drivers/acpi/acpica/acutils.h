@@ -3,7 +3,7 @@
  *
  * Name: acutils.h -- prototypes for the common (subsystem-wide) procedures
  *
- * Copyright (C) 2000 - 2020, Intel Corp.
+ * Copyright (C) 2000 - 2022, Intel Corp.
  *
  *****************************************************************************/
 
@@ -28,6 +28,7 @@ extern const char *acpi_gbl_max_decode[];
 extern const char *acpi_gbl_mem_decode[];
 extern const char *acpi_gbl_min_decode[];
 extern const char *acpi_gbl_mtp_decode[];
+extern const char *acpi_gbl_phy_decode[];
 extern const char *acpi_gbl_rng_decode[];
 extern const char *acpi_gbl_rw_decode[];
 extern const char *acpi_gbl_shr_decode[];
@@ -156,6 +157,19 @@ u8 acpi_ut_valid_nameseg(char *signature);
 u8 acpi_ut_valid_name_char(char character, u32 position);
 
 void acpi_ut_check_and_repair_ascii(u8 *name, char *repaired_name, u32 count);
+
+/*
+ * utcksum - Checksum utilities
+ */
+u8 acpi_ut_generate_checksum(void *table, u32 length, u8 original_checksum);
+
+u8 acpi_ut_checksum(u8 *buffer, u32 length);
+
+acpi_status
+acpi_ut_verify_cdat_checksum(struct acpi_table_cdat *cdat_table, u32 length);
+
+acpi_status
+acpi_ut_verify_checksum(struct acpi_table_header *table, u32 length);
 
 /*
  * utnonansi - Non-ANSI C library functions
@@ -736,6 +750,8 @@ const char *acpi_ah_match_uuid(u8 *data);
  */
 #if (defined ACPI_ASL_COMPILER || defined ACPI_EXEC_APP || defined ACPI_HELP_APP)
 void acpi_ut_convert_string_to_uuid(char *in_string, u8 *uuid_buffer);
+
+acpi_status acpi_ut_convert_uuid_to_string(char *uuid_buffer, char *out_string);
 #endif
 
 #endif				/* _ACUTILS_H */

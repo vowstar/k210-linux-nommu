@@ -1,6 +1,5 @@
-libbpf_version.h
+# SPDX-License-Identifier: GPL-2.0-only
 libbpf.pc
-FEATURE-DUMP.libbpf
 libbpf.so.*
 TAGS
 tags

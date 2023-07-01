@@ -198,6 +198,7 @@
 		interrupts = <GIC_SPI 82 IRQ_TYPE_LEVEL_HIGH>;
 		clocks = <&mstp0_clks R8A7779_CLK_I2C1>;
 		power-domains = <&sysc R8A7779_PD_ALWAYS_ON>;
+		i2c-scl-internal-delay-ns = <5>;
 		status = "disabled";
 	};
 
@@ -209,6 +210,7 @@
 		interrupts = <GIC_SPI 80 IRQ_TYPE_LEVEL_HIGH>;
 		clocks = <&mstp0_clks R8A7779_CLK_I2C2>;
 		power-domains = <&sysc R8A7779_PD_ALWAYS_ON>;
+		i2c-scl-internal-delay-ns = <5>;
 		status = "disabled";
 	};
 
@@ -220,6 +222,7 @@
 		interrupts = <GIC_SPI 81 IRQ_TYPE_LEVEL_HIGH>;
 		clocks = <&mstp0_clks R8A7779_CLK_I2C3>;
 		power-domains = <&sysc R8A7779_PD_ALWAYS_ON>;
+		i2c-scl-internal-delay-ns = <5>;
 		status = "disabled";
 	};
 
@@ -321,7 +324,7 @@
 		status = "disabled";
 	};
 
-	pfc: pin-controller@fffc0000 {
+	pfc: pinctrl@fffc0000 {
 		compatible = "renesas,pfc-r8a7779";
 		reg = <0xfffc0000 0x23c>;
 	};
@@ -377,7 +380,7 @@
 	};
 
 	sata: sata@fc600000 {
-		compatible = "renesas,sata-r8a7779", "renesas,rcar-sata";
+		compatible = "renesas,sata-r8a7779";
 		reg = <0xfc600000 0x200000>;
 		interrupts = <GIC_SPI 100 IRQ_TYPE_LEVEL_HIGH>;
 		clocks = <&mstp1_clks R8A7779_CLK_SATA>;
@@ -385,7 +388,7 @@
 		status = "disabled";
 	};
 
-	sdhi0: sd@ffe4c000 {
+	sdhi0: mmc@ffe4c000 {
 		compatible = "renesas,sdhi-r8a7779",
 			     "renesas,rcar-gen1-sdhi";
 		reg = <0xffe4c000 0x100>;
@@ -395,7 +398,7 @@
 		status = "disabled";
 	};
 
-	sdhi1: sd@ffe4d000 {
+	sdhi1: mmc@ffe4d000 {
 		compatible = "renesas,sdhi-r8a7779",
 			     "renesas,rcar-gen1-sdhi";
 		reg = <0xffe4d000 0x100>;
@@ -405,7 +408,7 @@
 		status = "disabled";
 	};
 
-	sdhi2: sd@ffe4e000 {
+	sdhi2: mmc@ffe4e000 {
 		compatible = "renesas,sdhi-r8a7779",
 			     "renesas,rcar-gen1-sdhi";
 		reg = <0xffe4e000 0x100>;
@@ -415,7 +418,7 @@
 		status = "disabled";
 	};
 
-	sdhi3: sd@ffe4f000 {
+	sdhi3: mmc@ffe4f000 {
 		compatible = "renesas,sdhi-r8a7779",
 			     "renesas,rcar-gen1-sdhi";
 		reg = <0xffe4f000 0x100>;
@@ -463,6 +466,7 @@
 		reg = <0xfff80000 0x40000>;
 		interrupts = <GIC_SPI 31 IRQ_TYPE_LEVEL_HIGH>;
 		clocks = <&mstp1_clks R8A7779_CLK_DU>;
+		clock-names = "du.0";
 		power-domains = <&sysc R8A7779_PD_ALWAYS_ON>;
 		status = "disabled";
 

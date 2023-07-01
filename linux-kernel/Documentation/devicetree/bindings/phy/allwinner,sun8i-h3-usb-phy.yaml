@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/phy/allwinner,sun8i-h3-usb-phy.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Allwinner H3 USB PHY Device Tree Bindings
+title: Allwinner H3 USB PHY
 
 maintainers:
   - Chen-Yu Tsai <wens@csie.org>
@@ -15,7 +15,9 @@ properties:
     const: 1
 
   compatible:
-    const: allwinner,sun8i-h3-usb-phy
+    enum:
+      - allwinner,sun8i-h3-usb-phy
+      - allwinner,sun50i-h616-usb-phy
 
   reg:
     items:
@@ -34,18 +36,22 @@ properties:
       - const: pmu3
 
   clocks:
+    minItems: 4
     items:
       - description: USB OTG PHY bus clock
       - description: USB Host 0 PHY bus clock
       - description: USB Host 1 PHY bus clock
       - description: USB Host 2 PHY bus clock
+      - description: PMU clock for host port 2
 
   clock-names:
+    minItems: 4
     items:
       - const: usb0_phy
       - const: usb1_phy
       - const: usb2_phy
       - const: usb3_phy
+      - const: pmu2_clk
 
   resets:
     items:
@@ -62,9 +68,11 @@ properties:
       - const: usb3_reset
 
   usb0_id_det-gpios:
+    maxItems: 1
     description: GPIO to the USB OTG ID pin
 
   usb0_vbus_det-gpios:
+    maxItems: 1
     description: GPIO to the USB OTG VBUS detect pin
 
   usb0_vbus_power-supply:
@@ -91,6 +99,28 @@ required:
   - reg-names
   - resets
   - reset-names
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - allwinner,sun50i-h616-usb-phy
+    then:
+      properties:
+        clocks:
+          minItems: 5
+
+        clock-names:
+          minItems: 5
+    else:
+      properties:
+        clocks:
+          maxItems: 4
+
+        clock-names:
+          maxItems: 4
 
 additionalProperties: false
 

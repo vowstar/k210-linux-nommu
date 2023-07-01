@@ -10,26 +10,52 @@
 
 #include <dt-bindings/leds/common.h>
 #include <linux/device.h>
-#include <linux/kernfs.h>
-#include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/rwsem.h>
 #include <linux/spinlock.h>
 #include <linux/timer.h>
+#include <linux/types.h>
 #include <linux/workqueue.h>
 
-struct device;
-struct led_pattern;
+struct attribute_group;
 struct device_node;
+struct fwnode_handle;
+struct gpio_desc;
+struct kernfs_node;
+struct led_pattern;
+struct platform_device;
+
 /*
  * LED Core
  */
 
+/* This is obsolete/useless. We now support variable maximum brightness. */
 enum led_brightness {
 	LED_OFF		= 0,
 	LED_ON		= 1,
 	LED_HALF	= 127,
 	LED_FULL	= 255,
+};
+
+enum led_default_state {
+	LEDS_DEFSTATE_OFF	= 0,
+	LEDS_DEFSTATE_ON	= 1,
+	LEDS_DEFSTATE_KEEP	= 2,
+};
+
+/**
+ * struct led_lookup_data - represents a single LED lookup entry
+ *
+ * @list: internal list of all LED lookup entries
+ * @provider: name of led_classdev providing the LED
+ * @dev_id: name of the device associated with this LED
+ * @con_id: name of the LED from the device's point of view
+ */
+struct led_lookup_data {
+	struct list_head list;
+	const char *provider;
+	const char *dev_id;
+	const char *con_id;
 };
 
 struct led_init_data {
@@ -56,10 +82,16 @@ struct led_init_data {
 	bool devname_mandatory;
 };
 
+enum led_default_state led_init_default_state_get(struct fwnode_handle *fwnode);
+
+struct led_hw_trigger_type {
+	int dummy;
+};
+
 struct led_classdev {
 	const char		*name;
-	enum led_brightness	 brightness;
-	enum led_brightness	 max_brightness;
+	unsigned int brightness;
+	unsigned int max_brightness;
 	int			 flags;
 
 	/* Lower 16 bits reflect status */
@@ -140,6 +172,9 @@ struct led_classdev {
 	void			*trigger_data;
 	/* true if activated - deactivate routine uses it to do cleanup */
 	bool			activated;
+
+	/* LEDs that have private triggers have this set */
+	struct led_hw_trigger_type	*trigger_type;
 #endif
 
 #ifdef CONFIG_LEDS_BRIGHTNESS_HW_CHANGED
@@ -197,6 +232,12 @@ void devm_led_classdev_unregister(struct device *parent,
 void led_classdev_suspend(struct led_classdev *led_cdev);
 void led_classdev_resume(struct led_classdev *led_cdev);
 
+void led_add_lookup(struct led_lookup_data *led_lookup);
+void led_remove_lookup(struct led_lookup_data *led_lookup);
+
+struct led_classdev *__must_check led_get(struct device *dev, char *con_id);
+struct led_classdev *__must_check devm_led_get(struct device *dev, char *con_id);
+
 extern struct led_classdev *of_led_get(struct device_node *np, int index);
 extern void led_put(struct led_classdev *led_cdev);
 struct led_classdev *__must_check devm_of_led_get(struct device *dev,
@@ -245,8 +286,7 @@ void led_blink_set_oneshot(struct led_classdev *led_cdev,
  * software blink timer that implements blinking when the
  * hardware doesn't. This function is guaranteed not to sleep.
  */
-void led_set_brightness(struct led_classdev *led_cdev,
-			enum led_brightness brightness);
+void led_set_brightness(struct led_classdev *led_cdev, unsigned int brightness);
 
 /**
  * led_set_brightness_sync - set LED brightness synchronously
@@ -259,8 +299,7 @@ void led_set_brightness(struct led_classdev *led_cdev,
  *
  * Returns: 0 on success or negative error value on failure
  */
-int led_set_brightness_sync(struct led_classdev *led_cdev,
-			    enum led_brightness value);
+int led_set_brightness_sync(struct led_classdev *led_cdev, unsigned int value);
 
 /**
  * led_update_brightness - update LED brightness
@@ -344,8 +383,11 @@ struct led_trigger {
 	int		(*activate)(struct led_classdev *led_cdev);
 	void		(*deactivate)(struct led_classdev *led_cdev);
 
+	/* LED-private triggers have this set */
+	struct led_hw_trigger_type *trigger_type;
+
 	/* LEDs under control by this trigger (for simple triggers) */
-	rwlock_t	  leddev_list_lock;
+	spinlock_t	  leddev_list_lock;
 	struct list_head  led_cdevs;
 
 	/* Link to next registered trigger */
@@ -493,7 +535,6 @@ struct led_properties {
 	const char	*label;
 };
 
-struct gpio_desc;
 typedef int (*gpio_blink_set_t)(struct gpio_desc *desc, int state,
 				unsigned long *delay_on,
 				unsigned long *delay_off);
@@ -511,9 +552,9 @@ struct gpio_led {
 	/* default_state should be one of LEDS_GPIO_DEFSTATE_(ON|OFF|KEEP) */
 	struct gpio_desc *gpiod;
 };
-#define LEDS_GPIO_DEFSTATE_OFF		0
-#define LEDS_GPIO_DEFSTATE_ON		1
-#define LEDS_GPIO_DEFSTATE_KEEP		2
+#define LEDS_GPIO_DEFSTATE_OFF		LEDS_DEFSTATE_OFF
+#define LEDS_GPIO_DEFSTATE_ON		LEDS_DEFSTATE_ON
+#define LEDS_GPIO_DEFSTATE_KEEP		LEDS_DEFSTATE_KEEP
 
 struct gpio_led_platform_data {
 	int 		num_leds;
@@ -554,7 +595,7 @@ static inline void ledtrig_cpu(enum cpu_led_event evt)
 
 #ifdef CONFIG_LEDS_BRIGHTNESS_HW_CHANGED
 void led_classdev_notify_brightness_hw_changed(
-	struct led_classdev *led_cdev, enum led_brightness brightness);
+	struct led_classdev *led_cdev, unsigned int brightness);
 #else
 static inline void led_classdev_notify_brightness_hw_changed(
 	struct led_classdev *led_cdev, enum led_brightness brightness) { }

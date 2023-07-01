@@ -40,21 +40,19 @@ struct amdgpu_df_funcs {
 	void (*update_medium_grain_clock_gating)(struct amdgpu_device *adev,
 						 bool enable);
 	void (*get_clockgating_state)(struct amdgpu_device *adev,
-				      u32 *flags);
+				      u64 *flags);
 	void (*enable_ecc_force_par_wr_rmw)(struct amdgpu_device *adev,
 					    bool enable);
 	int (*pmc_start)(struct amdgpu_device *adev, uint64_t config,
-					 int is_enable);
+					 int counter_idx, int is_add);
 	int (*pmc_stop)(struct amdgpu_device *adev, uint64_t config,
-					 int is_disable);
+					 int counter_idx, int is_remove);
 	void (*pmc_get_count)(struct amdgpu_device *adev, uint64_t config,
-					 uint64_t *count);
+					 int counter_idx, uint64_t *count);
 	uint64_t (*get_fica)(struct amdgpu_device *adev, uint32_t ficaa_val);
 	void (*set_fica)(struct amdgpu_device *adev, uint32_t ficaa_val,
 			 uint32_t ficadl_val, uint32_t ficadh_val);
-	uint64_t (*get_dram_base_addr)(struct amdgpu_device *adev,
-				       uint32_t df_inst);
-	uint32_t (*get_df_inst_id)(struct amdgpu_device *adev);
+	bool (*query_ras_poison_mode)(struct amdgpu_device *adev);
 };
 
 struct amdgpu_df {

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2013-2014, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2013-2022, NVIDIA CORPORATION.  All rights reserved.
  */
 
 #include <linux/clk.h>
@@ -13,6 +13,8 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
+#include <linux/reset.h>
 #include <linux/slab.h>
 #include <linux/sys_soc.h>
 
@@ -33,6 +35,19 @@ static const char *tegra_revision_name[TEGRA_REVISION_MAX] = {
 	[TEGRA_REVISION_A04]     = "A04",
 };
 
+static const char *tegra_platform_name[TEGRA_PLATFORM_MAX] = {
+	[TEGRA_PLATFORM_SILICON]			= "Silicon",
+	[TEGRA_PLATFORM_QT]				= "QT",
+	[TEGRA_PLATFORM_SYSTEM_FPGA]			= "System FPGA",
+	[TEGRA_PLATFORM_UNIT_FPGA]			= "Unit FPGA",
+	[TEGRA_PLATFORM_ASIM_QT]			= "Asim QT",
+	[TEGRA_PLATFORM_ASIM_LINSIM]			= "Asim Linsim",
+	[TEGRA_PLATFORM_DSIM_ASIM_LINSIM]		= "Dsim Asim Linsim",
+	[TEGRA_PLATFORM_VERIFICATION_SIMULATION]	= "Verification Simulation",
+	[TEGRA_PLATFORM_VDK]				= "VDK",
+	[TEGRA_PLATFORM_VSP]				= "VSP",
+};
+
 static const struct of_device_id car_match[] __initconst = {
 	{ .compatible = "nvidia,tegra20-car", },
 	{ .compatible = "nvidia,tegra30-car", },
@@ -49,6 +64,9 @@ static struct tegra_fuse *fuse = &(struct tegra_fuse) {
 };
 
 static const struct of_device_id tegra_fuse_match[] = {
+#ifdef CONFIG_ARCH_TEGRA_234_SOC
+	{ .compatible = "nvidia,tegra234-efuse", .data = &tegra234_fuse_soc },
+#endif
 #ifdef CONFIG_ARCH_TEGRA_194_SOC
 	{ .compatible = "nvidia,tegra194-efuse", .data = &tegra194_fuse_soc },
 #endif
@@ -89,93 +107,11 @@ static int tegra_fuse_read(void *priv, unsigned int offset, void *value,
 	return 0;
 }
 
-static const struct nvmem_cell_info tegra_fuse_cells[] = {
-	{
-		.name = "tsensor-cpu1",
-		.offset = 0x084,
-		.bytes = 4,
-		.bit_offset = 0,
-		.nbits = 32,
-	}, {
-		.name = "tsensor-cpu2",
-		.offset = 0x088,
-		.bytes = 4,
-		.bit_offset = 0,
-		.nbits = 32,
-	}, {
-		.name = "tsensor-cpu0",
-		.offset = 0x098,
-		.bytes = 4,
-		.bit_offset = 0,
-		.nbits = 32,
-	}, {
-		.name = "xusb-pad-calibration",
-		.offset = 0x0f0,
-		.bytes = 4,
-		.bit_offset = 0,
-		.nbits = 32,
-	}, {
-		.name = "tsensor-cpu3",
-		.offset = 0x12c,
-		.bytes = 4,
-		.bit_offset = 0,
-		.nbits = 32,
-	}, {
-		.name = "sata-calibration",
-		.offset = 0x124,
-		.bytes = 1,
-		.bit_offset = 0,
-		.nbits = 2,
-	}, {
-		.name = "tsensor-gpu",
-		.offset = 0x154,
-		.bytes = 4,
-		.bit_offset = 0,
-		.nbits = 32,
-	}, {
-		.name = "tsensor-mem0",
-		.offset = 0x158,
-		.bytes = 4,
-		.bit_offset = 0,
-		.nbits = 32,
-	}, {
-		.name = "tsensor-mem1",
-		.offset = 0x15c,
-		.bytes = 4,
-		.bit_offset = 0,
-		.nbits = 32,
-	}, {
-		.name = "tsensor-pllx",
-		.offset = 0x160,
-		.bytes = 4,
-		.bit_offset = 0,
-		.nbits = 32,
-	}, {
-		.name = "tsensor-common",
-		.offset = 0x180,
-		.bytes = 4,
-		.bit_offset = 0,
-		.nbits = 32,
-	}, {
-		.name = "tsensor-realignment",
-		.offset = 0x1fc,
-		.bytes = 4,
-		.bit_offset = 0,
-		.nbits = 32,
-	}, {
-		.name = "gpu-calibration",
-		.offset = 0x204,
-		.bytes = 4,
-		.bit_offset = 0,
-		.nbits = 32,
-	}, {
-		.name = "xusb-pad-calibration-ext",
-		.offset = 0x250,
-		.bytes = 4,
-		.bit_offset = 0,
-		.nbits = 32,
-	},
-};
+static void tegra_fuse_restore(void *base)
+{
+	fuse->base = (void __iomem *)base;
+	fuse->clk = NULL;
+}
 
 static int tegra_fuse_probe(struct platform_device *pdev)
 {
@@ -184,13 +120,16 @@ static int tegra_fuse_probe(struct platform_device *pdev)
 	struct resource *res;
 	int err;
 
+	err = devm_add_action(&pdev->dev, tegra_fuse_restore, (void __force *)base);
+	if (err)
+		return err;
+
 	/* take over the memory region from the early initialization */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	fuse->phys = res->start;
 	fuse->base = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(fuse->base)) {
 		err = PTR_ERR(fuse->base);
-		fuse->base = base;
 		return err;
 	}
 
@@ -200,17 +139,20 @@ static int tegra_fuse_probe(struct platform_device *pdev)
 			dev_err(&pdev->dev, "failed to get FUSE clock: %ld",
 				PTR_ERR(fuse->clk));
 
-		fuse->base = base;
 		return PTR_ERR(fuse->clk);
 	}
 
 	platform_set_drvdata(pdev, fuse);
 	fuse->dev = &pdev->dev;
 
+	err = devm_pm_runtime_enable(&pdev->dev);
+	if (err)
+		return err;
+
 	if (fuse->soc->probe) {
 		err = fuse->soc->probe(fuse);
 		if (err < 0)
-			goto restore;
+			return err;
 	}
 
 	memset(&nvmem, 0, sizeof(nvmem));
@@ -218,8 +160,10 @@ static int tegra_fuse_probe(struct platform_device *pdev)
 	nvmem.name = "fuse";
 	nvmem.id = -1;
 	nvmem.owner = THIS_MODULE;
-	nvmem.cells = tegra_fuse_cells;
-	nvmem.ncells = ARRAY_SIZE(tegra_fuse_cells);
+	nvmem.cells = fuse->soc->cells;
+	nvmem.ncells = fuse->soc->num_cells;
+	nvmem.keepout = fuse->soc->keepouts;
+	nvmem.nkeepout = fuse->soc->num_keepouts;
 	nvmem.type = NVMEM_TYPE_OTP;
 	nvmem.read_only = true;
 	nvmem.root_only = true;
@@ -234,30 +178,105 @@ static int tegra_fuse_probe(struct platform_device *pdev)
 		err = PTR_ERR(fuse->nvmem);
 		dev_err(&pdev->dev, "failed to register NVMEM device: %d\n",
 			err);
-		goto restore;
+		return err;
+	}
+
+	fuse->rst = devm_reset_control_get_optional(&pdev->dev, "fuse");
+	if (IS_ERR(fuse->rst)) {
+		err = PTR_ERR(fuse->rst);
+		dev_err(&pdev->dev, "failed to get FUSE reset: %pe\n",
+			fuse->rst);
+		return err;
+	}
+
+	/*
+	 * FUSE clock is enabled at a boot time, hence this resume/suspend
+	 * disables the clock besides the h/w resetting.
+	 */
+	err = pm_runtime_resume_and_get(&pdev->dev);
+	if (err)
+		return err;
+
+	err = reset_control_reset(fuse->rst);
+	pm_runtime_put(&pdev->dev);
+
+	if (err < 0) {
+		dev_err(&pdev->dev, "failed to reset FUSE: %d\n", err);
+		return err;
 	}
 
 	/* release the early I/O memory mapping */
 	iounmap(base);
 
 	return 0;
-
-restore:
-	fuse->base = base;
-	return err;
 }
+
+static int __maybe_unused tegra_fuse_runtime_resume(struct device *dev)
+{
+	int err;
+
+	err = clk_prepare_enable(fuse->clk);
+	if (err < 0) {
+		dev_err(dev, "failed to enable FUSE clock: %d\n", err);
+		return err;
+	}
+
+	return 0;
+}
+
+static int __maybe_unused tegra_fuse_runtime_suspend(struct device *dev)
+{
+	clk_disable_unprepare(fuse->clk);
+
+	return 0;
+}
+
+static int __maybe_unused tegra_fuse_suspend(struct device *dev)
+{
+	int ret;
+
+	/*
+	 * Critical for RAM re-repair operation, which must occur on resume
+	 * from LP1 system suspend and as part of CCPLEX cluster switching.
+	 */
+	if (fuse->soc->clk_suspend_on)
+		ret = pm_runtime_resume_and_get(dev);
+	else
+		ret = pm_runtime_force_suspend(dev);
+
+	return ret;
+}
+
+static int __maybe_unused tegra_fuse_resume(struct device *dev)
+{
+	int ret = 0;
+
+	if (fuse->soc->clk_suspend_on)
+		pm_runtime_put(dev);
+	else
+		ret = pm_runtime_force_resume(dev);
+
+	return ret;
+}
+
+static const struct dev_pm_ops tegra_fuse_pm = {
+	SET_RUNTIME_PM_OPS(tegra_fuse_runtime_suspend, tegra_fuse_runtime_resume,
+			   NULL)
+	SET_SYSTEM_SLEEP_PM_OPS(tegra_fuse_suspend, tegra_fuse_resume)
+};
 
 static struct platform_driver tegra_fuse_driver = {
 	.driver = {
 		.name = "tegra-fuse",
 		.of_match_table = tegra_fuse_match,
+		.pm = &tegra_fuse_pm,
 		.suppress_bind_attrs = true,
 	},
 	.probe = tegra_fuse_probe,
 };
 builtin_platform_driver(tegra_fuse_driver);
 
-bool __init tegra_fuse_read_spare(unsigned int spare)
+u32 __init tegra_fuse_read_spare(unsigned int spare)
 {
 	unsigned int offset = fuse->soc->info->spare + spare * 4;
 
@@ -300,6 +319,60 @@ static void tegra_enable_fuse_clk(void __iomem *base)
 	writel(reg, base + 0x14);
 }
 
+static ssize_t major_show(struct device *dev, struct device_attribute *attr,
+			     char *buf)
+{
+	return sprintf(buf, "%d\n", tegra_get_major_rev());
+}
+
+static DEVICE_ATTR_RO(major);
+
+static ssize_t minor_show(struct device *dev, struct device_attribute *attr,
+			     char *buf)
+{
+	return sprintf(buf, "%d\n", tegra_get_minor_rev());
+}
+
+static DEVICE_ATTR_RO(minor);
+
+static struct attribute *tegra_soc_attr[] = {
+	&dev_attr_major.attr,
+	&dev_attr_minor.attr,
+	NULL,
+};
+
+const struct attribute_group tegra_soc_attr_group = {
+	.attrs = tegra_soc_attr,
+};
+
+#if IS_ENABLED(CONFIG_ARCH_TEGRA_194_SOC) || \
+    IS_ENABLED(CONFIG_ARCH_TEGRA_234_SOC)
+static ssize_t platform_show(struct device *dev, struct device_attribute *attr,
+			     char *buf)
+{
+	/*
+	 * Displays the value in the 'pre_si_platform' field of the HIDREV
+	 * register for Tegra194 devices. A value of 0 indicates that the
+	 * platform type is silicon and all other non-zero values indicate
+	 * the type of simulation platform is being used.
+	 */
+	return sprintf(buf, "%d\n", tegra_get_platform());
+}
+
+static DEVICE_ATTR_RO(platform);
+
+static struct attribute *tegra194_soc_attr[] = {
+	&dev_attr_major.attr,
+	&dev_attr_minor.attr,
+	&dev_attr_platform.attr,
+	NULL,
+};
+
+const struct attribute_group tegra194_soc_attr_group = {
+	.attrs = tegra194_soc_attr,
+};
+#endif
+
 struct device * __init tegra_soc_device_register(void)
 {
 	struct soc_device_attribute *attr;
@@ -310,8 +383,15 @@ struct device * __init tegra_soc_device_register(void)
 		return NULL;
 
 	attr->family = kasprintf(GFP_KERNEL, "Tegra");
-	attr->revision = kasprintf(GFP_KERNEL, "%d", tegra_sku_info.revision);
+	if (tegra_is_silicon())
+		attr->revision = kasprintf(GFP_KERNEL, "%s %s",
+					   tegra_platform_name[tegra_sku_info.platform],
+					   tegra_revision_name[tegra_sku_info.revision]);
+	else
+		attr->revision = kasprintf(GFP_KERNEL, "%s",
+					   tegra_platform_name[tegra_sku_info.platform]);
 	attr->soc_id = kasprintf(GFP_KERNEL, "%u", tegra_get_chip_id());
+	attr->custom_attr_group = fuse->soc->soc_attr_group;
 
 	dev = soc_device_register(attr);
 	if (IS_ERR(dev)) {
@@ -402,6 +482,7 @@ static int __init tegra_init_fuse(void)
 	np = of_find_matching_node(NULL, car_match);
 	if (np) {
 		void __iomem *base = of_iomap(np, 0);
+		of_node_put(np);
 		if (base) {
 			tegra_enable_fuse_clk(base);
 			iounmap(base);
@@ -430,10 +511,8 @@ static int __init tegra_init_fuse(void)
 		size_t size = sizeof(*fuse->lookups) * fuse->soc->num_lookups;
 
 		fuse->lookups = kmemdup(fuse->soc->lookups, size, GFP_KERNEL);
-		if (!fuse->lookups)
-			return -ENOMEM;
-
-		nvmem_add_cell_lookups(fuse->lookups, fuse->soc->num_lookups);
+		if (fuse->lookups)
+			nvmem_add_cell_lookups(fuse->lookups, fuse->soc->num_lookups);
 	}
 
 	return 0;

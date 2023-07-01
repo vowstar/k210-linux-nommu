@@ -444,24 +444,24 @@ static enum dc_lut_mode dpp20_get_blndgam_current(struct dpp *dpp_base)
 	uint32_t state_mode;
 	struct dcn20_dpp *dpp = TO_DCN20_DPP(dpp_base);
 
-	REG_GET(CM_BLNDGAM_LUT_WRITE_EN_MASK,
-					CM_BLNDGAM_CONFIG_STATUS, &state_mode);
+	REG_GET(CM_BLNDGAM_LUT_WRITE_EN_MASK, CM_BLNDGAM_CONFIG_STATUS, &state_mode);
 
-		switch (state_mode) {
-		case 0:
-			mode = LUT_BYPASS;
-			break;
-		case 1:
-			mode = LUT_RAM_A;
-			break;
-		case 2:
-			mode = LUT_RAM_B;
-			break;
-		default:
-			mode = LUT_BYPASS;
-			break;
-		}
-		return mode;
+	switch (state_mode) {
+	case 0:
+		mode = LUT_BYPASS;
+		break;
+	case 1:
+		mode = LUT_RAM_A;
+		break;
+	case 2:
+		mode = LUT_RAM_B;
+		break;
+	default:
+		mode = LUT_BYPASS;
+		break;
+	}
+
+	return mode;
 }
 
 bool dpp20_program_blnd_lut(
@@ -482,7 +482,7 @@ bool dpp20_program_blnd_lut(
 		next_mode = LUT_RAM_A;
 
 	dpp20_power_on_blnd_lut(dpp_base, true);
-	dpp20_configure_blnd_lut(dpp_base, next_mode == LUT_RAM_A ? true:false);
+	dpp20_configure_blnd_lut(dpp_base, next_mode == LUT_RAM_A);
 
 	if (next_mode == LUT_RAM_A)
 		dpp20_program_blnd_luta_settings(dpp_base, params);
@@ -537,24 +537,24 @@ static enum dc_lut_mode dpp20_get_shaper_current(struct dpp *dpp_base)
 	uint32_t state_mode;
 	struct dcn20_dpp *dpp = TO_DCN20_DPP(dpp_base);
 
-	REG_GET(CM_SHAPER_LUT_WRITE_EN_MASK,
-			CM_SHAPER_CONFIG_STATUS, &state_mode);
+	REG_GET(CM_SHAPER_LUT_WRITE_EN_MASK, CM_SHAPER_CONFIG_STATUS, &state_mode);
 
-		switch (state_mode) {
-		case 0:
-			mode = LUT_BYPASS;
-			break;
-		case 1:
-			mode = LUT_RAM_A;
-			break;
-		case 2:
-			mode = LUT_RAM_B;
-			break;
-		default:
-			mode = LUT_BYPASS;
-			break;
-		}
-		return mode;
+	switch (state_mode) {
+	case 0:
+		mode = LUT_BYPASS;
+		break;
+	case 1:
+		mode = LUT_RAM_A;
+		break;
+	case 2:
+		mode = LUT_RAM_B;
+		break;
+	default:
+		mode = LUT_BYPASS;
+		break;
+	}
+
+	return mode;
 }
 
 static void dpp20_configure_shaper_lut(
@@ -893,7 +893,7 @@ bool dpp20_program_shaper(
 	else
 		next_mode = LUT_RAM_A;
 
-	dpp20_configure_shaper_lut(dpp_base, next_mode == LUT_RAM_A ? true:false);
+	dpp20_configure_shaper_lut(dpp_base, next_mode == LUT_RAM_A);
 
 	if (next_mode == LUT_RAM_A)
 		dpp20_program_shaper_luta_settings(dpp_base, params);

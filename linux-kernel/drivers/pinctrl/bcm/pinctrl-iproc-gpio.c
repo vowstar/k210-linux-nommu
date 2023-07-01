@@ -16,17 +16,19 @@
  * SoCs IOMUX controller.
  */
 
-#include <linux/kernel.h>
-#include <linux/slab.h>
+#include <linux/gpio/driver.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
-#include <linux/gpio/driver.h>
 #include <linux/ioport.h>
+#include <linux/kernel.h>
 #include <linux/of_device.h>
 #include <linux/of_irq.h>
-#include <linux/pinctrl/pinctrl.h>
-#include <linux/pinctrl/pinconf.h>
+#include <linux/slab.h>
+
+#include <linux/pinctrl/consumer.h>
 #include <linux/pinctrl/pinconf-generic.h>
+#include <linux/pinctrl/pinconf.h>
+#include <linux/pinctrl/pinctrl.h>
 
 #include "../pinctrl-utils.h"
 
@@ -131,7 +133,7 @@ static inline unsigned iproc_pin_to_gpio(unsigned pin)
  *  iproc_set_bit - set or clear one bit (corresponding to the GPIO pin) in a
  *  Iproc GPIO register
  *
- *  @iproc_gpio: Iproc GPIO device
+ *  @chip: Iproc GPIO device
  *  @reg: register offset
  *  @gpio: GPIO pin
  *  @set: set or clear
@@ -176,7 +178,6 @@ static void iproc_gpio_irq_handler(struct irq_desc *desc)
 
 		for_each_set_bit(bit, &val, NGPIOS_PER_BANK) {
 			unsigned pin = NGPIOS_PER_BANK * i + bit;
-			int child_irq = irq_find_mapping(gc->irq.domain, pin);
 
 			/*
 			 * Clear the interrupt before invoking the
@@ -185,7 +186,7 @@ static void iproc_gpio_irq_handler(struct irq_desc *desc)
 			writel(BIT(bit), chip->base + (i * GPIO_BANK_SIZE) +
 			       IPROC_GPIO_INT_CLR_OFFSET);
 
-			generic_handle_irq(child_irq);
+			generic_handle_domain_irq(gc->irq.domain, pin);
 		}
 	}
 
@@ -363,7 +364,10 @@ static int iproc_gpio_get_direction(struct gpio_chip *gc, unsigned int gpio)
 	unsigned int offset = IPROC_GPIO_REG(gpio, IPROC_GPIO_OUT_EN_OFFSET);
 	unsigned int shift = IPROC_GPIO_SHIFT(gpio);
 
-	return !(readl(chip->base + offset) & BIT(shift));
+	if (readl(chip->base + offset) & BIT(shift))
+		return GPIO_LINE_DIRECTION_OUT;
+
+	return GPIO_LINE_DIRECTION_IN;
 }
 
 static void iproc_gpio_set(struct gpio_chip *gc, unsigned gpio, int val)
@@ -810,10 +814,8 @@ static int iproc_gpio_probe(struct platform_device *pdev)
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
 	if (res) {
 		chip->io_ctrl = devm_ioremap_resource(dev, res);
-		if (IS_ERR(chip->io_ctrl)) {
-			dev_err(dev, "unable to map I/O memory\n");
+		if (IS_ERR(chip->io_ctrl))
 			return PTR_ERR(chip->io_ctrl);
-		}
 		if (of_device_is_compatible(dev->of_node,
 					    "brcm,cygnus-ccm-gpio"))
 			io_ctrl_type = IOCTRL_TYPE_CDRU;
@@ -836,7 +838,6 @@ static int iproc_gpio_probe(struct platform_device *pdev)
 	chip->num_banks = (ngpios + NGPIOS_PER_BANK - 1) / NGPIOS_PER_BANK;
 	gc->label = dev_name(dev);
 	gc->parent = dev;
-	gc->of_node = dev->of_node;
 	gc->request = iproc_gpio_request;
 	gc->free = iproc_gpio_free;
 	gc->direction_input = iproc_gpio_direction_input;

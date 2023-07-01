@@ -273,6 +273,8 @@ static int mtu3_prepare_tx_gpd(struct mtu3_ep *mep, struct mtu3_request *mreq)
 			gpd->dw3_info |= cpu_to_le32(GPD_EXT_FLAG_ZLP);
 	}
 
+	/* prevent reorder, make sure GPD's HWO is set last */
+	mb();
 	gpd->dw0_info |= cpu_to_le32(GPD_FLAGS_IOC | GPD_FLAGS_HWO);
 
 	mreq->gpd = gpd;
@@ -306,6 +308,8 @@ static int mtu3_prepare_rx_gpd(struct mtu3_ep *mep, struct mtu3_request *mreq)
 	gpd->next_gpd = cpu_to_le32(lower_32_bits(enq_dma));
 	ext_addr |= GPD_EXT_NGP(mtu, upper_32_bits(enq_dma));
 	gpd->dw3_info = cpu_to_le32(ext_addr);
+	/* prevent reorder, make sure GPD's HWO is set last */
+	mb();
 	gpd->dw0_info |= cpu_to_le32(GPD_FLAGS_IOC | GPD_FLAGS_HWO);
 
 	mreq->gpd = gpd;
@@ -384,12 +388,19 @@ void mtu3_qmu_stop(struct mtu3_ep *mep)
 	}
 	mtu3_writel(mbase, qcsr, QMU_Q_STOP);
 
+	if (mep->is_in)
+		mtu3_setbits(mbase, MU3D_EP_TXCR0(epnum), TX_FLUSHFIFO);
+
 	ret = readl_poll_timeout_atomic(mbase + qcsr, value,
 			!(value & QMU_Q_ACTIVE), 1, 1000);
 	if (ret) {
 		dev_err(mtu->dev, "stop %s's qmu failed\n", mep->name);
 		return;
 	}
+
+	/* flush fifo again to make sure the fifo is empty */
+	if (mep->is_in)
+		mtu3_setbits(mbase, MU3D_EP_TXCR0(epnum), TX_FLUSHFIFO);
 
 	dev_dbg(mtu->dev, "%s's qmu stop now!\n", mep->name);
 }
@@ -445,7 +456,8 @@ static void qmu_tx_zlp_error_handler(struct mtu3 *mtu, u8 epnum)
 		return;
 	}
 	mtu3_setbits(mbase, MU3D_EP_TXCR0(mep->epnum), TX_TXPKTRDY);
-
+	/* prevent reorder, make sure GPD's HWO is set last */
+	mb();
 	/* by pass the current GDP */
 	gpd_current->dw0_info |= cpu_to_le32(GPD_FLAGS_BPS | GPD_FLAGS_HWO);
 

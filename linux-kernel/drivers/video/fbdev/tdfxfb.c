@@ -64,6 +64,7 @@
  *
  */
 
+#include <linux/aperture.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -206,9 +207,7 @@ static inline u8 crt_inb(struct tdfx_par *par, u32 idx)
 
 static inline void att_outb(struct tdfx_par *par, u32 idx, u8 val)
 {
-	unsigned char tmp;
-
-	tmp = vga_inb(par, IS1_R);
+	vga_inb(par, IS1_R);
 	vga_outb(par, ATT_IW, idx);
 	vga_outb(par, ATT_IW, val);
 }
@@ -523,7 +522,7 @@ static int tdfxfb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 	case 32:
 		var->transp.offset = 24;
 		var->transp.length = 8;
-		/* fall through */
+		fallthrough;
 	case 24:
 		var->red.offset = 16;
 		var->green.offset = 8;
@@ -1266,7 +1265,7 @@ static int tdfxfb_setup_ddc_bus(struct tdfxfb_i2c_chan *chan, const char *name,
 {
 	int rc;
 
-	strlcpy(chan->adapter.name, name, sizeof(chan->adapter.name));
+	strscpy(chan->adapter.name, name, sizeof(chan->adapter.name));
 	chan->adapter.owner		= THIS_MODULE;
 	chan->adapter.class		= I2C_CLASS_DDC;
 	chan->adapter.algo_data		= &chan->algo;
@@ -1295,7 +1294,7 @@ static int tdfxfb_setup_i2c_bus(struct tdfxfb_i2c_chan *chan, const char *name,
 {
 	int rc;
 
-	strlcpy(chan->adapter.name, name, sizeof(chan->adapter.name));
+	strscpy(chan->adapter.name, name, sizeof(chan->adapter.name));
 	chan->adapter.owner		= THIS_MODULE;
 	chan->adapter.algo_data		= &chan->algo;
 	chan->adapter.dev.parent	= dev;
@@ -1377,6 +1376,10 @@ static int tdfxfb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	int err, lpitch;
 	struct fb_monspecs *specs;
 	bool found;
+
+	err = aperture_remove_conflicting_pci_devices(pdev, "tdfxfb");
+	if (err)
+		return err;
 
 	err = pci_enable_device(pdev);
 	if (err) {
@@ -1629,7 +1632,12 @@ static int __init tdfxfb_init(void)
 {
 #ifndef MODULE
 	char *option = NULL;
+#endif
 
+	if (fb_modesetting_disabled("tdfxfb"))
+		return -ENODEV;
+
+#ifndef MODULE
 	if (fb_get_options("tdfxfb", &option))
 		return -ENODEV;
 

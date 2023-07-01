@@ -41,7 +41,7 @@ static int x25_queue_rx_frame(struct sock *sk, struct sk_buff *skb, int more)
 		return 0;
 	}
 
-	if (!more && x25->fraglen > 0) {	/* End of fragment */
+	if (x25->fraglen > 0) {	/* End of fragment */
 		int len = x25->fraglen + skb->len;
 
 		if ((skbn = alloc_skb(len, GFP_ATOMIC)) == NULL){
@@ -349,7 +349,7 @@ static int x25_state4_machine(struct sock *sk, struct sk_buff *skb, int frametyp
 
 		case X25_RESET_REQUEST:
 			x25_write_internal(sk, X25_RESET_CONFIRMATION);
-			/* fall through */
+			fallthrough;
 		case X25_RESET_CONFIRMATION: {
 			x25_stop_timer(sk);
 			x25->condition = 0x00;

@@ -10,6 +10,7 @@
 #include <linux/acpi.h>
 #include <asm/msr.h>
 #include <asm/tsc.h>
+#include "internal.h"
 
 struct lpit_residency_info {
 	struct acpi_generic_address gaddr;
@@ -109,17 +110,11 @@ static void lpit_update_residency(struct lpit_residency_info *info,
 		if (!info->iomem_addr)
 			return;
 
-		if (!(acpi_gbl_FADT.flags & ACPI_FADT_LOW_POWER_S0))
-			return;
-
 		/* Silently fail, if cpuidle attribute group is not present */
 		sysfs_add_file_to_group(&cpu_subsys.dev_root->kobj,
 					&dev_attr_low_power_idle_system_residency_us.attr,
 					"cpuidle");
 	} else if (info->gaddr.space_id == ACPI_ADR_SPACE_FIXED_HARDWARE) {
-		if (!(acpi_gbl_FADT.flags & ACPI_FADT_LOW_POWER_S0))
-			return;
-
 		/* Silently fail, if cpuidle attribute group is not present */
 		sysfs_add_file_to_group(&cpu_subsys.dev_root->kobj,
 					&dev_attr_low_power_idle_cpu_residency_us.attr,
@@ -151,10 +146,11 @@ void acpi_init_lpit(void)
 	struct acpi_table_lpit *lpit;
 
 	status = acpi_get_table(ACPI_SIG_LPIT, 0, (struct acpi_table_header **)&lpit);
-
 	if (ACPI_FAILURE(status))
 		return;
 
 	lpit_process((u64)lpit + sizeof(*lpit),
 		     (u64)lpit + lpit->header.length);
+
+	acpi_put_table((struct acpi_table_header *)lpit);
 }

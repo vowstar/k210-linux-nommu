@@ -92,8 +92,8 @@ static int tm2_stop_sysclk(struct snd_soc_card *card)
 static int tm2_aif1_hw_params(struct snd_pcm_substream *substream,
 				struct snd_pcm_hw_params *params)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_component *component = rtd->codec_dai->component;
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_component *component = asoc_rtd_to_codec(rtd, 0)->component;
 	struct tm2_machine_priv *priv = snd_soc_card_get_drvdata(rtd->card);
 
 	switch (params_rate(params)) {
@@ -126,15 +126,15 @@ static int tm2_aif1_hw_params(struct snd_pcm_substream *substream,
 	return tm2_start_sysclk(rtd->card);
 }
 
-static struct snd_soc_ops tm2_aif1_ops = {
+static const struct snd_soc_ops tm2_aif1_ops = {
 	.hw_params = tm2_aif1_hw_params,
 };
 
 static int tm2_aif2_hw_params(struct snd_pcm_substream *substream,
 				struct snd_pcm_hw_params *params)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_component *component = rtd->codec_dai->component;
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_component *component = asoc_rtd_to_codec(rtd, 0)->component;
 	unsigned int asyncclk_rate;
 	int ret;
 
@@ -187,8 +187,8 @@ static int tm2_aif2_hw_params(struct snd_pcm_substream *substream,
 
 static int tm2_aif2_hw_free(struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_component *component = rtd->codec_dai->component;
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_component *component = asoc_rtd_to_codec(rtd, 0)->component;
 	int ret;
 
 	/* disable FLL2 */
@@ -200,7 +200,7 @@ static int tm2_aif2_hw_free(struct snd_pcm_substream *substream)
 	return ret;
 }
 
-static struct snd_soc_ops tm2_aif2_ops = {
+static const struct snd_soc_ops tm2_aif2_ops = {
 	.hw_params = tm2_aif2_hw_params,
 	.hw_free = tm2_aif2_hw_free,
 };
@@ -208,8 +208,8 @@ static struct snd_soc_ops tm2_aif2_ops = {
 static int tm2_hdmi_hw_params(struct snd_pcm_substream *substream,
 			      struct snd_pcm_hw_params *params)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = asoc_rtd_to_cpu(rtd, 0);
 	unsigned int bfs;
 	int bitwidth, ret;
 
@@ -254,7 +254,7 @@ static int tm2_hdmi_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
-static struct snd_soc_ops tm2_hdmi_ops = {
+static const struct snd_soc_ops tm2_hdmi_ops = {
 	.hw_params = tm2_hdmi_hw_params,
 };
 
@@ -284,7 +284,7 @@ static int tm2_set_bias_level(struct snd_soc_card *card,
 
 	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[0]);
 
-	if (dapm->dev != rtd->codec_dai->dev)
+	if (dapm->dev != asoc_rtd_to_codec(rtd, 0)->dev)
 		return 0;
 
 	switch (level) {
@@ -315,8 +315,8 @@ static int tm2_late_probe(struct snd_soc_card *card)
 	int ret;
 
 	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[TM2_DAI_AIF1]);
-	aif1_dai = rtd->codec_dai;
-	priv->component = rtd->codec_dai->component;
+	aif1_dai = asoc_rtd_to_codec(rtd, 0);
+	priv->component = asoc_rtd_to_codec(rtd, 0)->component;
 
 	ret = snd_soc_dai_set_sysclk(aif1_dai, ARIZONA_CLK_SYSCLK, 0, 0);
 	if (ret < 0) {
@@ -325,7 +325,7 @@ static int tm2_late_probe(struct snd_soc_card *card)
 	}
 
 	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[TM2_DAI_AIF2]);
-	aif2_dai = rtd->codec_dai;
+	aif2_dai = asoc_rtd_to_codec(rtd, 0);
 
 	ret = snd_soc_dai_set_sysclk(aif2_dai, ARIZONA_CLK_ASYNCCLK, 0, 0);
 	if (ret < 0) {
@@ -501,7 +501,6 @@ static int tm2_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct snd_soc_card *card = &tm2_card;
 	struct tm2_machine_priv *priv;
-	struct of_phandle_args args;
 	struct snd_soc_dai_link *dai_link;
 	int num_codecs, ret, i;
 
@@ -553,7 +552,7 @@ static int tm2_probe(struct platform_device *pdev)
 
 		ret = of_parse_phandle_with_args(dev->of_node, "i2s-controller",
 						 cells_name, i, &args);
-		if (!args.np) {
+		if (ret) {
 			dev_err(dev, "i2s-controller property parse error: %d\n", i);
 			ret = -EINVAL;
 			goto dai_node_put;
@@ -585,6 +584,8 @@ static int tm2_probe(struct platform_device *pdev)
 	}
 
 	if (num_codecs > 1) {
+		struct of_phandle_args args;
+
 		/* HDMI DAI link (I2S1) */
 		i = card->num_links - 1;
 
@@ -611,7 +612,7 @@ static int tm2_probe(struct platform_device *pdev)
 
 	ret = devm_snd_soc_register_card(dev, card);
 	if (ret < 0) {
-		dev_err(dev, "Failed to register card: %d\n", ret);
+		dev_err_probe(dev, ret, "Failed to register card\n");
 		goto dai_node_put;
 	}
 

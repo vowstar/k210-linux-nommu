@@ -96,7 +96,7 @@
 /* Hardware limit on ChipSelect rows per MC and processors per system */
 #define NUM_CHIPSELECTS			8
 #define DRAM_RANGES			8
-#define NUM_CONTROLLERS			8
+#define NUM_CONTROLLERS			12
 
 #define ON true
 #define OFF false
@@ -114,16 +114,6 @@
 #define PCI_DEVICE_ID_AMD_16H_NB_F2	0x1532
 #define PCI_DEVICE_ID_AMD_16H_M30H_NB_F1 0x1581
 #define PCI_DEVICE_ID_AMD_16H_M30H_NB_F2 0x1582
-#define PCI_DEVICE_ID_AMD_17H_DF_F0	0x1460
-#define PCI_DEVICE_ID_AMD_17H_DF_F6	0x1466
-#define PCI_DEVICE_ID_AMD_17H_M10H_DF_F0 0x15e8
-#define PCI_DEVICE_ID_AMD_17H_M10H_DF_F6 0x15ee
-#define PCI_DEVICE_ID_AMD_17H_M30H_DF_F0 0x1490
-#define PCI_DEVICE_ID_AMD_17H_M30H_DF_F6 0x1496
-#define PCI_DEVICE_ID_AMD_17H_M70H_DF_F0 0x1440
-#define PCI_DEVICE_ID_AMD_17H_M70H_DF_F6 0x1446
-#define PCI_DEVICE_ID_AMD_19H_DF_F0	0x1650
-#define PCI_DEVICE_ID_AMD_19H_DF_F6	0x1656
 
 /*
  * Function 1 - Address Map
@@ -209,8 +199,6 @@
 #define DCT_SEL_HI			0x114
 
 #define F15H_M60H_SCRCTRL		0x1C8
-#define F17H_SCR_BASE_ADDR		0x48
-#define F17H_SCR_LIMIT_ADDR		0x4C
 
 /*
  * Function 3 - Misc Control
@@ -267,8 +255,11 @@
 #define UMCCH_BASE_ADDR_SEC		0x10
 #define UMCCH_ADDR_MASK			0x20
 #define UMCCH_ADDR_MASK_SEC		0x28
+#define UMCCH_ADDR_MASK_SEC_DDR5	0x30
 #define UMCCH_ADDR_CFG			0x30
+#define UMCCH_ADDR_CFG_DDR5		0x40
 #define UMCCH_DIMM_CFG			0x80
+#define UMCCH_DIMM_CFG_DDR5		0x90
 #define UMCCH_UMC_CFG			0x100
 #define UMCCH_SDP_CTRL			0x104
 #define UMCCH_ECC_CTRL			0x14C
@@ -293,8 +284,11 @@ enum amd_families {
 	F17_CPUS,
 	F17_M10H_CPUS,
 	F17_M30H_CPUS,
+	F17_M60H_CPUS,
 	F17_M70H_CPUS,
 	F19_CPUS,
+	F19_M10H_CPUS,
+	F19_M50H_CPUS,
 	NUM_FAMILIES,
 };
 
@@ -335,13 +329,16 @@ struct amd64_umc {
 	u32 sdp_ctrl;		/* SDP Control reg */
 	u32 ecc_ctrl;		/* DRAM ECC Control reg */
 	u32 umc_cap_hi;		/* Capabilities High reg */
+
+	/* cache the dram_type */
+	enum mem_type dram_type;
 };
 
 struct amd64_pvt {
 	struct low_ops *ops;
 
 	/* pci_device handles which we utilize */
-	struct pci_dev *F0, *F1, *F2, *F3, *F6;
+	struct pci_dev *F1, *F2, *F3;
 
 	u16 mc_node_id;		/* MC index of this MC node */
 	u8 fam;			/* CPU family */
@@ -349,7 +346,6 @@ struct amd64_pvt {
 	u8 stepping;		/* ... stepping */
 
 	int ext_model;		/* extended model value of this node */
-	int channel_count;
 
 	/* Raw registers */
 	u32 dclr0;		/* DRAM Configuration Low DCT0 reg */
@@ -382,7 +378,12 @@ struct amd64_pvt {
 	/* place to store error injection parameters prior to issue */
 	struct error_injection injection;
 
-	/* cache the dram_type */
+	/*
+	 * cache the dram_type
+	 *
+	 * NOTE: Don't use this for Family 17h and later.
+	 *	 Use dram_type in struct amd64_umc instead.
+	 */
 	enum mem_type dram_type;
 
 	struct amd64_umc *umc;	/* UMC registers */
@@ -459,31 +460,33 @@ struct ecc_settings {
 	} flags;
 };
 
-#ifdef CONFIG_EDAC_DEBUG
-extern const struct attribute_group amd64_edac_dbg_group;
-#endif
-
-#ifdef CONFIG_EDAC_AMD64_ERROR_INJECTION
-extern const struct attribute_group amd64_edac_inj_group;
-#endif
-
 /*
  * Each of the PCI Device IDs types have their own set of hardware accessor
  * functions and per device encoding/decoding logic.
  */
 struct low_ops {
-	int (*early_channel_count)	(struct amd64_pvt *pvt);
 	void (*map_sysaddr_to_csrow)	(struct mem_ctl_info *mci, u64 sys_addr,
 					 struct err_info *);
 	int (*dbam_to_cs)		(struct amd64_pvt *pvt, u8 dct,
 					 unsigned cs_mode, int cs_mask_nr);
 };
 
+struct amd64_family_flags {
+	/*
+	 * Indicates that the system supports the new register offsets, etc.
+	 * first introduced with Family 19h Model 10h.
+	 */
+	__u64 zn_regs_v2	: 1,
+
+	      __reserved	: 63;
+};
+
 struct amd64_family_type {
 	const char *ctl_name;
-	u16 f0_id, f1_id, f2_id, f6_id;
+	u16 f1_id, f2_id;
 	/* Maximum number of memory controllers per die/node. */
 	u8 max_mcs;
+	struct amd64_family_flags flags;
 	struct low_ops ops;
 };
 
@@ -497,9 +500,6 @@ int __amd64_write_pci_cfg_dword(struct pci_dev *pdev, int offset,
 
 #define amd64_write_pci_cfg(pdev, offset, val)	\
 	__amd64_write_pci_cfg_dword(pdev, offset, val, __func__)
-
-int amd64_get_dram_hole_info(struct mem_ctl_info *mci, u64 *hole_base,
-			     u64 *hole_offset, u64 *hole_size);
 
 #define to_mci(k) container_of(k, struct mem_ctl_info, dev)
 

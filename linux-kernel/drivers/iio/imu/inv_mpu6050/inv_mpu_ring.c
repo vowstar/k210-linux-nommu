@@ -13,7 +13,6 @@
 #include <linux/interrupt.h>
 #include <linux/poll.h>
 #include <linux/math64.h>
-#include <asm/unaligned.h>
 #include "inv_mpu_iio.h"
 
 /**
@@ -90,63 +89,14 @@ static s64 inv_mpu6050_get_timestamp(struct inv_mpu6050_state *st)
 	return ts;
 }
 
-int inv_reset_fifo(struct iio_dev *indio_dev)
+static int inv_reset_fifo(struct iio_dev *indio_dev)
 {
 	int result;
-	u8 d;
 	struct inv_mpu6050_state  *st = iio_priv(indio_dev);
 
-	/* reset it timestamp validation */
-	st->it_timestamp = 0;
-
-	/* disable interrupt */
-	result = regmap_write(st->map, st->reg->int_enable, 0);
-	if (result) {
-		dev_err(regmap_get_device(st->map), "int_enable failed %d\n",
-			result);
-		return result;
-	}
-	/* disable the sensor output to FIFO */
-	result = regmap_write(st->map, st->reg->fifo_en, 0);
-	if (result)
-		goto reset_fifo_fail;
-	/* disable fifo reading */
-	result = regmap_write(st->map, st->reg->user_ctrl,
-			      st->chip_config.user_ctrl);
-	if (result)
-		goto reset_fifo_fail;
-
-	/* reset FIFO*/
-	d = st->chip_config.user_ctrl | INV_MPU6050_BIT_FIFO_RST;
-	result = regmap_write(st->map, st->reg->user_ctrl, d);
-	if (result)
-		goto reset_fifo_fail;
-
-	/* enable interrupt */
-	if (st->chip_config.accl_fifo_enable ||
-	    st->chip_config.gyro_fifo_enable ||
-	    st->chip_config.magn_fifo_enable) {
-		result = regmap_write(st->map, st->reg->int_enable,
-				      INV_MPU6050_BIT_DATA_RDY_EN);
-		if (result)
-			return result;
-	}
-	/* enable FIFO reading */
-	d = st->chip_config.user_ctrl | INV_MPU6050_BIT_FIFO_EN;
-	result = regmap_write(st->map, st->reg->user_ctrl, d);
-	if (result)
-		goto reset_fifo_fail;
-	/* enable sensor output to FIFO */
-	d = 0;
-	if (st->chip_config.gyro_fifo_enable)
-		d |= INV_MPU6050_BITS_GYRO_OUT;
-	if (st->chip_config.accl_fifo_enable)
-		d |= INV_MPU6050_BIT_ACCEL_OUT;
-	if (st->chip_config.temp_fifo_enable)
-		d |= INV_MPU6050_BIT_TEMP_OUT;
-	if (st->chip_config.magn_fifo_enable)
-		d |= INV_MPU6050_BIT_SLAVE_0;
-	result = regmap_write(st->map, st->reg->fifo_en, d);
+	/* disable fifo and reenable it */
+	inv_mpu6050_prepare_fifo(st, false);
+	result = inv_mpu6050_prepare_fifo(st, true);
 	if (result)
 		goto reset_fifo_fail;
 
@@ -160,7 +110,7 @@ reset_fifo_fail:
 	return result;
 }
 
-/**
+/*
  * inv_mpu6050_read_fifo() - Transfer data from hardware FIFO to KFIFO.
  */
 irqreturn_t inv_mpu6050_read_fifo(int irq, void *p)
@@ -170,7 +120,6 @@ irqreturn_t inv_mpu6050_read_fifo(int irq, void *p)
 	struct inv_mpu6050_state *st = iio_priv(indio_dev);
 	size_t bytes_per_datum;
 	int result;
-	u8 data[INV_MPU6050_OUTPUT_DATA_SIZE];
 	u16 fifo_count;
 	s64 timestamp;
 	int int_status;
@@ -209,11 +158,11 @@ irqreturn_t inv_mpu6050_read_fifo(int irq, void *p)
 	 * read fifo_count register to know how many bytes are inside the FIFO
 	 * right now
 	 */
-	result = regmap_bulk_read(st->map, st->reg->fifo_count_h, data,
-				  INV_MPU6050_FIFO_COUNT_BYTE);
+	result = regmap_bulk_read(st->map, st->reg->fifo_count_h,
+				  st->data, INV_MPU6050_FIFO_COUNT_BYTE);
 	if (result)
 		goto end_session;
-	fifo_count = get_unaligned_be16(&data[0]);
+	fifo_count = be16_to_cpup((__be16 *)&st->data[0]);
 
 	/*
 	 * Handle fifo overflow by resetting fifo.
@@ -230,8 +179,8 @@ irqreturn_t inv_mpu6050_read_fifo(int irq, void *p)
 	nb = fifo_count / bytes_per_datum;
 	inv_mpu6050_update_period(st, pf->timestamp, nb);
 	for (i = 0; i < nb; ++i) {
-		result = regmap_bulk_read(st->map, st->reg->fifo_r_w,
-					  data, bytes_per_datum);
+		result = regmap_noinc_read(st->map, st->reg->fifo_r_w,
+					   st->data, bytes_per_datum);
 		if (result)
 			goto flush_fifo;
 		/* skip first samples if needed */
@@ -240,7 +189,7 @@ irqreturn_t inv_mpu6050_read_fifo(int irq, void *p)
 			continue;
 		}
 		timestamp = inv_mpu6050_get_timestamp(st);
-		iio_push_to_buffers_with_timestamp(indio_dev, data, timestamp);
+		iio_push_to_buffers_with_timestamp(indio_dev, st->data, timestamp);
 	}
 
 end_session:

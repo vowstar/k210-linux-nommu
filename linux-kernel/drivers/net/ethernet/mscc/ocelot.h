@@ -12,87 +12,108 @@
 #include <linux/etherdevice.h>
 #include <linux/if_vlan.h>
 #include <linux/net_tstamp.h>
-#include <linux/phy.h>
-#include <linux/phy/phy.h>
+#include <linux/phylink.h>
 #include <linux/platform_device.h>
-#include <linux/ptp_clock_kernel.h>
 #include <linux/regmap.h>
 
 #include <soc/mscc/ocelot_qsys.h>
 #include <soc/mscc/ocelot_sys.h>
 #include <soc/mscc/ocelot_dev.h>
 #include <soc/mscc/ocelot_ana.h>
+#include <soc/mscc/ocelot_ptp.h>
+#include <soc/mscc/ocelot_vcap.h>
 #include <soc/mscc/ocelot.h>
 #include "ocelot_rew.h"
 #include "ocelot_qs.h"
-#include "ocelot_tc.h"
-#include "ocelot_ptp.h"
 
-#define PGID_AGGR    64
-#define PGID_SRC     80
-
-/* Reserved PGIDs */
-#define PGID_CPU     (PGID_AGGR - 5)
-#define PGID_UC      (PGID_AGGR - 4)
-#define PGID_MC      (PGID_AGGR - 3)
-#define PGID_MCIPV4  (PGID_AGGR - 2)
-#define PGID_MCIPV6  (PGID_AGGR - 1)
-
+#define OCELOT_STANDALONE_PVID 0
 #define OCELOT_BUFFER_CELL_SZ 60
 
 #define OCELOT_STATS_CHECK_DELAY (2 * HZ)
 
 #define OCELOT_PTP_QUEUE_SZ	128
 
-struct frame_info {
-	u32 len;
-	u16 port;
-	u16 vid;
-	u8 tag_type;
-	u16 rew_op;
-	u32 timestamp;	/* rew_val */
-};
+#define OCELOT_JUMBO_MTU	9000
 
-struct ocelot_multicast {
-	struct list_head list;
-	unsigned char addr[ETH_ALEN];
-	u16 vid;
-	u16 ports;
+struct ocelot_port_tc {
+	bool block_shared;
+	unsigned long offload_cnt;
+	unsigned long ingress_mirred_id;
+	unsigned long egress_mirred_id;
+	unsigned long police_id;
 };
 
 struct ocelot_port_private {
 	struct ocelot_port port;
 	struct net_device *dev;
-	struct phy_device *phy;
-	u8 chip_port;
-
-	u8 vlan_aware;
-
-	struct phy *serdes;
-
+	struct phylink *phylink;
+	struct phylink_config phylink_config;
 	struct ocelot_port_tc tc;
 };
+
+/* A (PGID) port mask structure, encoding the 2^ocelot->num_phys_ports
+ * possibilities of egress port masks for L2 multicast traffic.
+ * For a switch with 9 user ports, there are 512 possible port masks, but the
+ * hardware only has 46 individual PGIDs that it can forward multicast traffic
+ * to. So we need a structure that maps the limited PGID indices to the port
+ * destinations requested by the user for L2 multicast.
+ */
+struct ocelot_pgid {
+	unsigned long ports;
+	int index;
+	refcount_t refcount;
+	struct list_head list;
+};
+
+struct ocelot_multicast {
+	struct list_head list;
+	enum macaccess_entry_type entry_type;
+	unsigned char addr[ETH_ALEN];
+	u16 vid;
+	u16 ports;
+	struct ocelot_pgid *pgid;
+};
+
+int ocelot_bridge_num_find(struct ocelot *ocelot,
+			   const struct net_device *bridge);
+
+int ocelot_mact_learn(struct ocelot *ocelot, int port,
+		      const unsigned char mac[ETH_ALEN],
+		      unsigned int vid, enum macaccess_entry_type type);
+int ocelot_mact_forget(struct ocelot *ocelot,
+		       const unsigned char mac[ETH_ALEN], unsigned int vid);
+struct net_device *ocelot_port_to_netdev(struct ocelot *ocelot, int port);
+int ocelot_netdev_to_port(struct net_device *dev);
 
 u32 ocelot_port_readl(struct ocelot_port *port, u32 reg);
 void ocelot_port_writel(struct ocelot_port *port, u32 val, u32 reg);
 
-#define ocelot_field_write(ocelot, reg, val) regmap_field_write((ocelot)->regfields[(reg)], (val))
-#define ocelot_field_read(ocelot, reg, val) regmap_field_read((ocelot)->regfields[(reg)], (val))
+int ocelot_probe_port(struct ocelot *ocelot, int port, struct regmap *target,
+		      struct device_node *portnp);
+void ocelot_release_port(struct ocelot_port *ocelot_port);
+int ocelot_devlink_init(struct ocelot *ocelot);
+void ocelot_devlink_teardown(struct ocelot *ocelot);
+int ocelot_port_devlink_init(struct ocelot *ocelot, int port,
+			     enum devlink_port_flavour flavour);
+void ocelot_port_devlink_teardown(struct ocelot *ocelot, int port);
 
-int ocelot_chip_init(struct ocelot *ocelot, const struct ocelot_ops *ops);
-int ocelot_probe_port(struct ocelot *ocelot, u8 port,
-		      void __iomem *regs,
-		      struct phy_device *phy);
+int ocelot_trap_add(struct ocelot *ocelot, int port,
+		    unsigned long cookie, bool take_ts,
+		    void (*populate)(struct ocelot_vcap_filter *f));
+int ocelot_trap_del(struct ocelot *ocelot, int port, unsigned long cookie);
 
-void ocelot_set_cpu_port(struct ocelot *ocelot, int cpu,
-			 enum ocelot_tag_prefix injection,
-			 enum ocelot_tag_prefix extraction);
+struct ocelot_mirror *ocelot_mirror_get(struct ocelot *ocelot, int to,
+					struct netlink_ext_ack *extack);
+void ocelot_mirror_put(struct ocelot *ocelot);
+
+int ocelot_stats_init(struct ocelot *ocelot);
+void ocelot_stats_deinit(struct ocelot *ocelot);
+
+int ocelot_mm_init(struct ocelot *ocelot);
 
 extern struct notifier_block ocelot_netdevice_nb;
 extern struct notifier_block ocelot_switchdev_nb;
 extern struct notifier_block ocelot_switchdev_blocking_nb;
-
-#define ocelot_field_write(ocelot, reg, val) regmap_field_write((ocelot)->regfields[(reg)], (val))
-#define ocelot_field_read(ocelot, reg, val) regmap_field_read((ocelot)->regfields[(reg)], (val))
+extern const struct devlink_ops ocelot_devlink_ops;
 
 #endif

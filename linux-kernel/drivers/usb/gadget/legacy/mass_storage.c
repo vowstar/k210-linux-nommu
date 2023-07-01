@@ -175,8 +175,10 @@ static int msg_bind(struct usb_composite_dev *cdev)
 		struct usb_descriptor_header *usb_desc;
 
 		usb_desc = usb_otg_descriptor_alloc(cdev->gadget);
-		if (!usb_desc)
+		if (!usb_desc) {
+			status = -ENOMEM;
 			goto fail_string_ids;
+		}
 		usb_otg_descriptor_init(cdev->gadget, usb_desc);
 		otg_desc[0] = usb_desc;
 		otg_desc[1] = NULL;
@@ -229,18 +231,8 @@ static struct usb_composite_driver msg_driver = {
 	.unbind		= msg_unbind,
 };
 
+module_usb_composite_driver(msg_driver);
+
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_AUTHOR("Michal Nazarewicz");
 MODULE_LICENSE("GPL");
-
-static int __init msg_init(void)
-{
-	return usb_composite_probe(&msg_driver);
-}
-module_init(msg_init);
-
-static void __exit msg_cleanup(void)
-{
-	usb_composite_unregister(&msg_driver);
-}
-module_exit(msg_cleanup);

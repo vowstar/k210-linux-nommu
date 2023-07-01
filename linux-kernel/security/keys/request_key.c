@@ -38,9 +38,12 @@ static void cache_requested_key(struct key *key)
 #ifdef CONFIG_KEYS_REQUEST_CACHE
 	struct task_struct *t = current;
 
-	key_put(t->cached_requested_key);
-	t->cached_requested_key = key_get(key);
-	set_tsk_thread_flag(t, TIF_NOTIFY_RESUME);
+	/* Do not cache key if it is a kernel thread */
+	if (!(t->flags & PF_KTHREAD)) {
+		key_put(t->cached_requested_key);
+		t->cached_requested_key = key_get(key);
+		set_tsk_thread_flag(t, TIF_NOTIFY_RESUME);
+	}
 #endif
 }
 
@@ -295,26 +298,26 @@ static int construct_get_dest_keyring(struct key **_dest_keyring)
 				}
 			}
 
-			/* fall through */
+			fallthrough;
 		case KEY_REQKEY_DEFL_THREAD_KEYRING:
 			dest_keyring = key_get(cred->thread_keyring);
 			if (dest_keyring)
 				break;
 
-			/* fall through */
+			fallthrough;
 		case KEY_REQKEY_DEFL_PROCESS_KEYRING:
 			dest_keyring = key_get(cred->process_keyring);
 			if (dest_keyring)
 				break;
 
-			/* fall through */
+			fallthrough;
 		case KEY_REQKEY_DEFL_SESSION_KEYRING:
 			dest_keyring = key_get(cred->session_keyring);
 
 			if (dest_keyring)
 				break;
 
-			/* fall through */
+			fallthrough;
 		case KEY_REQKEY_DEFL_USER_SESSION_KEYRING:
 			ret = look_up_user_keyrings(NULL, &dest_keyring);
 			if (ret < 0)
@@ -418,7 +421,7 @@ static int construct_alloc_key(struct keyring_search_context *ctx,
 		goto key_already_present;
 
 	if (dest_keyring)
-		__key_link(key, &edit);
+		__key_link(dest_keyring, key, &edit);
 
 	mutex_unlock(&key_construction_mutex);
 	if (dest_keyring)
@@ -437,7 +440,7 @@ key_already_present:
 	if (dest_keyring) {
 		ret = __key_link_check_live_key(dest_keyring, key);
 		if (ret == 0)
-			__key_link(key, &edit);
+			__key_link(dest_keyring, key, &edit);
 		__key_link_end(dest_keyring, &ctx->index_key, edit);
 		if (ret < 0)
 			goto link_check_failed;

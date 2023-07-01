@@ -19,6 +19,9 @@
 #include <linux/of_irq.h>
 #include <linux/of_platform.h>
 
+#include "mtk_drm_drv.h"
+#include "mtk_hdmi.h"
+
 #define SIF1_CLOK		(288)
 #define DDC_DDCMCTL0		(0x0)
 #define DDCM_ODRAIN			BIT(31)
@@ -335,6 +338,7 @@ static const struct of_device_id mtk_hdmi_ddc_match[] = {
 	{ .compatible = "mediatek,mt8173-hdmi-ddc", },
 	{},
 };
+MODULE_DEVICE_TABLE(of, mtk_hdmi_ddc_match);
 
 struct platform_driver mtk_hdmi_ddc_driver = {
 	.probe = mtk_hdmi_ddc_probe,

@@ -4,6 +4,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/if_ether.h>
+#include <linux/nospec.h>
 
 #include "core.h"
 #include "bus.h"
@@ -14,7 +15,6 @@
 #include "util.h"
 #include "switchdev.h"
 
-#define QTNF_DMP_MAX_LEN 48
 #define QTNF_PRIMARY_VIF_IDX	0
 
 static bool slave_radar = true;
@@ -41,11 +41,12 @@ struct qtnf_wmac *qtnf_core_get_mac(const struct qtnf_bus *bus, u8 macid)
 {
 	struct qtnf_wmac *mac = NULL;
 
-	if (unlikely(macid >= QTNF_MAX_MAC)) {
+	if (macid >= QTNF_MAX_MAC) {
 		pr_err("invalid MAC index %u\n", macid);
 		return NULL;
 	}
 
+	macid = array_index_nospec(macid, QTNF_MAX_MAC);
 	mac = bus->mac[macid];
 
 	if (unlikely(!mac)) {
@@ -125,47 +126,11 @@ qtnf_netdev_hard_start_xmit(struct sk_buff *skb, struct net_device *ndev)
 
 	if (unlikely(skb->protocol == htons(ETH_P_PAE))) {
 		qtnf_packet_send_hi_pri(skb);
-		qtnf_update_tx_stats(ndev, skb);
+		dev_sw_netstats_tx_add(ndev, 1, skb->len);
 		return NETDEV_TX_OK;
 	}
 
 	return qtnf_bus_data_tx(mac->bus, skb, mac->macid, vif->vifid);
-}
-
-/* Netdev handler for getting stats.
- */
-static void qtnf_netdev_get_stats64(struct net_device *ndev,
-				    struct rtnl_link_stats64 *stats)
-{
-	struct qtnf_vif *vif = qtnf_netdev_get_priv(ndev);
-	unsigned int start;
-	int cpu;
-
-	netdev_stats_to_stats64(stats, &ndev->stats);
-
-	if (!vif->stats64)
-		return;
-
-	for_each_possible_cpu(cpu) {
-		struct pcpu_sw_netstats *stats64;
-		u64 rx_packets, rx_bytes;
-		u64 tx_packets, tx_bytes;
-
-		stats64 = per_cpu_ptr(vif->stats64, cpu);
-
-		do {
-			start = u64_stats_fetch_begin_irq(&stats64->syncp);
-			rx_packets = stats64->rx_packets;
-			rx_bytes = stats64->rx_bytes;
-			tx_packets = stats64->tx_packets;
-			tx_bytes = stats64->tx_bytes;
-		} while (u64_stats_fetch_retry_irq(&stats64->syncp, start));
-
-		stats->rx_packets += rx_packets;
-		stats->rx_bytes += rx_bytes;
-		stats->tx_packets += tx_packets;
-		stats->tx_bytes += tx_bytes;
-	}
 }
 
 /* Netdev handler for transmission timeout.
@@ -214,7 +179,7 @@ static int qtnf_netdev_set_mac_address(struct net_device *ndev, void *addr)
 					     sa->sa_data);
 
 	if (ret)
-		memcpy(ndev->dev_addr, old_addr, ETH_ALEN);
+		eth_hw_addr_set(ndev, old_addr);
 
 	return ret;
 }
@@ -231,13 +196,27 @@ static int qtnf_netdev_port_parent_id(struct net_device *ndev,
 	return 0;
 }
 
+static int qtnf_netdev_alloc_pcpu_stats(struct net_device *dev)
+{
+	dev->tstats = netdev_alloc_pcpu_stats(struct pcpu_sw_netstats);
+
+	return dev->tstats ? 0 : -ENOMEM;
+}
+
+static void qtnf_netdev_free_pcpu_stats(struct net_device *dev)
+{
+	free_percpu(dev->tstats);
+}
+
 /* Network device ops handlers */
 const struct net_device_ops qtnf_netdev_ops = {
+	.ndo_init = qtnf_netdev_alloc_pcpu_stats,
+	.ndo_uninit = qtnf_netdev_free_pcpu_stats,
 	.ndo_open = qtnf_netdev_open,
 	.ndo_stop = qtnf_netdev_close,
 	.ndo_start_xmit = qtnf_netdev_hard_start_xmit,
 	.ndo_tx_timeout = qtnf_netdev_tx_timeout,
-	.ndo_get_stats64 = qtnf_netdev_get_stats64,
+	.ndo_get_stats64 = dev_get_tstats64,
 	.ndo_set_mac_address = qtnf_netdev_set_mac_address,
 	.ndo_get_port_parent_id = qtnf_netdev_port_parent_id,
 };
@@ -429,18 +408,31 @@ static void qtnf_vif_send_data_high_pri(struct work_struct *work)
 static struct qtnf_wmac *qtnf_core_mac_alloc(struct qtnf_bus *bus,
 					     unsigned int macid)
 {
+	struct platform_device *pdev = NULL;
+	struct qtnf_wmac *mac;
 	struct qtnf_vif *vif;
 	struct wiphy *wiphy;
-	struct qtnf_wmac *mac;
 	unsigned int i;
 
-	wiphy = qtnf_wiphy_allocate(bus);
-	if (!wiphy)
+	if (bus->hw_info.num_mac > 1) {
+		pdev = platform_device_register_data(bus->dev,
+						     dev_name(bus->dev),
+						     macid, NULL, 0);
+		if (IS_ERR(pdev))
+			return ERR_PTR(-EINVAL);
+	}
+
+	wiphy = qtnf_wiphy_allocate(bus, pdev);
+	if (!wiphy) {
+		if (pdev)
+			platform_device_unregister(pdev);
 		return ERR_PTR(-ENOMEM);
+	}
 
 	mac = wiphy_priv(wiphy);
 
 	mac->macid = macid;
+	mac->pdev = pdev;
 	mac->bus = bus;
 	mutex_init(&mac->mac_lock);
 	INIT_DELAYED_WORK(&mac->scan_timeout, qtnf_mac_scan_timeout);
@@ -455,10 +447,6 @@ static struct qtnf_wmac *qtnf_core_mac_alloc(struct qtnf_bus *bus,
 		qtnf_sta_list_init(&vif->sta_list);
 		INIT_WORK(&vif->high_pri_tx_work, qtnf_vif_send_data_high_pri);
 		skb_queue_head_init(&vif->high_pri_tx_queue);
-		vif->stats64 = netdev_alloc_pcpu_stats(struct pcpu_sw_netstats);
-		if (!vif->stats64)
-			pr_warn("VIF%u.%u: per cpu stats allocation failed\n",
-				macid, i);
 	}
 
 	qtnf_mac_init_primary_intf(mac);
@@ -490,22 +478,21 @@ int qtnf_core_net_attach(struct qtnf_wmac *mac, struct qtnf_vif *vif,
 	dev->needs_free_netdev = true;
 	dev_net_set(dev, wiphy_net(wiphy));
 	dev->ieee80211_ptr = &vif->wdev;
-	ether_addr_copy(dev->dev_addr, vif->mac_addr);
-	SET_NETDEV_DEV(dev, wiphy_dev(wiphy));
+	eth_hw_addr_set(dev, vif->mac_addr);
 	dev->flags |= IFF_BROADCAST | IFF_MULTICAST;
 	dev->watchdog_timeo = QTNF_DEF_WDOG_TIMEOUT;
 	dev->tx_queue_len = 100;
 	dev->ethtool_ops = &qtnf_ethtool_ops;
 
-	if (mac->bus->hw_info.hw_capab & QLINK_HW_CAPAB_HW_BRIDGE)
+	if (qtnf_hwcap_is_set(&mac->bus->hw_info, QLINK_HW_CAPAB_HW_BRIDGE))
 		dev->needed_tailroom = sizeof(struct qtnf_frame_meta_info);
 
 	qdev_vif = netdev_priv(dev);
 	*((void **)qdev_vif) = vif;
 
-	SET_NETDEV_DEV(dev, mac->bus->dev);
+	SET_NETDEV_DEV(dev, wiphy_dev(wiphy));
 
-	ret = register_netdevice(dev);
+	ret = cfg80211_register_netdevice(dev);
 	if (ret) {
 		free_netdev(dev);
 		vif->netdev = NULL;
@@ -539,7 +526,6 @@ static void qtnf_core_mac_detach(struct qtnf_bus *bus, unsigned int macid)
 		}
 		rtnl_unlock();
 		qtnf_sta_list_free(&vif->sta_list);
-		free_percpu(vif->stats64);
 	}
 
 	if (mac->wiphy_registered)
@@ -559,6 +545,7 @@ static void qtnf_core_mac_detach(struct qtnf_bus *bus, unsigned int macid)
 		wiphy->bands[band] = NULL;
 	}
 
+	platform_device_unregister(mac->pdev);
 	qtnf_mac_iface_comb_free(mac);
 	qtnf_mac_ext_caps_free(mac);
 	kfree(mac->macinfo.wowlan);
@@ -585,16 +572,6 @@ static int qtnf_core_mac_attach(struct qtnf_bus *bus, unsigned int macid)
 		return PTR_ERR(mac);
 	}
 
-	ret = qtnf_cmd_get_mac_info(mac);
-	if (ret) {
-		pr_err("MAC%u: failed to get info\n", macid);
-		goto error;
-	}
-
-	/* Use MAC address of the first active radio as a unique device ID */
-	if (is_zero_ether_addr(mac->bus->hw_id))
-		ether_addr_copy(mac->bus->hw_id, mac->macaddr);
-
 	vif = qtnf_mac_get_base_vif(mac);
 	if (!vif) {
 		pr_err("MAC%u: primary VIF is not ready\n", macid);
@@ -609,11 +586,15 @@ static int qtnf_core_mac_attach(struct qtnf_bus *bus, unsigned int macid)
 		goto error;
 	}
 
-	ret = qtnf_cmd_send_get_phy_params(mac);
+	ret = qtnf_cmd_get_mac_info(mac);
 	if (ret) {
-		pr_err("MAC%u: failed to get PHY settings\n", macid);
+		pr_err("MAC%u: failed to get MAC info\n", macid);
 		goto error_del_vif;
 	}
+
+	/* Use MAC address of the first active radio as a unique device ID */
+	if (is_zero_ether_addr(mac->bus->hw_id))
+		ether_addr_copy(mac->bus->hw_id, mac->macaddr);
 
 	ret = qtnf_mac_init_bands(mac);
 	if (ret) {
@@ -630,8 +611,9 @@ static int qtnf_core_mac_attach(struct qtnf_bus *bus, unsigned int macid)
 	mac->wiphy_registered = 1;
 
 	rtnl_lock();
-
+	wiphy_lock(priv_to_wiphy(mac));
 	ret = qtnf_core_net_attach(mac, vif, "wlan%d", NET_NAME_ENUM);
+	wiphy_unlock(priv_to_wiphy(mac));
 	rtnl_unlock();
 
 	if (ret) {
@@ -639,7 +621,7 @@ static int qtnf_core_mac_attach(struct qtnf_bus *bus, unsigned int macid)
 		goto error_del_vif;
 	}
 
-	if (bus->hw_info.hw_capab & QLINK_HW_CAPAB_HW_BRIDGE) {
+	if (qtnf_hwcap_is_set(&bus->hw_info, QLINK_HW_CAPAB_HW_BRIDGE)) {
 		ret = qtnf_cmd_netdev_changeupper(vif, vif->netdev->ifindex);
 		if (ret)
 			goto error;
@@ -662,9 +644,10 @@ bool qtnf_netdev_is_qtn(const struct net_device *ndev)
 	return ndev->netdev_ops == &qtnf_netdev_ops;
 }
 
-static int qtnf_check_br_ports(struct net_device *dev, void *data)
+static int qtnf_check_br_ports(struct net_device *dev,
+			       struct netdev_nested_priv *priv)
 {
-	struct net_device *ndev = data;
+	struct net_device *ndev = (struct net_device *)priv->data;
 
 	if (dev != ndev && netdev_port_same_parent_id(dev, ndev))
 		return -ENOTSUPP;
@@ -677,6 +660,9 @@ static int qtnf_core_netdevice_event(struct notifier_block *nb,
 {
 	struct net_device *ndev = netdev_notifier_info_to_dev(ptr);
 	const struct netdev_notifier_changeupper_info *info;
+	struct netdev_nested_priv priv = {
+		.data = (void *)ndev,
+	};
 	struct net_device *brdev;
 	struct qtnf_vif *vif;
 	struct qtnf_bus *bus;
@@ -705,7 +691,8 @@ static int qtnf_core_netdevice_event(struct notifier_block *nb,
 			 info->linking ? "add" : "del");
 
 		if (IS_ENABLED(CONFIG_NET_SWITCHDEV) &&
-		    (bus->hw_info.hw_capab & QLINK_HW_CAPAB_HW_BRIDGE)) {
+		    qtnf_hwcap_is_set(&bus->hw_info,
+				      QLINK_HW_CAPAB_HW_BRIDGE)) {
 			if (info->linking)
 				br_domain = brdev->ifindex;
 			else
@@ -715,7 +702,7 @@ static int qtnf_core_netdevice_event(struct notifier_block *nb,
 		} else {
 			ret = netdev_walk_all_lower_dev(brdev,
 							qtnf_check_br_ports,
-							ndev);
+							&priv);
 		}
 
 		break;
@@ -756,6 +743,15 @@ int qtnf_core_attach(struct qtnf_bus *bus)
 		goto error;
 	}
 
+	if (QLINK_VER_MAJOR(bus->hw_info.ql_proto_ver) !=
+	    QLINK_PROTO_VER_MAJOR) {
+		pr_err("qlink driver vs FW version mismatch: %u vs %u\n",
+		       QLINK_PROTO_VER_MAJOR,
+		       QLINK_VER_MAJOR(bus->hw_info.ql_proto_ver));
+		ret = -EPROTONOSUPPORT;
+		goto error;
+	}
+
 	bus->fw_state = QTNF_FW_STATE_ACTIVE;
 	ret = qtnf_cmd_get_hw_info(bus);
 	if (ret) {
@@ -763,14 +759,7 @@ int qtnf_core_attach(struct qtnf_bus *bus)
 		goto error;
 	}
 
-	if (bus->hw_info.ql_proto_ver != QLINK_PROTO_VER) {
-		pr_err("qlink version mismatch %u != %u\n",
-		       QLINK_PROTO_VER, bus->hw_info.ql_proto_ver);
-		ret = -EPROTONOSUPPORT;
-		goto error;
-	}
-
-	if ((bus->hw_info.hw_capab & QLINK_HW_CAPAB_HW_BRIDGE) &&
+	if (qtnf_hwcap_is_set(&bus->hw_info, QLINK_HW_CAPAB_HW_BRIDGE) &&
 	    bus->bus_ops->data_tx_use_meta_set)
 		bus->bus_ops->data_tx_use_meta_set(bus, true);
 
@@ -822,13 +811,11 @@ void qtnf_core_detach(struct qtnf_bus *bus)
 	bus->fw_state = QTNF_FW_STATE_DETACHED;
 
 	if (bus->workqueue) {
-		flush_workqueue(bus->workqueue);
 		destroy_workqueue(bus->workqueue);
 		bus->workqueue = NULL;
 	}
 
 	if (bus->hprio_workqueue) {
-		flush_workqueue(bus->hprio_workqueue);
 		destroy_workqueue(bus->hprio_workqueue);
 		bus->hprio_workqueue = NULL;
 	}
@@ -929,46 +916,6 @@ void qtnf_wake_all_queues(struct net_device *ndev)
 	}
 }
 EXPORT_SYMBOL_GPL(qtnf_wake_all_queues);
-
-void qtnf_update_rx_stats(struct net_device *ndev, const struct sk_buff *skb)
-{
-	struct qtnf_vif *vif = qtnf_netdev_get_priv(ndev);
-	struct pcpu_sw_netstats *stats64;
-
-	if (unlikely(!vif || !vif->stats64)) {
-		ndev->stats.rx_packets++;
-		ndev->stats.rx_bytes += skb->len;
-		return;
-	}
-
-	stats64 = this_cpu_ptr(vif->stats64);
-
-	u64_stats_update_begin(&stats64->syncp);
-	stats64->rx_packets++;
-	stats64->rx_bytes += skb->len;
-	u64_stats_update_end(&stats64->syncp);
-}
-EXPORT_SYMBOL_GPL(qtnf_update_rx_stats);
-
-void qtnf_update_tx_stats(struct net_device *ndev, const struct sk_buff *skb)
-{
-	struct qtnf_vif *vif = qtnf_netdev_get_priv(ndev);
-	struct pcpu_sw_netstats *stats64;
-
-	if (unlikely(!vif || !vif->stats64)) {
-		ndev->stats.tx_packets++;
-		ndev->stats.tx_bytes += skb->len;
-		return;
-	}
-
-	stats64 = this_cpu_ptr(vif->stats64);
-
-	u64_stats_update_begin(&stats64->syncp);
-	stats64->tx_packets++;
-	stats64->tx_bytes += skb->len;
-	u64_stats_update_end(&stats64->syncp);
-}
-EXPORT_SYMBOL_GPL(qtnf_update_tx_stats);
 
 struct dentry *qtnf_get_debugfs_dir(void)
 {

@@ -14,14 +14,15 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/mmiotrace.h>
-#include <linux/mem_encrypt.h>
+#include <linux/cc_platform.h>
 #include <linux/efi.h>
+#include <linux/pgtable.h>
+#include <linux/kmsan.h>
 
 #include <asm/set_memory.h>
 #include <asm/e820/api.h>
 #include <asm/efi.h>
 #include <asm/fixmap.h>
-#include <asm/pgtable.h>
 #include <asm/tlbflush.h>
 #include <asm/pgalloc.h>
 #include <asm/memtype.h>
@@ -92,7 +93,7 @@ static unsigned int __ioremap_check_ram(struct resource *res)
  */
 static unsigned int __ioremap_check_encrypted(struct resource *res)
 {
-	if (!sev_active())
+	if (!cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT))
 		return 0;
 
 	switch (res->desc) {
@@ -104,6 +105,24 @@ static unsigned int __ioremap_check_encrypted(struct resource *res)
 	}
 
 	return 0;
+}
+
+/*
+ * The EFI runtime services data area is not covered by walk_mem_res(), but must
+ * be mapped encrypted when SEV is active.
+ */
+static void __ioremap_check_other(resource_size_t addr, struct ioremap_desc *desc)
+{
+	if (!cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT))
+		return;
+
+	if (!IS_ENABLED(CONFIG_EFI))
+		return;
+
+	if (efi_mem_type(addr) == EFI_RUNTIME_SERVICES_DATA ||
+	    (efi_mem_type(addr) == EFI_BOOT_SERVICES_DATA &&
+	     efi_mem_attributes(addr) & EFI_MEMORY_RUNTIME))
+		desc->flags |= IORES_MAP_ENCRYPTED;
 }
 
 static int __ioremap_collect_map_flags(struct resource *res, void *arg)
@@ -124,6 +143,9 @@ static int __ioremap_collect_map_flags(struct resource *res, void *arg)
  * To avoid multiple resource walks, this function walks resources marked as
  * IORESOURCE_MEM and IORESOURCE_BUSY and looking for system RAM and/or a
  * resource described not as IORES_DESC_NONE (e.g. IORES_DESC_ACPI_TABLES).
+ *
+ * After that, deal with misc other ranges in __ioremap_check_other() which do
+ * not fall into the above category.
  */
 static void __ioremap_check_mem(resource_size_t addr, unsigned long size,
 				struct ioremap_desc *desc)
@@ -135,6 +157,8 @@ static void __ioremap_check_mem(resource_size_t addr, unsigned long size,
 	memset(desc, 0, sizeof(struct ioremap_desc));
 
 	walk_mem_res(start, end, desc, __ioremap_collect_map_flags);
+
+	__ioremap_check_other(addr, desc);
 }
 
 /*
@@ -193,8 +217,14 @@ __ioremap_caller(resource_size_t phys_addr, unsigned long size,
 	 * Mappings have to be page-aligned
 	 */
 	offset = phys_addr & ~PAGE_MASK;
-	phys_addr &= PHYSICAL_PAGE_MASK;
+	phys_addr &= PAGE_MASK;
 	size = PAGE_ALIGN(last_addr+1) - phys_addr;
+
+	/*
+	 * Mask out any bits not part of the actual physical
+	 * address, like memory encryption bits.
+	 */
+	phys_addr &= PHYSICAL_PAGE_MASK;
 
 	retval = memtype_reserve(phys_addr, (u64)phys_addr + size,
 						pcm, &new_pcm);
@@ -219,10 +249,15 @@ __ioremap_caller(resource_size_t phys_addr, unsigned long size,
 	 * If the page being mapped is in memory and SEV is active then
 	 * make sure the memory encryption attribute is enabled in the
 	 * resulting mapping.
+	 * In TDX guests, memory is marked private by default. If encryption
+	 * is not requested (using encrypted), explicitly set decrypt
+	 * attribute in all IOREMAPPED memory.
 	 */
 	prot = PAGE_KERNEL_IO;
 	if ((io_desc.flags & IORES_MAP_ENCRYPTED) || encrypted)
 		prot = pgprot_encrypted(prot);
+	else
+		prot = pgprot_decrypted(prot);
 
 	switch (pcm) {
 	case _PAGE_CACHE_MODE_UC:
@@ -451,6 +486,8 @@ void iounmap(volatile void __iomem *addr)
 		return;
 	}
 
+	kmsan_iounmap_page_range((unsigned long)addr,
+		(unsigned long)addr + get_vm_area_size(p));
 	memtype_free(p->phys_addr, p->phys_addr + get_vm_area_size(p));
 
 	/* Finally remove it */
@@ -459,25 +496,6 @@ void iounmap(volatile void __iomem *addr)
 	kfree(p);
 }
 EXPORT_SYMBOL(iounmap);
-
-int __init arch_ioremap_p4d_supported(void)
-{
-	return 0;
-}
-
-int __init arch_ioremap_pud_supported(void)
-{
-#ifdef CONFIG_X86_64
-	return boot_cpu_has(X86_FEATURE_GBPAGES);
-#else
-	return 0;
-#endif
-}
-
-int __init arch_ioremap_pmd_supported(void)
-{
-	return boot_cpu_has(X86_FEATURE_PSE);
-}
 
 /*
  * Convert a physical pointer to a virtual kernel pointer for /dev/mem
@@ -504,6 +522,7 @@ void unxlate_dev_mem_ptr(phys_addr_t phys, void *addr)
 	memunmap((void *)((unsigned long)addr & PAGE_MASK));
 }
 
+#ifdef CONFIG_AMD_MEM_ENCRYPT
 /*
  * Examine the physical address to determine if it is an area of memory
  * that should be mapped decrypted.  If the memory is not part of the
@@ -551,9 +570,9 @@ static bool memremap_should_map_decrypted(resource_size_t phys_addr,
 	case E820_TYPE_NVS:
 	case E820_TYPE_UNUSABLE:
 		/* For SEV, these areas are encrypted */
-		if (sev_active())
+		if (cc_platform_has(CC_ATTR_GUEST_MEM_ENCRYPT))
 			break;
-		/* Fallthrough */
+		fallthrough;
 
 	case E820_TYPE_PRAM:
 		return true;
@@ -610,6 +629,7 @@ static bool memremap_is_efi_data(resource_size_t phys_addr,
 static bool memremap_is_setup_data(resource_size_t phys_addr,
 				   unsigned long size)
 {
+	struct setup_indirect *indirect;
 	struct setup_data *data;
 	u64 paddr, paddr_next;
 
@@ -622,6 +642,10 @@ static bool memremap_is_setup_data(resource_size_t phys_addr,
 
 		data = memremap(paddr, sizeof(*data),
 				MEMREMAP_WB | MEMREMAP_DEC);
+		if (!data) {
+			pr_warn("failed to memremap setup_data entry\n");
+			return false;
+		}
 
 		paddr_next = data->next;
 		len = data->len;
@@ -631,10 +655,21 @@ static bool memremap_is_setup_data(resource_size_t phys_addr,
 			return true;
 		}
 
-		if (data->type == SETUP_INDIRECT &&
-		    ((struct setup_indirect *)data->data)->type != SETUP_INDIRECT) {
-			paddr = ((struct setup_indirect *)data->data)->addr;
-			len = ((struct setup_indirect *)data->data)->len;
+		if (data->type == SETUP_INDIRECT) {
+			memunmap(data);
+			data = memremap(paddr, sizeof(*data) + len,
+					MEMREMAP_WB | MEMREMAP_DEC);
+			if (!data) {
+				pr_warn("failed to memremap indirect setup_data\n");
+				return false;
+			}
+
+			indirect = (struct setup_indirect *)data->data;
+
+			if (indirect->type != SETUP_INDIRECT) {
+				paddr = indirect->addr;
+				len = indirect->len;
+			}
 		}
 
 		memunmap(data);
@@ -655,22 +690,51 @@ static bool memremap_is_setup_data(resource_size_t phys_addr,
 static bool __init early_memremap_is_setup_data(resource_size_t phys_addr,
 						unsigned long size)
 {
+	struct setup_indirect *indirect;
 	struct setup_data *data;
 	u64 paddr, paddr_next;
 
 	paddr = boot_params.hdr.setup_data;
 	while (paddr) {
-		unsigned int len;
+		unsigned int len, size;
 
 		if (phys_addr == paddr)
 			return true;
 
 		data = early_memremap_decrypted(paddr, sizeof(*data));
+		if (!data) {
+			pr_warn("failed to early memremap setup_data entry\n");
+			return false;
+		}
+
+		size = sizeof(*data);
 
 		paddr_next = data->next;
 		len = data->len;
 
-		early_memunmap(data, sizeof(*data));
+		if ((phys_addr > paddr) && (phys_addr < (paddr + len))) {
+			early_memunmap(data, sizeof(*data));
+			return true;
+		}
+
+		if (data->type == SETUP_INDIRECT) {
+			size += len;
+			early_memunmap(data, sizeof(*data));
+			data = early_memremap_decrypted(paddr, size);
+			if (!data) {
+				pr_warn("failed to early memremap indirect setup_data\n");
+				return false;
+			}
+
+			indirect = (struct setup_indirect *)data->data;
+
+			if (indirect->type != SETUP_INDIRECT) {
+				paddr = indirect->addr;
+				len = indirect->len;
+			}
+		}
+
+		early_memunmap(data, size);
 
 		if ((phys_addr > paddr) && (phys_addr < (paddr + len)))
 			return true;
@@ -689,7 +753,7 @@ static bool __init early_memremap_is_setup_data(resource_size_t phys_addr,
 bool arch_memremap_can_ram_remap(resource_size_t phys_addr, unsigned long size,
 				 unsigned long flags)
 {
-	if (!mem_encrypt_active())
+	if (!cc_platform_has(CC_ATTR_MEM_ENCRYPT))
 		return true;
 
 	if (flags & MEMREMAP_ENC)
@@ -698,7 +762,7 @@ bool arch_memremap_can_ram_remap(resource_size_t phys_addr, unsigned long size,
 	if (flags & MEMREMAP_DEC)
 		return false;
 
-	if (sme_active()) {
+	if (cc_platform_has(CC_ATTR_HOST_MEM_ENCRYPT)) {
 		if (memremap_is_setup_data(phys_addr, size) ||
 		    memremap_is_efi_data(phys_addr, size))
 			return false;
@@ -719,12 +783,12 @@ pgprot_t __init early_memremap_pgprot_adjust(resource_size_t phys_addr,
 {
 	bool encrypted_prot;
 
-	if (!mem_encrypt_active())
+	if (!cc_platform_has(CC_ATTR_MEM_ENCRYPT))
 		return prot;
 
 	encrypted_prot = true;
 
-	if (sme_active()) {
+	if (cc_platform_has(CC_ATTR_HOST_MEM_ENCRYPT)) {
 		if (early_memremap_is_setup_data(phys_addr, size) ||
 		    memremap_is_efi_data(phys_addr, size))
 			encrypted_prot = false;
@@ -742,7 +806,6 @@ bool phys_mem_access_encrypted(unsigned long phys_addr, unsigned long size)
 	return arch_memremap_can_ram_remap(phys_addr, size, 0);
 }
 
-#ifdef CONFIG_AMD_MEM_ENCRYPT
 /* Remap memory with encryption */
 void __init *early_memremap_encrypted(resource_size_t phys_addr,
 				      unsigned long size)
@@ -757,10 +820,8 @@ void __init *early_memremap_encrypted(resource_size_t phys_addr,
 void __init *early_memremap_encrypted_wp(resource_size_t phys_addr,
 					 unsigned long size)
 {
-	/* Be sure the write-protect PAT entry is set for write-protect */
-	if (__pte2cachemode_tbl[_PAGE_CACHE_MODE_WP] != _PAGE_CACHE_MODE_WP)
+	if (!x86_has_pat_wp())
 		return NULL;
-
 	return early_memremap_prot(phys_addr, size, __PAGE_KERNEL_ENC_WP);
 }
 
@@ -778,10 +839,8 @@ void __init *early_memremap_decrypted(resource_size_t phys_addr,
 void __init *early_memremap_decrypted_wp(resource_size_t phys_addr,
 					 unsigned long size)
 {
-	/* Be sure the write-protect PAT entry is set for write-protect */
-	if (__pte2cachemode_tbl[_PAGE_CACHE_MODE_WP] != _PAGE_CACHE_MODE_WP)
+	if (!x86_has_pat_wp())
 		return NULL;
-
 	return early_memremap_prot(phys_addr, size, __PAGE_KERNEL_NOENC_WP);
 }
 #endif	/* CONFIG_AMD_MEM_ENCRYPT */
@@ -868,5 +927,5 @@ void __init __early_set_fixmap(enum fixed_addresses idx,
 		set_pte(pte, pfn_pte(phys >> PAGE_SHIFT, flags));
 	else
 		pte_clear(&init_mm, addr, pte);
-	__flush_tlb_one_kernel(addr);
+	flush_tlb_one_kernel(addr);
 }

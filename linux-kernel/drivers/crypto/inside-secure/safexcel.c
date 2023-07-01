@@ -304,6 +304,11 @@ static void eip197_init_firmware(struct safexcel_crypto_priv *priv)
 		/* Enable access to all IFPP program memories */
 		writel(EIP197_PE_ICE_RAM_CTRL_FPP_PROG_EN,
 		       EIP197_PE(priv) + EIP197_PE_ICE_RAM_CTRL(pe));
+
+		/* bypass the OCE, if present */
+		if (priv->flags & EIP197_OCE)
+			writel(EIP197_DEBUG_OCE_BYPASS, EIP197_PE(priv) +
+							EIP197_PE_DEBUG(pe));
 	}
 
 }
@@ -311,14 +316,20 @@ static void eip197_init_firmware(struct safexcel_crypto_priv *priv)
 static int eip197_write_firmware(struct safexcel_crypto_priv *priv,
 				  const struct firmware *fw)
 {
-	const __be32 *data = (const __be32 *)fw->data;
+	u32 val;
 	int i;
 
 	/* Write the firmware */
-	for (i = 0; i < fw->size / sizeof(u32); i++)
-		writel(be32_to_cpu(data[i]),
+	for (i = 0; i < fw->size / sizeof(u32); i++) {
+		if (priv->data->fw_little_endian)
+			val = le32_to_cpu(((const __le32 *)fw->data)[i]);
+		else
+			val = be32_to_cpu(((const __be32 *)fw->data)[i]);
+
+		writel(val,
 		       priv->base + EIP197_CLASSIFICATION_RAMS +
-		       i * sizeof(__be32));
+		       i * sizeof(val));
+	}
 
 	/* Exclude final 2 NOPs from size */
 	return i - EIP197_FW_TERMINAL_NOPS;
@@ -405,11 +416,13 @@ static int eip197_load_firmwares(struct safexcel_crypto_priv *priv)
 	int i, j, ret = 0, pe;
 	int ipuesz, ifppsz, minifw = 0;
 
-	if (priv->version == EIP197D_MRVL)
+	if (priv->data->version == EIP197D_MRVL)
 		dir = "eip197d";
-	else if (priv->version == EIP197B_MRVL ||
-		 priv->version == EIP197_DEVBRD)
+	else if (priv->data->version == EIP197B_MRVL ||
+		 priv->data->version == EIP197_DEVBRD)
 		dir = "eip197b";
+	else if (priv->data->version == EIP197C_MXL)
+		dir = "eip197c";
 	else
 		return -ENODEV;
 
@@ -418,7 +431,7 @@ retry_fw:
 		snprintf(fw_path, 37, "inside-secure/%s/%s", dir, fw_name[i]);
 		ret = firmware_request_nowarn(&fw[i], fw_path, priv->dev);
 		if (ret) {
-			if (minifw || priv->version != EIP197B_MRVL)
+			if (minifw || priv->data->version != EIP197B_MRVL)
 				goto release_fw;
 
 			/* Fallback to the old firmware location for the
@@ -683,7 +696,7 @@ static int safexcel_hw_init(struct safexcel_crypto_priv *priv)
 		/* Leave the DSE threads reset state */
 		writel(0, EIP197_HIA_DSE_THR(priv) + EIP197_HIA_DSE_THR_CTRL(pe));
 
-		/* Configure the procesing engine thresholds */
+		/* Configure the processing engine thresholds */
 		writel(EIP197_PE_OUT_DBUF_THRES_MIN(opbuflo) |
 		       EIP197_PE_OUT_DBUF_THRES_MAX(opbufhi),
 		       EIP197_PE(priv) + EIP197_PE_OUT_DBUF_THRES(pe));
@@ -837,7 +850,7 @@ handle_req:
 			goto request_failed;
 
 		if (backlog)
-			backlog->complete(backlog, -EINPROGRESS);
+			crypto_request_complete(backlog, -EINPROGRESS);
 
 		/* In case the send() helper did not issue any command to push
 		 * to the engine because the input data was cached, continue to
@@ -957,17 +970,6 @@ void safexcel_complete(struct safexcel_crypto_priv *priv, int ring)
 	} while (!cdesc->last_seg);
 }
 
-void safexcel_inv_complete(struct crypto_async_request *req, int error)
-{
-	struct safexcel_inv_result *result = req->data;
-
-	if (error == -EINPROGRESS)
-		return;
-
-	result->error = error;
-	complete(&result->completion);
-}
-
 int safexcel_invalidate_cache(struct crypto_async_request *async,
 			      struct safexcel_crypto_priv *priv,
 			      dma_addr_t ctxr_dma, int ring)
@@ -1037,7 +1039,7 @@ handle_results:
 
 		if (should_complete) {
 			local_bh_disable();
-			req->complete(req, ret);
+			crypto_request_complete(req, ret);
 			local_bh_enable();
 		}
 
@@ -1135,11 +1137,12 @@ static irqreturn_t safexcel_irq_ring_thread(int irq, void *data)
 
 static int safexcel_request_ring_irq(void *pdev, int irqid,
 				     int is_pci_dev,
+				     int ring_id,
 				     irq_handler_t handler,
 				     irq_handler_t threaded_handler,
 				     struct safexcel_ring_irq_data *ring_irq_priv)
 {
-	int ret, irq;
+	int ret, irq, cpu;
 	struct device *dev;
 
 	if (IS_ENABLED(CONFIG_PCI) && is_pci_dev) {
@@ -1160,11 +1163,8 @@ static int safexcel_request_ring_irq(void *pdev, int irqid,
 		dev = &plf_pdev->dev;
 		irq = platform_get_irq_byname(plf_pdev, irq_name);
 
-		if (irq < 0) {
-			dev_err(dev, "unable to get IRQ '%s' (err %d)\n",
-				irq_name, irq);
+		if (irq < 0)
 			return irq;
-		}
 	} else {
 		return -ENXIO;
 	}
@@ -1176,6 +1176,10 @@ static int safexcel_request_ring_irq(void *pdev, int irqid,
 		dev_err(dev, "unable to request IRQ %d\n", irq);
 		return ret;
 	}
+
+	/* Set affinity */
+	cpu = cpumask_local_spread(ring_id, NUMA_NO_NODE);
+	irq_set_affinity_hint(irq, get_cpu_mask(cpu));
 
 	return irq;
 }
@@ -1490,6 +1494,9 @@ static int safexcel_probe_generic(void *pdev,
 	hwopt = readl(EIP197_GLOBAL(priv) + EIP197_OPTIONS);
 	hiaopt = readl(EIP197_HIA_AIC(priv) + EIP197_HIA_OPTIONS);
 
+	priv->hwconfig.icever = 0;
+	priv->hwconfig.ocever = 0;
+	priv->hwconfig.psever = 0;
 	if (priv->flags & SAFEXCEL_HW_EIP197) {
 		/* EIP197 */
 		peopt = readl(EIP197_PE(priv) + EIP197_PE_OPTIONS(0));
@@ -1508,8 +1515,37 @@ static int safexcel_probe_generic(void *pdev,
 					    EIP197_N_RINGS_MASK;
 		if (hiaopt & EIP197_HIA_OPT_HAS_PE_ARB)
 			priv->flags |= EIP197_PE_ARB;
-		if (EIP206_OPT_ICE_TYPE(peopt) == 1)
+		if (EIP206_OPT_ICE_TYPE(peopt) == 1) {
 			priv->flags |= EIP197_ICE;
+			/* Detect ICE EIP207 class. engine and version */
+			version = readl(EIP197_PE(priv) +
+				  EIP197_PE_ICE_VERSION(0));
+			if (EIP197_REG_LO16(version) != EIP207_VERSION_LE) {
+				dev_err(dev, "EIP%d: ICE EIP207 not detected.\n",
+					peid);
+				return -ENODEV;
+			}
+			priv->hwconfig.icever = EIP197_VERSION_MASK(version);
+		}
+		if (EIP206_OPT_OCE_TYPE(peopt) == 1) {
+			priv->flags |= EIP197_OCE;
+			/* Detect EIP96PP packet stream editor and version */
+			version = readl(EIP197_PE(priv) + EIP197_PE_PSE_VERSION(0));
+			if (EIP197_REG_LO16(version) != EIP96_VERSION_LE) {
+				dev_err(dev, "EIP%d: EIP96PP not detected.\n", peid);
+				return -ENODEV;
+			}
+			priv->hwconfig.psever = EIP197_VERSION_MASK(version);
+			/* Detect OCE EIP207 class. engine and version */
+			version = readl(EIP197_PE(priv) +
+				  EIP197_PE_ICE_VERSION(0));
+			if (EIP197_REG_LO16(version) != EIP207_VERSION_LE) {
+				dev_err(dev, "EIP%d: OCE EIP207 not detected.\n",
+					peid);
+				return -ENODEV;
+			}
+			priv->hwconfig.ocever = EIP197_VERSION_MASK(version);
+		}
 		/* If not a full TRC, then assume simple TRC */
 		if (!(hwopt & EIP197_OPT_HAS_TRC))
 			priv->flags |= EIP197_SIMPLE_TRC;
@@ -1547,17 +1583,18 @@ static int safexcel_probe_generic(void *pdev,
 				    EIP197_PE_EIP96_OPTIONS(0));
 
 	/* Print single info line describing what we just detected */
-	dev_info(priv->dev, "EIP%d:%x(%d,%d,%d,%d)-HIA:%x(%d,%d,%d),PE:%x/%x,alg:%08x\n",
+	dev_info(priv->dev, "EIP%d:%x(%d,%d,%d,%d)-HIA:%x(%d,%d,%d),PE:%x/%x(alg:%08x)/%x/%x/%x\n",
 		 peid, priv->hwconfig.hwver, hwctg, priv->hwconfig.hwnumpes,
 		 priv->hwconfig.hwnumrings, priv->hwconfig.hwnumraic,
 		 priv->hwconfig.hiaver, priv->hwconfig.hwdataw,
 		 priv->hwconfig.hwcfsize, priv->hwconfig.hwrfsize,
 		 priv->hwconfig.ppver, priv->hwconfig.pever,
-		 priv->hwconfig.algo_flags);
+		 priv->hwconfig.algo_flags, priv->hwconfig.icever,
+		 priv->hwconfig.ocever, priv->hwconfig.psever);
 
 	safexcel_configure(priv);
 
-	if (IS_ENABLED(CONFIG_PCI) && priv->version == EIP197_DEVBRD) {
+	if (IS_ENABLED(CONFIG_PCI) && priv->data->version == EIP197_DEVBRD) {
 		/*
 		 * Request MSI vectors for global + 1 per ring -
 		 * or just 1 for older dev images
@@ -1596,7 +1633,7 @@ static int safexcel_probe_generic(void *pdev,
 
 		priv->ring[i].rdr_req = devm_kcalloc(dev,
 			EIP197_DEFAULT_RING_SIZE,
-			sizeof(priv->ring[i].rdr_req),
+			sizeof(*priv->ring[i].rdr_req),
 			GFP_KERNEL);
 		if (!priv->ring[i].rdr_req)
 			return -ENOMEM;
@@ -1611,6 +1648,7 @@ static int safexcel_probe_generic(void *pdev,
 		irq = safexcel_request_ring_irq(pdev,
 						EIP197_IRQ_NUMBER(i, is_pci_dev),
 						is_pci_dev,
+						i,
 						safexcel_irq_ring,
 						safexcel_irq_ring_thread,
 						ring_irq);
@@ -1619,6 +1657,7 @@ static int safexcel_probe_generic(void *pdev,
 			return irq;
 		}
 
+		priv->ring[i].irq = irq;
 		priv->ring[i].work_data.priv = priv;
 		priv->ring[i].work_data.ring = i;
 		INIT_WORK(&priv->ring[i].work_data.work,
@@ -1689,7 +1728,7 @@ static int safexcel_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	priv->dev = dev;
-	priv->version = (enum safexcel_eip_version)of_device_get_match_data(dev);
+	priv->data = (struct safexcel_priv_data *)of_device_get_match_data(dev);
 
 	platform_set_drvdata(pdev, priv);
 
@@ -1756,36 +1795,65 @@ static int safexcel_remove(struct platform_device *pdev)
 	clk_disable_unprepare(priv->reg_clk);
 	clk_disable_unprepare(priv->clk);
 
-	for (i = 0; i < priv->config.rings; i++)
+	for (i = 0; i < priv->config.rings; i++) {
+		irq_set_affinity_hint(priv->ring[i].irq, NULL);
 		destroy_workqueue(priv->ring[i].workqueue);
+	}
 
 	return 0;
 }
 
+static const struct safexcel_priv_data eip97ies_mrvl_data = {
+	.version = EIP97IES_MRVL,
+};
+
+static const struct safexcel_priv_data eip197b_mrvl_data = {
+	.version = EIP197B_MRVL,
+};
+
+static const struct safexcel_priv_data eip197d_mrvl_data = {
+	.version = EIP197D_MRVL,
+};
+
+static const struct safexcel_priv_data eip197_devbrd_data = {
+	.version = EIP197_DEVBRD,
+};
+
+static const struct safexcel_priv_data eip197c_mxl_data = {
+	.version = EIP197C_MXL,
+	.fw_little_endian = true,
+};
+
 static const struct of_device_id safexcel_of_match_table[] = {
 	{
 		.compatible = "inside-secure,safexcel-eip97ies",
-		.data = (void *)EIP97IES_MRVL,
+		.data = &eip97ies_mrvl_data,
 	},
 	{
 		.compatible = "inside-secure,safexcel-eip197b",
-		.data = (void *)EIP197B_MRVL,
+		.data = &eip197b_mrvl_data,
 	},
 	{
 		.compatible = "inside-secure,safexcel-eip197d",
-		.data = (void *)EIP197D_MRVL,
+		.data = &eip197d_mrvl_data,
+	},
+	{
+		.compatible = "inside-secure,safexcel-eip197c-mxl",
+		.data = &eip197c_mxl_data,
 	},
 	/* For backward compatibility and intended for generic use */
 	{
 		.compatible = "inside-secure,safexcel-eip97",
-		.data = (void *)EIP97IES_MRVL,
+		.data = &eip97ies_mrvl_data,
 	},
 	{
 		.compatible = "inside-secure,safexcel-eip197",
-		.data = (void *)EIP197B_MRVL,
+		.data = &eip197b_mrvl_data,
 	},
 	{},
 };
+
+MODULE_DEVICE_TABLE(of, safexcel_of_match_table);
 
 static struct platform_driver  crypto_safexcel = {
 	.probe		= safexcel_probe,
@@ -1816,7 +1884,7 @@ static int safexcel_pci_probe(struct pci_dev *pdev,
 		return -ENOMEM;
 
 	priv->dev = dev;
-	priv->version = (enum safexcel_eip_version)ent->driver_data;
+	priv->data = (struct safexcel_priv_data *)ent->driver_data;
 
 	pci_set_drvdata(pdev, priv);
 
@@ -1835,7 +1903,7 @@ static int safexcel_pci_probe(struct pci_dev *pdev,
 	}
 	priv->base = pcim_iomap_table(pdev)[0];
 
-	if (priv->version == EIP197_DEVBRD) {
+	if (priv->data->version == EIP197_DEVBRD) {
 		dev_dbg(dev, "Device identified as FPGA based development board - applying HW reset\n");
 
 		rc = pcim_iomap_regions(pdev, 4, "crypto_safexcel");
@@ -1903,7 +1971,7 @@ static const struct pci_device_id safexcel_pci_ids[] = {
 	{
 		PCI_DEVICE_SUB(PCI_VENDOR_ID_XILINX, 0x9038,
 			       0x16ae, 0xc522),
-		.driver_data = EIP197_DEVBRD,
+		.driver_data = (kernel_ulong_t)&eip197_devbrd_data,
 	},
 	{},
 };
@@ -1952,3 +2020,13 @@ MODULE_AUTHOR("Ofer Heifetz <oferh@marvell.com>");
 MODULE_AUTHOR("Igal Liberman <igall@marvell.com>");
 MODULE_DESCRIPTION("Support for SafeXcel cryptographic engines: EIP97 & EIP197");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS(CRYPTO_INTERNAL);
+
+MODULE_FIRMWARE("ifpp.bin");
+MODULE_FIRMWARE("ipue.bin");
+MODULE_FIRMWARE("inside-secure/eip197b/ifpp.bin");
+MODULE_FIRMWARE("inside-secure/eip197b/ipue.bin");
+MODULE_FIRMWARE("inside-secure/eip197d/ifpp.bin");
+MODULE_FIRMWARE("inside-secure/eip197d/ipue.bin");
+MODULE_FIRMWARE("inside-secure/eip197_minifw/ifpp.bin");
+MODULE_FIRMWARE("inside-secure/eip197_minifw/ipue.bin");

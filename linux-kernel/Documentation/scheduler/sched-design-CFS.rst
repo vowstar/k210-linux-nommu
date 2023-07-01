@@ -34,9 +34,9 @@ In CFS the virtual runtime is expressed and tracked via the per-task
 p->se.vruntime (nanosec-unit) value.  This way, it's possible to accurately
 timestamp and measure the "expected CPU time" a task should have gotten.
 
-[ small detail: on "ideal" hardware, at any time all tasks would have the same
-  p->se.vruntime value --- i.e., tasks would execute simultaneously and no task
-  would ever get "out of balance" from the "ideal" share of CPU time.  ]
+   Small detail: on "ideal" hardware, at any time all tasks would have the same
+   p->se.vruntime value --- i.e., tasks would execute simultaneously and no task
+   would ever get "out of balance" from the "ideal" share of CPU time.
 
 CFS's task picking logic is based on this p->se.vruntime value and it is thus
 very simple: it always tries to run the task with the smallest p->se.vruntime
@@ -94,7 +94,7 @@ other HZ detail.  Thus the CFS scheduler has no notion of "timeslices" in the
 way the previous scheduler had, and has no heuristics whatsoever.  There is
 only one central tunable (you have to switch on CONFIG_SCHED_DEBUG):
 
-   /proc/sys/kernel/sched_min_granularity_ns
+   /sys/kernel/debug/sched/min_granularity_ns
 
 which can be used to tune the scheduler from "desktop" (i.e., low latencies) to
 "server" (i.e., good batching) workloads.  It defaults to a setting suitable

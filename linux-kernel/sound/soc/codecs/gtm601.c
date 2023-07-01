@@ -73,7 +73,6 @@ static const struct snd_soc_component_driver soc_component_dev_gtm601 = {
 	.idle_bias_on		= 1,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 static int gtm601_platform_probe(struct platform_device *pdev)
@@ -87,7 +86,7 @@ static int gtm601_platform_probe(struct platform_device *pdev)
 			(struct snd_soc_dai_driver *)dai_driver, 1);
 }
 
-static const struct of_device_id gtm601_codec_of_match[] = {
+static const struct of_device_id gtm601_codec_of_match[] __maybe_unused = {
 	{ .compatible = "option,gtm601", .data = (void *)&gtm601_dai },
 	{ .compatible = "broadmobi,bm818", .data = (void *)&bm818_dai },
 	{},

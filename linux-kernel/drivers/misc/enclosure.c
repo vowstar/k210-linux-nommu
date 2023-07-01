@@ -32,7 +32,7 @@ static struct class enclosure_class;
  * found. @start can be used as a starting point to obtain multiple
  * enclosures per parent (should begin with NULL and then be set to
  * each returned enclosure device). Obtains a reference to the
- * enclosure class device which must be released with device_put().
+ * enclosure class device which must be released with put_device().
  * If @start is not NULL, a reference must be taken on it which is
  * released before returning (this allows a loop through all
  * enclosures to exit with only the reference on the enclosure of
@@ -103,7 +103,9 @@ EXPORT_SYMBOL_GPL(enclosure_for_each_device);
  * enclosure_register - register device as an enclosure
  *
  * @dev:	device containing the enclosure
+ * @name:	chosen device name
  * @components:	number of components in the enclosure
+ * @cb:         platform call-backs
  *
  * This sets up the device for being an enclosure.  Note that @dev does
  * not have to be a dedicated enclosure device.  It may be some other type
@@ -266,7 +268,7 @@ static const struct attribute_group *enclosure_component_groups[];
 /**
  * enclosure_component_alloc - prepare a new enclosure component
  * @edev:	the enclosure to add the component
- * @num:	the device number
+ * @number:	the device number
  * @type:	the type of component being added
  * @name:	an optional name to appear in sysfs (leave NULL if none)
  *
@@ -347,7 +349,7 @@ EXPORT_SYMBOL_GPL(enclosure_component_register);
 /**
  * enclosure_add_device - add a device as being part of an enclosure
  * @edev:	the enclosure device being added to.
- * @num:	the number of the component
+ * @component:	the number of the component
  * @dev:	the device being added
  *
  * Declares a real device to reside in slot (or identifier) @num of an
@@ -389,7 +391,7 @@ EXPORT_SYMBOL_GPL(enclosure_add_device);
 /**
  * enclosure_remove_device - remove a device from an enclosure
  * @edev:	the enclosure device
- * @num:	the number of the component to remove
+ * @dev:	device to remove/put
  *
  * Returns zero on success or an error.
  *
@@ -424,7 +426,7 @@ static ssize_t components_show(struct device *cdev,
 {
 	struct enclosure_device *edev = to_enclosure_device(cdev);
 
-	return snprintf(buf, 40, "%d\n", edev->components);
+	return sysfs_emit(buf, "%d\n", edev->components);
 }
 static DEVICE_ATTR_RO(components);
 
@@ -479,7 +481,7 @@ static ssize_t get_component_fault(struct device *cdev,
 
 	if (edev->cb->get_fault)
 		edev->cb->get_fault(edev, ecomp);
-	return snprintf(buf, 40, "%d\n", ecomp->fault);
+	return sysfs_emit(buf, "%d\n", ecomp->fault);
 }
 
 static ssize_t set_component_fault(struct device *cdev,
@@ -503,7 +505,7 @@ static ssize_t get_component_status(struct device *cdev,
 
 	if (edev->cb->get_status)
 		edev->cb->get_status(edev, ecomp);
-	return snprintf(buf, 40, "%s\n", enclosure_status[ecomp->status]);
+	return sysfs_emit(buf, "%s\n", enclosure_status[ecomp->status]);
 }
 
 static ssize_t set_component_status(struct device *cdev,
@@ -537,7 +539,7 @@ static ssize_t get_component_active(struct device *cdev,
 
 	if (edev->cb->get_active)
 		edev->cb->get_active(edev, ecomp);
-	return snprintf(buf, 40, "%d\n", ecomp->active);
+	return sysfs_emit(buf, "%d\n", ecomp->active);
 }
 
 static ssize_t set_component_active(struct device *cdev,
@@ -561,7 +563,7 @@ static ssize_t get_component_locate(struct device *cdev,
 
 	if (edev->cb->get_locate)
 		edev->cb->get_locate(edev, ecomp);
-	return snprintf(buf, 40, "%d\n", ecomp->locate);
+	return sysfs_emit(buf, "%d\n", ecomp->locate);
 }
 
 static ssize_t set_component_locate(struct device *cdev,
@@ -591,7 +593,7 @@ static ssize_t get_component_power_status(struct device *cdev,
 	if (ecomp->power_status == -1)
 		return (edev->cb->get_power_status) ? -EIO : -ENOTTY;
 
-	return snprintf(buf, 40, "%s\n", ecomp->power_status ? "on" : "off");
+	return sysfs_emit(buf, "%s\n", ecomp->power_status ? "on" : "off");
 }
 
 static ssize_t set_component_power_status(struct device *cdev,
@@ -621,7 +623,7 @@ static ssize_t get_component_type(struct device *cdev,
 {
 	struct enclosure_component *ecomp = to_enclosure_component(cdev);
 
-	return snprintf(buf, 40, "%s\n", enclosure_type[ecomp->type]);
+	return sysfs_emit(buf, "%s\n", enclosure_type[ecomp->type]);
 }
 
 static ssize_t get_component_slot(struct device *cdev,
@@ -636,7 +638,7 @@ static ssize_t get_component_slot(struct device *cdev,
 	else
 		slot = ecomp->number;
 
-	return snprintf(buf, 40, "%d\n", slot);
+	return sysfs_emit(buf, "%d\n", slot);
 }
 
 static DEVICE_ATTR(fault, S_IRUGO | S_IWUSR, get_component_fault,

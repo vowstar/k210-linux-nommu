@@ -320,7 +320,7 @@ static ssize_t temp1_limit_show(struct device *dev,
 	u8 index = to_sensor_dev_attr(attr)->index;
 	int temperature_limit = data->temperature_limits[index];
 
-	return scnprintf(buf, PAGE_SIZE, "%d\n", temperature_limit);
+	return sysfs_emit(buf, "%d\n", temperature_limit);
 }
 
 static ssize_t humidity1_limit_show(struct device *dev,
@@ -331,7 +331,7 @@ static ssize_t humidity1_limit_show(struct device *dev,
 	u8 index = to_sensor_dev_attr(attr)->index;
 	u32 humidity_limit = data->humidity_limits[index];
 
-	return scnprintf(buf, PAGE_SIZE, "%u\n", humidity_limit);
+	return sysfs_emit(buf, "%u\n", humidity_limit);
 }
 
 /*
@@ -483,7 +483,7 @@ static ssize_t temp1_alarm_show(struct device *dev,
 	if (ret)
 		return ret;
 
-	return scnprintf(buf, PAGE_SIZE, "%d\n", !!(buffer[0] & 0x04));
+	return sysfs_emit(buf, "%d\n", !!(buffer[0] & 0x04));
 }
 
 static ssize_t humidity1_alarm_show(struct device *dev,
@@ -498,7 +498,7 @@ static ssize_t humidity1_alarm_show(struct device *dev,
 	if (ret)
 		return ret;
 
-	return scnprintf(buf, PAGE_SIZE, "%d\n", !!(buffer[0] & 0x08));
+	return sysfs_emit(buf, "%d\n", !!(buffer[0] & 0x08));
 }
 
 static ssize_t heater_enable_show(struct device *dev,
@@ -513,7 +513,7 @@ static ssize_t heater_enable_show(struct device *dev,
 	if (ret)
 		return ret;
 
-	return scnprintf(buf, PAGE_SIZE, "%d\n", !!(buffer[0] & 0x20));
+	return sysfs_emit(buf, "%d\n", !!(buffer[0] & 0x20));
 }
 
 static ssize_t heater_enable_store(struct device *dev,
@@ -550,7 +550,7 @@ static ssize_t update_interval_show(struct device *dev,
 {
 	struct sht3x_data *data = dev_get_drvdata(dev);
 
-	return scnprintf(buf, PAGE_SIZE, "%u\n",
+	return sysfs_emit(buf, "%u\n",
 			 mode_to_update_interval[data->mode]);
 }
 
@@ -662,8 +662,9 @@ static struct attribute *sts3x_attrs[] = {
 ATTRIBUTE_GROUPS(sht3x);
 ATTRIBUTE_GROUPS(sts3x);
 
-static int sht3x_probe(struct i2c_client *client,
-		       const struct i2c_device_id *id)
+static const struct i2c_device_id sht3x_ids[];
+
+static int sht3x_probe(struct i2c_client *client)
 {
 	int ret;
 	struct sht3x_data *data;
@@ -715,7 +716,7 @@ static int sht3x_probe(struct i2c_client *client,
 	if (ret)
 		return ret;
 
-	if (id->driver_data == sts3x)
+	if (i2c_match_id(sht3x_ids, client)->driver_data == sts3x)
 		attribute_groups = sts3x_groups;
 	else
 		attribute_groups = sht3x_groups;
@@ -742,7 +743,7 @@ MODULE_DEVICE_TABLE(i2c, sht3x_ids);
 
 static struct i2c_driver sht3x_i2c_driver = {
 	.driver.name = "sht3x",
-	.probe       = sht3x_probe,
+	.probe_new   = sht3x_probe,
 	.id_table    = sht3x_ids,
 };
 

@@ -40,6 +40,7 @@
 MODULE_LICENSE("GPL");
 
 static struct dasd_discipline dasd_fba_discipline;
+static void *dasd_fba_zero_page;
 
 struct dasd_fba_private {
 	struct dasd_fba_characteristics rdc_data;
@@ -53,13 +54,6 @@ static struct ccw_device_id dasd_fba_ids[] = {
 
 MODULE_DEVICE_TABLE(ccw, dasd_fba_ids);
 
-static struct ccw_driver dasd_fba_driver; /* see below */
-static int
-dasd_fba_probe(struct ccw_device *cdev)
-{
-	return dasd_generic_probe(cdev, &dasd_fba_discipline);
-}
-
 static int
 dasd_fba_set_online(struct ccw_device *cdev)
 {
@@ -70,17 +64,15 @@ static struct ccw_driver dasd_fba_driver = {
 	.driver = {
 		.name	= "dasd-fba",
 		.owner	= THIS_MODULE,
+		.dev_groups = dasd_dev_groups,
 	},
 	.ids         = dasd_fba_ids,
-	.probe       = dasd_fba_probe,
+	.probe       = dasd_generic_probe,
 	.remove      = dasd_generic_remove,
 	.set_offline = dasd_generic_set_offline,
 	.set_online  = dasd_fba_set_online,
 	.notify      = dasd_generic_notify,
 	.path_event  = dasd_generic_path_event,
-	.freeze      = dasd_generic_pm_freeze,
-	.thaw	     = dasd_generic_restore_device,
-	.restore     = dasd_generic_restore_device,
 	.int_class   = IRQIO_DAS,
 };
 
@@ -91,7 +83,7 @@ define_extent(struct ccw1 * ccw, struct DE_fba_data *data, int rw,
 	ccw->cmd_code = DASD_FBA_CCW_DEFINE_EXTENT;
 	ccw->flags = 0;
 	ccw->count = 16;
-	ccw->cda = (__u32) __pa(data);
+	ccw->cda = (__u32)virt_to_phys(data);
 	memset(data, 0, sizeof (struct DE_fba_data));
 	if (rw == WRITE)
 		(data->mask).perm = 0x0;
@@ -111,7 +103,7 @@ locate_record(struct ccw1 * ccw, struct LO_fba_data *data, int rw,
 	ccw->cmd_code = DASD_FBA_CCW_LOCATE;
 	ccw->flags = 0;
 	ccw->count = 8;
-	ccw->cda = (__u32) __pa(data);
+	ccw->cda = (__u32)virt_to_phys(data);
 	memset(data, 0, sizeof (struct LO_fba_data));
 	if (rw == WRITE)
 		data->operation.cmd = 0x5;
@@ -270,7 +262,7 @@ static void ccw_write_zero(struct ccw1 *ccw, int count)
 	ccw->cmd_code = DASD_FBA_CCW_WRITE;
 	ccw->flags |= CCW_FLAG_SLI;
 	ccw->count = count;
-	ccw->cda = (__u32) (addr_t) page_to_phys(ZERO_PAGE(0));
+	ccw->cda = (__u32)virt_to_phys(dasd_fba_zero_page);
 }
 
 /*
@@ -509,7 +501,7 @@ static struct dasd_ccw_req *dasd_fba_build_cp_regular(
 	}
 	recid = first_rec;
 	rq_for_each_segment(bv, req, iter) {
-		dst = page_address(bv.bv_page) + bv.bv_offset;
+		dst = bvec_virt(&bv);
 		if (dasd_page_cache) {
 			char *copy = kmem_cache_alloc(dasd_page_cache,
 						      GFP_DMA | __GFP_NOWARN);
@@ -536,11 +528,11 @@ static struct dasd_ccw_req *dasd_fba_build_cp_regular(
 			ccw->cmd_code = cmd;
 			ccw->count = block->bp_block;
 			if (idal_is_needed(dst, blksize)) {
-				ccw->cda = (__u32)(addr_t) idaws;
+				ccw->cda = (__u32)virt_to_phys(idaws);
 				ccw->flags = CCW_FLAG_IDA;
 				idaws = idal_create_words(idaws, dst, blksize);
 			} else {
-				ccw->cda = (__u32)(addr_t) dst;
+				ccw->cda = (__u32)virt_to_phys(dst);
 				ccw->flags = 0;
 			}
 			ccw++;
@@ -591,16 +583,16 @@ dasd_fba_free_cp(struct dasd_ccw_req *cqr, struct request *req)
 	if (private->rdc_data.mode.bits.data_chain != 0)
 		ccw++;
 	rq_for_each_segment(bv, req, iter) {
-		dst = page_address(bv.bv_page) + bv.bv_offset;
+		dst = bvec_virt(&bv);
 		for (off = 0; off < bv.bv_len; off += blksize) {
 			/* Skip locate record. */
 			if (private->rdc_data.mode.bits.data_chain == 0)
 				ccw++;
 			if (dst) {
 				if (ccw->flags & CCW_FLAG_IDA)
-					cda = *((char **)((addr_t) ccw->cda));
+					cda = *((char **)phys_to_virt(ccw->cda));
 				else
-					cda = (char *)((addr_t) ccw->cda);
+					cda = phys_to_virt(ccw->cda);
 				if (dst != cda) {
 					if (rq_data_dir(req) == READ)
 						memcpy(dst, cda, bv.bv_len);
@@ -775,7 +767,7 @@ dasd_fba_dump_sense(struct dasd_device *device, struct dasd_ccw_req * req,
 static void dasd_fba_setup_blk_queue(struct dasd_block *block)
 {
 	unsigned int logical_block_size = block->bp_block;
-	struct request_queue *q = block->request_queue;
+	struct request_queue *q = block->gdp->queue;
 	unsigned int max_bytes, max_discard_sectors;
 	int max;
 
@@ -790,7 +782,6 @@ static void dasd_fba_setup_blk_queue(struct dasd_block *block)
 	blk_queue_segment_boundary(q, PAGE_SIZE - 1);
 
 	q->limits.discard_granularity = logical_block_size;
-	q->limits.discard_alignment = PAGE_SIZE;
 
 	/* Calculate max_discard_sectors and make it PAGE aligned */
 	max_bytes = USHRT_MAX * logical_block_size;
@@ -799,7 +790,12 @@ static void dasd_fba_setup_blk_queue(struct dasd_block *block)
 
 	blk_queue_max_discard_sectors(q, max_discard_sectors);
 	blk_queue_max_write_zeroes_sectors(q, max_discard_sectors);
-	blk_queue_flag_set(QUEUE_FLAG_DISCARD, q);
+}
+
+static int dasd_fba_pe_handler(struct dasd_device *device,
+			       __u8 tbvpm, __u8 fcsecpm)
+{
+	return dasd_generic_verify_path(device, tbvpm);
 }
 
 static struct dasd_discipline dasd_fba_discipline = {
@@ -808,7 +804,7 @@ static struct dasd_discipline dasd_fba_discipline = {
 	.ebcname = "FBA ",
 	.check_device = dasd_fba_check_characteristics,
 	.do_analysis = dasd_fba_do_analysis,
-	.verify_path = dasd_generic_verify_path,
+	.pe_handler = dasd_fba_pe_handler,
 	.setup_blk_queue = dasd_fba_setup_blk_queue,
 	.fill_geometry = dasd_fba_fill_geometry,
 	.start_IO = dasd_start_IO,
@@ -830,6 +826,11 @@ dasd_fba_init(void)
 	int ret;
 
 	ASCEBC(dasd_fba_discipline.ebcname, 4);
+
+	dasd_fba_zero_page = (void *)get_zeroed_page(GFP_KERNEL | GFP_DMA);
+	if (!dasd_fba_zero_page)
+		return -ENOMEM;
+
 	ret = ccw_driver_register(&dasd_fba_driver);
 	if (!ret)
 		wait_for_device_probe();
@@ -841,6 +842,7 @@ static void __exit
 dasd_fba_cleanup(void)
 {
 	ccw_driver_unregister(&dasd_fba_driver);
+	free_page((unsigned long)dasd_fba_zero_page);
 }
 
 module_init(dasd_fba_init);

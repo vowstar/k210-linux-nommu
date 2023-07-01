@@ -8,9 +8,7 @@
 
 #include <linux/types.h>
 
-#include <drm/i915_drm.h>
-
-#include "i915_reg.h"
+#include "i915_reg_defs.h"
 
 struct drm_i915_private;
 enum pipe;

@@ -67,7 +67,6 @@ struct smbd_connection {
 	bool negotiate_done;
 
 	struct work_struct disconnect_work;
-	struct work_struct recv_done_work;
 	struct work_struct post_send_credits_work;
 
 	spinlock_t lock_new_credits_offered;
@@ -92,7 +91,7 @@ struct smbd_connection {
 	/* Memory registrations */
 	/* Maximum number of RDMA read/write outstanding on this connection */
 	int responder_resources;
-	/* Maximum number of SGEs in a RDMA write/read */
+	/* Maximum number of pages in a single RDMA write/read on this connection */
 	int max_frmr_depth;
 	/*
 	 * If payload is less than or equal to the threshold,
@@ -115,8 +114,7 @@ struct smbd_connection {
 	/* Activity accoutning */
 	atomic_t send_pending;
 	wait_queue_head_t wait_send_pending;
-	atomic_t send_payload_pending;
-	wait_queue_head_t wait_send_payload_pending;
+	wait_queue_head_t wait_post_send;
 
 	/* Receive queue */
 	struct list_head receive_queue;
@@ -155,7 +153,6 @@ struct smbd_connection {
 
 	struct workqueue_struct *workqueue;
 	struct delayed_work idle_timer_work;
-	struct delayed_work send_immediate_work;
 
 	/* Memory pool for preallocating buffers */
 	/* request pool for RDMA send */
@@ -228,23 +225,24 @@ struct smbd_buffer_descriptor_v1 {
 	__le32 length;
 } __packed;
 
-/* Default maximum number of SGEs in a RDMA send/recv */
-#define SMBDIRECT_MAX_SGE	16
+/* Maximum number of SGEs used by smbdirect.c in any send work request */
+#define SMBDIRECT_MAX_SEND_SGE	6
+
 /* The context for a SMBD request */
 struct smbd_request {
 	struct smbd_connection *info;
 	struct ib_cqe cqe;
 
-	/* true if this request carries upper layer payload */
-	bool has_payload;
-
-	/* the SGE entries for this packet */
-	struct ib_sge sge[SMBDIRECT_MAX_SGE];
+	/* the SGE entries for this work request */
+	struct ib_sge sge[SMBDIRECT_MAX_SEND_SGE];
 	int num_sge;
 
 	/* SMBD packet header follows this structure */
 	u8 packet[];
 };
+
+/* Maximum number of SGEs used by smbdirect.c in any receive work request */
+#define SMBDIRECT_MAX_RECV_SGE	1
 
 /* The context for a SMBD response */
 struct smbd_response {
@@ -290,8 +288,7 @@ struct smbd_mr {
 	struct list_head	list;
 	enum mr_state		state;
 	struct ib_mr		*mr;
-	struct scatterlist	*sgl;
-	int			sgl_count;
+	struct sg_table		sgt;
 	enum dma_data_direction	dir;
 	union {
 		struct ib_reg_wr	wr;
@@ -304,8 +301,8 @@ struct smbd_mr {
 
 /* Interfaces to register and deregister MR for RDMA read/write */
 struct smbd_mr *smbd_register_mr(
-	struct smbd_connection *info, struct page *pages[], int num_pages,
-	int offset, int tailsz, bool writing, bool need_invalidate);
+	struct smbd_connection *info, struct iov_iter *iter,
+	bool writing, bool need_invalidate);
 int smbd_deregister_mr(struct smbd_mr *mr);
 
 #else

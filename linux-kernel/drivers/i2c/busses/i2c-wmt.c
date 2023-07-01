@@ -399,7 +399,7 @@ static int wmt_i2c_probe(struct platform_device *pdev)
 
 	i2c_dev->mode = I2C_MODE_STANDARD;
 	err = of_property_read_u32(np, "clock-frequency", &clk_rate);
-	if ((!err) && (clk_rate == 400000))
+	if (!err && (clk_rate == I2C_MAX_FAST_MODE_FREQ))
 		i2c_dev->mode = I2C_MODE_FAST;
 
 	i2c_dev->dev = &pdev->dev;
@@ -413,7 +413,7 @@ static int wmt_i2c_probe(struct platform_device *pdev)
 
 	adap = &i2c_dev->adapter;
 	i2c_set_adapdata(adap, i2c_dev);
-	strlcpy(adap->name, "WMT I2C adapter", sizeof(adap->name));
+	strscpy(adap->name, "WMT I2C adapter", sizeof(adap->name));
 	adap->owner = THIS_MODULE;
 	adap->algo = &wmt_i2c_algo;
 	adap->dev.parent = &pdev->dev;

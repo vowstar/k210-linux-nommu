@@ -496,15 +496,13 @@ static int max732x_irq_setup(struct max732x_chip *chip,
 			     const struct i2c_device_id *id)
 {
 	struct i2c_client *client = chip->client;
-	struct max732x_platform_data *pdata = dev_get_platdata(&client->dev);
 	int has_irq = max732x_features[id->driver_data] >> 32;
 	int irq_base = 0;
 	int ret;
 
-	if (((pdata && pdata->irq_base) || client->irq)
-			&& has_irq != INT_NONE) {
-		if (pdata)
-			irq_base = pdata->irq_base;
+	if (client->irq && has_irq != INT_NONE) {
+		struct gpio_irq_chip *girq;
+
 		chip->irq_features = has_irq;
 		mutex_init(&chip->irq_lock);
 
@@ -517,19 +515,17 @@ static int max732x_irq_setup(struct max732x_chip *chip,
 				client->irq);
 			return ret;
 		}
-		ret =  gpiochip_irqchip_add_nested(&chip->gpio_chip,
-						   &max732x_irq_chip,
-						   irq_base,
-						   handle_simple_irq,
-						   IRQ_TYPE_NONE);
-		if (ret) {
-			dev_err(&client->dev,
-				"could not connect irqchip to gpiochip\n");
-			return ret;
-		}
-		gpiochip_set_nested_irqchip(&chip->gpio_chip,
-					    &max732x_irq_chip,
-					    client->irq);
+
+		girq = &chip->gpio_chip.irq;
+		girq->chip = &max732x_irq_chip;
+		/* This will let us handle the parent IRQ in the driver */
+		girq->parent_handler = NULL;
+		girq->num_parents = 0;
+		girq->parents = NULL;
+		girq->default_type = IRQ_TYPE_NONE;
+		girq->handler = handle_simple_irq;
+		girq->threaded = true;
+		girq->first = irq_base; /* FIXME: get rid of this */
 	}
 
 	return 0;
@@ -540,10 +536,9 @@ static int max732x_irq_setup(struct max732x_chip *chip,
 			     const struct i2c_device_id *id)
 {
 	struct i2c_client *client = chip->client;
-	struct max732x_platform_data *pdata = dev_get_platdata(&client->dev);
 	int has_irq = max732x_features[id->driver_data] >> 32;
 
-	if (((pdata && pdata->irq_base) || client->irq) && has_irq != INT_NONE)
+	if (client->irq && has_irq != INT_NONE)
 		dev_warn(&client->dev, "interrupt support not compiled in\n");
 
 	return 0;
@@ -613,9 +608,9 @@ static struct max732x_platform_data *of_gpio_max732x(struct device *dev)
 	return pdata;
 }
 
-static int max732x_probe(struct i2c_client *client,
-				   const struct i2c_device_id *id)
+static int max732x_probe(struct i2c_client *client)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct max732x_platform_data *pdata;
 	struct device_node *node;
 	struct max732x_chip *chip;
@@ -695,42 +690,15 @@ static int max732x_probe(struct i2c_client *client,
 			return ret;
 	}
 
-	ret = devm_gpiochip_add_data(&client->dev, &chip->gpio_chip, chip);
-	if (ret)
-		return ret;
-
 	ret = max732x_irq_setup(chip, id);
 	if (ret)
 		return ret;
 
-	if (pdata && pdata->setup) {
-		ret = pdata->setup(client, chip->gpio_chip.base,
-				chip->gpio_chip.ngpio, pdata->context);
-		if (ret < 0)
-			dev_warn(&client->dev, "setup failed, %d\n", ret);
-	}
+	ret = devm_gpiochip_add_data(&client->dev, &chip->gpio_chip, chip);
+	if (ret)
+		return ret;
 
 	i2c_set_clientdata(client, chip);
-	return 0;
-}
-
-static int max732x_remove(struct i2c_client *client)
-{
-	struct max732x_platform_data *pdata = dev_get_platdata(&client->dev);
-	struct max732x_chip *chip = i2c_get_clientdata(client);
-
-	if (pdata && pdata->teardown) {
-		int ret;
-
-		ret = pdata->teardown(client, chip->gpio_chip.base,
-				chip->gpio_chip.ngpio, pdata->context);
-		if (ret < 0) {
-			dev_err(&client->dev, "%s failed, %d\n",
-					"teardown", ret);
-			return ret;
-		}
-	}
-
 	return 0;
 }
 
@@ -739,8 +707,7 @@ static struct i2c_driver max732x_driver = {
 		.name		= "max732x",
 		.of_match_table	= of_match_ptr(max732x_of_table),
 	},
-	.probe		= max732x_probe,
-	.remove		= max732x_remove,
+	.probe_new	= max732x_probe,
 	.id_table	= max732x_id,
 };
 

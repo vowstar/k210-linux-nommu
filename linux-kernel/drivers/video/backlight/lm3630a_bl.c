@@ -52,6 +52,7 @@ struct lm3630a_chip {
 	struct gpio_desc *enable_gpio;
 	struct regmap *regmap;
 	struct pwm_device *pwmd;
+	struct pwm_state pwmd_state;
 };
 
 /* i2c access */
@@ -167,16 +168,19 @@ static int lm3630a_intr_config(struct lm3630a_chip *pchip)
 	return rval;
 }
 
-static void lm3630a_pwm_ctrl(struct lm3630a_chip *pchip, int br, int br_max)
+static int lm3630a_pwm_ctrl(struct lm3630a_chip *pchip, int br, int br_max)
 {
-	unsigned int period = pchip->pdata->pwm_period;
-	unsigned int duty = br * period / br_max;
+	int err;
 
-	pwm_config(pchip->pwmd, duty, period);
-	if (duty)
-		pwm_enable(pchip->pwmd);
-	else
-		pwm_disable(pchip->pwmd);
+	pchip->pwmd_state.period = pchip->pdata->pwm_period;
+
+	err = pwm_set_relative_duty_cycle(&pchip->pwmd_state, br, br_max);
+	if (err)
+		return err;
+
+	pchip->pwmd_state.enabled = pchip->pwmd_state.duty_cycle ? true : false;
+
+	return pwm_apply_state(pchip->pwmd, &pchip->pwmd_state);
 }
 
 /* update and get brightness */
@@ -187,11 +191,9 @@ static int lm3630a_bank_a_update_status(struct backlight_device *bl)
 	enum lm3630a_pwm_ctrl pwm_ctrl = pchip->pdata->pwm_ctrl;
 
 	/* pwm control */
-	if ((pwm_ctrl & LM3630A_PWM_BANK_A) != 0) {
-		lm3630a_pwm_ctrl(pchip, bl->props.brightness,
-				 bl->props.max_brightness);
-		return bl->props.brightness;
-	}
+	if ((pwm_ctrl & LM3630A_PWM_BANK_A) != 0)
+		return lm3630a_pwm_ctrl(pchip, bl->props.brightness,
+					bl->props.max_brightness);
 
 	/* disable sleep */
 	ret = lm3630a_update(pchip, REG_CTRL, 0x80, 0x00);
@@ -210,8 +212,8 @@ static int lm3630a_bank_a_update_status(struct backlight_device *bl)
 	return 0;
 
 out_i2c_err:
-	dev_err(pchip->dev, "i2c failed to access\n");
-	return bl->props.brightness;
+	dev_err(pchip->dev, "i2c failed to access (%pe)\n", ERR_PTR(ret));
+	return ret;
 }
 
 static int lm3630a_bank_a_get_brightness(struct backlight_device *bl)
@@ -264,11 +266,9 @@ static int lm3630a_bank_b_update_status(struct backlight_device *bl)
 	enum lm3630a_pwm_ctrl pwm_ctrl = pchip->pdata->pwm_ctrl;
 
 	/* pwm control */
-	if ((pwm_ctrl & LM3630A_PWM_BANK_B) != 0) {
-		lm3630a_pwm_ctrl(pchip, bl->props.brightness,
-				 bl->props.max_brightness);
-		return bl->props.brightness;
-	}
+	if ((pwm_ctrl & LM3630A_PWM_BANK_B) != 0)
+		return lm3630a_pwm_ctrl(pchip, bl->props.brightness,
+					bl->props.max_brightness);
 
 	/* disable sleep */
 	ret = lm3630a_update(pchip, REG_CTRL, 0x80, 0x00);
@@ -287,8 +287,8 @@ static int lm3630a_bank_b_update_status(struct backlight_device *bl)
 	return 0;
 
 out_i2c_err:
-	dev_err(pchip->dev, "i2c failed to access REG_CTRL\n");
-	return bl->props.brightness;
+	dev_err(pchip->dev, "i2c failed to access (%pe)\n", ERR_PTR(ret));
+	return ret;
 }
 
 static int lm3630a_bank_b_get_brightness(struct backlight_device *bl)
@@ -391,7 +391,7 @@ static int lm3630a_parse_led_sources(struct fwnode_handle *node,
 		return ret;
 
 	for (i = 0; i < num_sources; i++) {
-		if (sources[i] < LM3630A_SINK_0 || sources[i] > LM3630A_SINK_1)
+		if (sources[i] != LM3630A_SINK_0 && sources[i] != LM3630A_SINK_1)
 			return -EINVAL;
 
 		ret |= BIT(sources[i]);
@@ -412,7 +412,7 @@ static int lm3630a_parse_bank(struct lm3630a_platform_data *pdata,
 	if (ret)
 		return ret;
 
-	if (bank < LM3630A_BANK_0 || bank > LM3630A_BANK_1)
+	if (bank != LM3630A_BANK_0 && bank != LM3630A_BANK_1)
 		return -EINVAL;
 
 	led_sources = lm3630a_parse_led_sources(node, BIT(bank));
@@ -482,15 +482,16 @@ static int lm3630a_parse_node(struct lm3630a_chip *pchip,
 
 	device_for_each_child_node(pchip->dev, node) {
 		ret = lm3630a_parse_bank(pdata, node, &seen_led_sources);
-		if (ret)
+		if (ret) {
+			fwnode_handle_put(node);
 			return ret;
+		}
 	}
 
 	return ret;
 }
 
-static int lm3630a_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+static int lm3630a_probe(struct i2c_client *client)
 {
 	struct lm3630a_platform_data *pdata = dev_get_platdata(&client->dev);
 	struct lm3630a_chip *pchip;
@@ -563,11 +564,7 @@ static int lm3630a_probe(struct i2c_client *client,
 			return PTR_ERR(pchip->pwmd);
 		}
 
-		/*
-		 * FIXME: pwm_apply_args() should be removed when switching to
-		 * the atomic PWM API.
-		 */
-		pwm_apply_args(pchip->pwmd);
+		pwm_init_state(pchip->pwmd, &pchip->pwmd_state);
 	}
 
 	/* interrupt enable  : irq 0 is not allowed */
@@ -581,7 +578,7 @@ static int lm3630a_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int lm3630a_remove(struct i2c_client *client)
+static void lm3630a_remove(struct i2c_client *client)
 {
 	int rval;
 	struct lm3630a_chip *pchip = i2c_get_clientdata(client);
@@ -596,10 +593,8 @@ static int lm3630a_remove(struct i2c_client *client)
 
 	if (pchip->irq) {
 		free_irq(pchip->irq, pchip);
-		flush_workqueue(pchip->irqthread);
 		destroy_workqueue(pchip->irqthread);
 	}
-	return 0;
 }
 
 static const struct i2c_device_id lm3630a_id[] = {
@@ -621,7 +616,7 @@ static struct i2c_driver lm3630a_i2c_driver = {
 		   .name = LM3630A_NAME,
 		   .of_match_table = lm3630a_match_table,
 		   },
-	.probe = lm3630a_probe,
+	.probe_new = lm3630a_probe,
 	.remove = lm3630a_remove,
 	.id_table = lm3630a_id,
 };

@@ -21,7 +21,7 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&pinctrl_gpio_leds>;
 
-		user {
+		led-user {
 			label = "debug";
 			gpios = <&gpio5 15 GPIO_ACTIVE_HIGH>;
 		};
@@ -267,12 +267,12 @@
 };
 
 &ecspi1 {
-	cs-gpios = <&gpio3 19 0>;
+	cs-gpios = <&gpio3 19 GPIO_ACTIVE_LOW>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_ecspi1 &pinctrl_ecspi1_cs>;
 	status = "disabled"; /* pin conflict with WEIM NOR */
 
-	flash: m25p80@0 {
+	flash: flash@0 {
 		#address-cells = <1>;
 		#size-cells = <1>;
 		compatible = "st,m25p32", "jedec,spi-nor";
@@ -295,9 +295,11 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_enet>;
 	phy-mode = "rgmii-id";
+	/delete-property/ interrupts;
 	interrupts-extended = <&gpio1 6 IRQ_TYPE_LEVEL_HIGH>,
 			      <&intc 0 119 IRQ_TYPE_LEVEL_HIGH>;
 	fsl,err006687-workaround-present;
+	fsl,magic-packet;
 	status = "okay";
 };
 
@@ -450,8 +452,8 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&pinctrl_egalax_int>;
 		interrupt-parent = <&gpio2>;
-		interrupts = <28 IRQ_TYPE_EDGE_FALLING>;
-		wakeup-gpios = <&gpio2 28 GPIO_ACTIVE_HIGH>;
+		interrupts = <28 IRQ_TYPE_LEVEL_LOW>;
+		wakeup-gpios = <&gpio2 28 GPIO_ACTIVE_LOW>;
 	};
 };
 
@@ -800,6 +802,7 @@
 };
 
 &pwm3 {
+	#pwm-cells = <2>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_pwm3>;
 	status = "okay";

@@ -219,7 +219,7 @@ static void ll_device_want_to_wakeup(struct hci_uart *hu)
 		 * perfectly safe to always send one.
 		 */
 		BT_DBG("dual wake-up-indication");
-		/* fall through */
+		fallthrough;
 	case HCILL_ASLEEP:
 		/* acknowledge device wake up */
 		if (send_hcill_cmd(HCILL_WAKE_UP_ACK, hu) < 0) {
@@ -345,7 +345,7 @@ static int ll_enqueue(struct hci_uart *hu, struct sk_buff *skb)
 	default:
 		BT_ERR("illegal hcill state: %ld (losing packet)",
 		       ll->hcill_state);
-		kfree_skb(skb);
+		dev_kfree_skb_irq(skb);
 		break;
 	}
 
@@ -509,7 +509,7 @@ static int send_command_from_firmware(struct ll_device *lldev,
 	return 0;
 }
 
-/**
+/*
  * download_firmware -
  *	internal function which parses through the .bts firmware
  *	script file intreprets SEND, DELAY actions only as of now
@@ -626,6 +626,7 @@ static int ll_setup(struct hci_uart *hu)
 		gpiod_set_value_cansleep(lldev->enable_gpio, 0);
 		msleep(5);
 		gpiod_set_value_cansleep(lldev->enable_gpio, 1);
+		mdelay(100);
 		err = serdev_device_wait_for_cts(serdev, true, 200);
 		if (err) {
 			bt_dev_err(hu->hdev, "Failed to get CTS");

@@ -14,7 +14,6 @@
 
 #include <linux/clkdev.h>
 #include <linux/delay.h>
-#include <linux/dma-mapping.h>
 #include <linux/gpio.h>
 #include <linux/gpio/machine.h>
 #include <linux/i2c.h>
@@ -33,6 +32,7 @@
 #include <linux/sh_intc.h>
 #include <linux/usb/r8a66597.h>
 #include <linux/videodev2.h>
+#include <linux/dma-map-ops.h>
 
 #include <mach/kfr2r09.h>
 
@@ -633,7 +633,7 @@ static void __init kfr2r09_mv_mem_reserve(void)
 	if (!phys)
 		panic("Failed to allocate CEU memory\n");
 
-	memblock_free(phys, size);
+	memblock_phys_free(phys, size);
 	memblock_remove(phys, size);
 
 	ceu_dma_membase = phys;

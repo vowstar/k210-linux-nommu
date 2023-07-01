@@ -15,3 +15,6 @@ Security Documentation
    self-protection
    siphash
    tpm/index
+   digsig
+   landlock
+   secrets/index

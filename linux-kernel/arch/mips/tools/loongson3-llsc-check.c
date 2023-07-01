@@ -217,7 +217,7 @@ static int check_code(uint64_t pc, uint32_t *code, size_t sz)
 )
 
 	/*
-	 * Skip the first instructionm allowing check_ll to look backwards
+	 * Skip the first instruction, allowing check_ll to look backwards
 	 * unconditionally.
 	 */
 	advance();
@@ -303,5 +303,7 @@ out_munmap:
 out_close:
 	close(vmlinux_fd);
 out_ret:
+	fprintf(stdout, "loongson3-llsc-check returns %s\n",
+		status ? "failure" : "success");
 	return status;
 }

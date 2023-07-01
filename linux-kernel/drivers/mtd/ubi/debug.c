@@ -393,9 +393,6 @@ static void *eraseblk_count_seq_start(struct seq_file *s, loff_t *pos)
 {
 	struct ubi_device *ubi = s->private;
 
-	if (*pos == 0)
-		return SEQ_START_TOKEN;
-
 	if (*pos < ubi->peb_count)
 		return pos;
 
@@ -409,8 +406,6 @@ static void *eraseblk_count_seq_next(struct seq_file *s, void *v, loff_t *pos)
 {
 	struct ubi_device *ubi = s->private;
 
-	if (v == SEQ_START_TOKEN)
-		return pos;
 	(*pos)++;
 
 	if (*pos < ubi->peb_count)
@@ -432,11 +427,8 @@ static int eraseblk_count_seq_show(struct seq_file *s, void *iter)
 	int err;
 
 	/* If this is the start, print a header */
-	if (iter == SEQ_START_TOKEN) {
-		seq_puts(s,
-			 "physical_block_number\terase_count\tblock_status\tread_status\n");
-		return 0;
-	}
+	if (*block_number == 0)
+		seq_puts(s, "physical_block_number\terase_count\n");
 
 	err = ubi_io_is_bad(ubi, *block_number);
 	if (err)
@@ -512,6 +504,7 @@ int ubi_debugfs_init_dev(struct ubi_device *ubi)
 {
 	unsigned long ubi_num = ubi->ubi_num;
 	struct ubi_debug_info *d = &ubi->dbg;
+	umode_t mode = S_IRUSR | S_IWUSR;
 	int n;
 
 	if (!IS_ENABLED(CONFIG_DEBUG_FS))
@@ -519,48 +512,48 @@ int ubi_debugfs_init_dev(struct ubi_device *ubi)
 
 	n = snprintf(d->dfs_dir_name, UBI_DFS_DIR_LEN + 1, UBI_DFS_DIR_NAME,
 		     ubi->ubi_num);
-	if (n == UBI_DFS_DIR_LEN) {
+	if (n > UBI_DFS_DIR_LEN) {
 		/* The array size is too small */
 		return -EINVAL;
 	}
 
 	d->dfs_dir = debugfs_create_dir(d->dfs_dir_name, dfs_rootdir);
 
-	d->dfs_chk_gen = debugfs_create_file("chk_gen", S_IWUSR, d->dfs_dir,
+	d->dfs_chk_gen = debugfs_create_file("chk_gen", mode, d->dfs_dir,
 					     (void *)ubi_num, &dfs_fops);
 
-	d->dfs_chk_io = debugfs_create_file("chk_io", S_IWUSR, d->dfs_dir,
+	d->dfs_chk_io = debugfs_create_file("chk_io", mode, d->dfs_dir,
 					    (void *)ubi_num, &dfs_fops);
 
-	d->dfs_chk_fastmap = debugfs_create_file("chk_fastmap", S_IWUSR,
+	d->dfs_chk_fastmap = debugfs_create_file("chk_fastmap", mode,
 						 d->dfs_dir, (void *)ubi_num,
 						 &dfs_fops);
 
-	d->dfs_disable_bgt = debugfs_create_file("tst_disable_bgt", S_IWUSR,
+	d->dfs_disable_bgt = debugfs_create_file("tst_disable_bgt", mode,
 						 d->dfs_dir, (void *)ubi_num,
 						 &dfs_fops);
 
 	d->dfs_emulate_bitflips = debugfs_create_file("tst_emulate_bitflips",
-						      S_IWUSR, d->dfs_dir,
+						      mode, d->dfs_dir,
 						      (void *)ubi_num,
 						      &dfs_fops);
 
 	d->dfs_emulate_io_failures = debugfs_create_file("tst_emulate_io_failures",
-							 S_IWUSR, d->dfs_dir,
+							 mode, d->dfs_dir,
 							 (void *)ubi_num,
 							 &dfs_fops);
 
 	d->dfs_emulate_power_cut = debugfs_create_file("tst_emulate_power_cut",
-						       S_IWUSR, d->dfs_dir,
+						       mode, d->dfs_dir,
 						       (void *)ubi_num,
 						       &dfs_fops);
 
 	d->dfs_power_cut_min = debugfs_create_file("tst_emulate_power_cut_min",
-						   S_IWUSR, d->dfs_dir,
+						   mode, d->dfs_dir,
 						   (void *)ubi_num, &dfs_fops);
 
 	d->dfs_power_cut_max = debugfs_create_file("tst_emulate_power_cut_max",
-						   S_IWUSR, d->dfs_dir,
+						   mode, d->dfs_dir,
 						   (void *)ubi_num, &dfs_fops);
 
 	debugfs_create_file("detailed_erase_block_info", S_IRUSR, d->dfs_dir,
@@ -570,7 +563,7 @@ int ubi_debugfs_init_dev(struct ubi_device *ubi)
 }
 
 /**
- * dbg_debug_exit_dev - free all debugfs files corresponding to device @ubi
+ * ubi_debugfs_exit_dev - free all debugfs files corresponding to device @ubi
  * @ubi: UBI device description object
  */
 void ubi_debugfs_exit_dev(struct ubi_device *ubi)
@@ -598,7 +591,7 @@ int ubi_dbg_power_cut(struct ubi_device *ubi, int caller)
 
 		if (ubi->dbg.power_cut_max > ubi->dbg.power_cut_min) {
 			range = ubi->dbg.power_cut_max - ubi->dbg.power_cut_min;
-			ubi->dbg.power_cut_counter += prandom_u32() % range;
+			ubi->dbg.power_cut_counter += get_random_u32_below(range);
 		}
 		return 0;
 	}

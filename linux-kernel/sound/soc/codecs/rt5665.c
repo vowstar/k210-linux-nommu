@@ -1000,7 +1000,7 @@ static int rt5665_hp_vol_put(struct snd_kcontrol *kcontrol,
 	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
 	int ret = snd_soc_put_volsw(kcontrol, ucontrol);
 
-	if (snd_soc_component_read32(component, RT5665_STO_NG2_CTRL_1) & RT5665_NG2_EN) {
+	if (snd_soc_component_read(component, RT5665_STO_NG2_CTRL_1) & RT5665_NG2_EN) {
 		snd_soc_component_update_bits(component, RT5665_STO_NG2_CTRL_1,
 			RT5665_NG2_EN_MASK, RT5665_NG2_DIS);
 		snd_soc_component_update_bits(component, RT5665_STO_NG2_CTRL_1,
@@ -1016,7 +1016,7 @@ static int rt5665_mono_vol_put(struct snd_kcontrol *kcontrol,
 	struct snd_soc_component *component = snd_soc_kcontrol_component(kcontrol);
 	int ret = snd_soc_put_volsw(kcontrol, ucontrol);
 
-	if (snd_soc_component_read32(component, RT5665_MONO_NG2_CTRL_1) & RT5665_NG2_EN) {
+	if (snd_soc_component_read(component, RT5665_MONO_NG2_CTRL_1) & RT5665_NG2_EN) {
 		snd_soc_component_update_bits(component, RT5665_MONO_NG2_CTRL_1,
 			RT5665_NG2_EN_MASK, RT5665_NG2_DIS);
 		snd_soc_component_update_bits(component, RT5665_MONO_NG2_CTRL_1,
@@ -1126,7 +1126,7 @@ static int rt5665_button_detect(struct snd_soc_component *component)
 {
 	int btn_type, val;
 
-	val = snd_soc_component_read32(component, RT5665_4BTN_IL_CMD_1);
+	val = snd_soc_component_read(component, RT5665_4BTN_IL_CMD_1);
 	btn_type = val & 0xfff0;
 	snd_soc_component_write(component, RT5665_4BTN_IL_CMD_1, val);
 
@@ -1198,7 +1198,7 @@ static int rt5665_headset_detect(struct snd_soc_component *component, int jack_i
 
 		usleep_range(10000, 15000);
 
-		rt5665->sar_adc_value = snd_soc_component_read32(rt5665->component,
+		rt5665->sar_adc_value = snd_soc_component_read(rt5665->component,
 			RT5665_SAR_IL_CMD_4) & 0x7ff;
 
 		sar_hs_type = rt5665->pdata.sar_hs_type ?
@@ -1245,7 +1245,7 @@ static void rt5665_jd_check_handler(struct work_struct *work)
 	struct rt5665_priv *rt5665 = container_of(work, struct rt5665_priv,
 		jd_check_work.work);
 
-	if (snd_soc_component_read32(rt5665->component, RT5665_AJD1_CTRL) & 0x0010) {
+	if (snd_soc_component_read(rt5665->component, RT5665_AJD1_CTRL) & 0x0010) {
 		/* jack out */
 		rt5665->jack_type = rt5665_headset_detect(rt5665->component, 0);
 
@@ -1298,7 +1298,7 @@ static void rt5665_jack_detect_handler(struct work_struct *work)
 		usleep_range(10000, 15000);
 	}
 
-	while (!rt5665->component->card->instantiated) {
+	while (!snd_soc_card_is_instantiated(rt5665->component->card)) {
 		pr_debug("%s\n", __func__);
 		usleep_range(10000, 15000);
 	}
@@ -1310,7 +1310,7 @@ static void rt5665_jack_detect_handler(struct work_struct *work)
 
 	mutex_lock(&rt5665->calibrate_mutex);
 
-	val = snd_soc_component_read32(rt5665->component, RT5665_AJD1_CTRL) & 0x0010;
+	val = snd_soc_component_read(rt5665->component, RT5665_AJD1_CTRL) & 0x0010;
 	if (!val) {
 		/* jack in */
 		if (rt5665->jack_type == 0) {
@@ -1522,7 +1522,7 @@ static int is_sys_clk_from_pll(struct snd_soc_dapm_widget *w,
 	unsigned int val;
 	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
 
-	val = snd_soc_component_read32(component, RT5665_GLB_CLK);
+	val = snd_soc_component_read(component, RT5665_GLB_CLK);
 	val &= RT5665_SCLK_SRC_MASK;
 	if (val == RT5665_SCLK_SRC_PLL1)
 		return 1;
@@ -1573,7 +1573,7 @@ static int is_using_asrc(struct snd_soc_dapm_widget *w,
 		return 0;
 	}
 
-	val = (snd_soc_component_read32(component, reg) >> shift) & 0xf;
+	val = (snd_soc_component_read(component, reg) >> shift) & 0xf;
 	switch (val) {
 	case RT5665_CLK_SEL_I2S1_ASRC:
 	case RT5665_CLK_SEL_I2S2_ASRC:
@@ -4374,7 +4374,7 @@ static int rt5665_set_component_pll(struct snd_soc_component *component, int pll
 
 	ret = rl6231_pll_calc(freq_in, freq_out, &pll_code);
 	if (ret < 0) {
-		dev_err(component->dev, "Unsupport input clock %d\n", freq_in);
+		dev_err(component->dev, "Unsupported input clock %d\n", freq_in);
 		return ret;
 	}
 
@@ -4385,8 +4385,8 @@ static int rt5665_set_component_pll(struct snd_soc_component *component, int pll
 	snd_soc_component_write(component, RT5665_PLL_CTRL_1,
 		pll_code.n_code << RT5665_PLL_N_SFT | pll_code.k_code);
 	snd_soc_component_write(component, RT5665_PLL_CTRL_2,
-		(pll_code.m_bp ? 0 : pll_code.m_code) << RT5665_PLL_M_SFT |
-		pll_code.m_bp << RT5665_PLL_M_BP_SFT);
+		((pll_code.m_bp ? 0 : pll_code.m_code) << RT5665_PLL_M_SFT) |
+		(pll_code.m_bp << RT5665_PLL_M_BP_SFT));
 
 	rt5665->pll_in = freq_in;
 	rt5665->pll_out = freq_out;
@@ -4617,7 +4617,6 @@ static const struct snd_soc_component_driver soc_component_dev_rt5665 = {
 	.set_jack		= rt5665_set_jack_detect,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 
@@ -4749,7 +4748,7 @@ static void rt5665_calibrate_handler(struct work_struct *work)
 	struct rt5665_priv *rt5665 = container_of(work, struct rt5665_priv,
 		calibrate_work.work);
 
-	while (!rt5665->component->card->instantiated) {
+	while (!snd_soc_card_is_instantiated(rt5665->component->card)) {
 		pr_debug("%s\n", __func__);
 		usleep_range(10000, 15000);
 	}
@@ -4757,8 +4756,7 @@ static void rt5665_calibrate_handler(struct work_struct *work)
 	rt5665_calibrate(rt5665);
 }
 
-static int rt5665_i2c_probe(struct i2c_client *i2c,
-		    const struct i2c_device_id *id)
+static int rt5665_i2c_probe(struct i2c_client *i2c)
 {
 	struct rt5665_platform_data *pdata = dev_get_platdata(&i2c->dev);
 	struct rt5665_priv *rt5665;
@@ -4970,7 +4968,7 @@ static struct i2c_driver rt5665_i2c_driver = {
 		.of_match_table = of_match_ptr(rt5665_of_match),
 		.acpi_match_table = ACPI_PTR(rt5665_acpi_match),
 	},
-	.probe = rt5665_i2c_probe,
+	.probe_new = rt5665_i2c_probe,
 	.shutdown = rt5665_i2c_shutdown,
 	.id_table = rt5665_i2c_id,
 };

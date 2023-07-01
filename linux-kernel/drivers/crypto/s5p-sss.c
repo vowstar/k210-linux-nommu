@@ -20,6 +20,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/scatterlist.h>
 
@@ -30,7 +31,8 @@
 
 #include <crypto/hash.h>
 #include <crypto/md5.h>
-#include <crypto/sha.h>
+#include <crypto/sha1.h>
+#include <crypto/sha2.h>
 #include <crypto/internal/hash.h>
 
 #define _SBF(s, v)			((v) << (s))
@@ -260,6 +262,7 @@ struct s5p_aes_ctx {
  * struct s5p_aes_dev - Crypto device state container
  * @dev:	Associated device
  * @clk:	Clock for accessing hardware
+ * @pclk:	APB bus clock necessary to access the hardware
  * @ioaddr:	Mapped IO memory region
  * @aes_ioaddr:	Per-varian offset for AES block IO memory
  * @irq_fc:	Feed control interrupt line
@@ -342,13 +345,13 @@ struct s5p_aes_dev {
  * @engine:	Bits for selecting type of HASH in SSS block
  * @sg:		sg for DMA transfer
  * @sg_len:	Length of sg for DMA transfer
- * @sgl[]:	sg for joining buffer and req->src scatterlist
+ * @sgl:	sg for joining buffer and req->src scatterlist
  * @skip:	Skip offset in req->src for current op
  * @total:	Total number of bytes for current request
  * @finup:	Keep state for finup or final.
  * @error:	Keep track of error.
  * @bufcnt:	Number of bytes holded in buffer[]
- * @buffer[]:	For byte(s) from end of req->src in UPDATE op
+ * @buffer:	For byte(s) from end of req->src in UPDATE op
  */
 struct s5p_hash_reqctx {
 	struct s5p_aes_dev	*dd;
@@ -369,7 +372,7 @@ struct s5p_hash_reqctx {
 	bool			error;
 
 	u32			bufcnt;
-	u8			buffer[0];
+	u8			buffer[];
 };
 
 /**
@@ -399,7 +402,7 @@ static const struct samsung_aes_variant exynos_aes_data = {
 static const struct samsung_aes_variant exynos5433_slim_aes_data = {
 	.aes_offset	= 0x400,
 	.hash_offset	= 0x800,
-	.clk_names	= { "pclk", "aclk", },
+	.clk_names	= { "aclk", "pclk", },
 };
 
 static const struct of_device_id s5p_sss_dt_match[] = {
@@ -422,13 +425,9 @@ MODULE_DEVICE_TABLE(of, s5p_sss_dt_match);
 static inline const struct samsung_aes_variant *find_s5p_sss_version
 				   (const struct platform_device *pdev)
 {
-	if (IS_ENABLED(CONFIG_OF) && (pdev->dev.of_node)) {
-		const struct of_device_id *match;
+	if (IS_ENABLED(CONFIG_OF) && (pdev->dev.of_node))
+		return of_device_get_match_data(&pdev->dev);
 
-		match = of_match_node(s5p_sss_dt_match,
-					pdev->dev.of_node);
-		return (const struct samsung_aes_variant *)match->data;
-	}
 	return (const struct samsung_aes_variant *)
 			platform_get_device_id(pdev)->driver_data;
 }
@@ -500,7 +499,7 @@ static void s5p_sg_done(struct s5p_aes_dev *dev)
 /* Calls the completion. Cannot be called with dev->lock hold. */
 static void s5p_aes_complete(struct skcipher_request *req, int err)
 {
-	req->base.complete(&req->base, err);
+	skcipher_request_complete(req, err);
 }
 
 static void s5p_unset_outdata(struct s5p_aes_dev *dev)
@@ -1125,7 +1124,7 @@ static int s5p_hash_copy_sg_lists(struct s5p_hash_reqctx *ctx,
  * s5p_hash_prepare_sgs() - prepare sg for processing
  * @ctx:	request context
  * @sg:		source scatterlist request
- * @nbytes:	number of bytes to process from sg
+ * @new_len:	number of bytes to process from sg
  * @final:	final flag
  *
  * Check two conditions: (1) if buffers in sg have len aligned data, and (2)
@@ -1356,7 +1355,7 @@ static void s5p_hash_finish_req(struct ahash_request *req, int err)
 	spin_unlock_irqrestore(&dd->hash_lock, flags);
 
 	if (req->base.complete)
-		req->base.complete(&req->base, err);
+		ahash_request_complete(req, err);
 }
 
 /**
@@ -1398,7 +1397,7 @@ retry:
 		return ret;
 
 	if (backlog)
-		backlog->complete(backlog, -EINPROGRESS);
+		crypto_request_complete(backlog, -EINPROGRESS);
 
 	req = ahash_request_cast(async_req);
 	dd->hash_req = req;
@@ -1521,37 +1520,6 @@ static int s5p_hash_update(struct ahash_request *req)
 }
 
 /**
- * s5p_hash_shash_digest() - calculate shash digest
- * @tfm:	crypto transformation
- * @flags:	tfm flags
- * @data:	input data
- * @len:	length of data
- * @out:	output buffer
- */
-static int s5p_hash_shash_digest(struct crypto_shash *tfm, u32 flags,
-				 const u8 *data, unsigned int len, u8 *out)
-{
-	SHASH_DESC_ON_STACK(shash, tfm);
-
-	shash->tfm = tfm;
-
-	return crypto_shash_digest(shash, data, len, out);
-}
-
-/**
- * s5p_hash_final_shash() - calculate shash digest
- * @req:	AHASH request
- */
-static int s5p_hash_final_shash(struct ahash_request *req)
-{
-	struct s5p_hash_ctx *tctx = crypto_tfm_ctx(req->base.tfm);
-	struct s5p_hash_reqctx *ctx = ahash_request_ctx(req);
-
-	return s5p_hash_shash_digest(tctx->fallback, req->base.flags,
-				     ctx->buffer, ctx->bufcnt, req->result);
-}
-
-/**
  * s5p_hash_final() - close up hash and calculate digest
  * @req:	AHASH request
  *
@@ -1582,8 +1550,12 @@ static int s5p_hash_final(struct ahash_request *req)
 	if (ctx->error)
 		return -EINVAL; /* uncompleted hash is not needed */
 
-	if (!ctx->digcnt && ctx->bufcnt < BUFLEN)
-		return s5p_hash_final_shash(req);
+	if (!ctx->digcnt && ctx->bufcnt < BUFLEN) {
+		struct s5p_hash_ctx *tctx = crypto_tfm_ctx(req->base.tfm);
+
+		return crypto_shash_tfm_digest(tctx->fallback, ctx->buffer,
+					       ctx->bufcnt, req->result);
+	}
 
 	return s5p_hash_enqueue(req, false); /* HASH_OP_FINAL */
 }
@@ -2019,7 +1991,7 @@ static void s5p_tasklet_cb(unsigned long data)
 	spin_unlock_irqrestore(&dev->lock, flags);
 
 	if (backlog)
-		backlog->complete(backlog, -EINPROGRESS);
+		crypto_request_complete(backlog, -EINPROGRESS);
 
 	dev->req = skcipher_request_cast(async_req);
 	dev->ctx = crypto_tfm_ctx(dev->req->base.tfm);
@@ -2184,7 +2156,7 @@ static struct skcipher_alg algs[] = {
 static int s5p_aes_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	int i, j, err = -ENODEV;
+	int i, j, err;
 	const struct samsung_aes_variant *variant;
 	struct s5p_aes_dev *pdata;
 	struct resource *res;
@@ -2199,6 +2171,8 @@ static int s5p_aes_probe(struct platform_device *pdev)
 
 	variant = find_s5p_sss_version(pdev);
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!res)
+		return -EINVAL;
 
 	/*
 	 * Note: HASH and PRNG uses the same registers in secss, avoid
@@ -2214,24 +2188,23 @@ static int s5p_aes_probe(struct platform_device *pdev)
 	}
 
 	pdata->res = res;
-	pdata->ioaddr = devm_ioremap_resource(&pdev->dev, res);
+	pdata->ioaddr = devm_ioremap_resource(dev, res);
 	if (IS_ERR(pdata->ioaddr)) {
 		if (!pdata->use_hash)
 			return PTR_ERR(pdata->ioaddr);
 		/* try AES without HASH */
 		res->end -= 0x300;
 		pdata->use_hash = false;
-		pdata->ioaddr = devm_ioremap_resource(&pdev->dev, res);
+		pdata->ioaddr = devm_ioremap_resource(dev, res);
 		if (IS_ERR(pdata->ioaddr))
 			return PTR_ERR(pdata->ioaddr);
 	}
 
 	pdata->clk = devm_clk_get(dev, variant->clk_names[0]);
-	if (IS_ERR(pdata->clk)) {
-		dev_err(dev, "failed to find secss clock %s\n",
-			variant->clk_names[0]);
-		return -ENOENT;
-	}
+	if (IS_ERR(pdata->clk))
+		return dev_err_probe(dev, PTR_ERR(pdata->clk),
+				     "failed to find secss clock %s\n",
+				     variant->clk_names[0]);
 
 	err = clk_prepare_enable(pdata->clk);
 	if (err < 0) {
@@ -2243,9 +2216,9 @@ static int s5p_aes_probe(struct platform_device *pdev)
 	if (variant->clk_names[1]) {
 		pdata->pclk = devm_clk_get(dev, variant->clk_names[1]);
 		if (IS_ERR(pdata->pclk)) {
-			dev_err(dev, "failed to find clock %s\n",
-				variant->clk_names[1]);
-			err = -ENOENT;
+			err = dev_err_probe(dev, PTR_ERR(pdata->pclk),
+					    "failed to find clock %s\n",
+					    variant->clk_names[1]);
 			goto err_clk;
 		}
 
@@ -2334,8 +2307,7 @@ err_algs:
 	tasklet_kill(&pdata->tasklet);
 
 err_irq:
-	if (pdata->pclk)
-		clk_disable_unprepare(pdata->pclk);
+	clk_disable_unprepare(pdata->pclk);
 
 err_clk:
 	clk_disable_unprepare(pdata->clk);
@@ -2348,9 +2320,6 @@ static int s5p_aes_remove(struct platform_device *pdev)
 {
 	struct s5p_aes_dev *pdata = platform_get_drvdata(pdev);
 	int i;
-
-	if (!pdata)
-		return -ENODEV;
 
 	for (i = 0; i < ARRAY_SIZE(algs); i++)
 		crypto_unregister_skcipher(&algs[i]);
@@ -2365,8 +2334,7 @@ static int s5p_aes_remove(struct platform_device *pdev)
 		pdata->use_hash = false;
 	}
 
-	if (pdata->pclk)
-		clk_disable_unprepare(pdata->pclk);
+	clk_disable_unprepare(pdata->pclk);
 
 	clk_disable_unprepare(pdata->clk);
 	s5p_dev = NULL;

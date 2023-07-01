@@ -16,6 +16,7 @@
 #include <linux/suspend.h>
 
 #include <linux/firmware/xlnx-zynqmp.h>
+#include <linux/firmware/xlnx-event-manager.h>
 #include <linux/mailbox/zynqmp-ipi-message.h>
 
 /**
@@ -30,7 +31,7 @@ struct zynqmp_pm_work_struct {
 
 static struct zynqmp_pm_work_struct *zynqmp_pm_init_suspend_work;
 static struct mbox_chan *rx_chan;
-static const struct zynqmp_eemi_ops *eemi_ops;
+static bool event_registered;
 
 enum pm_suspend_mode {
 	PM_SUSPEND_MODE_FIRST = 0,
@@ -47,15 +48,22 @@ static const char *const suspend_modes[] = {
 
 static enum pm_suspend_mode suspend_mode = PM_SUSPEND_MODE_STD;
 
-enum pm_api_cb_id {
-	PM_INIT_SUSPEND_CB = 30,
-	PM_ACKNOWLEDGE_CB,
-	PM_NOTIFY_CB,
-};
-
 static void zynqmp_pm_get_callback_data(u32 *buf)
 {
 	zynqmp_pm_invoke_fn(GET_CALLBACK_DATA, 0, 0, 0, 0, buf);
+}
+
+static void suspend_event_callback(const u32 *payload, void *data)
+{
+	/* First element is callback API ID, others are callback arguments */
+	if (work_pending(&zynqmp_pm_init_suspend_work->callback_work))
+		return;
+
+	/* Copy callback arguments into work's structure */
+	memcpy(zynqmp_pm_init_suspend_work->args, &payload[1],
+	       sizeof(zynqmp_pm_init_suspend_work->args));
+
+	queue_work(system_unbound_wq, &zynqmp_pm_init_suspend_work->callback_work);
 }
 
 static irqreturn_t zynqmp_pm_isr(int irq, void *data)
@@ -155,9 +163,6 @@ static ssize_t suspend_mode_store(struct device *dev,
 {
 	int md, ret = -EINVAL;
 
-	if (!eemi_ops->set_suspend_mode)
-		return ret;
-
 	for (md = PM_SUSPEND_MODE_FIRST; md < ARRAY_SIZE(suspend_modes); md++)
 		if (suspend_modes[md] &&
 		    sysfs_streq(suspend_modes[md], buf)) {
@@ -166,7 +171,7 @@ static ssize_t suspend_mode_store(struct device *dev,
 		}
 
 	if (!ret && md != suspend_mode) {
-		ret = eemi_ops->set_suspend_mode(md);
+		ret = zynqmp_pm_set_suspend_mode(md);
 		if (likely(!ret))
 			suspend_mode = md;
 	}
@@ -182,21 +187,38 @@ static int zynqmp_pm_probe(struct platform_device *pdev)
 	u32 pm_api_version;
 	struct mbox_client *client;
 
-	eemi_ops = zynqmp_pm_get_eemi_ops();
-	if (IS_ERR(eemi_ops))
-		return PTR_ERR(eemi_ops);
-
-	if (!eemi_ops->get_api_version || !eemi_ops->init_finalize)
-		return -ENXIO;
-
-	eemi_ops->init_finalize();
-	eemi_ops->get_api_version(&pm_api_version);
+	zynqmp_pm_get_api_version(&pm_api_version);
 
 	/* Check PM API version number */
 	if (pm_api_version < ZYNQMP_PM_VERSION)
 		return -ENODEV;
 
-	if (of_find_property(pdev->dev.of_node, "mboxes", NULL)) {
+	/*
+	 * First try to use Xilinx Event Manager by registering suspend_event_callback
+	 * for suspend/shutdown event.
+	 * If xlnx_register_event() returns -EACCES (Xilinx Event Manager
+	 * is not available to use) or -ENODEV(Xilinx Event Manager not compiled),
+	 * then use ipi-mailbox or interrupt method.
+	 */
+	ret = xlnx_register_event(PM_INIT_SUSPEND_CB, 0, 0, false,
+				  suspend_event_callback, NULL);
+	if (!ret) {
+		zynqmp_pm_init_suspend_work = devm_kzalloc(&pdev->dev,
+							   sizeof(struct zynqmp_pm_work_struct),
+							   GFP_KERNEL);
+		if (!zynqmp_pm_init_suspend_work) {
+			xlnx_unregister_event(PM_INIT_SUSPEND_CB, 0, 0,
+					      suspend_event_callback, NULL);
+			return -ENOMEM;
+		}
+		event_registered = true;
+
+		INIT_WORK(&zynqmp_pm_init_suspend_work->callback_work,
+			  zynqmp_pm_init_suspend_work_fn);
+	} else if (ret != -EACCES && ret != -ENODEV) {
+		dev_err(&pdev->dev, "Failed to Register with Xilinx Event manager %d\n", ret);
+		return ret;
+	} else if (of_find_property(pdev->dev.of_node, "mboxes", NULL)) {
 		zynqmp_pm_init_suspend_work =
 			devm_kzalloc(&pdev->dev,
 				     sizeof(struct zynqmp_pm_work_struct),
@@ -216,7 +238,7 @@ static int zynqmp_pm_probe(struct platform_device *pdev)
 		rx_chan = mbox_request_channel_byname(client, "rx");
 		if (IS_ERR(rx_chan)) {
 			dev_err(&pdev->dev, "Failed to request rx channel\n");
-			return IS_ERR(rx_chan);
+			return PTR_ERR(rx_chan);
 		}
 	} else if (of_find_property(pdev->dev.of_node, "interrupts", NULL)) {
 		irq = platform_get_irq(pdev, 0);
@@ -240,6 +262,11 @@ static int zynqmp_pm_probe(struct platform_device *pdev)
 
 	ret = sysfs_create_file(&pdev->dev.kobj, &dev_attr_suspend_mode.attr);
 	if (ret) {
+		if (event_registered) {
+			xlnx_unregister_event(PM_INIT_SUSPEND_CB, 0, 0, suspend_event_callback,
+					      NULL);
+			event_registered = false;
+		}
 		dev_err(&pdev->dev, "unable to create sysfs interface\n");
 		return ret;
 	}
@@ -250,6 +277,8 @@ static int zynqmp_pm_probe(struct platform_device *pdev)
 static int zynqmp_pm_remove(struct platform_device *pdev)
 {
 	sysfs_remove_file(&pdev->dev.kobj, &dev_attr_suspend_mode.attr);
+	if (event_registered)
+		xlnx_unregister_event(PM_INIT_SUSPEND_CB, 0, 0, suspend_event_callback, NULL);
 
 	if (!rx_chan)
 		mbox_free_channel(rx_chan);

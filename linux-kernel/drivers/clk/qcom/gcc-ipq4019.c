@@ -1276,16 +1276,15 @@ static int clk_cpu_div_set_rate(struct clk_hw *hw, unsigned long rate,
 	struct clk_fepll *pll = to_clk_fepll(hw);
 	const struct freq_tbl *f;
 	u32 mask;
-	int ret;
 
 	f = qcom_find_freq(pll->freq_tbl, rate);
 	if (!f)
 		return -EINVAL;
 
 	mask = (BIT(pll->cdiv.width) - 1) << pll->cdiv.shift;
-	ret = regmap_update_bits(pll->cdiv.clkr.regmap,
-				 pll->cdiv.reg, mask,
-				 f->pre_div << pll->cdiv.shift);
+	regmap_update_bits(pll->cdiv.clkr.regmap,
+			   pll->cdiv.reg, mask,
+			   f->pre_div << pll->cdiv.shift);
 	/*
 	 * There is no status bit which can be checked for successful CPU
 	 * divider update operation so using delay for the same.
@@ -1757,19 +1756,12 @@ static int gcc_ipq4019_probe(struct platform_device *pdev)
 	if (err)
 		return err;
 
-	return clk_notifier_register(apps_clk_src.clkr.hw.clk,
-				     &gcc_ipq4019_cpu_clk_notifier);
-}
-
-static int gcc_ipq4019_remove(struct platform_device *pdev)
-{
-	return clk_notifier_unregister(apps_clk_src.clkr.hw.clk,
-				       &gcc_ipq4019_cpu_clk_notifier);
+	return devm_clk_notifier_register(&pdev->dev, apps_clk_src.clkr.hw.clk,
+					  &gcc_ipq4019_cpu_clk_notifier);
 }
 
 static struct platform_driver gcc_ipq4019_driver = {
 	.probe		= gcc_ipq4019_probe,
-	.remove		= gcc_ipq4019_remove,
 	.driver		= {
 		.name	= "qcom,gcc-ipq4019",
 		.of_match_table = gcc_ipq4019_match_table,

@@ -34,12 +34,24 @@
 #include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_util.h>
 
+/*
+ * Drivers that don't allow primary plane scaling may pass this macro in place
+ * of the min/max scale parameters of the plane-state checker function.
+ *
+ * Due to src being in 16.16 fixed point and dest being in integer pixels,
+ * 1<<16 represents no scaling.
+ */
+#define DRM_PLANE_NO_SCALING (1<<16)
+
 struct drm_atomic_state;
 struct drm_private_obj;
 struct drm_private_state;
 
 int drm_atomic_helper_check_modeset(struct drm_device *dev,
 				struct drm_atomic_state *state);
+int
+drm_atomic_helper_check_wb_encoder_state(struct drm_encoder *encoder,
+					 struct drm_connector_state *conn_state);
 int drm_atomic_helper_check_plane_state(struct drm_plane_state *plane_state,
 					const struct drm_crtc_state *crtc_state,
 					int min_scale,
@@ -48,6 +60,7 @@ int drm_atomic_helper_check_plane_state(struct drm_plane_state *plane_state,
 					bool can_update_disabled);
 int drm_atomic_helper_check_planes(struct drm_device *dev,
 			       struct drm_atomic_state *state);
+int drm_atomic_helper_check_crtc_primary_plane(struct drm_crtc_state *crtc_state);
 int drm_atomic_helper_check(struct drm_device *dev,
 			    struct drm_atomic_state *state);
 void drm_atomic_helper_commit_tail(struct drm_atomic_state *state);
@@ -73,6 +86,9 @@ void drm_atomic_helper_wait_for_flip_done(struct drm_device *dev,
 void
 drm_atomic_helper_update_legacy_modeset_state(struct drm_device *dev,
 					      struct drm_atomic_state *old_state);
+
+void
+drm_atomic_helper_calc_timestamping_constants(struct drm_atomic_state *state);
 
 void drm_atomic_helper_commit_modeset_disables(struct drm_device *dev,
 					       struct drm_atomic_state *state);
@@ -144,10 +160,6 @@ int drm_atomic_helper_page_flip_target(
 				uint32_t flags,
 				uint32_t target,
 				struct drm_modeset_acquire_ctx *ctx);
-int drm_atomic_helper_legacy_gamma_set(struct drm_crtc *crtc,
-				       u16 *red, u16 *green, u16 *blue,
-				       uint32_t size,
-				       struct drm_modeset_acquire_ctx *ctx);
 
 /**
  * drm_atomic_crtc_for_each_plane - iterate over planes currently attached to CRTC
@@ -164,7 +176,7 @@ int drm_atomic_helper_legacy_gamma_set(struct drm_crtc *crtc,
 	drm_for_each_plane_mask(plane, (crtc)->dev, (crtc)->state->plane_mask)
 
 /**
- * drm_crtc_atomic_state_for_each_plane - iterate over attached planes in new state
+ * drm_atomic_crtc_state_for_each_plane - iterate over attached planes in new state
  * @plane: the loop cursor
  * @crtc_state: the incoming CRTC state
  *
@@ -177,7 +189,7 @@ int drm_atomic_helper_legacy_gamma_set(struct drm_crtc *crtc,
 	drm_for_each_plane_mask(plane, (crtc_state)->state->dev, (crtc_state)->plane_mask)
 
 /**
- * drm_crtc_atomic_state_for_each_plane_state - iterate over attached planes in new state
+ * drm_atomic_crtc_state_for_each_plane_state - iterate over attached planes in new state
  * @plane: the loop cursor
  * @plane_state: loop cursor for the plane's state, must be const
  * @crtc_state: the incoming CRTC state
@@ -223,5 +235,13 @@ drm_atomic_plane_disabling(struct drm_plane_state *old_plane_state,
 
 	return old_plane_state->crtc && !new_plane_state->crtc;
 }
+
+u32 *
+drm_atomic_helper_bridge_propagate_bus_fmt(struct drm_bridge *bridge,
+					struct drm_bridge_state *bridge_state,
+					struct drm_crtc_state *crtc_state,
+					struct drm_connector_state *conn_state,
+					u32 output_fmt,
+					unsigned int *num_input_fmts);
 
 #endif /* DRM_ATOMIC_HELPER_H_ */

@@ -81,7 +81,7 @@ struct ath10k_pci_pipe {
 	/* Handle of underlying Copy Engine */
 	struct ath10k_ce_pipe *ce_hdl;
 
-	/* Our pipe number; facilitiates use of pipe_info ptrs. */
+	/* Our pipe number; facilitates use of pipe_info ptrs. */
 	u8 pipe_num;
 
 	/* Convenience back pointer to hif_ce_state. */
@@ -178,11 +178,16 @@ struct ath10k_pci {
 	 */
 	u32 (*targ_cpu_to_ce_addr)(struct ath10k *ar, u32 addr);
 
+	struct ce_attr *attr;
+	struct ce_pipe_config *pipe_config;
+	struct ce_service_to_pipe *serv_to_pipe;
+
 	/* Keep this entry in the last, memory for struct ath10k_ahb is
 	 * allocated (ahb support enabled case) in the continuation of
 	 * this struct.
 	 */
-	struct ath10k_ahb ahb[0];
+	struct ath10k_ahb ahb[];
+
 };
 
 static inline struct ath10k_pci *ath10k_pci_priv(struct ath10k *ar)
@@ -229,7 +234,6 @@ void ath10k_pci_hif_send_complete_check(struct ath10k *ar, u8 pipe,
 u16 ath10k_pci_hif_get_free_queue_number(struct ath10k *ar, u8 pipe);
 void ath10k_pci_hif_power_down(struct ath10k *ar);
 int ath10k_pci_alloc_pipes(struct ath10k *ar);
-void ath10k_pci_free_pipes(struct ath10k *ar);
 void ath10k_pci_free_pipes(struct ath10k *ar);
 void ath10k_pci_rx_replenish_retry(struct timer_list *t);
 void ath10k_pci_ce_deinit(struct ath10k *ar);

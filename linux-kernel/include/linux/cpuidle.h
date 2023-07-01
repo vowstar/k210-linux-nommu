@@ -14,6 +14,7 @@
 #include <linux/percpu.h>
 #include <linux/list.h>
 #include <linux/hrtimer.h>
+#include <linux/context_tracking.h>
 
 #define CPUIDLE_STATE_MAX	10
 #define CPUIDLE_NAME_LEN	16
@@ -38,6 +39,7 @@ struct cpuidle_state_usage {
 	u64			time_ns;
 	unsigned long long	above; /* Number of times it's been too deep */
 	unsigned long long	below; /* Number of times it's been too shallow */
+	unsigned long long	rejected; /* Number of times idle entry was rejected */
 #ifdef CONFIG_SUSPEND
 	unsigned long long	s2idle_usage;
 	unsigned long long	s2idle_time; /* in US */
@@ -48,8 +50,8 @@ struct cpuidle_state {
 	char		name[CPUIDLE_NAME_LEN];
 	char		desc[CPUIDLE_DESC_LEN];
 
-	u64		exit_latency_ns;
-	u64		target_residency_ns;
+	s64		exit_latency_ns;
+	s64		target_residency_ns;
 	unsigned int	flags;
 	unsigned int	exit_latency; /* in US */
 	int		power_usage; /* in mW */
@@ -65,19 +67,24 @@ struct cpuidle_state {
 	 * CPUs execute ->enter_s2idle with the local tick or entire timekeeping
 	 * suspended, so it must not re-enable interrupts at any point (even
 	 * temporarily) or attempt to change states of clock event devices.
+	 *
+	 * This callback may point to the same function as ->enter if all of
+	 * the above requirements are met by it.
 	 */
-	void (*enter_s2idle) (struct cpuidle_device *dev,
-			      struct cpuidle_driver *drv,
-			      int index);
+	int (*enter_s2idle)(struct cpuidle_device *dev,
+			    struct cpuidle_driver *drv,
+			    int index);
 };
 
 /* Idle State Flags */
-#define CPUIDLE_FLAG_NONE       (0x00)
-#define CPUIDLE_FLAG_POLLING	BIT(0) /* polling state */
-#define CPUIDLE_FLAG_COUPLED	BIT(1) /* state applies to multiple cpus */
-#define CPUIDLE_FLAG_TIMER_STOP BIT(2) /* timer is stopped on this state */
-#define CPUIDLE_FLAG_UNUSABLE	BIT(3) /* avoid using this state */
-#define CPUIDLE_FLAG_OFF	BIT(4) /* disable this state by default */
+#define CPUIDLE_FLAG_NONE       	(0x00)
+#define CPUIDLE_FLAG_POLLING		BIT(0) /* polling state */
+#define CPUIDLE_FLAG_COUPLED		BIT(1) /* state applies to multiple cpus */
+#define CPUIDLE_FLAG_TIMER_STOP 	BIT(2) /* timer is stopped on this state */
+#define CPUIDLE_FLAG_UNUSABLE		BIT(3) /* avoid using this state */
+#define CPUIDLE_FLAG_OFF		BIT(4) /* disable this state by default */
+#define CPUIDLE_FLAG_TLB_FLUSHED	BIT(5) /* idle-state flushes TLBs */
+#define CPUIDLE_FLAG_RCU_IDLE		BIT(6) /* idle-state takes care of RCU */
 
 struct cpuidle_device_kobj;
 struct cpuidle_state_kobj;
@@ -108,6 +115,35 @@ struct cpuidle_device {
 
 DECLARE_PER_CPU(struct cpuidle_device *, cpuidle_devices);
 DECLARE_PER_CPU(struct cpuidle_device, cpuidle_dev);
+
+static __always_inline void ct_cpuidle_enter(void)
+{
+	lockdep_assert_irqs_disabled();
+	/*
+	 * Idle is allowed to (temporary) enable IRQs. It
+	 * will return with IRQs disabled.
+	 *
+	 * Trace IRQs enable here, then switch off RCU, and have
+	 * arch_cpu_idle() use raw_local_irq_enable(). Note that
+	 * ct_idle_enter() relies on lockdep IRQ state, so switch that
+	 * last -- this is very similar to the entry code.
+	 */
+	trace_hardirqs_on_prepare();
+	lockdep_hardirqs_on_prepare();
+	instrumentation_end();
+	ct_idle_enter();
+	lockdep_hardirqs_on(_RET_IP_);
+}
+
+static __always_inline void ct_cpuidle_exit(void)
+{
+	/*
+	 * Carefully undo the above.
+	 */
+	lockdep_hardirqs_off(_RET_IP_);
+	ct_idle_exit();
+	instrumentation_begin();
+}
 
 /****************************
  * CPUIDLE DRIVER INTERFACE *
@@ -265,18 +301,13 @@ struct cpuidle_governor {
 	void (*reflect)		(struct cpuidle_device *dev, int index);
 };
 
-#ifdef CONFIG_CPU_IDLE
 extern int cpuidle_register_governor(struct cpuidle_governor *gov);
 extern s64 cpuidle_governor_latency_req(unsigned int cpu);
-#else
-static inline int cpuidle_register_governor(struct cpuidle_governor *gov)
-{return 0;}
-#endif
 
 #define __CPU_PM_CPU_IDLE_ENTER(low_level_idle_enter,			\
 				idx,					\
 				state,					\
-				is_retention)				\
+				is_retention, is_rcu)			\
 ({									\
 	int __ret = 0;							\
 									\
@@ -288,7 +319,11 @@ static inline int cpuidle_register_governor(struct cpuidle_governor *gov)
 	if (!is_retention)						\
 		__ret =  cpu_pm_enter();				\
 	if (!__ret) {							\
+		if (!is_rcu)						\
+			ct_cpuidle_enter();				\
 		__ret = low_level_idle_enter(state);			\
+		if (!is_rcu)						\
+			ct_cpuidle_exit();				\
 		if (!is_retention)					\
 			cpu_pm_exit();					\
 	}								\
@@ -297,15 +332,21 @@ static inline int cpuidle_register_governor(struct cpuidle_governor *gov)
 })
 
 #define CPU_PM_CPU_IDLE_ENTER(low_level_idle_enter, idx)	\
-	__CPU_PM_CPU_IDLE_ENTER(low_level_idle_enter, idx, idx, 0)
+	__CPU_PM_CPU_IDLE_ENTER(low_level_idle_enter, idx, idx, 0, 0)
 
 #define CPU_PM_CPU_IDLE_ENTER_RETENTION(low_level_idle_enter, idx)	\
-	__CPU_PM_CPU_IDLE_ENTER(low_level_idle_enter, idx, idx, 1)
+	__CPU_PM_CPU_IDLE_ENTER(low_level_idle_enter, idx, idx, 1, 0)
 
 #define CPU_PM_CPU_IDLE_ENTER_PARAM(low_level_idle_enter, idx, state)	\
-	__CPU_PM_CPU_IDLE_ENTER(low_level_idle_enter, idx, state, 0)
+	__CPU_PM_CPU_IDLE_ENTER(low_level_idle_enter, idx, state, 0, 0)
+
+#define CPU_PM_CPU_IDLE_ENTER_PARAM_RCU(low_level_idle_enter, idx, state)	\
+	__CPU_PM_CPU_IDLE_ENTER(low_level_idle_enter, idx, state, 0, 1)
 
 #define CPU_PM_CPU_IDLE_ENTER_RETENTION_PARAM(low_level_idle_enter, idx, state)	\
-	__CPU_PM_CPU_IDLE_ENTER(low_level_idle_enter, idx, state, 1)
+	__CPU_PM_CPU_IDLE_ENTER(low_level_idle_enter, idx, state, 1, 0)
+
+#define CPU_PM_CPU_IDLE_ENTER_RETENTION_PARAM_RCU(low_level_idle_enter, idx, state)	\
+	__CPU_PM_CPU_IDLE_ENTER(low_level_idle_enter, idx, state, 1, 1)
 
 #endif /* _LINUX_CPUIDLE_H */

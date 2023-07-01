@@ -165,7 +165,7 @@ enum qca9377_chip_id_rev {
 struct ath10k_fw_ie {
 	__le32 id;
 	__le32 len;
-	u8 data[0];
+	u8 data[];
 };
 
 enum ath10k_fw_ie_type {
@@ -510,6 +510,8 @@ struct ath10k_hw_clk_params {
 	u32 outdiv;
 };
 
+struct htt_rx_desc_ops;
+
 struct ath10k_hw_params {
 	u32 id;
 	u16 dev_id;
@@ -562,6 +564,9 @@ struct ath10k_hw_params {
 	 */
 	bool sw_decrypt_mcast_mgmt;
 
+	/* Rx descriptor abstraction */
+	const struct ath10k_htt_rx_desc_ops *rx_desc_ops;
+
 	const struct ath10k_hw_ops *hw_ops;
 
 	/* Number of bytes used for alignment in rx_hdr_status of rx desc. */
@@ -593,9 +598,6 @@ struct ath10k_hw_params {
 	/* Target rx ring fill level */
 	u32 rx_ring_fill_level;
 
-	/* target supporting per ce IRQ */
-	bool per_ce_irq;
-
 	/* target supporting shadow register for ce write */
 	bool shadow_reg_support;
 
@@ -621,20 +623,32 @@ struct ath10k_hw_params {
 	 */
 	bool uart_pin_workaround;
 
+	/* Workaround for the credit size calculation */
+	bool credit_size_workaround;
+
 	/* tx stats support over pktlog */
 	bool tx_stats_over_pktlog;
+
+	/* provides bitrates for sta_statistics using WMI_TLV_PEER_STATS_INFO_EVENTID */
+	bool supports_peer_stats_info;
+
+	bool dynamic_sar_support;
+
+	bool hw_restart_disconnect;
+
+	bool use_fw_tx_credits;
+
+	bool delay_unmap_buffer;
 };
 
-struct htt_rx_desc;
 struct htt_resp;
 struct htt_data_tx_completion_ext;
+struct htt_rx_ring_rx_desc_offsets;
 
 /* Defines needed for Rx descriptor abstraction */
 struct ath10k_hw_ops {
-	int (*rx_desc_get_l3_pad_bytes)(struct htt_rx_desc *rxd);
 	void (*set_coverage_class)(struct ath10k *ar, s16 value);
 	int (*enable_pll_clk)(struct ath10k *ar);
-	bool (*rx_desc_get_msdu_limit_error)(struct htt_rx_desc *rxd);
 	int (*tx_data_rssi_pad_bytes)(struct htt_resp *htt);
 	int (*is_rssi_enable)(struct htt_resp *resp);
 };
@@ -646,24 +660,6 @@ extern const struct ath10k_hw_ops qca6174_sdio_ops;
 extern const struct ath10k_hw_ops wcn3990_ops;
 
 extern const struct ath10k_hw_clk_params qca6174_clk[];
-
-static inline int
-ath10k_rx_desc_get_l3_pad_bytes(struct ath10k_hw_params *hw,
-				struct htt_rx_desc *rxd)
-{
-	if (hw->hw_ops->rx_desc_get_l3_pad_bytes)
-		return hw->hw_ops->rx_desc_get_l3_pad_bytes(rxd);
-	return 0;
-}
-
-static inline bool
-ath10k_rx_desc_msdu_limit_error(struct ath10k_hw_params *hw,
-				struct htt_rx_desc *rxd)
-{
-	if (hw->hw_ops->rx_desc_get_msdu_limit_error)
-		return hw->hw_ops->rx_desc_get_msdu_limit_error(rxd);
-	return false;
-}
 
 static inline int
 ath10k_tx_data_rssi_get_pad_bytes(struct ath10k_hw_params *hw,
@@ -765,7 +761,7 @@ ath10k_is_rssi_enable(struct ath10k_hw_params *hw,
 #define TARGET_TLV_NUM_TDLS_VDEVS		1
 #define TARGET_TLV_NUM_TIDS			((TARGET_TLV_NUM_PEERS) * 2)
 #define TARGET_TLV_NUM_MSDU_DESC		(1024 + 32)
-#define TARGET_TLV_NUM_MSDU_DESC_HL		64
+#define TARGET_TLV_NUM_MSDU_DESC_HL		1024
 #define TARGET_TLV_NUM_WOW_PATTERNS		22
 #define TARGET_TLV_MGMT_NUM_MSDU_DESC		(50)
 
@@ -773,6 +769,9 @@ ath10k_is_rssi_enable(struct ath10k_hw_params *hw,
 #define TARGET_HL_TLV_NUM_PEERS			33
 #define TARGET_HL_TLV_AST_SKID_LIMIT		16
 #define TARGET_HL_TLV_NUM_WDS_ENTRIES		2
+
+/* Target specific defines for QCA9377 high latency firmware */
+#define TARGET_QCA9377_HL_NUM_PEERS		15
 
 /* Diagnostic Window */
 #define CE_DIAG_PIPE	7

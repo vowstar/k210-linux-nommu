@@ -705,7 +705,7 @@ static int fat_readdir(struct file *file, struct dir_context *ctx)
 }
 
 #define FAT_IOCTL_FILLDIR_FUNC(func, dirent_type)			   \
-static int func(struct dir_context *ctx, const char *name, int name_len,   \
+static bool func(struct dir_context *ctx, const char *name, int name_len,  \
 			     loff_t offset, u64 ino, unsigned int d_type)  \
 {									   \
 	struct fat_ioctl_filldir_callback *buf =			   \
@@ -714,7 +714,7 @@ static int func(struct dir_context *ctx, const char *name, int name_len,   \
 	struct dirent_type __user *d2 = d1 + 1;				   \
 									   \
 	if (buf->result)						   \
-		return -EINVAL;						   \
+		return false;						   \
 	buf->result++;							   \
 									   \
 	if (name != NULL) {						   \
@@ -722,7 +722,7 @@ static int func(struct dir_context *ctx, const char *name, int name_len,   \
 		if (name_len >= sizeof(d1->d_name))			   \
 			name_len = sizeof(d1->d_name) - 1;		   \
 									   \
-		if (put_user(0, d2->d_name)			||	   \
+		if (put_user(0, &d2->d_name[0])			||	   \
 		    put_user(0, &d2->d_reclen)			||	   \
 		    copy_to_user(d1->d_name, name, name_len)	||	   \
 		    put_user(0, d1->d_name + name_len)		||	   \
@@ -750,10 +750,10 @@ static int func(struct dir_context *ctx, const char *name, int name_len,   \
 		    put_user(short_len, &d1->d_reclen))			   \
 			goto efault;					   \
 	}								   \
-	return 0;							   \
+	return true;							   \
 efault:									   \
 	buf->result = -EFAULT;						   \
-	return -EFAULT;							   \
+	return false;							   \
 }
 
 FAT_IOCTL_FILLDIR_FUNC(fat_ioctl_filldir, __fat_dirent)
@@ -804,8 +804,6 @@ static long fat_dir_ioctl(struct file *filp, unsigned int cmd,
 		return fat_generic_ioctl(filp, cmd, arg);
 	}
 
-	if (!access_ok(d1, sizeof(struct __fat_dirent[2])))
-		return -EFAULT;
 	/*
 	 * Yes, we don't need this put_user() absolutely. However old
 	 * code didn't return the right value. So, app use this value,
@@ -844,8 +842,6 @@ static long fat_compat_dir_ioctl(struct file *filp, unsigned cmd,
 		return fat_generic_ioctl(filp, cmd, (unsigned long)arg);
 	}
 
-	if (!access_ok(d1, sizeof(struct compat_dirent[2])))
-		return -EFAULT;
 	/*
 	 * Yes, we don't need this put_user() absolutely. However old
 	 * code didn't return the right value. So, app use this value,
@@ -1288,7 +1284,7 @@ int fat_add_entries(struct inode *dir, void *slots, int nr_slots,
 	struct super_block *sb = dir->i_sb;
 	struct msdos_sb_info *sbi = MSDOS_SB(sb);
 	struct buffer_head *bh, *prev, *bhs[3]; /* 32*slots (672bytes) */
-	struct msdos_dir_entry *uninitialized_var(de);
+	struct msdos_dir_entry *de;
 	int err, free_slots, i, nr_bhs;
 	loff_t pos, i_pos;
 

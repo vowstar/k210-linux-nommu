@@ -7,31 +7,147 @@
 #ifndef _LINUX_IMA_H
 #define _LINUX_IMA_H
 
+#include <linux/kernel_read_file.h>
 #include <linux/fs.h>
 #include <linux/security.h>
 #include <linux/kexec.h>
+#include <crypto/hash_info.h>
 struct linux_binprm;
 
 #ifdef CONFIG_IMA
+extern enum hash_algo ima_get_current_hash_algo(void);
 extern int ima_bprm_check(struct linux_binprm *bprm);
 extern int ima_file_check(struct file *file, int mask);
-extern void ima_post_create_tmpfile(struct inode *inode);
+extern void ima_post_create_tmpfile(struct mnt_idmap *idmap,
+				    struct inode *inode);
 extern void ima_file_free(struct file *file);
-extern int ima_file_mmap(struct file *file, unsigned long prot);
-extern int ima_load_data(enum kernel_load_data_id id);
-extern int ima_read_file(struct file *file, enum kernel_read_file_id id);
+extern int ima_file_mmap(struct file *file, unsigned long reqprot,
+			 unsigned long prot, unsigned long flags);
+extern int ima_file_mprotect(struct vm_area_struct *vma, unsigned long prot);
+extern int ima_load_data(enum kernel_load_data_id id, bool contents);
+extern int ima_post_load_data(char *buf, loff_t size,
+			      enum kernel_load_data_id id, char *description);
+extern int ima_read_file(struct file *file, enum kernel_read_file_id id,
+			 bool contents);
 extern int ima_post_read_file(struct file *file, void *buf, loff_t size,
 			      enum kernel_read_file_id id);
-extern void ima_post_path_mknod(struct dentry *dentry);
+extern void ima_post_path_mknod(struct mnt_idmap *idmap,
+				struct dentry *dentry);
 extern int ima_file_hash(struct file *file, char *buf, size_t buf_size);
-extern void ima_kexec_cmdline(const void *buf, int size);
+extern int ima_inode_hash(struct inode *inode, char *buf, size_t buf_size);
+extern void ima_kexec_cmdline(int kernel_fd, const void *buf, int size);
+extern int ima_measure_critical_data(const char *event_label,
+				     const char *event_name,
+				     const void *buf, size_t buf_len,
+				     bool hash, u8 *digest, size_t digest_len);
+
+#ifdef CONFIG_IMA_APPRAISE_BOOTPARAM
+extern void ima_appraise_parse_cmdline(void);
+#else
+static inline void ima_appraise_parse_cmdline(void) {}
+#endif
 
 #ifdef CONFIG_IMA_KEXEC
 extern void ima_add_kexec_buffer(struct kimage *image);
 #endif
 
-#if (defined(CONFIG_X86) && defined(CONFIG_EFI)) || defined(CONFIG_S390) \
-	|| defined(CONFIG_PPC_SECURE_BOOT)
+#else
+static inline enum hash_algo ima_get_current_hash_algo(void)
+{
+	return HASH_ALGO__LAST;
+}
+
+static inline int ima_bprm_check(struct linux_binprm *bprm)
+{
+	return 0;
+}
+
+static inline int ima_file_check(struct file *file, int mask)
+{
+	return 0;
+}
+
+static inline void ima_post_create_tmpfile(struct mnt_idmap *idmap,
+					   struct inode *inode)
+{
+}
+
+static inline void ima_file_free(struct file *file)
+{
+	return;
+}
+
+static inline int ima_file_mmap(struct file *file, unsigned long reqprot,
+				unsigned long prot, unsigned long flags)
+{
+	return 0;
+}
+
+static inline int ima_file_mprotect(struct vm_area_struct *vma,
+				    unsigned long prot)
+{
+	return 0;
+}
+
+static inline int ima_load_data(enum kernel_load_data_id id, bool contents)
+{
+	return 0;
+}
+
+static inline int ima_post_load_data(char *buf, loff_t size,
+				     enum kernel_load_data_id id,
+				     char *description)
+{
+	return 0;
+}
+
+static inline int ima_read_file(struct file *file, enum kernel_read_file_id id,
+				bool contents)
+{
+	return 0;
+}
+
+static inline int ima_post_read_file(struct file *file, void *buf, loff_t size,
+				     enum kernel_read_file_id id)
+{
+	return 0;
+}
+
+static inline void ima_post_path_mknod(struct mnt_idmap *idmap,
+				       struct dentry *dentry)
+{
+	return;
+}
+
+static inline int ima_file_hash(struct file *file, char *buf, size_t buf_size)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int ima_inode_hash(struct inode *inode, char *buf, size_t buf_size)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline void ima_kexec_cmdline(int kernel_fd, const void *buf, int size) {}
+
+static inline int ima_measure_critical_data(const char *event_label,
+					     const char *event_name,
+					     const void *buf, size_t buf_len,
+					     bool hash, u8 *digest,
+					     size_t digest_len)
+{
+	return -ENOENT;
+}
+
+#endif /* CONFIG_IMA */
+
+#ifdef CONFIG_HAVE_IMA_KEXEC
+int __init ima_free_kexec_buffer(void);
+int __init ima_get_kexec_buffer(void **addr, size_t *size);
+#endif
+
+#ifdef CONFIG_IMA_SECURE_AND_OR_TRUSTED_BOOT
 extern bool arch_ima_get_secureboot(void);
 extern const char * const *arch_get_ima_policy(void);
 #else
@@ -45,60 +161,6 @@ static inline const char * const *arch_get_ima_policy(void)
 	return NULL;
 }
 #endif
-
-#else
-static inline int ima_bprm_check(struct linux_binprm *bprm)
-{
-	return 0;
-}
-
-static inline int ima_file_check(struct file *file, int mask)
-{
-	return 0;
-}
-
-static inline void ima_post_create_tmpfile(struct inode *inode)
-{
-}
-
-static inline void ima_file_free(struct file *file)
-{
-	return;
-}
-
-static inline int ima_file_mmap(struct file *file, unsigned long prot)
-{
-	return 0;
-}
-
-static inline int ima_load_data(enum kernel_load_data_id id)
-{
-	return 0;
-}
-
-static inline int ima_read_file(struct file *file, enum kernel_read_file_id id)
-{
-	return 0;
-}
-
-static inline int ima_post_read_file(struct file *file, void *buf, loff_t size,
-				     enum kernel_read_file_id id)
-{
-	return 0;
-}
-
-static inline void ima_post_path_mknod(struct dentry *dentry)
-{
-	return;
-}
-
-static inline int ima_file_hash(struct file *file, char *buf, size_t buf_size)
-{
-	return -EOPNOTSUPP;
-}
-
-static inline void ima_kexec_cmdline(const void *buf, int size) {}
-#endif /* CONFIG_IMA */
 
 #ifndef CONFIG_IMA_KEXEC
 struct kimage;
@@ -123,9 +185,19 @@ static inline void ima_post_key_create_or_update(struct key *keyring,
 
 #ifdef CONFIG_IMA_APPRAISE
 extern bool is_ima_appraise_enabled(void);
-extern void ima_inode_post_setattr(struct dentry *dentry);
+extern void ima_inode_post_setattr(struct mnt_idmap *idmap,
+				   struct dentry *dentry);
 extern int ima_inode_setxattr(struct dentry *dentry, const char *xattr_name,
 		       const void *xattr_value, size_t xattr_value_len);
+extern int ima_inode_set_acl(struct mnt_idmap *idmap,
+			     struct dentry *dentry, const char *acl_name,
+			     struct posix_acl *kacl);
+static inline int ima_inode_remove_acl(struct mnt_idmap *idmap,
+				       struct dentry *dentry,
+				       const char *acl_name)
+{
+	return ima_inode_set_acl(idmap, dentry, acl_name, NULL);
+}
 extern int ima_inode_removexattr(struct dentry *dentry, const char *xattr_name);
 #else
 static inline bool is_ima_appraise_enabled(void)
@@ -133,7 +205,8 @@ static inline bool is_ima_appraise_enabled(void)
 	return 0;
 }
 
-static inline void ima_inode_post_setattr(struct dentry *dentry)
+static inline void ima_inode_post_setattr(struct mnt_idmap *idmap,
+					  struct dentry *dentry)
 {
 	return;
 }
@@ -146,8 +219,23 @@ static inline int ima_inode_setxattr(struct dentry *dentry,
 	return 0;
 }
 
+static inline int ima_inode_set_acl(struct mnt_idmap *idmap,
+				    struct dentry *dentry, const char *acl_name,
+				    struct posix_acl *kacl)
+{
+
+	return 0;
+}
+
 static inline int ima_inode_removexattr(struct dentry *dentry,
 					const char *xattr_name)
+{
+	return 0;
+}
+
+static inline int ima_inode_remove_acl(struct mnt_idmap *idmap,
+				       struct dentry *dentry,
+				       const char *acl_name)
 {
 	return 0;
 }

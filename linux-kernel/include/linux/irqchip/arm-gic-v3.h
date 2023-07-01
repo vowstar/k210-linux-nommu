@@ -19,7 +19,6 @@
 #define GICD_CLRSPI_NSR			0x0048
 #define GICD_SETSPI_SR			0x0050
 #define GICD_CLRSPI_SR			0x0058
-#define GICD_SEIR			0x0068
 #define GICD_IGROUPR			0x0080
 #define GICD_ISENABLER			0x0100
 #define GICD_ICENABLER			0x0180
@@ -57,6 +56,7 @@
 #define GICD_SPENDSGIR			0x0F20
 
 #define GICD_CTLR_RWP			(1U << 31)
+#define GICD_CTLR_nASSGIreq		(1U << 8)
 #define GICD_CTLR_DS			(1U << 6)
 #define GICD_CTLR_ARE_NS		(1U << 4)
 #define GICD_CTLR_ENABLE_G1A		(1U << 1)
@@ -90,6 +90,7 @@
 #define GICD_TYPER_ESPIS(typer)						\
 	(((typer) & GICD_TYPER_ESPI) ? GICD_TYPER_SPIS((typer) >> 27) : 0)
 
+#define GICD_TYPER2_nASSGIcap		(1U << 8)
 #define GICD_TYPER2_VIL			(1U << 7)
 #define GICD_TYPER2_VID			GENMASK(4, 0)
 
@@ -117,18 +118,17 @@
 #define GICR_WAKER			0x0014
 #define GICR_SETLPIR			0x0040
 #define GICR_CLRLPIR			0x0048
-#define GICR_SEIR			GICD_SEIR
 #define GICR_PROPBASER			0x0070
 #define GICR_PENDBASER			0x0078
 #define GICR_INVLPIR			0x00A0
 #define GICR_INVALLR			0x00B0
 #define GICR_SYNCR			0x00C0
-#define GICR_MOVLPIR			0x0100
-#define GICR_MOVALLR			0x0110
 #define GICR_IDREGS			GICD_IDREGS
 #define GICR_PIDR2			GICD_PIDR2
 
 #define GICR_CTLR_ENABLE_LPIS		(1UL << 0)
+#define GICR_CTLR_CES			(1UL << 1)
+#define GICR_CTLR_IR			(1UL << 2)
 #define GICR_CTLR_RWP			(1UL << 3)
 
 #define GICR_TYPER_CPU_NUMBER(r)	(((r) >> 8) & 0xffff)
@@ -241,6 +241,7 @@
 
 #define GICR_TYPER_PLPIS		(1U << 0)
 #define GICR_TYPER_VLPIS		(1U << 1)
+#define GICR_TYPER_DIRTY		(1U << 2)
 #define GICR_TYPER_DirectLPIS		(1U << 3)
 #define GICR_TYPER_LAST			(1U << 4)
 #define GICR_TYPER_RVPEID		(1U << 7)
@@ -320,6 +321,9 @@
 #define GICR_VPENDBASER_NonShareable					\
 	GIC_BASER_SHAREABILITY(GICR_VPENDBASER, NonShareable)
 
+#define GICR_VPENDBASER_InnerShareable					\
+	GIC_BASER_SHAREABILITY(GICR_VPENDBASER, InnerShareable)
+
 #define GICR_VPENDBASER_nCnB	GIC_BASER_CACHEABILITY(GICR_VPENDBASER, INNER, nCnB)
 #define GICR_VPENDBASER_nC 	GIC_BASER_CACHEABILITY(GICR_VPENDBASER, INNER, nC)
 #define GICR_VPENDBASER_RaWt	GIC_BASER_CACHEABILITY(GICR_VPENDBASER, INNER, RaWt)
@@ -343,6 +347,15 @@
 #define GICR_VPENDBASER_4_1_VGRP1EN	(1ULL << 58)
 #define GICR_VPENDBASER_4_1_VPEID	GENMASK_ULL(15, 0)
 
+#define GICR_VSGIR			0x0080
+
+#define GICR_VSGIR_VPEID		GENMASK(15, 0)
+
+#define GICR_VSGIPENDR			0x0088
+
+#define GICR_VSGIPENDR_BUSY		(1U << 31)
+#define GICR_VSGIPENDR_PENDING		GENMASK(15, 0)
+
 /*
  * ITS registers, offsets from ITS_base
  */
@@ -365,6 +378,11 @@
 #define GITS_CIDR3			0xfffc
 
 #define GITS_TRANSLATER			0x10040
+
+#define GITS_SGIR			0x20020
+
+#define GITS_SGIR_VPEID			GENMASK_ULL(47, 32)
+#define GITS_SGIR_VINTID		GENMASK_ULL(3, 0)
 
 #define GITS_CTLR_ENABLE		(1U << 0)
 #define GITS_CTLR_ImDe			(1U << 1)
@@ -500,8 +518,9 @@
 #define GITS_CMD_VMAPTI			GITS_CMD_GICv4(GITS_CMD_MAPTI)
 #define GITS_CMD_VMOVI			GITS_CMD_GICv4(GITS_CMD_MOVI)
 #define GITS_CMD_VSYNC			GITS_CMD_GICv4(GITS_CMD_SYNC)
-/* VMOVP and INVDB are the odd ones, as they dont have a physical counterpart */
+/* VMOVP, VSGI and INVDB are the odd ones, as they dont have a physical counterpart */
 #define GITS_CMD_VMOVP			GITS_CMD_GICv4(2)
+#define GITS_CMD_VSGI			GITS_CMD_GICv4(3)
 #define GITS_CMD_INVDB			GITS_CMD_GICv4(0xe)
 
 /*
@@ -558,66 +577,10 @@
 #define ICC_SRE_EL1_DFB			(1U << 1)
 #define ICC_SRE_EL1_SRE			(1U << 0)
 
-/*
- * Hypervisor interface registers (SRE only)
- */
-#define ICH_LR_VIRTUAL_ID_MASK		((1ULL << 32) - 1)
-
-#define ICH_LR_EOI			(1ULL << 41)
-#define ICH_LR_GROUP			(1ULL << 60)
-#define ICH_LR_HW			(1ULL << 61)
-#define ICH_LR_STATE			(3ULL << 62)
-#define ICH_LR_PENDING_BIT		(1ULL << 62)
-#define ICH_LR_ACTIVE_BIT		(1ULL << 63)
-#define ICH_LR_PHYS_ID_SHIFT		32
-#define ICH_LR_PHYS_ID_MASK		(0x3ffULL << ICH_LR_PHYS_ID_SHIFT)
-#define ICH_LR_PRIORITY_SHIFT		48
-#define ICH_LR_PRIORITY_MASK		(0xffULL << ICH_LR_PRIORITY_SHIFT)
-
 /* These are for GICv2 emulation only */
 #define GICH_LR_VIRTUALID		(0x3ffUL << 0)
 #define GICH_LR_PHYSID_CPUID_SHIFT	(10)
 #define GICH_LR_PHYSID_CPUID		(7UL << GICH_LR_PHYSID_CPUID_SHIFT)
-
-#define ICH_MISR_EOI			(1 << 0)
-#define ICH_MISR_U			(1 << 1)
-
-#define ICH_HCR_EN			(1 << 0)
-#define ICH_HCR_UIE			(1 << 1)
-#define ICH_HCR_NPIE			(1 << 3)
-#define ICH_HCR_TC			(1 << 10)
-#define ICH_HCR_TALL0			(1 << 11)
-#define ICH_HCR_TALL1			(1 << 12)
-#define ICH_HCR_EOIcount_SHIFT		27
-#define ICH_HCR_EOIcount_MASK		(0x1f << ICH_HCR_EOIcount_SHIFT)
-
-#define ICH_VMCR_ACK_CTL_SHIFT		2
-#define ICH_VMCR_ACK_CTL_MASK		(1 << ICH_VMCR_ACK_CTL_SHIFT)
-#define ICH_VMCR_FIQ_EN_SHIFT		3
-#define ICH_VMCR_FIQ_EN_MASK		(1 << ICH_VMCR_FIQ_EN_SHIFT)
-#define ICH_VMCR_CBPR_SHIFT		4
-#define ICH_VMCR_CBPR_MASK		(1 << ICH_VMCR_CBPR_SHIFT)
-#define ICH_VMCR_EOIM_SHIFT		9
-#define ICH_VMCR_EOIM_MASK		(1 << ICH_VMCR_EOIM_SHIFT)
-#define ICH_VMCR_BPR1_SHIFT		18
-#define ICH_VMCR_BPR1_MASK		(7 << ICH_VMCR_BPR1_SHIFT)
-#define ICH_VMCR_BPR0_SHIFT		21
-#define ICH_VMCR_BPR0_MASK		(7 << ICH_VMCR_BPR0_SHIFT)
-#define ICH_VMCR_PMR_SHIFT		24
-#define ICH_VMCR_PMR_MASK		(0xffUL << ICH_VMCR_PMR_SHIFT)
-#define ICH_VMCR_ENG0_SHIFT		0
-#define ICH_VMCR_ENG0_MASK		(1 << ICH_VMCR_ENG0_SHIFT)
-#define ICH_VMCR_ENG1_SHIFT		1
-#define ICH_VMCR_ENG1_MASK		(1 << ICH_VMCR_ENG1_SHIFT)
-
-#define ICH_VTR_PRI_BITS_SHIFT		29
-#define ICH_VTR_PRI_BITS_MASK		(7 << ICH_VTR_PRI_BITS_SHIFT)
-#define ICH_VTR_ID_BITS_SHIFT		23
-#define ICH_VTR_ID_BITS_MASK		(7 << ICH_VTR_ID_BITS_SHIFT)
-#define ICH_VTR_SEIS_SHIFT		22
-#define ICH_VTR_SEIS_MASK		(1 << ICH_VTR_SEIS_SHIFT)
-#define ICH_VTR_A3V_SHIFT		21
-#define ICH_VTR_A3V_MASK		(1 << ICH_VTR_A3V_SHIFT)
 
 #define ICC_IAR1_EL1_SPURIOUS		0x3ff
 
@@ -650,10 +613,11 @@
 
 struct rdists {
 	struct {
+		raw_spinlock_t	rd_lock;
 		void __iomem	*rd_base;
 		struct page	*pend_page;
 		phys_addr_t	phys_base;
-		bool		lpi_enabled;
+		u64             flags;
 		cpumask_t	*vpe_table_mask;
 		void		*vpe_l1_base;
 	} __percpu		*rdist;
@@ -662,13 +626,16 @@ struct rdists {
 	u64			flags;
 	u32			gicd_typer;
 	u32			gicd_typer2;
+	int                     cpuhp_memreserve_state;
 	bool			has_vlpis;
 	bool			has_rvpeid;
 	bool			has_direct_lpi;
+	bool			has_vpend_valid_dirty;
 };
 
 struct irq_domain;
 struct fwnode_handle;
+int __init its_lpi_memreserve_init(void);
 int its_cpu_init(void);
 int its_init(struct fwnode_handle *handle, struct rdists *rdists,
 	     struct irq_domain *domain);

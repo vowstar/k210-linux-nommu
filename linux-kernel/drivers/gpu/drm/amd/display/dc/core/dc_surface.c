@@ -23,8 +23,6 @@
  *
  */
 
-#include <linux/mm.h>
-
 /* DC interface (public) */
 #include "dm_services.h"
 #include "dc.h"
@@ -48,23 +46,20 @@ static void dc_plane_construct(struct dc_context *ctx, struct dc_plane_state *pl
 	plane_state->in_transfer_func = dc_create_transfer_func();
 	if (plane_state->in_transfer_func != NULL) {
 		plane_state->in_transfer_func->type = TF_TYPE_BYPASS;
-		plane_state->in_transfer_func->ctx = ctx;
 	}
 	plane_state->in_shaper_func = dc_create_transfer_func();
 	if (plane_state->in_shaper_func != NULL) {
 		plane_state->in_shaper_func->type = TF_TYPE_BYPASS;
-		plane_state->in_shaper_func->ctx = ctx;
 	}
 
 	plane_state->lut3d_func = dc_create_3dlut_func();
-	if (plane_state->lut3d_func != NULL) {
-		plane_state->lut3d_func->ctx = ctx;
-	}
+
 	plane_state->blend_tf = dc_create_transfer_func();
 	if (plane_state->blend_tf != NULL) {
 		plane_state->blend_tf->type = TF_TYPE_BYPASS;
-		plane_state->blend_tf->ctx = ctx;
 	}
+
+	plane_state->pre_multiplied_alpha = true;
 
 }
 
@@ -120,7 +115,7 @@ struct dc_plane_state *dc_create_plane_state(struct dc *dc)
 	return plane_state;
 }
 
-/**
+/*
  *****************************************************************************
  *  Function: dc_plane_get_status
  *

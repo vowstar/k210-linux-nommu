@@ -8,6 +8,11 @@
 	model = "Beelink A1";
 	compatible = "azw,beelink-a1", "rockchip,rk3328";
 
+	aliases {
+		mmc0 = &sdmmc;
+		mmc1 = &emmc;
+	};
+
 	/*
 	 * UART pins, as viewed with bottom of case removed:
 	 *
@@ -60,6 +65,7 @@
 };
 
 &codec {
+	mute-gpios = <&grf_gpio 0 GPIO_ACTIVE_LOW>;
 	status = "okay";
 };
 
@@ -114,7 +120,7 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
-		rtl8211f: phy@0 {
+		rtl8211f: ethernet-phy@0 {
 			reg = <0>;
 			reset-assert-us = <10000>;
 			reset-deassert-us = <30000>;
@@ -154,6 +160,7 @@
 		pinctrl-0 = <&pmic_int_l>;
 		rockchip,system-power-controller;
 		wakeup-source;
+		#clock-cells = <0>;
 
 		vcc1-supply = <&vcc_sys>;
 		vcc2-supply = <&vcc_sys>;

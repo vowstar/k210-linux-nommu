@@ -341,7 +341,8 @@ static void __init szmem(void)
 				continue;
 			}
 			memblock_add_node(PFN_PHYS(slot_getbasepfn(node, slot)),
-					  PFN_PHYS(slot_psize), node);
+					  PFN_PHYS(slot_psize), node,
+					  MEMBLOCK_NONE);
 		}
 	}
 }
@@ -402,13 +403,6 @@ void __init prom_meminit(void)
 		}
 		__node_data[node] = &null_node;
 	}
-
-	memblocks_present();
-}
-
-void __init prom_free_prom_memory(void)
-{
-	/* We got nothing to free here ...  */
 }
 
 extern void setup_zero_pages(void);
@@ -419,7 +413,7 @@ void __init paging_init(void)
 
 	pagetable_init();
 	zones_size[ZONE_NORMAL] = max_low_pfn;
-	free_area_init_nodes(zones_size);
+	free_area_init(zones_size);
 }
 
 void __init mem_init(void)
@@ -427,5 +421,14 @@ void __init mem_init(void)
 	high_memory = (void *) __va(get_num_physpages() << PAGE_SHIFT);
 	memblock_free_all();
 	setup_zero_pages();	/* This comes from node 0 */
-	mem_init_print_info(NULL);
+}
+
+pg_data_t * __init arch_alloc_nodedata(int nid)
+{
+	return memblock_alloc(sizeof(pg_data_t), SMP_CACHE_BYTES);
+}
+
+void arch_refresh_nodedata(int nid, pg_data_t *pgdat)
+{
+	__node_data[nid] = (struct node_data *)pgdat;
 }

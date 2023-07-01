@@ -193,7 +193,7 @@ static bool altera_pcie_valid_device(struct altera_pcie *pcie,
 	if (bus->number == pcie->root_bus_nr && dev > 0)
 		return false;
 
-	 return true;
+	return true;
 }
 
 static int tlp_read_packet(struct altera_pcie *pcie, u32 *value)
@@ -510,10 +510,8 @@ static int altera_pcie_cfg_read(struct pci_bus *bus, unsigned int devfn,
 	if (altera_pcie_hide_rc_bar(bus, devfn, where))
 		return PCIBIOS_BAD_REGISTER_NUMBER;
 
-	if (!altera_pcie_valid_device(pcie, bus, PCI_SLOT(devfn))) {
-		*value = 0xffffffff;
+	if (!altera_pcie_valid_device(pcie, bus, PCI_SLOT(devfn)))
 		return PCIBIOS_DEVICE_NOT_FOUND;
-	}
 
 	return _altera_pcie_cfg_read(pcie, bus->number, devfn, where, size,
 				     value);
@@ -646,7 +644,7 @@ static void altera_pcie_isr(struct irq_desc *desc)
 	struct device *dev;
 	unsigned long status;
 	u32 bit;
-	u32 virq;
+	int ret;
 
 	chained_irq_enter(chip, desc);
 	pcie = irq_desc_get_handler_data(desc);
@@ -658,11 +656,9 @@ static void altera_pcie_isr(struct irq_desc *desc)
 			/* clear interrupts */
 			cra_writel(pcie, 1 << bit, P2A_INT_STATUS);
 
-			virq = irq_find_mapping(pcie->irq_domain, bit);
-			if (virq)
-				generic_handle_irq(virq);
-			else
-				dev_err(dev, "unexpected IRQ, INT%d\n", bit);
+			ret = generic_handle_domain_irq(pcie->irq_domain, bit);
+			if (ret)
+				dev_err_ratelimited(dev, "unexpected IRQ, INT%d\n", bit);
 		}
 	}
 
@@ -694,29 +690,23 @@ static void altera_pcie_irq_teardown(struct altera_pcie *pcie)
 
 static int altera_pcie_parse_dt(struct altera_pcie *pcie)
 {
-	struct device *dev = &pcie->pdev->dev;
 	struct platform_device *pdev = pcie->pdev;
-	struct resource *cra;
-	struct resource *hip;
 
-	cra = platform_get_resource_byname(pdev, IORESOURCE_MEM, "Cra");
-	pcie->cra_base = devm_ioremap_resource(dev, cra);
+	pcie->cra_base = devm_platform_ioremap_resource_byname(pdev, "Cra");
 	if (IS_ERR(pcie->cra_base))
 		return PTR_ERR(pcie->cra_base);
 
 	if (pcie->pcie_data->version == ALTERA_PCIE_V2) {
-		hip = platform_get_resource_byname(pdev, IORESOURCE_MEM, "Hip");
-		pcie->hip_base = devm_ioremap_resource(&pdev->dev, hip);
+		pcie->hip_base =
+			devm_platform_ioremap_resource_byname(pdev, "Hip");
 		if (IS_ERR(pcie->hip_base))
 			return PTR_ERR(pcie->hip_base);
 	}
 
 	/* setup IRQ */
 	pcie->irq = platform_get_irq(pdev, 0);
-	if (pcie->irq < 0) {
-		dev_err(dev, "failed to get IRQ: %d\n", pcie->irq);
+	if (pcie->irq < 0)
 		return pcie->irq;
-	}
 
 	irq_set_chained_handler_and_data(pcie->irq, altera_pcie_isr, pcie);
 	return 0;
@@ -773,11 +763,9 @@ static int altera_pcie_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct altera_pcie *pcie;
-	struct pci_bus *bus;
-	struct pci_bus *child;
 	struct pci_host_bridge *bridge;
 	int ret;
-	const struct of_device_id *match;
+	const struct altera_pcie_data *data;
 
 	bridge = devm_pci_alloc_host_bridge(dev, sizeof(*pcie));
 	if (!bridge)
@@ -787,22 +775,15 @@ static int altera_pcie_probe(struct platform_device *pdev)
 	pcie->pdev = pdev;
 	platform_set_drvdata(pdev, pcie);
 
-	match = of_match_device(altera_pcie_of_match, &pdev->dev);
-	if (!match)
+	data = of_device_get_match_data(&pdev->dev);
+	if (!data)
 		return -ENODEV;
 
-	pcie->pcie_data = match->data;
+	pcie->pcie_data = data;
 
 	ret = altera_pcie_parse_dt(pcie);
 	if (ret) {
 		dev_err(dev, "Parsing DT failed\n");
-		return ret;
-	}
-
-	ret = pci_parse_request_of_pci_ranges(dev, &bridge->windows,
-					      &bridge->dma_ranges, NULL);
-	if (ret) {
-		dev_err(dev, "Failed add resources\n");
 		return ret;
 	}
 
@@ -818,27 +799,11 @@ static int altera_pcie_probe(struct platform_device *pdev)
 	cra_writel(pcie, P2A_INT_ENA_ALL, P2A_INT_ENABLE);
 	altera_pcie_host_init(pcie);
 
-	bridge->dev.parent = dev;
 	bridge->sysdata = pcie;
 	bridge->busnr = pcie->root_bus_nr;
 	bridge->ops = &altera_pcie_ops;
-	bridge->map_irq = of_irq_parse_and_map_pci;
-	bridge->swizzle_irq = pci_common_swizzle;
 
-	ret = pci_scan_root_bus_bridge(bridge);
-	if (ret < 0)
-		return ret;
-
-	bus = bridge->bus;
-
-	pci_assign_unassigned_bus_resources(bus);
-
-	/* Configure PCI Express setting. */
-	list_for_each_entry(child, &bus->children, node)
-		pcie_bus_configure_settings(child);
-
-	pci_bus_add_devices(bus);
-	return ret;
+	return pci_host_probe(bridge);
 }
 
 static int altera_pcie_remove(struct platform_device *pdev)

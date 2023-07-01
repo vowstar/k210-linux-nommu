@@ -111,18 +111,40 @@ static int irq_affinity_list_proc_show(struct seq_file *m, void *v)
 	return show_irq_affinity(AFFINITY_LIST, m);
 }
 
+#ifndef CONFIG_AUTO_IRQ_AFFINITY
+static inline int irq_select_affinity_usr(unsigned int irq)
+{
+	/*
+	 * If the interrupt is started up already then this fails. The
+	 * interrupt is assigned to an online CPU already. There is no
+	 * point to move it around randomly. Tell user space that the
+	 * selected mask is bogus.
+	 *
+	 * If not then any change to the affinity is pointless because the
+	 * startup code invokes irq_setup_affinity() which will select
+	 * a online CPU anyway.
+	 */
+	return -EINVAL;
+}
+#else
+/* ALPHA magic affinity auto selector. Keep it for historical reasons. */
+static inline int irq_select_affinity_usr(unsigned int irq)
+{
+	return irq_select_affinity(irq);
+}
+#endif
 
 static ssize_t write_irq_affinity(int type, struct file *file,
 		const char __user *buffer, size_t count, loff_t *pos)
 {
-	unsigned int irq = (int)(long)PDE_DATA(file_inode(file));
+	unsigned int irq = (int)(long)pde_data(file_inode(file));
 	cpumask_var_t new_value;
 	int err;
 
 	if (!irq_can_set_affinity_usr(irq) || no_irq_affinity)
 		return -EIO;
 
-	if (!alloc_cpumask_var(&new_value, GFP_KERNEL))
+	if (!zalloc_cpumask_var(&new_value, GFP_KERNEL))
 		return -ENOMEM;
 
 	if (type)
@@ -168,12 +190,12 @@ static ssize_t irq_affinity_list_proc_write(struct file *file,
 
 static int irq_affinity_proc_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, irq_affinity_proc_show, PDE_DATA(inode));
+	return single_open(file, irq_affinity_proc_show, pde_data(inode));
 }
 
 static int irq_affinity_list_proc_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, irq_affinity_list_proc_show, PDE_DATA(inode));
+	return single_open(file, irq_affinity_list_proc_show, pde_data(inode));
 }
 
 static const struct proc_ops irq_affinity_proc_ops = {
@@ -216,7 +238,7 @@ static ssize_t default_affinity_write(struct file *file,
 	cpumask_var_t new_value;
 	int err;
 
-	if (!alloc_cpumask_var(&new_value, GFP_KERNEL))
+	if (!zalloc_cpumask_var(&new_value, GFP_KERNEL))
 		return -ENOMEM;
 
 	err = cpumask_parse_user(buffer, count, new_value);
@@ -243,7 +265,7 @@ out:
 
 static int default_affinity_open(struct inode *inode, struct file *file)
 {
-	return single_open(file, default_affinity_show, PDE_DATA(inode));
+	return single_open(file, default_affinity_show, pde_data(inode));
 }
 
 static const struct proc_ops default_affinity_proc_ops = {
@@ -463,12 +485,13 @@ int show_interrupts(struct seq_file *p, void *v)
 
 	rcu_read_lock();
 	desc = irq_to_desc(i);
-	if (!desc)
+	if (!desc || irq_settings_is_hidden(desc))
 		goto outsparse;
 
-	if (desc->kstat_irqs)
+	if (desc->kstat_irqs) {
 		for_each_online_cpu(j)
-			any_count |= *per_cpu_ptr(desc->kstat_irqs, j);
+			any_count |= data_race(*per_cpu_ptr(desc->kstat_irqs, j));
+	}
 
 	if ((!desc->action || irq_desc_is_chained(desc)) && !any_count)
 		goto outsparse;
@@ -490,7 +513,7 @@ int show_interrupts(struct seq_file *p, void *v)
 		seq_printf(p, " %8s", "None");
 	}
 	if (desc->irq_data.domain)
-		seq_printf(p, " %*d", prec, (int) desc->irq_data.hwirq);
+		seq_printf(p, " %*lu", prec, desc->irq_data.hwirq);
 	else
 		seq_printf(p, " %*s", prec, "");
 #ifdef CONFIG_GENERIC_IRQ_SHOW_LEVEL

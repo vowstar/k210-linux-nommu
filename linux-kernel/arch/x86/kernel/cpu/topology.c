@@ -25,12 +25,12 @@
 #define BITS_SHIFT_NEXT_LEVEL(eax)	((eax) & 0x1f)
 #define LEVEL_MAX_SIBLINGS(ebx)		((ebx) & 0xffff)
 
-#ifdef CONFIG_SMP
 unsigned int __max_die_per_package __read_mostly = 1;
 EXPORT_SYMBOL(__max_die_per_package);
 
+#ifdef CONFIG_SMP
 /*
- * Check if given CPUID extended toplogy "leaf" is implemented
+ * Check if given CPUID extended topology "leaf" is implemented
  */
 static int check_extended_topology_leaf(int leaf)
 {
@@ -44,7 +44,7 @@ static int check_extended_topology_leaf(int leaf)
 	return 0;
 }
 /*
- * Return best CPUID Extended Toplogy Leaf supported
+ * Return best CPUID Extended Topology Leaf supported
  */
 static int detect_extended_topology_leaf(struct cpuinfo_x86 *c)
 {
@@ -96,6 +96,8 @@ int detect_extended_topology(struct cpuinfo_x86 *c)
 	unsigned int ht_mask_width, core_plus_mask_width, die_plus_mask_width;
 	unsigned int core_select_mask, core_level_siblings;
 	unsigned int die_select_mask, die_level_siblings;
+	unsigned int pkg_mask_width;
+	bool die_level_present = false;
 	int leaf;
 
 	leaf = detect_extended_topology_leaf(c);
@@ -110,10 +112,10 @@ int detect_extended_topology(struct cpuinfo_x86 *c)
 	core_level_siblings = smp_num_siblings = LEVEL_MAX_SIBLINGS(ebx);
 	core_plus_mask_width = ht_mask_width = BITS_SHIFT_NEXT_LEVEL(eax);
 	die_level_siblings = LEVEL_MAX_SIBLINGS(ebx);
-	die_plus_mask_width = BITS_SHIFT_NEXT_LEVEL(eax);
+	pkg_mask_width = die_plus_mask_width = BITS_SHIFT_NEXT_LEVEL(eax);
 
 	sub_index = 1;
-	do {
+	while (true) {
 		cpuid_count(leaf, sub_index, &eax, &ebx, &ecx, &edx);
 
 		/*
@@ -126,23 +128,33 @@ int detect_extended_topology(struct cpuinfo_x86 *c)
 			die_plus_mask_width = BITS_SHIFT_NEXT_LEVEL(eax);
 		}
 		if (LEAFB_SUBTYPE(ecx) == DIE_TYPE) {
+			die_level_present = true;
 			die_level_siblings = LEVEL_MAX_SIBLINGS(ebx);
 			die_plus_mask_width = BITS_SHIFT_NEXT_LEVEL(eax);
 		}
 
-		sub_index++;
-	} while (LEAFB_SUBTYPE(ecx) != INVALID_TYPE);
+		if (LEAFB_SUBTYPE(ecx) != INVALID_TYPE)
+			pkg_mask_width = BITS_SHIFT_NEXT_LEVEL(eax);
+		else
+			break;
 
-	core_select_mask = (~(-1 << core_plus_mask_width)) >> ht_mask_width;
+		sub_index++;
+	}
+
+	core_select_mask = (~(-1 << pkg_mask_width)) >> ht_mask_width;
 	die_select_mask = (~(-1 << die_plus_mask_width)) >>
 				core_plus_mask_width;
 
 	c->cpu_core_id = apic->phys_pkg_id(c->initial_apicid,
 				ht_mask_width) & core_select_mask;
-	c->cpu_die_id = apic->phys_pkg_id(c->initial_apicid,
-				core_plus_mask_width) & die_select_mask;
+
+	if (die_level_present) {
+		c->cpu_die_id = apic->phys_pkg_id(c->initial_apicid,
+					core_plus_mask_width) & die_select_mask;
+	}
+
 	c->phys_proc_id = apic->phys_pkg_id(c->initial_apicid,
-				die_plus_mask_width);
+				pkg_mask_width);
 	/*
 	 * Reinit the apicid, now that we have extended initial_apicid.
 	 */

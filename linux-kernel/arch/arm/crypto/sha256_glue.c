@@ -15,10 +15,9 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/mm.h>
-#include <linux/cryptohash.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <crypto/sha.h>
+#include <crypto/sha2.h>
 #include <crypto/sha256_base.h>
 #include <asm/simd.h>
 #include <asm/neon.h>

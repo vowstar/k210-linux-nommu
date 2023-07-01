@@ -8,7 +8,6 @@
 #define _SS_SERVICES_H_
 
 #include "policydb.h"
-#include "context.h"
 
 /* Mapping for a single class */
 struct selinux_mapping {
@@ -23,22 +22,26 @@ struct selinux_map {
 	u16 size; /* array size of mapping */
 };
 
-struct selinux_ss {
+struct selinux_policy {
 	struct sidtab *sidtab;
 	struct policydb policydb;
-	rwlock_t policy_rwlock;
-	u32 latest_granting;
 	struct selinux_map map;
-	struct page *status_page;
-	struct mutex status_lock;
+	u32 latest_granting;
 } __randomize_layout;
 
+struct convert_context_args {
+	struct selinux_state *state;
+	struct policydb *oldp;
+	struct policydb *newp;
+};
+
 void services_compute_xperms_drivers(struct extended_perms *xperms,
-				struct avtab_node *node);
-
+				     struct avtab_node *node);
 void services_compute_xperms_decision(struct extended_perms_decision *xpermd,
-					struct avtab_node *node);
+				      struct avtab_node *node);
 
-int context_add_hash(struct policydb *policydb, struct context *context);
+int services_convert_context(struct convert_context_args *args,
+			     struct context *oldc, struct context *newc,
+			     gfp_t gfp_flags);
 
 #endif	/* _SS_SERVICES_H_ */

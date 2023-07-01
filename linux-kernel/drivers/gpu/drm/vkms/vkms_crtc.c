@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0+
 
+#include <linux/dma-fence.h>
+
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_probe_helper.h>
@@ -14,11 +16,14 @@ static enum hrtimer_restart vkms_vblank_simulate(struct hrtimer *timer)
 	struct drm_crtc *crtc = &output->crtc;
 	struct vkms_crtc_state *state;
 	u64 ret_overrun;
-	bool ret;
+	bool ret, fence_cookie;
+
+	fence_cookie = dma_fence_begin_signalling();
 
 	ret_overrun = hrtimer_forward_now(&output->vblank_hrtimer,
 					  output->period_ns);
-	WARN_ON(ret_overrun != 1);
+	if (ret_overrun != 1)
+		pr_warn("%s: vblank timer overrun\n", __func__);
 
 	spin_lock(&output->lock);
 	ret = drm_crtc_handle_vblank(crtc);
@@ -49,6 +54,8 @@ static enum hrtimer_restart vkms_vblank_simulate(struct hrtimer *timer)
 			DRM_DEBUG_DRIVER("Composer worker already queued\n");
 	}
 
+	dma_fence_end_signalling(fence_cookie);
+
 	return HRTIMER_RESTART;
 }
 
@@ -76,13 +83,20 @@ static void vkms_disable_vblank(struct drm_crtc *crtc)
 	hrtimer_cancel(&out->vblank_hrtimer);
 }
 
-bool vkms_get_vblank_timestamp(struct drm_device *dev, unsigned int pipe,
-			       int *max_error, ktime_t *vblank_time,
-			       bool in_vblank_irq)
+static bool vkms_get_vblank_timestamp(struct drm_crtc *crtc,
+				      int *max_error, ktime_t *vblank_time,
+				      bool in_vblank_irq)
 {
+	struct drm_device *dev = crtc->dev;
+	unsigned int pipe = crtc->index;
 	struct vkms_device *vkmsdev = drm_device_to_vkms_device(dev);
 	struct vkms_output *output = &vkmsdev->output;
 	struct drm_vblank_crtc *vblank = &dev->vblank[pipe];
+
+	if (!READ_ONCE(vblank->enabled)) {
+		*vblank_time = ktime_get();
+		return true;
+	}
 
 	*vblank_time = READ_ONCE(output->vblank_hrtimer.node.expires);
 
@@ -154,15 +168,18 @@ static const struct drm_crtc_funcs vkms_crtc_funcs = {
 	.atomic_destroy_state   = vkms_atomic_crtc_destroy_state,
 	.enable_vblank		= vkms_enable_vblank,
 	.disable_vblank		= vkms_disable_vblank,
+	.get_vblank_timestamp	= vkms_get_vblank_timestamp,
 	.get_crc_sources	= vkms_get_crc_sources,
 	.set_crc_source		= vkms_set_crc_source,
 	.verify_crc_source	= vkms_verify_crc_source,
 };
 
 static int vkms_crtc_atomic_check(struct drm_crtc *crtc,
-				  struct drm_crtc_state *state)
+				  struct drm_atomic_state *state)
 {
-	struct vkms_crtc_state *vkms_state = to_vkms_crtc_state(state);
+	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state,
+									  crtc);
+	struct vkms_crtc_state *vkms_state = to_vkms_crtc_state(crtc_state);
 	struct drm_plane *plane;
 	struct drm_plane_state *plane_state;
 	int i = 0, ret;
@@ -170,12 +187,12 @@ static int vkms_crtc_atomic_check(struct drm_crtc *crtc,
 	if (vkms_state->active_planes)
 		return 0;
 
-	ret = drm_atomic_add_affected_planes(state->state, crtc);
+	ret = drm_atomic_add_affected_planes(crtc_state->state, crtc);
 	if (ret < 0)
 		return ret;
 
-	drm_for_each_plane_mask(plane, crtc->dev, state->plane_mask) {
-		plane_state = drm_atomic_get_existing_plane_state(state->state,
+	drm_for_each_plane_mask(plane, crtc->dev, crtc_state->plane_mask) {
+		plane_state = drm_atomic_get_existing_plane_state(crtc_state->state,
 								  plane);
 		WARN_ON(!plane_state);
 
@@ -191,8 +208,8 @@ static int vkms_crtc_atomic_check(struct drm_crtc *crtc,
 	vkms_state->num_active_planes = i;
 
 	i = 0;
-	drm_for_each_plane_mask(plane, crtc->dev, state->plane_mask) {
-		plane_state = drm_atomic_get_existing_plane_state(state->state,
+	drm_for_each_plane_mask(plane, crtc->dev, crtc_state->plane_mask) {
+		plane_state = drm_atomic_get_existing_plane_state(crtc_state->state,
 								  plane);
 
 		if (!plane_state->visible)
@@ -206,19 +223,19 @@ static int vkms_crtc_atomic_check(struct drm_crtc *crtc,
 }
 
 static void vkms_crtc_atomic_enable(struct drm_crtc *crtc,
-				    struct drm_crtc_state *old_state)
+				    struct drm_atomic_state *state)
 {
 	drm_crtc_vblank_on(crtc);
 }
 
 static void vkms_crtc_atomic_disable(struct drm_crtc *crtc,
-				     struct drm_crtc_state *old_state)
+				     struct drm_atomic_state *state)
 {
 	drm_crtc_vblank_off(crtc);
 }
 
 static void vkms_crtc_atomic_begin(struct drm_crtc *crtc,
-				   struct drm_crtc_state *old_crtc_state)
+				   struct drm_atomic_state *state)
 {
 	struct vkms_output *vkms_output = drm_crtc_to_vkms_output(crtc);
 
@@ -229,7 +246,7 @@ static void vkms_crtc_atomic_begin(struct drm_crtc *crtc,
 }
 
 static void vkms_crtc_atomic_flush(struct drm_crtc *crtc,
-				   struct drm_crtc_state *old_crtc_state)
+				   struct drm_atomic_state *state)
 {
 	struct vkms_output *vkms_output = drm_crtc_to_vkms_output(crtc);
 

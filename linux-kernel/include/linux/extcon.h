@@ -76,6 +76,8 @@
 #define EXTCON_DISP_VGA		43	/* Video Graphics Array */
 #define EXTCON_DISP_DP		44	/* Display Port */
 #define EXTCON_DISP_HMD		45	/* Head-Mounted Display */
+#define EXTCON_DISP_CVBS	46	/* Composite Video Broadcast Signal */
+#define EXTCON_DISP_EDP		47	/* Embedded Display Port */
 
 /* Miscellaneous external connector */
 #define EXTCON_DOCK		60
@@ -271,9 +273,32 @@ static inline  void devm_extcon_unregister_notifier(struct device *dev,
 				struct extcon_dev *edev, unsigned int id,
 				struct notifier_block *nb) { }
 
+static inline int extcon_register_notifier_all(struct extcon_dev *edev,
+					       struct notifier_block *nb)
+{
+	return 0;
+}
+
+static inline int extcon_unregister_notifier_all(struct extcon_dev *edev,
+						 struct notifier_block *nb)
+{
+	return 0;
+}
+
+static inline int devm_extcon_register_notifier_all(struct device *dev,
+						    struct extcon_dev *edev,
+						    struct notifier_block *nb)
+{
+	return 0;
+}
+
+static inline void devm_extcon_unregister_notifier_all(struct device *dev,
+						       struct extcon_dev *edev,
+						       struct notifier_block *nb) { }
+
 static inline struct extcon_dev *extcon_get_extcon_dev(const char *extcon_name)
 {
-	return ERR_PTR(-ENODEV);
+	return NULL;
 }
 
 static inline struct extcon_dev *extcon_find_edev_by_node(struct device_node *node)
@@ -285,6 +310,11 @@ static inline struct extcon_dev *extcon_get_edev_by_phandle(struct device *dev,
 				int index)
 {
 	return ERR_PTR(-ENODEV);
+}
+
+static inline const char *extcon_get_edev_name(struct extcon_dev *edev)
+{
+	return NULL;
 }
 #endif /* CONFIG_EXTCON */
 

@@ -104,7 +104,7 @@
 		BPF_EXIT_INSN(),
 	},
 	.fixup_map_hash_8b = { 3 },
-	.errstr = "R6 invalid mem access 'inv'",
+	.errstr = "R6 invalid mem access 'scalar'",
 	.result = REJECT,
 	.prog_type = BPF_PROG_TYPE_TRACEPOINT,
 },
@@ -128,8 +128,80 @@
 		BPF_EXIT_INSN(),
 	},
 	.fixup_map_hash_8b = { 3 },
-	.errstr = "invalid read from stack off -16+0 size 8",
+	.errstr_unpriv = "invalid read from stack off -16+0 size 8",
+	.result_unpriv = REJECT,
+	/* in privileged mode reads from uninitialized stack locations are permitted */
+	.result = ACCEPT,
+},
+{
+	"precision tracking for u32 spill/fill",
+	.insns = {
+		BPF_MOV64_REG(BPF_REG_7, BPF_REG_1),
+		BPF_EMIT_CALL(BPF_FUNC_get_prandom_u32),
+		BPF_MOV32_IMM(BPF_REG_6, 32),
+		BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 1),
+		BPF_MOV32_IMM(BPF_REG_6, 4),
+		/* Additional insns to introduce a pruning point. */
+		BPF_EMIT_CALL(BPF_FUNC_get_prandom_u32),
+		BPF_MOV64_IMM(BPF_REG_3, 0),
+		BPF_MOV64_IMM(BPF_REG_3, 0),
+		BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 1),
+		BPF_MOV64_IMM(BPF_REG_3, 0),
+		/* u32 spill/fill */
+		BPF_STX_MEM(BPF_W, BPF_REG_10, BPF_REG_6, -8),
+		BPF_LDX_MEM(BPF_W, BPF_REG_8, BPF_REG_10, -8),
+		/* out-of-bound map value access for r6=32 */
+		BPF_ST_MEM(BPF_DW, BPF_REG_10, -16, 0),
+		BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+		BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -16),
+		BPF_LD_MAP_FD(BPF_REG_1, 0),
+		BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_map_lookup_elem),
+		BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 2),
+		BPF_ALU64_REG(BPF_ADD, BPF_REG_0, BPF_REG_8),
+		BPF_LDX_MEM(BPF_W, BPF_REG_1, BPF_REG_0, 0),
+		BPF_MOV64_IMM(BPF_REG_0, 0),
+		BPF_EXIT_INSN(),
+	},
+	.fixup_map_hash_8b = { 15 },
 	.result = REJECT,
+	.errstr = "R0 min value is outside of the allowed memory range",
+	.prog_type = BPF_PROG_TYPE_TRACEPOINT,
+},
+{
+	"precision tracking for u32 spills, u64 fill",
+	.insns = {
+		BPF_EMIT_CALL(BPF_FUNC_get_prandom_u32),
+		BPF_MOV64_REG(BPF_REG_6, BPF_REG_0),
+		BPF_MOV32_IMM(BPF_REG_7, 0xffffffff),
+		/* Additional insns to introduce a pruning point. */
+		BPF_MOV64_IMM(BPF_REG_3, 1),
+		BPF_MOV64_IMM(BPF_REG_3, 1),
+		BPF_MOV64_IMM(BPF_REG_3, 1),
+		BPF_MOV64_IMM(BPF_REG_3, 1),
+		BPF_EMIT_CALL(BPF_FUNC_get_prandom_u32),
+		BPF_JMP_IMM(BPF_JEQ, BPF_REG_0, 0, 1),
+		BPF_MOV64_IMM(BPF_REG_3, 1),
+		BPF_ALU32_IMM(BPF_DIV, BPF_REG_3, 0),
+		/* u32 spills, u64 fill */
+		BPF_STX_MEM(BPF_W, BPF_REG_10, BPF_REG_6, -4),
+		BPF_STX_MEM(BPF_W, BPF_REG_10, BPF_REG_7, -8),
+		BPF_LDX_MEM(BPF_DW, BPF_REG_8, BPF_REG_10, -8),
+		/* if r8 != X goto pc+1  r8 known in fallthrough branch */
+		BPF_JMP_IMM(BPF_JNE, BPF_REG_8, 0xffffffff, 1),
+		BPF_MOV64_IMM(BPF_REG_3, 1),
+		/* if r8 == X goto pc+1  condition always true on first
+		 * traversal, so starts backtracking to mark r8 as requiring
+		 * precision. r7 marked as needing precision. r6 not marked
+		 * since it's not tracked.
+		 */
+		BPF_JMP_IMM(BPF_JEQ, BPF_REG_8, 0xffffffff, 1),
+		/* fails if r8 correctly marked unknown after fill. */
+		BPF_ALU32_IMM(BPF_DIV, BPF_REG_3, 0),
+		BPF_MOV64_IMM(BPF_REG_0, 0),
+		BPF_EXIT_INSN(),
+	},
+	.result = REJECT,
+	.errstr = "div by zero",
 	.prog_type = BPF_PROG_TYPE_TRACEPOINT,
 },
 {
@@ -153,4 +225,42 @@
 	.result = ACCEPT,
 	.result_unpriv = ACCEPT,
 	.insn_processed = 15,
+},
+/* The test performs a conditional 64-bit write to a stack location
+ * fp[-8], this is followed by an unconditional 8-bit write to fp[-8],
+ * then data is read from fp[-8]. This sequence is unsafe.
+ *
+ * The test would be mistakenly marked as safe w/o dst register parent
+ * preservation in verifier.c:copy_register_state() function.
+ *
+ * Note the usage of BPF_F_TEST_STATE_FREQ to force creation of the
+ * checkpoint state after conditional 64-bit assignment.
+ */
+{
+	"write tracking and register parent chain bug",
+	.insns = {
+	/* r6 = ktime_get_ns() */
+	BPF_EMIT_CALL(BPF_FUNC_ktime_get_ns),
+	BPF_MOV64_REG(BPF_REG_6, BPF_REG_0),
+	/* r0 = ktime_get_ns() */
+	BPF_EMIT_CALL(BPF_FUNC_ktime_get_ns),
+	/* if r0 > r6 goto +1 */
+	BPF_JMP_REG(BPF_JGT, BPF_REG_0, BPF_REG_6, 1),
+	/* *(u64 *)(r10 - 8) = 0xdeadbeef */
+	BPF_ST_MEM(BPF_DW, BPF_REG_FP, -8, 0xdeadbeef),
+	/* r1 = 42 */
+	BPF_MOV64_IMM(BPF_REG_1, 42),
+	/* *(u8 *)(r10 - 8) = r1 */
+	BPF_STX_MEM(BPF_B, BPF_REG_FP, BPF_REG_1, -8),
+	/* r2 = *(u64 *)(r10 - 8) */
+	BPF_LDX_MEM(BPF_DW, BPF_REG_2, BPF_REG_FP, -8),
+	/* exit(0) */
+	BPF_MOV64_IMM(BPF_REG_0, 0),
+	BPF_EXIT_INSN(),
+	},
+	.flags = BPF_F_TEST_STATE_FREQ,
+	.errstr_unpriv = "invalid read from stack off -8+1 size 8",
+	.result_unpriv = REJECT,
+	/* in privileged mode reads from uninitialized stack locations are permitted */
+	.result = ACCEPT,
 },

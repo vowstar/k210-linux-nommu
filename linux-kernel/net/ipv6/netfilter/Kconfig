@@ -47,14 +47,6 @@ config NFT_FIB_IPV6
 endif # NF_TABLES_IPV6
 endif # NF_TABLES
 
-config NF_FLOW_TABLE_IPV6
-	tristate "Netfilter flow table IPv6 module"
-	depends on NF_FLOW_TABLE
-	help
-	  This option adds the flow table IPv6 support.
-
-	  To compile it as a module, choose M here.
-
 config NF_DUP_IPV6
 	tristate "Netfilter IPv6 packet duplication to alternate destination"
 	depends on !NF_CONNTRACK || NF_CONNTRACK
@@ -69,7 +61,10 @@ config NF_REJECT_IPV6
 config NF_LOG_IPV6
 	tristate "IPv6 packet logging"
 	default m if NETFILTER_ADVANCED=n
-	select NF_LOG_COMMON
+	select NF_LOG_SYSLOG
+	help
+	  This is a backwards-compat option for the user's convenience
+	  (e.g. when running oldconfig). It selects CONFIG_NF_LOG_SYSLOG.
 
 config IP6_NF_IPTABLES
 	tristate "IP6 tables support (required for filtering)"
@@ -127,7 +122,7 @@ config IP6_NF_MATCH_HL
 	tristate '"hl" hoplimit match support'
 	depends on NETFILTER_ADVANCED
 	select NETFILTER_XT_MATCH_HL
-	---help---
+	help
 	  This is a backwards-compat option for the user's convenience
 	  (e.g. when running oldconfig). It selects
 	  CONFIG_NETFILTER_XT_MATCH_HL.
@@ -153,7 +148,7 @@ config IP6_NF_MATCH_RPFILTER
 	tristate '"rpfilter" reverse path filter match support'
 	depends on NETFILTER_ADVANCED
 	depends on IP6_NF_MANGLE || IP6_NF_RAW
-	---help---
+	help
 	  This option allows you to match packets whose replies would
 	  go out via the interface the packet came in.
 
@@ -183,7 +178,7 @@ config IP6_NF_TARGET_HL
 	tristate '"HL" hoplimit target support'
 	depends on NETFILTER_ADVANCED && IP6_NF_MANGLE
 	select NETFILTER_XT_TARGET_HL
-	---help---
+	help
 	  This is a backwards-compatible option for the user's convenience
 	  (e.g. when running oldconfig). It selects
 	  CONFIG_NETFILTER_XT_TARGET_HL.

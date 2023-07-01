@@ -91,12 +91,12 @@
 };
 
 &ecspi4 {
-	cs-gpios = <&gpio3 20 0>;
+	cs-gpios = <&gpio3 20 GPIO_ACTIVE_LOW>;
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_ecspi4>;
 	status = "okay";
 
-	flash: m25p80@0 {
+	flash: flash@0 {
 		#address-cells = <1>;
 		#size-cells = <1>;
 		compatible = "micron,n25q128a11", "jedec,spi-nor";

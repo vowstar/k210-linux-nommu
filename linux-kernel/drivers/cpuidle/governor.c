@@ -63,12 +63,11 @@ int cpuidle_switch_governor(struct cpuidle_governor *gov)
 
 	cpuidle_curr_governor = gov;
 
-	if (gov) {
-		list_for_each_entry(dev, &cpuidle_detected_devices, device_list)
-			cpuidle_enable_device(dev);
-		cpuidle_install_idle_handler();
-		printk(KERN_INFO "cpuidle: using governor %s\n", gov->name);
-	}
+	list_for_each_entry(dev, &cpuidle_detected_devices, device_list)
+		cpuidle_enable_device(dev);
+
+	cpuidle_install_idle_handler();
+	pr_info("cpuidle: using governor %s\n", gov->name);
 
 	return 0;
 }
@@ -109,9 +108,9 @@ int cpuidle_register_governor(struct cpuidle_governor *gov)
  */
 s64 cpuidle_governor_latency_req(unsigned int cpu)
 {
-	int global_req = pm_qos_request(PM_QOS_CPU_DMA_LATENCY);
 	struct device *device = get_cpu_device(cpu);
 	int device_req = dev_pm_qos_raw_resume_latency(device);
+	int global_req = cpu_latency_qos_limit();
 
 	if (device_req > global_req)
 		device_req = global_req;

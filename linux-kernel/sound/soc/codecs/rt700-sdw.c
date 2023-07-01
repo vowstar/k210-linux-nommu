@@ -11,7 +11,9 @@
 #include <linux/mod_devicetable.h>
 #include <linux/soundwire/sdw.h>
 #include <linux/soundwire/sdw_type.h>
+#include <linux/soundwire/sdw_registers.h>
 #include <linux/module.h>
+#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <sound/soc.h>
 #include "rt700.h"
@@ -333,10 +335,14 @@ static int rt700_update_status(struct sdw_slave *slave,
 static int rt700_read_prop(struct sdw_slave *slave)
 {
 	struct sdw_slave_prop *prop = &slave->prop;
-	int nval, i, num_of_ports = 1;
+	int nval, i;
 	u32 bit;
 	unsigned long addr;
 	struct sdw_dpn_prop *dpn;
+
+	prop->scp_int1_mask = SDW_SCP_INT1_IMPL_DEF | SDW_SCP_INT1_BUS_CLASH |
+		SDW_SCP_INT1_PARITY;
+	prop->quirks = SDW_SLAVE_QUIRKS_INVALID_INITIAL_PARITY;
 
 	prop->paging_support = false;
 
@@ -345,7 +351,6 @@ static int rt700_read_prop(struct sdw_slave *slave)
 	prop->sink_ports = 0xA; /* BITMAP:  00001010 */
 
 	nval = hweight32(prop->source_ports);
-	num_of_ports += nval;
 	prop->src_dpn_prop = devm_kcalloc(&slave->dev, nval,
 						sizeof(*prop->src_dpn_prop),
 						GFP_KERNEL);
@@ -365,7 +370,6 @@ static int rt700_read_prop(struct sdw_slave *slave)
 
 	/* do this again for sink now */
 	nval = hweight32(prop->sink_ports);
-	num_of_ports += nval;
 	prop->sink_dpn_prop = devm_kcalloc(&slave->dev, nval,
 						sizeof(*prop->sink_dpn_prop),
 						GFP_KERNEL);
@@ -382,17 +386,6 @@ static int rt700_read_prop(struct sdw_slave *slave)
 		dpn[i].ch_prep_timeout = 10;
 		i++;
 	}
-
-	/* Allocate port_ready based on num_of_ports */
-	slave->port_ready = devm_kcalloc(&slave->dev, num_of_ports,
-					sizeof(*slave->port_ready),
-					GFP_KERNEL);
-	if (!slave->port_ready)
-		return -ENOMEM;
-
-	/* Initialize completion */
-	for (i = 0; i < num_of_ports; i++)
-		init_completion(&slave->port_ready[i]);
 
 	/* set the timeout values */
 	prop->clk_stop_timeout = 20;
@@ -426,10 +419,12 @@ static int rt700_interrupt_callback(struct sdw_slave *slave,
 	dev_dbg(&slave->dev,
 		"%s control_port_stat=%x", __func__, status->control_port);
 
-	if (status->control_port & 0x4) {
+	mutex_lock(&rt700->disable_irq_lock);
+	if (status->control_port & 0x4 && !rt700->disable_irq) {
 		mod_delayed_work(system_power_efficient_wq,
 			&rt700->jack_detect_work, msecs_to_jiffies(250));
 	}
+	mutex_unlock(&rt700->disable_irq_lock);
 
 	return 0;
 }
@@ -438,7 +433,7 @@ static int rt700_interrupt_callback(struct sdw_slave *slave,
  * slave_ops: callbacks for get_clock_stop_mode, clock_stop and
  * port_prep are not defined for now
  */
-static struct sdw_slave_ops rt700_slave_ops = {
+static const struct sdw_slave_ops rt700_slave_ops = {
 	.read_prop = rt700_read_prop,
 	.interrupt_callback = rt700_interrupt_callback,
 	.update_status = rt700_update_status,
@@ -450,13 +445,10 @@ static int rt700_sdw_probe(struct sdw_slave *slave,
 {
 	struct regmap *sdw_regmap, *regmap;
 
-	/* Assign ops */
-	slave->ops = &rt700_slave_ops;
-
 	/* Regmap Initialization */
 	sdw_regmap = devm_regmap_init_sdw(slave, &rt700_sdw_regmap);
-	if (!sdw_regmap)
-		return -EINVAL;
+	if (IS_ERR(sdw_regmap))
+		return PTR_ERR(sdw_regmap);
 
 	regmap = devm_regmap_init(&slave->dev, NULL,
 		&slave->dev, &rt700_regmap);
@@ -472,16 +464,19 @@ static int rt700_sdw_remove(struct sdw_slave *slave)
 {
 	struct rt700_priv *rt700 = dev_get_drvdata(&slave->dev);
 
-	if (rt700 && rt700->hw_init) {
-		cancel_delayed_work(&rt700->jack_detect_work);
-		cancel_delayed_work(&rt700->jack_btn_check_work);
+	if (rt700->hw_init) {
+		cancel_delayed_work_sync(&rt700->jack_detect_work);
+		cancel_delayed_work_sync(&rt700->jack_btn_check_work);
 	}
+
+	if (rt700->first_hw_init)
+		pm_runtime_disable(&slave->dev);
 
 	return 0;
 }
 
 static const struct sdw_device_id rt700_id[] = {
-	SDW_SLAVE_ENTRY(0x025d, 0x700, 0),
+	SDW_SLAVE_ENTRY_EXT(0x025d, 0x700, 0x1, 0, 0),
 	{},
 };
 MODULE_DEVICE_TABLE(sdw, rt700_id);
@@ -493,12 +488,43 @@ static int __maybe_unused rt700_dev_suspend(struct device *dev)
 	if (!rt700->hw_init)
 		return 0;
 
+	cancel_delayed_work_sync(&rt700->jack_detect_work);
+	cancel_delayed_work_sync(&rt700->jack_btn_check_work);
+
 	regcache_cache_only(rt700->regmap, true);
 
 	return 0;
 }
 
-#define RT700_PROBE_TIMEOUT 2000
+static int __maybe_unused rt700_dev_system_suspend(struct device *dev)
+{
+	struct sdw_slave *slave = dev_to_sdw_dev(dev);
+	struct rt700_priv *rt700 = dev_get_drvdata(dev);
+	int ret;
+
+	if (!rt700->hw_init)
+		return 0;
+
+	/*
+	 * prevent new interrupts from being handled after the
+	 * deferred work completes and before the parent disables
+	 * interrupts on the link
+	 */
+	mutex_lock(&rt700->disable_irq_lock);
+	rt700->disable_irq = true;
+	ret = sdw_update_no_pm(slave, SDW_SCP_INTMASK1,
+			       SDW_SCP_INT1_IMPL_DEF, 0);
+	mutex_unlock(&rt700->disable_irq_lock);
+
+	if (ret < 0) {
+		/* log but don't prevent suspend from happening */
+		dev_dbg(&slave->dev, "%s: could not disable imp-def interrupts\n:", __func__);
+	}
+
+	return rt700_dev_suspend(dev);
+}
+
+#define RT700_PROBE_TIMEOUT 5000
 
 static int __maybe_unused rt700_dev_resume(struct device *dev)
 {
@@ -506,7 +532,7 @@ static int __maybe_unused rt700_dev_resume(struct device *dev)
 	struct rt700_priv *rt700 = dev_get_drvdata(dev);
 	unsigned long time;
 
-	if (!rt700->hw_init)
+	if (!rt700->first_hw_init)
 		return 0;
 
 	if (!slave->unattach_request)
@@ -516,6 +542,8 @@ static int __maybe_unused rt700_dev_resume(struct device *dev)
 				msecs_to_jiffies(RT700_PROBE_TIMEOUT));
 	if (!time) {
 		dev_err(&slave->dev, "Initialization not complete, timed out\n");
+		sdw_show_ping_status(slave->bus, true);
+
 		return -ETIMEDOUT;
 	}
 
@@ -529,7 +557,7 @@ regmap_sync:
 }
 
 static const struct dev_pm_ops rt700_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(rt700_dev_suspend, rt700_dev_resume)
+	SET_SYSTEM_SLEEP_PM_OPS(rt700_dev_system_suspend, rt700_dev_resume)
 	SET_RUNTIME_PM_OPS(rt700_dev_suspend, rt700_dev_resume, NULL)
 };
 

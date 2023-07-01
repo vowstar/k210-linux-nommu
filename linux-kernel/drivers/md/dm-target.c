@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2001 Sistina Software (UK) Limited
  *
@@ -10,6 +11,7 @@
 #include <linux/init.h>
 #include <linux/kmod.h>
 #include <linux/bio.h>
+#include <linux/dax.h>
 
 #define DM_MSG_PREFIX "target"
 
@@ -91,6 +93,7 @@ int dm_register_target(struct target_type *tt)
 	up_write(&_lock);
 	return rv;
 }
+EXPORT_SYMBOL(dm_register_target);
 
 void dm_unregister_target(struct target_type *tt)
 {
@@ -104,6 +107,7 @@ void dm_unregister_target(struct target_type *tt)
 
 	up_write(&_lock);
 }
+EXPORT_SYMBOL(dm_unregister_target);
 
 /*
  * io-err: always fails an io, useful for bringing
@@ -142,7 +146,8 @@ static void io_err_release_clone_rq(struct request *clone,
 }
 
 static long io_err_dax_direct_access(struct dm_target *ti, pgoff_t pgoff,
-		long nr_pages, void **kaddr, pfn_t *pfn)
+		long nr_pages, enum dax_access_mode mode, void **kaddr,
+		pfn_t *pfn)
 {
 	return -EIO;
 }
@@ -168,6 +173,3 @@ void dm_target_exit(void)
 {
 	dm_unregister_target(&error_target);
 }
-
-EXPORT_SYMBOL(dm_register_target);
-EXPORT_SYMBOL(dm_unregister_target);

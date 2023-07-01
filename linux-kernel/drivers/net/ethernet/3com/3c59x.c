@@ -1052,7 +1052,7 @@ static const struct net_device_ops boomrang_netdev_ops = {
 	.ndo_tx_timeout		= vortex_tx_timeout,
 	.ndo_get_stats		= vortex_get_stats,
 #ifdef CONFIG_PCI
-	.ndo_do_ioctl 		= vortex_ioctl,
+	.ndo_eth_ioctl		= vortex_ioctl,
 #endif
 	.ndo_set_rx_mode	= set_rx_mode,
 	.ndo_set_mac_address 	= eth_mac_addr,
@@ -1069,7 +1069,7 @@ static const struct net_device_ops vortex_netdev_ops = {
 	.ndo_tx_timeout		= vortex_tx_timeout,
 	.ndo_get_stats		= vortex_get_stats,
 #ifdef CONFIG_PCI
-	.ndo_do_ioctl 		= vortex_ioctl,
+	.ndo_eth_ioctl		= vortex_ioctl,
 #endif
 	.ndo_set_rx_mode	= set_rx_mode,
 	.ndo_set_mac_address 	= eth_mac_addr,
@@ -1091,6 +1091,7 @@ static int vortex_probe1(struct device *gendev, void __iomem *ioaddr, int irq,
 	struct vortex_private *vp;
 	int option;
 	unsigned int eeprom[0x40], checksum = 0;		/* EEPROM contents */
+	__be16 addr[ETH_ALEN / 2];
 	int i, step;
 	struct net_device *dev;
 	static int printed_version;
@@ -1149,7 +1150,7 @@ static int vortex_probe1(struct device *gendev, void __iomem *ioaddr, int irq,
 
 	print_info = (vortex_debug > 1);
 	if (print_info)
-		pr_info("See Documentation/networking/device_drivers/3com/vortex.txt\n");
+		pr_info("See Documentation/networking/device_drivers/ethernet/3com/vortex.rst\n");
 
 	pr_info("%s: 3Com %s %s at %p.\n",
 	       print_name,
@@ -1284,7 +1285,8 @@ static int vortex_probe1(struct device *gendev, void __iomem *ioaddr, int irq,
 	if ((checksum != 0x00) && !(vci->drv_flags & IS_TORNADO))
 		pr_cont(" ***INVALID CHECKSUM %4.4x*** ", checksum);
 	for (i = 0; i < 3; i++)
-		((__be16 *)dev->dev_addr)[i] = htons(eeprom[i + 10]);
+		addr[i] = htons(eeprom[i + 10]);
+	eth_hw_addr_set(dev, (u8 *)addr);
 	if (print_info)
 		pr_cont(" %pM", dev->dev_addr);
 	/* Unfortunately an all zero eeprom passes the checksum and this
@@ -1464,7 +1466,7 @@ static int vortex_probe1(struct device *gendev, void __iomem *ioaddr, int irq,
 	if (pdev) {
 		vp->pm_state_valid = 1;
 		pci_save_state(pdev);
- 		acpi_set_WOL(dev);
+		acpi_set_WOL(dev);
 	}
 	retval = register_netdev(dev);
 	if (retval == 0)
@@ -1954,7 +1956,7 @@ vortex_error(struct net_device *dev, int status)
 				   dev->name, tx_status);
 			if (tx_status == 0x82) {
 				pr_err("Probably a duplex mismatch.  See "
-						"Documentation/networking/device_drivers/3com/vortex.txt\n");
+						"Documentation/networking/device_drivers/ethernet/3com/vortex.rst\n");
 			}
 			dump_tx_ring(dev);
 		}
@@ -2786,7 +2788,7 @@ static void
 dump_tx_ring(struct net_device *dev)
 {
 	if (vortex_debug > 0) {
-	struct vortex_private *vp = netdev_priv(dev);
+		struct vortex_private *vp = netdev_priv(dev);
 		void __iomem *ioaddr = vp->ioaddr;
 
 		if (vp->full_bus_master_tx) {
@@ -2957,13 +2959,13 @@ static void vortex_get_drvinfo(struct net_device *dev,
 {
 	struct vortex_private *vp = netdev_priv(dev);
 
-	strlcpy(info->driver, DRV_NAME, sizeof(info->driver));
+	strscpy(info->driver, DRV_NAME, sizeof(info->driver));
 	if (VORTEX_PCI(vp)) {
-		strlcpy(info->bus_info, pci_name(VORTEX_PCI(vp)),
+		strscpy(info->bus_info, pci_name(VORTEX_PCI(vp)),
 			sizeof(info->bus_info));
 	} else {
 		if (VORTEX_EISA(vp))
-			strlcpy(info->bus_info, dev_name(vp->gendev),
+			strscpy(info->bus_info, dev_name(vp->gendev),
 				sizeof(info->bus_info));
 		else
 			snprintf(info->bus_info, sizeof(info->bus_info),

@@ -28,7 +28,7 @@ MODULE_FIRMWARE("nvidia/gp10b/acr/ucode_load.bin");
 
 static const struct nvkm_acr_hsf_fwif
 gp10b_acr_load_fwif[] = {
-	{ 0, nvkm_acr_hsfw_load, &gm20b_acr_load_0 },
+	{ 0, gm200_acr_hsfw_ctor, &gm20b_acr_load_0, NVKM_ACR_HSF_PMU, 0, 0x00000010 },
 	{}
 };
 
@@ -46,12 +46,14 @@ gp10b_acr = {
 
 static const struct nvkm_acr_fwif
 gp10b_acr_fwif[] = {
-	{ 0, gm20b_acr_load, &gp10b_acr },
+	{  0, gm20b_acr_load, &gp10b_acr },
+	{ -1, gm200_acr_nofw, &gm200_acr },
 	{}
 };
 
 int
-gp10b_acr_new(struct nvkm_device *device, int index, struct nvkm_acr **pacr)
+gp10b_acr_new(struct nvkm_device *device, enum nvkm_subdev_type type, int inst,
+	      struct nvkm_acr **pacr)
 {
-	return nvkm_acr_new_(gp10b_acr_fwif, device, index, pacr);
+	return nvkm_acr_new_(gp10b_acr_fwif, device, type, inst, pacr);
 }

@@ -5,15 +5,28 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/device.h>
 #include <linux/init.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/sys_soc.h>
 
 #include "k3-psil-priv.h"
 
 static DEFINE_MUTEX(ep_map_mutex);
-static struct psil_ep_map *soc_ep_map;
+static const struct psil_ep_map *soc_ep_map;
+
+static const struct soc_device_attribute k3_soc_devices[] = {
+	{ .family = "AM65X", .data = &am654_ep_map },
+	{ .family = "J721E", .data = &j721e_ep_map },
+	{ .family = "J7200", .data = &j7200_ep_map },
+	{ .family = "AM64X", .data = &am64_ep_map },
+	{ .family = "J721S2", .data = &j721s2_ep_map },
+	{ .family = "AM62X", .data = &am62_ep_map },
+	{ .family = "AM62AX", .data = &am62a_ep_map },
+	{ /* sentinel */ }
+};
 
 struct psil_endpoint_config *psil_get_ep_config(u32 thread_id)
 {
@@ -21,12 +34,14 @@ struct psil_endpoint_config *psil_get_ep_config(u32 thread_id)
 
 	mutex_lock(&ep_map_mutex);
 	if (!soc_ep_map) {
-		if (of_machine_is_compatible("ti,am654")) {
-			soc_ep_map = &am654_ep_map;
-		} else if (of_machine_is_compatible("ti,j721e")) {
-			soc_ep_map = &j721e_ep_map;
+		const struct soc_device_attribute *soc;
+
+		soc = soc_device_match(k3_soc_devices);
+		if (soc) {
+			soc_ep_map = soc->data;
 		} else {
 			pr_err("PSIL: No compatible machine found for map\n");
+			mutex_unlock(&ep_map_mutex);
 			return ERR_PTR(-ENOTSUPP);
 		}
 		pr_debug("%s: Using map for %s\n", __func__, soc_ep_map->name);
@@ -88,3 +103,4 @@ int psil_set_new_ep_config(struct device *dev, const char *name,
 	return 0;
 }
 EXPORT_SYMBOL_GPL(psil_set_new_ep_config);
+MODULE_LICENSE("GPL v2");

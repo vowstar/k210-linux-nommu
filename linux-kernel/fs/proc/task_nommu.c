@@ -20,15 +20,13 @@
  */
 void task_mem(struct seq_file *m, struct mm_struct *mm)
 {
+	VMA_ITERATOR(vmi, mm, 0);
 	struct vm_area_struct *vma;
 	struct vm_region *region;
-	struct rb_node *p;
 	unsigned long bytes = 0, sbytes = 0, slack = 0, size;
-        
-	down_read(&mm->mmap_sem);
-	for (p = rb_first(&mm->mm_rb); p; p = rb_next(p)) {
-		vma = rb_entry(p, struct vm_area_struct, vm_rb);
 
+	mmap_read_lock(mm);
+	for_each_vma(vmi, vma) {
 		bytes += kobjsize(vma);
 
 		region = vma->vm_region;
@@ -40,7 +38,7 @@ void task_mem(struct seq_file *m, struct mm_struct *mm)
 		}
 
 		if (atomic_read(&mm->mm_count) > 1 ||
-		    vma->vm_flags & VM_MAYSHARE) {
+		    is_nommu_shared_mapping(vma->vm_flags)) {
 			sbytes += size;
 		} else {
 			bytes += size;
@@ -77,21 +75,19 @@ void task_mem(struct seq_file *m, struct mm_struct *mm)
 		"Shared:\t%8lu bytes\n",
 		bytes, slack, sbytes);
 
-	up_read(&mm->mmap_sem);
+	mmap_read_unlock(mm);
 }
 
 unsigned long task_vsize(struct mm_struct *mm)
 {
+	VMA_ITERATOR(vmi, mm, 0);
 	struct vm_area_struct *vma;
-	struct rb_node *p;
 	unsigned long vsize = 0;
 
-	down_read(&mm->mmap_sem);
-	for (p = rb_first(&mm->mm_rb); p; p = rb_next(p)) {
-		vma = rb_entry(p, struct vm_area_struct, vm_rb);
+	mmap_read_lock(mm);
+	for_each_vma(vmi, vma)
 		vsize += vma->vm_end - vma->vm_start;
-	}
-	up_read(&mm->mmap_sem);
+	mmap_read_unlock(mm);
 	return vsize;
 }
 
@@ -99,14 +95,13 @@ unsigned long task_statm(struct mm_struct *mm,
 			 unsigned long *shared, unsigned long *text,
 			 unsigned long *data, unsigned long *resident)
 {
+	VMA_ITERATOR(vmi, mm, 0);
 	struct vm_area_struct *vma;
 	struct vm_region *region;
-	struct rb_node *p;
 	unsigned long size = kobjsize(mm);
 
-	down_read(&mm->mmap_sem);
-	for (p = rb_first(&mm->mm_rb); p; p = rb_next(p)) {
-		vma = rb_entry(p, struct vm_area_struct, vm_rb);
+	mmap_read_lock(mm);
+	for_each_vma(vmi, vma) {
 		size += kobjsize(vma);
 		region = vma->vm_region;
 		if (region) {
@@ -119,7 +114,7 @@ unsigned long task_statm(struct mm_struct *mm,
 		>> PAGE_SHIFT;
 	*data = (PAGE_ALIGN(mm->start_stack) - (mm->start_data & PAGE_MASK))
 		>> PAGE_SHIFT;
-	up_read(&mm->mmap_sem);
+	mmap_read_unlock(mm);
 	size >>= PAGE_SHIFT;
 	size += *text + *data;
 	*resident = size;
@@ -190,17 +185,19 @@ static int nommu_vma_show(struct seq_file *m, struct vm_area_struct *vma)
  */
 static int show_map(struct seq_file *m, void *_p)
 {
-	struct rb_node *p = _p;
-
-	return nommu_vma_show(m, rb_entry(p, struct vm_area_struct, vm_rb));
+	return nommu_vma_show(m, _p);
 }
 
 static void *m_start(struct seq_file *m, loff_t *pos)
 {
 	struct proc_maps_private *priv = m->private;
 	struct mm_struct *mm;
-	struct rb_node *p;
-	loff_t n = *pos;
+	struct vm_area_struct *vma;
+	unsigned long addr = *pos;
+
+	/* See m_next(). Zero at the start or after lseek. */
+	if (addr == -1UL)
+		return NULL;
 
 	/* pin the task and mm whilst we play with them */
 	priv->task = get_proc_task(priv->inode);
@@ -211,17 +208,17 @@ static void *m_start(struct seq_file *m, loff_t *pos)
 	if (!mm || !mmget_not_zero(mm))
 		return NULL;
 
-	if (down_read_killable(&mm->mmap_sem)) {
+	if (mmap_read_lock_killable(mm)) {
 		mmput(mm);
 		return ERR_PTR(-EINTR);
 	}
 
-	/* start from the Nth VMA */
-	for (p = rb_first(&mm->mm_rb); p; p = rb_next(p))
-		if (n-- == 0)
-			return p;
+	/* start the next element from addr */
+	vma = find_vma(mm, addr);
+	if (vma)
+		return vma;
 
-	up_read(&mm->mmap_sem);
+	mmap_read_unlock(mm);
 	mmput(mm);
 	return NULL;
 }
@@ -231,7 +228,7 @@ static void m_stop(struct seq_file *m, void *_vml)
 	struct proc_maps_private *priv = m->private;
 
 	if (!IS_ERR_OR_NULL(_vml)) {
-		up_read(&priv->mm->mmap_sem);
+		mmap_read_unlock(priv->mm);
 		mmput(priv->mm);
 	}
 	if (priv->task) {
@@ -242,10 +239,10 @@ static void m_stop(struct seq_file *m, void *_vml)
 
 static void *m_next(struct seq_file *m, void *_p, loff_t *pos)
 {
-	struct rb_node *p = _p;
+	struct vm_area_struct *vma = _p;
 
-	(*pos)++;
-	return p ? rb_next(p) : NULL;
+	*pos = vma->vm_end;
+	return find_vma(vma->vm_mm, vma->vm_end);
 }
 
 static const struct seq_operations proc_pid_maps_ops = {

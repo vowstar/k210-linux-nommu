@@ -87,9 +87,7 @@ static void timbuart_rx_chars(struct uart_port *port)
 		tty_insert_flip_char(tport, ch, TTY_NORMAL);
 	}
 
-	spin_unlock(&port->lock);
 	tty_flip_buffer_push(tport);
-	spin_lock(&port->lock);
 
 	dev_dbg(port->dev, "%s - total read %d bytes\n",
 		__func__, port->icount.rx);
@@ -103,8 +101,7 @@ static void timbuart_tx_chars(struct uart_port *port)
 		!uart_circ_empty(xmit)) {
 		iowrite8(xmit->buf[xmit->tail],
 			port->membase + TIMBUART_TXFIFO);
-		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
-		port->icount.tx++;
+		uart_xmit_advance(port, 1);
 	}
 
 	dev_dbg(port->dev,
@@ -172,9 +169,9 @@ static void timbuart_handle_rx_port(struct uart_port *port, u32 isr, u32 *ier)
 	dev_dbg(port->dev, "%s - leaving\n", __func__);
 }
 
-static void timbuart_tasklet(unsigned long arg)
+static void timbuart_tasklet(struct tasklet_struct *t)
 {
-	struct timbuart_port *uart = (struct timbuart_port *)arg;
+	struct timbuart_port *uart = from_tasklet(uart, t, tasklet);
 	u32 isr, ier = 0;
 
 	spin_lock(&uart->port.lock);
@@ -277,8 +274,8 @@ static int get_bindex(int baud)
 }
 
 static void timbuart_set_termios(struct uart_port *port,
-	struct ktermios *termios,
-	struct ktermios *old)
+				 struct ktermios *termios,
+				 const struct ktermios *old)
 {
 	unsigned int baud;
 	short bindex;
@@ -451,7 +448,7 @@ static int timbuart_probe(struct platform_device *dev)
 	}
 	uart->port.irq = irq;
 
-	tasklet_init(&uart->tasklet, timbuart_tasklet, (unsigned long)uart);
+	tasklet_setup(&uart->tasklet, timbuart_tasklet);
 
 	err = uart_register_driver(&timbuart_driver);
 	if (err)

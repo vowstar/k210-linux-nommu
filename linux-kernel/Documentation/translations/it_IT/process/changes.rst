@@ -11,8 +11,8 @@ Requisiti minimi per compilare il kernel
 Introduzione
 ============
 
-Questo documento fornisce una lista dei software necessari per eseguire i
-kernel 4.x.
+Questo documento fornisce una lista dei software necessari per eseguire questa
+versione del kernel.
 
 Questo documento è basato sul file "Changes" del kernel 2.0.x e quindi le
 persone che lo scrissero meritano credito (Jared Mauch, Axel Boldt,
@@ -32,11 +32,14 @@ PC Card, per esempio, probabilmente non dovreste preoccuparvi di pcmciautils.
 ====================== =================  ========================================
         Programma       Versione minima       Comando per verificare la versione
 ====================== =================  ========================================
-GNU C                  4.6                gcc --version
+GNU C                  5.1                gcc --version
+Clang/LLVM (optional)  11.0.0             clang --version
 GNU make               3.81               make --version
-binutils               2.21               ld -v
+bash                   4.2                bash --version
+binutils               2.23               ld -v
 flex                   2.5.35             flex --version
 bison                  2.0                bison --version
+pahole                 1.16               pahole --version
 util-linux             2.10o              fdformat --version
 kmod                   13                 depmod -V
 e2fsprogs              1.41.4             e2fsck -V
@@ -50,14 +53,14 @@ quota-tools            3.09               quota -V
 PPP                    2.4.0              pppd --version
 nfs-utils              1.0.5              showmount --version
 procps                 3.2.0              ps --version
-oprofile               0.9                oprofiled --version
 udev                   081                udevd --version
 grub                   0.93               grub --version || grub-install --version
 mcelog                 0.6                mcelog --version
 iptables               1.4.2              iptables -V
 openssl & libcrypto    1.0.0              openssl version
 bc                     1.06.95            bc --version
-Sphinx\ [#f1]_         1.3                sphinx-build --version
+Sphinx\ [#f1]_         1.7                sphinx-build --version
+cpio                   any                cpio --version
 ====================== =================  ========================================
 
 .. [#f1] Sphinx è necessario solo per produrre la documentazione del Kernel
@@ -71,15 +74,30 @@ GCC
 La versione necessaria di gcc potrebbe variare a seconda del tipo di CPU nel
 vostro calcolatore.
 
+Clang/LLVM (opzionale)
+----------------------
+
+L'ultima versione di clang e *LLVM utils* (secondo `releases.llvm.org
+<https://releases.llvm.org>`_) sono supportati per la generazione del
+kernel. Non garantiamo che anche i rilasci più vecchi funzionino, inoltre
+potremmo rimuovere gli espedienti che abbiamo implementato per farli
+funzionare. Per maggiori informazioni
+:ref:`Building Linux with Clang/LLVM <kbuild_llvm>`.
+
 Make
 ----
 
 Per compilare il kernel vi servirà GNU make 3.81 o successivo.
 
+Bash
+----
+Per generare il kernel vengono usati alcuni script per bash.
+Questo richiede bash 4.2 o successivo.
+
 Binutils
 --------
 
-Per generare il kernel è necessario avere Binutils 2.21 o superiore.
+Per generare il kernel è necessario avere Binutils 2.23 o superiore.
 
 pkg-config
 ----------
@@ -100,6 +118,16 @@ Bison
 
 Dalla versione 4.16, il sistema di compilazione, durante l'esecuzione, genera
 un parsificatore.  Questo richiede bison 2.0 o successivo.
+
+pahole
+------
+
+Dalla versione 5.2, quando viene impostato CONFIG_DEBUG_INFO_BTF, il sistema di
+compilazione genera BTF (BPF Type Format) a partire da DWARF per vmlinux. Più
+tardi anche per i moduli. Questo richiede pahole v1.16 o successivo.
+
+A seconda della distribuzione, lo si può trovare nei pacchetti 'dwarves' o
+'pahole'. Oppure lo si può trovare qui: https://fedorapeople.org/~acme/dwarves/.
 
 Perl
 ----
@@ -338,10 +366,20 @@ gcc
 
 - <ftp://ftp.gnu.org/gnu/gcc/>
 
+Clang/LLVM
+----------
+
+- :ref:`Getting LLVM <getting_llvm>`.
+
 Make
 ----
 
 - <ftp://ftp.gnu.org/gnu/make/>
+
+Bash
+----
+
+- <ftp://ftp.gnu.org/gnu/bash/>
 
 Binutils
 --------
@@ -439,6 +477,11 @@ mcelog
 ------
 
 - <http://www.mcelog.org/>
+
+cpio
+----
+
+- <https://www.gnu.org/software/cpio/>
 
 Rete
 ****

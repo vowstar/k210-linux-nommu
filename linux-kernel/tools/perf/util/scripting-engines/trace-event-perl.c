@@ -27,6 +27,7 @@
 #include <errno.h>
 #include <linux/bitmap.h>
 #include <linux/time64.h>
+#include <traceevent/event-parse.h>
 
 #include <stdbool.h>
 /* perl needs the following define, right after including stdbool.h */
@@ -365,14 +366,11 @@ static void perl_process_tracepoint(struct perf_sample *sample,
 
 	sprintf(handler, "%s::%s", event->system, event->name);
 
-	if (!test_and_set_bit(event->id, events_defined))
+	if (!__test_and_set_bit(event->id, events_defined))
 		define_event_symbols(event, handler, event->print_fmt.args);
 
 	s = nsecs / NSEC_PER_SEC;
 	ns = nsecs - s * NSEC_PER_SEC;
-
-	scripting_context->event_data = data;
-	scripting_context->pevent = evsel->tp_format->tep;
 
 	ENTER;
 	SAVETMPS;
@@ -395,6 +393,8 @@ static void perl_process_tracepoint(struct perf_sample *sample,
 			if (field->flags & TEP_FIELD_IS_DYNAMIC) {
 				offset = *(int *)(data + field->offset);
 				offset &= 0xffff;
+				if (tep_field_is_relative(field->flags))
+					offset += field->offset + field->size;
 			} else
 				offset = field->offset;
 			XPUSHs(sv_2mortal(newSVpv((char *)data + offset, 0)));
@@ -456,8 +456,10 @@ static void perl_process_event_generic(union perf_event *event,
 static void perl_process_event(union perf_event *event,
 			       struct perf_sample *sample,
 			       struct evsel *evsel,
-			       struct addr_location *al)
+			       struct addr_location *al,
+			       struct addr_location *addr_al)
 {
+	scripting_context__update(scripting_context, event, sample, evsel, al, addr_al);
 	perl_process_tracepoint(sample, evsel, al);
 	perl_process_event_generic(event, sample, evsel);
 }
@@ -474,10 +476,13 @@ static void run_start_sub(void)
 /*
  * Start trace script
  */
-static int perl_start_script(const char *script, int argc, const char **argv)
+static int perl_start_script(const char *script, int argc, const char **argv,
+			     struct perf_session *session)
 {
 	const char **command_line;
 	int i, err = 0;
+
+	scripting_context->session = session;
 
 	command_line = malloc((argc + 2) * sizeof(const char *));
 	command_line[0] = "";
@@ -750,6 +755,7 @@ sub print_backtrace\n\
 
 struct scripting_ops perl_scripting_ops = {
 	.name = "Perl",
+	.dirname = "perl",
 	.start_script = perl_start_script,
 	.flush_script = perl_flush_script,
 	.stop_script = perl_stop_script,

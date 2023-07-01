@@ -100,7 +100,7 @@ static struct inode *affs_alloc_inode(struct super_block *sb)
 {
 	struct affs_inode_info *i;
 
-	i = kmem_cache_alloc(affs_inode_cachep, GFP_KERNEL);
+	i = alloc_inode_sb(sb, affs_inode_cachep, GFP_KERNEL);
 	if (!i)
 		return NULL;
 
@@ -276,7 +276,7 @@ parse_options(char *options, kuid_t *uid, kgid_t *gid, int *mode, int *reserved,
 			char *vol = match_strdup(&args[0]);
 			if (!vol)
 				return 0;
-			strlcpy(volume, vol, 32);
+			strscpy(volume, vol, 32);
 			kfree(vol);
 			break;
 		}
@@ -389,7 +389,7 @@ static int affs_fill_super(struct super_block *sb, void *data, int silent)
 	 * blocks, we will have to change it.
 	 */
 
-	size = i_size_read(sb->s_bdev->bd_inode) >> 9;
+	size = bdev_nr_sectors(sb->s_bdev);
 	pr_debug("initial blocksize=%d, #blocks=%d\n", 512, size);
 
 	affs_set_blocksize(sb, PAGE_SIZE);
@@ -474,7 +474,7 @@ got_root:
 	case MUFS_INTLFFS:
 	case MUFS_DCFFS:
 		affs_set_opt(sbi->s_flags, SF_MUFS);
-		/* fall thru */
+		fallthrough;
 	case FS_INTLFFS:
 	case FS_DCFFS:
 		affs_set_opt(sbi->s_flags, SF_INTL);
@@ -486,7 +486,7 @@ got_root:
 		break;
 	case MUFS_OFS:
 		affs_set_opt(sbi->s_flags, SF_MUFS);
-		/* fall through */
+		fallthrough;
 	case FS_OFS:
 		affs_set_opt(sbi->s_flags, SF_OFS);
 		sb->s_flags |= SB_NOEXEC;
@@ -494,7 +494,7 @@ got_root:
 	case MUFS_DCOFS:
 	case MUFS_INTLOFS:
 		affs_set_opt(sbi->s_flags, SF_MUFS);
-		/* fall through */
+		fallthrough;
 	case FS_DCOFS:
 	case FS_INTLOFS:
 		affs_set_opt(sbi->s_flags, SF_INTL);
@@ -620,8 +620,7 @@ affs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_blocks  = AFFS_SB(sb)->s_partition_size - AFFS_SB(sb)->s_reserved;
 	buf->f_bfree   = free;
 	buf->f_bavail  = free;
-	buf->f_fsid.val[0] = (u32)id;
-	buf->f_fsid.val[1] = (u32)(id >> 32);
+	buf->f_fsid    = u64_to_fsid(id);
 	buf->f_namelen = AFFSNAMEMAX;
 	return 0;
 }

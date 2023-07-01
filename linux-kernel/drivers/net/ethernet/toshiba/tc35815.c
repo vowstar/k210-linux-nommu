@@ -367,7 +367,7 @@ struct TxFD {
 
 struct RxFD {
 	struct FDesc fd;
-	struct BDesc bd[0];	/* variable length */
+	struct BDesc bd[];	/* variable length */
 };
 
 struct FrFD {
@@ -454,9 +454,9 @@ static struct sk_buff *alloc_rxbuf_skb(struct net_device *dev,
 	skb = netdev_alloc_skb(dev, RX_BUF_SIZE);
 	if (!skb)
 		return NULL;
-	*dma_handle = pci_map_single(hwdev, skb->data, RX_BUF_SIZE,
-				     PCI_DMA_FROMDEVICE);
-	if (pci_dma_mapping_error(hwdev, *dma_handle)) {
+	*dma_handle = dma_map_single(&hwdev->dev, skb->data, RX_BUF_SIZE,
+				     DMA_FROM_DEVICE);
+	if (dma_mapping_error(&hwdev->dev, *dma_handle)) {
 		dev_kfree_skb_any(skb);
 		return NULL;
 	}
@@ -466,8 +466,8 @@ static struct sk_buff *alloc_rxbuf_skb(struct net_device *dev,
 
 static void free_rxbuf_skb(struct pci_dev *hwdev, struct sk_buff *skb, dma_addr_t dma_handle)
 {
-	pci_unmap_single(hwdev, dma_handle, RX_BUF_SIZE,
-			 PCI_DMA_FROMDEVICE);
+	dma_unmap_single(&hwdev->dev, dma_handle, RX_BUF_SIZE,
+			 DMA_FROM_DEVICE);
 	dev_kfree_skb_any(skb);
 }
 
@@ -643,7 +643,7 @@ static int tc_mii_probe(struct net_device *dev)
 		linkmode_set_bit(ETHTOOL_LINK_MODE_10baseT_Half_BIT, mask);
 		linkmode_set_bit(ETHTOOL_LINK_MODE_100baseT_Half_BIT, mask);
 	}
-	linkmode_and(phydev->supported, phydev->supported, mask);
+	linkmode_andnot(phydev->supported, phydev->supported, mask);
 	linkmode_copy(phydev->advertising, phydev->supported);
 
 	lp->link = 0;
@@ -708,7 +708,7 @@ static int tc35815_read_plat_dev_addr(struct net_device *dev)
 					    lp->pci_dev, tc35815_mac_match);
 	if (pd) {
 		if (pd->platform_data)
-			memcpy(dev->dev_addr, pd->platform_data, ETH_ALEN);
+			eth_hw_addr_set(dev, pd->platform_data);
 		put_device(pd);
 		return is_valid_ether_addr(dev->dev_addr) ? 0 : -ENODEV;
 	}
@@ -725,6 +725,7 @@ static int tc35815_init_dev_addr(struct net_device *dev)
 {
 	struct tc35815_regs __iomem *tr =
 		(struct tc35815_regs __iomem *)dev->base_addr;
+	u8 addr[ETH_ALEN];
 	int i;
 
 	while (tc_readl(&tr->PROM_Ctl) & PROM_Busy)
@@ -735,9 +736,10 @@ static int tc35815_init_dev_addr(struct net_device *dev)
 		while (tc_readl(&tr->PROM_Ctl) & PROM_Busy)
 			;
 		data = tc_readl(&tr->PROM_Data);
-		dev->dev_addr[i] = data & 0xff;
-		dev->dev_addr[i+1] = data >> 8;
+		addr[i] = data & 0xff;
+		addr[i+1] = data >> 8;
 	}
+	eth_hw_addr_set(dev, addr);
 	if (!is_valid_ether_addr(dev->dev_addr))
 		return tc35815_read_plat_dev_addr(dev);
 	return 0;
@@ -750,7 +752,7 @@ static const struct net_device_ops tc35815_netdev_ops = {
 	.ndo_get_stats		= tc35815_get_stats,
 	.ndo_set_rx_mode	= tc35815_set_multicast_list,
 	.ndo_tx_timeout		= tc35815_tx_timeout,
-	.ndo_do_ioctl		= phy_do_ioctl_running,
+	.ndo_eth_ioctl		= phy_do_ioctl_running,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_set_mac_address	= eth_mac_addr,
 #ifdef CONFIG_NET_POLL_CONTROLLER
@@ -802,7 +804,7 @@ static int tc35815_init_one(struct pci_dev *pdev,
 	dev->netdev_ops = &tc35815_netdev_ops;
 	dev->ethtool_ops = &tc35815_ethtool_ops;
 	dev->watchdog_timeo = TC35815_TX_TIMEOUT;
-	netif_napi_add(dev, &lp->napi, tc35815_poll, NAPI_WEIGHT);
+	netif_napi_add_weight(dev, &lp->napi, tc35815_poll, NAPI_WEIGHT);
 
 	dev->irq = pdev->irq;
 	dev->base_addr = (unsigned long)ioaddr;
@@ -876,9 +878,9 @@ tc35815_init_queues(struct net_device *dev)
 		       sizeof(struct TxFD) * TX_FD_NUM >
 		       PAGE_SIZE * FD_PAGE_NUM);
 
-		lp->fd_buf = pci_alloc_consistent(lp->pci_dev,
-						  PAGE_SIZE * FD_PAGE_NUM,
-						  &lp->fd_buf_dma);
+		lp->fd_buf = dma_alloc_coherent(&lp->pci_dev->dev,
+						PAGE_SIZE * FD_PAGE_NUM,
+						&lp->fd_buf_dma, GFP_ATOMIC);
 		if (!lp->fd_buf)
 			return -ENOMEM;
 		for (i = 0; i < RX_BUF_NUM; i++) {
@@ -892,10 +894,9 @@ tc35815_init_queues(struct net_device *dev)
 						       lp->rx_skbs[i].skb_dma);
 					lp->rx_skbs[i].skb = NULL;
 				}
-				pci_free_consistent(lp->pci_dev,
-						    PAGE_SIZE * FD_PAGE_NUM,
-						    lp->fd_buf,
-						    lp->fd_buf_dma);
+				dma_free_coherent(&lp->pci_dev->dev,
+						  PAGE_SIZE * FD_PAGE_NUM,
+						  lp->fd_buf, lp->fd_buf_dma);
 				lp->fd_buf = NULL;
 				return -ENOMEM;
 			}
@@ -990,7 +991,9 @@ tc35815_clear_queues(struct net_device *dev)
 		BUG_ON(lp->tx_skbs[i].skb != skb);
 #endif
 		if (skb) {
-			pci_unmap_single(lp->pci_dev, lp->tx_skbs[i].skb_dma, skb->len, PCI_DMA_TODEVICE);
+			dma_unmap_single(&lp->pci_dev->dev,
+					 lp->tx_skbs[i].skb_dma, skb->len,
+					 DMA_TO_DEVICE);
 			lp->tx_skbs[i].skb = NULL;
 			lp->tx_skbs[i].skb_dma = 0;
 			dev_kfree_skb_any(skb);
@@ -1022,7 +1025,9 @@ tc35815_free_queues(struct net_device *dev)
 			BUG_ON(lp->tx_skbs[i].skb != skb);
 #endif
 			if (skb) {
-				pci_unmap_single(lp->pci_dev, lp->tx_skbs[i].skb_dma, skb->len, PCI_DMA_TODEVICE);
+				dma_unmap_single(&lp->pci_dev->dev,
+						 lp->tx_skbs[i].skb_dma,
+						 skb->len, DMA_TO_DEVICE);
 				dev_kfree_skb(skb);
 				lp->tx_skbs[i].skb = NULL;
 				lp->tx_skbs[i].skb_dma = 0;
@@ -1044,8 +1049,8 @@ tc35815_free_queues(struct net_device *dev)
 		}
 	}
 	if (lp->fd_buf) {
-		pci_free_consistent(lp->pci_dev, PAGE_SIZE * FD_PAGE_NUM,
-				    lp->fd_buf, lp->fd_buf_dma);
+		dma_free_coherent(&lp->pci_dev->dev, PAGE_SIZE * FD_PAGE_NUM,
+				  lp->fd_buf, lp->fd_buf_dma);
 		lp->fd_buf = NULL;
 	}
 }
@@ -1292,7 +1297,10 @@ tc35815_send_packet(struct sk_buff *skb, struct net_device *dev)
 	BUG_ON(lp->tx_skbs[lp->tfd_start].skb);
 #endif
 	lp->tx_skbs[lp->tfd_start].skb = skb;
-	lp->tx_skbs[lp->tfd_start].skb_dma = pci_map_single(lp->pci_dev, skb->data, skb->len, PCI_DMA_TODEVICE);
+	lp->tx_skbs[lp->tfd_start].skb_dma = dma_map_single(&lp->pci_dev->dev,
+							    skb->data,
+							    skb->len,
+							    DMA_TO_DEVICE);
 
 	/*add to ring */
 	txfd = &lp->tfd_base[lp->tfd_start];
@@ -1500,9 +1508,9 @@ tc35815_rx(struct net_device *dev, int limit)
 			skb = lp->rx_skbs[cur_bd].skb;
 			prefetch(skb->data);
 			lp->rx_skbs[cur_bd].skb = NULL;
-			pci_unmap_single(lp->pci_dev,
+			dma_unmap_single(&lp->pci_dev->dev,
 					 lp->rx_skbs[cur_bd].skb_dma,
-					 RX_BUF_SIZE, PCI_DMA_FROMDEVICE);
+					 RX_BUF_SIZE, DMA_FROM_DEVICE);
 			if (!HAVE_DMA_RXALIGN(lp) && NET_IP_ALIGN != 0)
 				memmove(skb->data, skb->data - NET_IP_ALIGN,
 					pkt_len);
@@ -1756,7 +1764,9 @@ tc35815_txdone(struct net_device *dev)
 #endif
 		if (skb) {
 			dev->stats.tx_bytes += skb->len;
-			pci_unmap_single(lp->pci_dev, lp->tx_skbs[lp->tfd_end].skb_dma, skb->len, PCI_DMA_TODEVICE);
+			dma_unmap_single(&lp->pci_dev->dev,
+					 lp->tx_skbs[lp->tfd_end].skb_dma,
+					 skb->len, DMA_TO_DEVICE);
 			lp->tx_skbs[lp->tfd_end].skb = NULL;
 			lp->tx_skbs[lp->tfd_end].skb_dma = 0;
 			dev_kfree_skb_any(skb);
@@ -1851,7 +1861,8 @@ static struct net_device_stats *tc35815_get_stats(struct net_device *dev)
 	return &dev->stats;
 }
 
-static void tc35815_set_cam_entry(struct net_device *dev, int index, unsigned char *addr)
+static void tc35815_set_cam_entry(struct net_device *dev, int index,
+				  const unsigned char *addr)
 {
 	struct tc35815_local *lp = netdev_priv(dev);
 	struct tc35815_regs __iomem *tr =
@@ -1906,7 +1917,8 @@ tc35815_set_multicast_list(struct net_device *dev)
 
 	if (dev->flags & IFF_PROMISC) {
 		/* With some (all?) 100MHalf HUB, controller will hang
-		 * if we enabled promiscuous mode before linkup... */
+		 * if we enabled promiscuous mode before linkup...
+		 */
 		struct tc35815_local *lp = netdev_priv(dev);
 
 		if (!lp->link)
@@ -1944,9 +1956,9 @@ static void tc35815_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *
 {
 	struct tc35815_local *lp = netdev_priv(dev);
 
-	strlcpy(info->driver, MODNAME, sizeof(info->driver));
-	strlcpy(info->version, DRV_VERSION, sizeof(info->version));
-	strlcpy(info->bus_info, pci_name(lp->pci_dev), sizeof(info->bus_info));
+	strscpy(info->driver, MODNAME, sizeof(info->driver));
+	strscpy(info->version, DRV_VERSION, sizeof(info->version));
+	strscpy(info->bus_info, pci_name(lp->pci_dev), sizeof(info->bus_info));
 }
 
 static u32 tc35815_get_msglevel(struct net_device *dev)

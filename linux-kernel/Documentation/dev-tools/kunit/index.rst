@@ -1,83 +1,109 @@
 .. SPDX-License-Identifier: GPL-2.0
 
-=========================================
-KUnit - Unit Testing for the Linux Kernel
-=========================================
+=================================
+KUnit - Linux Kernel Unit Testing
+=================================
 
 .. toctree::
 	:maxdepth: 2
+	:caption: Contents:
 
 	start
+	architecture
+	run_wrapper
+	run_manual
 	usage
-	kunit-tool
 	api/index
+	style
 	faq
+	running_tips
 
-What is KUnit?
-==============
+This section details the kernel unit testing framework.
 
-KUnit is a lightweight unit testing and mocking framework for the Linux kernel.
-These tests are able to be run locally on a developer's workstation without a VM
-or special hardware.
+Introduction
+============
 
-KUnit is heavily inspired by JUnit, Python's unittest.mock, and
-Googletest/Googlemock for C++. KUnit provides facilities for defining unit test
-cases, grouping related test cases into test suites, providing common
-infrastructure for running tests, and much more.
+KUnit (Kernel unit testing framework) provides a common framework for
+unit tests within the Linux kernel. Using KUnit, you can define groups
+of test cases called test suites. The tests either run on kernel boot
+if built-in, or load as a module. KUnit automatically flags and reports
+failed test cases in the kernel log. The test results appear in
+:doc:`KTAP (Kernel - Test Anything Protocol) format</dev-tools/ktap>`.
+It is inspired by JUnit, Python’s unittest.mock, and GoogleTest/GoogleMock
+(C++ unit testing framework).
 
-Get started now: :doc:`start`
+KUnit tests are part of the kernel, written in the C (programming)
+language, and test parts of the Kernel implementation (example: a C
+language function). Excluding build time, from invocation to
+completion, KUnit can run around 100 tests in less than 10 seconds.
+KUnit can test any kernel component, for example: file system, system
+calls, memory management, device drivers and so on.
 
-Why KUnit?
-==========
+KUnit follows the white-box testing approach. The test has access to
+internal system functionality. KUnit runs in kernel space and is not
+restricted to things exposed to user-space.
 
-A unit test is supposed to test a single unit of code in isolation, hence the
-name. A unit test should be the finest granularity of testing and as such should
-allow all possible code paths to be tested in the code under test; this is only
-possible if the code under test is very small and does not have any external
-dependencies outside of the test's control like hardware.
+In addition, KUnit has kunit_tool, a script (``tools/testing/kunit/kunit.py``)
+that configures the Linux kernel, runs KUnit tests under QEMU or UML
+(:doc:`User Mode Linux </virt/uml/user_mode_linux_howto_v2>`),
+parses the test results and
+displays them in a user friendly manner.
 
-Outside of KUnit, there are no testing frameworks currently
-available for the kernel that do not require installing the kernel on a test
-machine or in a VM and all require tests to be written in userspace running on
-the kernel; this is true for Autotest, and kselftest, disqualifying
-any of them from being considered unit testing frameworks.
+Features
+--------
 
-KUnit addresses the problem of being able to run tests without needing a virtual
-machine or actual hardware with User Mode Linux. User Mode Linux is a Linux
-architecture, like ARM or x86; however, unlike other architectures it compiles
-to a standalone program that can be run like any other program directly inside
-of a host operating system; to be clear, it does not require any virtualization
-support; it is just a regular program.
+- Provides a framework for writing unit tests.
+- Runs tests on any kernel architecture.
+- Runs a test in milliseconds.
 
-Alternatively, kunit and kunit tests can be built as modules and tests will
-run when the test module is loaded.
+Prerequisites
+-------------
 
-KUnit is fast. Excluding build time, from invocation to completion KUnit can run
-several dozen tests in only 10 to 20 seconds; this might not sound like a big
-deal to some people, but having such fast and easy to run tests fundamentally
-changes the way you go about testing and even writing code in the first place.
-Linus himself said in his `git talk at Google
-<https://gist.github.com/lorn/1272686/revisions#diff-53c65572127855f1b003db4064a94573R874>`_:
+- Any Linux kernel compatible hardware.
+- For Kernel under test, Linux kernel version 5.5 or greater.
 
-	"... a lot of people seem to think that performance is about doing the
-	same thing, just doing it faster, and that is not true. That is not what
-	performance is all about. If you can do something really fast, really
-	well, people will start using it differently."
+Unit Testing
+============
 
-In this context Linus was talking about branching and merging,
-but this point also applies to testing. If your tests are slow, unreliable, are
-difficult to write, and require a special setup or special hardware to run,
-then you wait a lot longer to write tests, and you wait a lot longer to run
-tests; this means that tests are likely to break, unlikely to test a lot of
-things, and are unlikely to be rerun once they pass. If your tests are really
-fast, you run them all the time, every time you make a change, and every time
-someone sends you some code. Why trust that someone ran all their tests
-correctly on every change when you can just run them yourself in less time than
-it takes to read their test log?
+A unit test tests a single unit of code in isolation. A unit test is the finest
+granularity of testing and allows all possible code paths to be tested in the
+code under test. This is possible if the code under test is small and does not
+have any external dependencies outside of the test's control like hardware.
+
+
+Write Unit Tests
+----------------
+
+To write good unit tests, there is a simple but powerful pattern:
+Arrange-Act-Assert. This is a great way to structure test cases and
+defines an order of operations.
+
+- Arrange inputs and targets: At the start of the test, arrange the data
+  that allows a function to work. Example: initialize a statement or
+  object.
+- Act on the target behavior: Call your function/code under test.
+- Assert expected outcome: Verify that the result (or resulting state) is as
+  expected.
+
+Unit Testing Advantages
+-----------------------
+
+- Increases testing speed and development in the long run.
+- Detects bugs at initial stage and therefore decreases bug fix cost
+  compared to acceptance testing.
+- Improves code quality.
+- Encourages writing testable code.
+
+Read also :ref:`kinds-of-tests`.
 
 How do I use it?
 ================
 
-*   :doc:`start` - for new users of KUnit
-*   :doc:`usage` - for a more detailed explanation of KUnit features
-*   :doc:`api/index` - for the list of KUnit APIs used for testing
+You can find a step-by-step guide to writing and running KUnit tests in
+Documentation/dev-tools/kunit/start.rst
+
+Alternatively, feel free to look through the rest of the KUnit documentation,
+or to experiment with tools/testing/kunit/kunit.py and the example test under
+lib/kunit/kunit-example-test.c
+
+Happy testing!

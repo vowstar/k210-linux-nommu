@@ -2,7 +2,7 @@
 /*
  * OMAP IOMMU quirks for various TI SoCs
  *
- * Copyright (C) 2015-2019 Texas Instruments Incorporated - http://www.ti.com/
+ * Copyright (C) 2015-2019 Texas Instruments Incorporated - https://www.ti.com/
  *      Suman Anna <s-anna@ti.com>
  */
 
@@ -13,6 +13,7 @@
 
 #include "clockdomain.h"
 #include "powerdomain.h"
+#include "common.h"
 
 struct pwrdm_link {
 	struct device *dev;
@@ -74,7 +75,7 @@ static struct powerdomain *_get_pwrdm(struct device *dev)
 		return pwrdm;
 
 	clk = of_clk_get(dev->of_node->parent, 0);
-	if (!clk) {
+	if (IS_ERR(clk)) {
 		dev_err(dev, "no fck found\n");
 		return NULL;
 	}

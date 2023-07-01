@@ -5,6 +5,7 @@
  * Copyright (c) 2014-2016, Intel Corporation.
  */
 
+#include <linux/acpi.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
@@ -37,6 +38,12 @@ static const struct pci_device_id ish_pci_tbl[] = {
 	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, CMP_H_DEVICE_ID)},
 	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, EHL_Ax_DEVICE_ID)},
 	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, TGL_LP_DEVICE_ID)},
+	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, TGL_H_DEVICE_ID)},
+	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, ADL_S_DEVICE_ID)},
+	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, ADL_P_DEVICE_ID)},
+	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, ADL_N_DEVICE_ID)},
+	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, RPL_S_DEVICE_ID)},
+	{PCI_DEVICE(PCI_VENDOR_ID_INTEL, MTL_P_DEVICE_ID)},
 	{0, }
 };
 MODULE_DEVICE_TABLE(pci, ish_pci_tbl);
@@ -104,6 +111,47 @@ static const struct pci_device_id ish_invalid_pci_ids[] = {
 static inline bool ish_should_enter_d0i3(struct pci_dev *pdev)
 {
 	return !pm_suspend_via_firmware() || pdev->device == CHV_DEVICE_ID;
+}
+
+static inline bool ish_should_leave_d0i3(struct pci_dev *pdev)
+{
+	return !pm_resume_via_firmware() || pdev->device == CHV_DEVICE_ID;
+}
+
+static int enable_gpe(struct device *dev)
+{
+#ifdef CONFIG_ACPI
+	acpi_status acpi_sts;
+	struct acpi_device *adev;
+	struct acpi_device_wakeup *wakeup;
+
+	adev = ACPI_COMPANION(dev);
+	if (!adev) {
+		dev_err(dev, "get acpi handle failed\n");
+		return -ENODEV;
+	}
+	wakeup = &adev->wakeup;
+
+	acpi_sts = acpi_enable_gpe(wakeup->gpe_device, wakeup->gpe_number);
+	if (ACPI_FAILURE(acpi_sts)) {
+		dev_err(dev, "enable ose_gpe failed\n");
+		return -EIO;
+	}
+
+	return 0;
+#else
+	return -ENODEV;
+#endif
+}
+
+static void enable_pme_wake(struct pci_dev *pdev)
+{
+	if ((pci_pme_capable(pdev, PCI_D0) ||
+	     pci_pme_capable(pdev, PCI_D3hot) ||
+	     pci_pme_capable(pdev, PCI_D3cold)) && !enable_gpe(&pdev->dev)) {
+		pci_pme_active(pdev, true);
+		dev_dbg(&pdev->dev, "ish ipc driver pme wake enabled\n");
+	}
 }
 
 /**
@@ -174,6 +222,10 @@ static int ish_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	init_waitqueue_head(&ishtp->suspend_wait);
 	init_waitqueue_head(&ishtp->resume_wait);
 
+	/* Enable PME for EHL */
+	if (pdev->device == EHL_Ax_DEVICE_ID)
+		enable_pme_wake(pdev);
+
 	ret = ish_init(ishtp);
 	if (ret)
 		return ret;
@@ -213,18 +265,20 @@ static void __maybe_unused ish_resume_handler(struct work_struct *work)
 {
 	struct pci_dev *pdev = to_pci_dev(ish_resume_device);
 	struct ishtp_device *dev = pci_get_drvdata(pdev);
-	int ret;
+	uint32_t fwsts = dev->ops->get_fw_status(dev);
 
-	/* Check the NO_D3 flag to distinguish the resume paths */
-	if (pdev->dev_flags & PCI_DEV_FLAGS_NO_D3) {
-		pdev->dev_flags &= ~PCI_DEV_FLAGS_NO_D3;
-		disable_irq_wake(pdev->irq);
+	if (ish_should_leave_d0i3(pdev) && !dev->suspend_flag
+			&& IPC_IS_ISH_ILUP(fwsts)) {
+		if (device_may_wakeup(&pdev->dev))
+			disable_irq_wake(pdev->irq);
+
+		ish_set_host_ready(dev);
 
 		ishtp_send_resume(dev);
 
 		/* Waiting to get resume response */
 		if (dev->resume_flag)
-			ret = wait_event_interruptible_timeout(dev->resume_wait,
+			wait_event_interruptible_timeout(dev->resume_wait,
 				!dev->resume_flag,
 				msecs_to_jiffies(WAIT_FOR_RESUME_ACK_MS));
 
@@ -281,10 +335,14 @@ static int __maybe_unused ish_suspend(struct device *device)
 			 */
 			ish_disable_dma(dev);
 		} else {
-			/* Set the NO_D3 flag, the ISH would enter D0i3 */
-			pdev->dev_flags |= PCI_DEV_FLAGS_NO_D3;
+			/*
+			 * Save state so PCI core will keep the device at D0,
+			 * the ISH would enter D0i3
+			 */
+			pci_save_state(pdev);
 
-			enable_irq_wake(pdev->irq);
+			if (device_may_wakeup(&pdev->dev))
+				enable_irq_wake(pdev->irq);
 		}
 	} else {
 		/*
@@ -310,6 +368,13 @@ static int __maybe_unused ish_resume(struct device *device)
 {
 	struct pci_dev *pdev = to_pci_dev(device);
 	struct ishtp_device *dev = pci_get_drvdata(pdev);
+
+	/* add this to finish power flow for EHL */
+	if (dev->pdev->device == EHL_Ax_DEVICE_ID) {
+		pci_set_power_state(pdev, PCI_D0);
+		enable_pme_wake(pdev);
+		dev_dbg(dev->devc, "set power state to D0 for ehl\n");
+	}
 
 	ish_resume_device = device;
 	dev->resume_flag = 1;

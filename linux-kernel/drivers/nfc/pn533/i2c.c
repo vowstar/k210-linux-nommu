@@ -40,11 +40,8 @@ static int pn533_i2c_send_ack(struct pn533 *dev, gfp_t flags)
 	struct i2c_client *client = phy->i2c_dev;
 	static const u8 ack[6] = {0x00, 0x00, 0xff, 0x00, 0xff, 0x00};
 	/* spec 6.2.1.3:  Preamble, SoPC (2), ACK Code (2), Postamble */
-	int rc;
 
-	rc = i2c_master_send(client, ack, 6);
-
-	return rc;
+	return i2c_master_send(client, ack, 6);
 }
 
 static int pn533_i2c_send_frame(struct pn533 *dev,
@@ -131,7 +128,6 @@ static int pn533_i2c_read(struct pn533_i2c_phy *phy, struct sk_buff **skb)
 static irqreturn_t pn533_i2c_irq_thread_fn(int irq, void *data)
 {
 	struct pn533_i2c_phy *phy = data;
-	struct i2c_client *client;
 	struct sk_buff *skb = NULL;
 	int r;
 
@@ -139,9 +135,6 @@ static irqreturn_t pn533_i2c_irq_thread_fn(int irq, void *data)
 		WARN_ON_ONCE(1);
 		return IRQ_NONE;
 	}
-
-	client = phy->i2c_dev;
-	dev_dbg(&client->dev, "IRQ\n");
 
 	if (phy->hard_fault != 0)
 		return IRQ_HANDLED;
@@ -163,22 +156,18 @@ static irqreturn_t pn533_i2c_irq_thread_fn(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static struct pn533_phy_ops i2c_phy_ops = {
+static const struct pn533_phy_ops i2c_phy_ops = {
 	.send_frame = pn533_i2c_send_frame,
 	.send_ack = pn533_i2c_send_ack,
 	.abort_cmd = pn533_i2c_abort_cmd,
 };
 
 
-static int pn533_i2c_probe(struct i2c_client *client,
-			       const struct i2c_device_id *id)
+static int pn533_i2c_probe(struct i2c_client *client)
 {
 	struct pn533_i2c_phy *phy;
 	struct pn533 *priv;
 	int r = 0;
-
-	dev_dbg(&client->dev, "%s\n", __func__);
-	dev_dbg(&client->dev, "IRQ: %d\n", client->irq);
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
 		nfc_err(&client->dev, "Need I2C_FUNC_I2C\n");
@@ -198,10 +187,8 @@ static int pn533_i2c_probe(struct i2c_client *client,
 				phy, &i2c_phy_ops, NULL,
 				&phy->i2c_dev->dev);
 
-	if (IS_ERR(priv)) {
-		r = PTR_ERR(priv);
-		return r;
-	}
+	if (IS_ERR(priv))
+		return PTR_ERR(priv);
 
 	phy->priv = priv;
 	r = pn532_i2c_nfc_alloc(priv, PN533_NO_TYPE_B_PROTOCOLS, &client->dev);
@@ -239,21 +226,17 @@ nfc_alloc_err:
 	return r;
 }
 
-static int pn533_i2c_remove(struct i2c_client *client)
+static void pn533_i2c_remove(struct i2c_client *client)
 {
 	struct pn533_i2c_phy *phy = i2c_get_clientdata(client);
-
-	dev_dbg(&client->dev, "%s\n", __func__);
 
 	free_irq(client->irq, phy);
 
 	pn53x_unregister_nfc(phy->priv);
 	pn53x_common_clean(phy->priv);
-
-	return 0;
 }
 
-static const struct of_device_id of_pn533_i2c_match[] = {
+static const struct of_device_id of_pn533_i2c_match[] __maybe_unused = {
 	{ .compatible = "nxp,pn532", },
 	/*
 	 * NOTE: The use of the compatibles with the trailing "...-i2c" is
@@ -276,7 +259,7 @@ static struct i2c_driver pn533_i2c_driver = {
 		   .name = PN533_I2C_DRIVER_NAME,
 		   .of_match_table = of_match_ptr(of_pn533_i2c_match),
 		  },
-	.probe = pn533_i2c_probe,
+	.probe_new = pn533_i2c_probe,
 	.id_table = pn533_i2c_id_table,
 	.remove = pn533_i2c_remove,
 };

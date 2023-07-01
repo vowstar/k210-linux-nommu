@@ -28,8 +28,7 @@
  */
 int
 xchk_setup_inode(
-	struct xfs_scrub	*sc,
-	struct xfs_inode	*ip)
+	struct xfs_scrub	*sc)
 {
 	int			error;
 
@@ -37,7 +36,7 @@ xchk_setup_inode(
 	 * Try to get the inode.  If the verifiers fail, we try again
 	 * in raw mode.
 	 */
-	error = xchk_get_inode(sc, ip);
+	error = xchk_get_inode(sc);
 	switch (error) {
 	case 0:
 		break;
@@ -74,11 +73,25 @@ xchk_inode_extsize(
 	uint16_t		flags)
 {
 	xfs_failaddr_t		fa;
+	uint32_t		value = be32_to_cpu(dip->di_extsize);
 
-	fa = xfs_inode_validate_extsize(sc->mp, be32_to_cpu(dip->di_extsize),
-			mode, flags);
+	fa = xfs_inode_validate_extsize(sc->mp, value, mode, flags);
 	if (fa)
 		xchk_ino_set_corrupt(sc, ino);
+
+	/*
+	 * XFS allows a sysadmin to change the rt extent size when adding a rt
+	 * section to a filesystem after formatting.  If there are any
+	 * directories with extszinherit and rtinherit set, the hint could
+	 * become misaligned with the new rextsize.  The verifier doesn't check
+	 * this, because we allow rtinherit directories even without an rt
+	 * device.  Flag this as an administrative warning since we will clean
+	 * this up eventually.
+	 */
+	if ((flags & XFS_DIFLAG_RTINHERIT) &&
+	    (flags & XFS_DIFLAG_EXTSZINHERIT) &&
+	    value % sc->mp->m_sb.sb_rextsize > 0)
+		xchk_ino_set_warning(sc, ino);
 }
 
 /*
@@ -121,8 +134,7 @@ xchk_inode_flags(
 		goto bad;
 
 	/* rt flags require rt device */
-	if ((flags & (XFS_DIFLAG_REALTIME | XFS_DIFLAG_RTINHERIT)) &&
-	    !mp->m_rtdev_targp)
+	if ((flags & XFS_DIFLAG_REALTIME) && !mp->m_rtdev_targp)
 		goto bad;
 
 	/* new rt bitmap flag only valid for rbmino */
@@ -169,7 +181,7 @@ xchk_inode_flags2(
 
 	/* reflink flag requires reflink feature */
 	if ((flags2 & XFS_DIFLAG2_REFLINK) &&
-	    !xfs_sb_version_hasreflink(&mp->m_sb))
+	    !xfs_has_reflink(mp))
 		goto bad;
 
 	/* cowextsize flag is checked w.r.t. mode separately */
@@ -186,13 +198,27 @@ xchk_inode_flags2(
 	if ((flags & XFS_DIFLAG_REALTIME) && (flags2 & XFS_DIFLAG2_REFLINK))
 		goto bad;
 
-	/* dax and reflink make no sense, currently */
-	if ((flags2 & XFS_DIFLAG2_DAX) && (flags2 & XFS_DIFLAG2_REFLINK))
+	/* no bigtime iflag without the bigtime feature */
+	if (xfs_dinode_has_bigtime(dip) && !xfs_has_bigtime(mp))
 		goto bad;
 
 	return;
 bad:
 	xchk_ino_set_corrupt(sc, ino);
+}
+
+static inline void
+xchk_dinode_nsec(
+	struct xfs_scrub	*sc,
+	xfs_ino_t		ino,
+	struct xfs_dinode	*dip,
+	const xfs_timestamp_t	ts)
+{
+	struct timespec64	tv;
+
+	tv = xfs_inode_from_disk_ts(dip, ts);
+	if (tv.tv_nsec < 0 || tv.tv_nsec >= NSEC_PER_SEC)
+		xchk_ino_set_corrupt(sc, ino);
 }
 
 /* Scrub all the ondisk inode fields. */
@@ -206,7 +232,9 @@ xchk_dinode(
 	size_t			fork_recs;
 	unsigned long long	isize;
 	uint64_t		flags2;
-	uint32_t		nextents;
+	xfs_extnum_t		nextents;
+	xfs_extnum_t		naextents;
+	prid_t			prid;
 	uint16_t		flags;
 	uint16_t		mode;
 
@@ -241,6 +269,7 @@ xchk_dinode(
 		 * so just mark this inode for preening.
 		 */
 		xchk_ino_set_preen(sc, ino);
+		prid = 0;
 		break;
 	case 2:
 	case 3:
@@ -251,13 +280,18 @@ xchk_dinode(
 			xchk_ino_set_corrupt(sc, ino);
 
 		if (dip->di_projid_hi != 0 &&
-		    !xfs_sb_version_hasprojid32bit(&mp->m_sb))
+		    !xfs_has_projid32(mp))
 			xchk_ino_set_corrupt(sc, ino);
+
+		prid = be16_to_cpu(dip->di_projid_lo);
 		break;
 	default:
 		xchk_ino_set_corrupt(sc, ino);
 		return;
 	}
+
+	if (xfs_has_projid32(mp))
+		prid |= (prid_t)be16_to_cpu(dip->di_projid_hi) << 16;
 
 	/*
 	 * di_uid/di_gid -- -1 isn't invalid, but there's no way that
@@ -265,6 +299,13 @@ xchk_dinode(
 	 */
 	if (dip->di_uid == cpu_to_be32(-1U) ||
 	    dip->di_gid == cpu_to_be32(-1U))
+		xchk_ino_set_warning(sc, ino);
+
+	/*
+	 * project id of -1 isn't supposed to be valid, but the kernel didn't
+	 * always validate that.
+	 */
+	if (prid == -1U)
 		xchk_ino_set_warning(sc, ino);
 
 	/* di_format */
@@ -293,12 +334,9 @@ xchk_dinode(
 	}
 
 	/* di_[amc]time.nsec */
-	if (be32_to_cpu(dip->di_atime.t_nsec) >= NSEC_PER_SEC)
-		xchk_ino_set_corrupt(sc, ino);
-	if (be32_to_cpu(dip->di_mtime.t_nsec) >= NSEC_PER_SEC)
-		xchk_ino_set_corrupt(sc, ino);
-	if (be32_to_cpu(dip->di_ctime.t_nsec) >= NSEC_PER_SEC)
-		xchk_ino_set_corrupt(sc, ino);
+	xchk_dinode_nsec(sc, ino, dip, dip->di_atime);
+	xchk_dinode_nsec(sc, ino, dip, dip->di_mtime);
+	xchk_dinode_nsec(sc, ino, dip, dip->di_ctime);
 
 	/*
 	 * di_size.  xfs_dinode_verify checks for things that screw up
@@ -327,7 +365,7 @@ xchk_dinode(
 	 * pagecache can't cache all the blocks in this file due to
 	 * overly large offsets, flag the inode for admin review.
 	 */
-	if (isize >= mp->m_super->s_maxbytes)
+	if (isize > mp->m_super->s_maxbytes)
 		xchk_ino_set_warning(sc, ino);
 
 	/* di_nblocks */
@@ -353,8 +391,10 @@ xchk_dinode(
 
 	xchk_inode_extsize(sc, dip, ino, mode, flags);
 
+	nextents = xfs_dfork_data_extents(dip);
+	naextents = xfs_dfork_attr_extents(dip);
+
 	/* di_nextents */
-	nextents = be32_to_cpu(dip->di_nextents);
 	fork_recs =  XFS_DFORK_DSIZE(dip, mp) / sizeof(struct xfs_bmbt_rec);
 	switch (dip->di_format) {
 	case XFS_DINODE_FMT_EXTENTS:
@@ -374,7 +414,7 @@ xchk_dinode(
 	/* di_forkoff */
 	if (XFS_DFORK_APTR(dip) >= (char *)dip + mp->m_sb.sb_inodesize)
 		xchk_ino_set_corrupt(sc, ino);
-	if (dip->di_anextents != 0 && dip->di_forkoff == 0)
+	if (naextents != 0 && dip->di_forkoff == 0)
 		xchk_ino_set_corrupt(sc, ino);
 	if (dip->di_forkoff == 0 && dip->di_aformat != XFS_DINODE_FMT_EXTENTS)
 		xchk_ino_set_corrupt(sc, ino);
@@ -386,25 +426,23 @@ xchk_dinode(
 		xchk_ino_set_corrupt(sc, ino);
 
 	/* di_anextents */
-	nextents = be16_to_cpu(dip->di_anextents);
 	fork_recs =  XFS_DFORK_ASIZE(dip, mp) / sizeof(struct xfs_bmbt_rec);
 	switch (dip->di_aformat) {
 	case XFS_DINODE_FMT_EXTENTS:
-		if (nextents > fork_recs)
+		if (naextents > fork_recs)
 			xchk_ino_set_corrupt(sc, ino);
 		break;
 	case XFS_DINODE_FMT_BTREE:
-		if (nextents <= fork_recs)
+		if (naextents <= fork_recs)
 			xchk_ino_set_corrupt(sc, ino);
 		break;
 	default:
-		if (nextents != 0)
+		if (naextents != 0)
 			xchk_ino_set_corrupt(sc, ino);
 	}
 
 	if (dip->di_version >= 3) {
-		if (be32_to_cpu(dip->di_crtime.t_nsec) >= NSEC_PER_SEC)
-			xchk_ino_set_corrupt(sc, ino);
+		xchk_dinode_nsec(sc, ino, dip, dip->di_crtime);
 		xchk_inode_flags2(sc, dip, ino, mode, flags, flags2);
 		xchk_inode_cowextsize(sc, dip, ino, mode, flags,
 				flags2);
@@ -477,14 +515,14 @@ xchk_inode_xref_bmap(
 			&nextents, &count);
 	if (!xchk_should_check_xref(sc, &error, NULL))
 		return;
-	if (nextents < be32_to_cpu(dip->di_nextents))
+	if (nextents < xfs_dfork_data_extents(dip))
 		xchk_ino_xref_set_corrupt(sc, sc->ip->i_ino);
 
 	error = xfs_bmap_count_blocks(sc->tp, sc->ip, XFS_ATTR_FORK,
 			&nextents, &acount);
 	if (!xchk_should_check_xref(sc, &error, NULL))
 		return;
-	if (nextents != be16_to_cpu(dip->di_anextents))
+	if (nextents != xfs_dfork_attr_extents(dip))
 		xchk_ino_xref_set_corrupt(sc, sc->ip->i_ino);
 
 	/* Check nblocks against the inode. */
@@ -509,9 +547,9 @@ xchk_inode_xref(
 	agno = XFS_INO_TO_AGNO(sc->mp, ino);
 	agbno = XFS_INO_TO_AGBNO(sc->mp, ino);
 
-	error = xchk_ag_init(sc, agno, &sc->sa);
+	error = xchk_ag_init_existing(sc, agno, &sc->sa);
 	if (!xchk_xref_process_error(sc, agno, agbno, &error))
-		return;
+		goto out_free;
 
 	xchk_xref_is_used_space(sc, agbno, 1);
 	xchk_inode_xref_finobt(sc, ino);
@@ -519,6 +557,7 @@ xchk_inode_xref(
 	xchk_xref_is_not_shared(sc, agbno, 1);
 	xchk_inode_xref_bmap(sc, dip);
 
+out_free:
 	xchk_ag_free(sc, &sc->sa);
 }
 
@@ -537,7 +576,7 @@ xchk_inode_check_reflink_iflag(
 	bool			has_shared;
 	int			error;
 
-	if (!xfs_sb_version_hasreflink(&mp->m_sb))
+	if (!xfs_has_reflink(mp))
 		return;
 
 	error = xfs_reflink_inode_has_shared_extents(sc->tp, sc->ip,

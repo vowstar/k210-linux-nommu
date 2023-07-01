@@ -68,6 +68,8 @@ COND_SYSCALL(epoll_create1);
 COND_SYSCALL(epoll_ctl);
 COND_SYSCALL(epoll_pwait);
 COND_SYSCALL_COMPAT(epoll_pwait);
+COND_SYSCALL(epoll_pwait2);
+COND_SYSCALL_COMPAT(epoll_pwait2);
 
 /* fs/fcntl.c */
 
@@ -97,6 +99,7 @@ COND_SYSCALL(flock);
 
 /* fs/quota.c */
 COND_SYSCALL(quotactl);
+COND_SYSCALL(quotactl_fd);
 
 /* fs/readdir.c */
 
@@ -140,13 +143,14 @@ COND_SYSCALL(capset);
 /* __ARCH_WANT_SYS_CLONE3 */
 COND_SYSCALL(clone3);
 
-/* kernel/futex.c */
+/* kernel/futex/syscalls.c */
 COND_SYSCALL(futex);
 COND_SYSCALL(futex_time32);
 COND_SYSCALL(set_robust_list);
 COND_SYSCALL_COMPAT(set_robust_list);
 COND_SYSCALL(get_robust_list);
 COND_SYSCALL_COMPAT(get_robust_list);
+COND_SYSCALL(futex_waitv);
 
 /* kernel/hrtimer.c */
 
@@ -264,10 +268,16 @@ COND_SYSCALL(request_key);
 COND_SYSCALL(keyctl);
 COND_SYSCALL_COMPAT(keyctl);
 
+/* security/landlock/syscalls.c */
+COND_SYSCALL(landlock_create_ruleset);
+COND_SYSCALL(landlock_add_rule);
+COND_SYSCALL(landlock_restrict_self);
+
 /* arch/example/kernel/sys_example.c */
 
 /* mm/fadvise.c */
 COND_SYSCALL(fadvise64_64);
+COND_SYSCALL_COMPAT(fadvise64_64);
 
 /* mm/, CONFIG_MMU only */
 COND_SYSCALL(swapon);
@@ -280,17 +290,15 @@ COND_SYSCALL(mlockall);
 COND_SYSCALL(munlockall);
 COND_SYSCALL(mincore);
 COND_SYSCALL(madvise);
+COND_SYSCALL(process_madvise);
+COND_SYSCALL(process_mrelease);
 COND_SYSCALL(remap_file_pages);
 COND_SYSCALL(mbind);
-COND_SYSCALL_COMPAT(mbind);
 COND_SYSCALL(get_mempolicy);
-COND_SYSCALL_COMPAT(get_mempolicy);
 COND_SYSCALL(set_mempolicy);
-COND_SYSCALL_COMPAT(set_mempolicy);
 COND_SYSCALL(migrate_pages);
-COND_SYSCALL_COMPAT(migrate_pages);
 COND_SYSCALL(move_pages);
-COND_SYSCALL_COMPAT(move_pages);
+COND_SYSCALL(set_mempolicy_home_node);
 
 COND_SYSCALL(perf_event_open);
 COND_SYSCALL(accept4);
@@ -349,6 +357,8 @@ COND_SYSCALL(pkey_mprotect);
 COND_SYSCALL(pkey_alloc);
 COND_SYSCALL(pkey_free);
 
+/* memfd_secret */
+COND_SYSCALL(memfd_secret);
 
 /*
  * Architecture specific weak syscall entries.
@@ -364,13 +374,11 @@ COND_SYSCALL(socketcall);
 COND_SYSCALL_COMPAT(socketcall);
 
 /* compat syscalls for arm64, x86, ... */
-COND_SYSCALL_COMPAT(sysctl);
 COND_SYSCALL_COMPAT(fanotify_mark);
 
 /* x86 */
 COND_SYSCALL(vm86old);
 COND_SYSCALL(modify_ldt);
-COND_SYSCALL_COMPAT(quotactl32);
 COND_SYSCALL(vm86);
 COND_SYSCALL(kexec_file_load);
 
@@ -407,7 +415,6 @@ COND_SYSCALL(epoll_wait);
 COND_SYSCALL(recv);
 COND_SYSCALL_COMPAT(recv);
 COND_SYSCALL(send);
-COND_SYSCALL(bdflush);
 COND_SYSCALL(uselib);
 
 /* optional: time32 */

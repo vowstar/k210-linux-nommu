@@ -28,17 +28,16 @@
 #ifndef __AST_DRV_H__
 #define __AST_DRV_H__
 
-#include <linux/types.h>
-#include <linux/io.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-bit.h>
+#include <linux/io.h>
+#include <linux/types.h>
 
 #include <drm/drm_connector.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_encoder.h>
 #include <drm/drm_mode.h>
 #include <drm/drm_framebuffer.h>
-#include <drm/drm_fb_helper.h>
 
 #define DRIVER_AUTHOR		"Dave Airlie"
 
@@ -52,7 +51,6 @@
 
 #define PCI_CHIP_AST2000 0x2000
 #define PCI_CHIP_AST2100 0x2010
-#define PCI_CHIP_AST1180 0x1180
 
 
 enum ast_chip {
@@ -64,15 +62,20 @@ enum ast_chip {
 	AST2300,
 	AST2400,
 	AST2500,
-	AST1180,
+	AST2600,
 };
 
 enum ast_tx_chip {
 	AST_TX_NONE,
 	AST_TX_SIL164,
-	AST_TX_ITE66121,
 	AST_TX_DP501,
+	AST_TX_ASTDP,
 };
+
+#define AST_TX_NONE_BIT		BIT(AST_TX_NONE)
+#define AST_TX_SIL164_BIT	BIT(AST_TX_SIL164)
+#define AST_TX_DP501_BIT	BIT(AST_TX_DP501)
+#define AST_TX_ASTDP_BIT	BIT(AST_TX_ASTDP)
 
 #define AST_DRAM_512Mx16 0
 #define AST_DRAM_1Gx16   1
@@ -82,14 +85,15 @@ enum ast_tx_chip {
 #define AST_DRAM_4Gx16   7
 #define AST_DRAM_8Gx16   8
 
+/*
+ * Hardware cursor
+ */
 
 #define AST_MAX_HWC_WIDTH	64
 #define AST_MAX_HWC_HEIGHT	64
 
 #define AST_HWC_SIZE		(AST_MAX_HWC_WIDTH * AST_MAX_HWC_HEIGHT * 2)
 #define AST_HWC_SIGNATURE_SIZE	32
-
-#define AST_DEFAULT_HWC_NUM	2
 
 /* define for signature structure */
 #define AST_HWC_SIGNATURE_CHECKSUM	0x00
@@ -100,29 +104,99 @@ enum ast_tx_chip {
 #define AST_HWC_SIGNATURE_HOTSPOTX	0x14
 #define AST_HWC_SIGNATURE_HOTSPOTY	0x18
 
+/*
+ * Planes
+ */
+
+struct ast_plane {
+	struct drm_plane base;
+
+	void __iomem *vaddr;
+	u64 offset;
+	unsigned long size;
+};
+
+static inline struct ast_plane *to_ast_plane(struct drm_plane *plane)
+{
+	return container_of(plane, struct ast_plane, base);
+}
+
+/*
+ * Connector with i2c channel
+ */
+
+struct ast_i2c_chan {
+	struct i2c_adapter adapter;
+	struct drm_device *dev;
+	struct i2c_algo_bit_data bit;
+};
+
+struct ast_vga_connector {
+	struct drm_connector base;
+	struct ast_i2c_chan *i2c;
+};
+
+static inline struct ast_vga_connector *
+to_ast_vga_connector(struct drm_connector *connector)
+{
+	return container_of(connector, struct ast_vga_connector, base);
+}
+
+struct ast_sil164_connector {
+	struct drm_connector base;
+	struct ast_i2c_chan *i2c;
+};
+
+static inline struct ast_sil164_connector *
+to_ast_sil164_connector(struct drm_connector *connector)
+{
+	return container_of(connector, struct ast_sil164_connector, base);
+}
+
+/*
+ * Device
+ */
 
 struct ast_private {
-	struct drm_device *dev;
+	struct drm_device base;
 
+	struct mutex ioregs_lock; /* Protects access to I/O registers in ioregs */
 	void __iomem *regs;
 	void __iomem *ioregs;
+	void __iomem *dp501_fw_buf;
 
 	enum ast_chip chip;
 	bool vga2_clone;
 	uint32_t dram_bus_width;
 	uint32_t dram_type;
 	uint32_t mclk;
-	uint32_t vram_size;
 
-	int fb_mtrr;
+	void __iomem	*vram;
+	unsigned long	vram_base;
+	unsigned long	vram_size;
+	unsigned long	vram_fb_available;
 
+	struct ast_plane primary_plane;
+	struct ast_plane cursor_plane;
+	struct drm_crtc crtc;
 	struct {
-		struct drm_gem_vram_object *gbo[AST_DEFAULT_HWC_NUM];
-		unsigned int next_index;
-	} cursor;
-
-	struct drm_plane primary_plane;
-	struct drm_plane cursor_plane;
+		struct {
+			struct drm_encoder encoder;
+			struct ast_vga_connector vga_connector;
+		} vga;
+		struct {
+			struct drm_encoder encoder;
+			struct ast_sil164_connector sil164_connector;
+		} sil164;
+		struct {
+			struct drm_encoder encoder;
+			struct drm_connector connector;
+		} dp501;
+		struct {
+			struct drm_encoder encoder;
+			struct drm_connector connector;
+		} astdp;
+	} output;
 
 	bool support_wide_screen;
 	enum {
@@ -131,14 +205,19 @@ struct ast_private {
 		ast_use_defaults
 	} config_mode;
 
-	enum ast_tx_chip tx_chip_type;
-	u8 dp501_maxclk;
+	unsigned long tx_chip_types;		/* bitfield of enum ast_chip_type */
 	u8 *dp501_fw_addr;
 	const struct firmware *dp501_fw;	/* dp501 fw */
 };
 
-int ast_driver_load(struct drm_device *dev, unsigned long flags);
-void ast_driver_unload(struct drm_device *dev);
+static inline struct ast_private *to_ast_private(struct drm_device *dev)
+{
+	return container_of(dev, struct ast_private, base);
+}
+
+struct ast_private *ast_device_create(const struct drm_driver *drv,
+				      struct pci_dev *pdev,
+				      unsigned long flags);
 
 #define AST_IO_AR_PORT_WRITE		(0x40)
 #define AST_IO_MISC_PORT_WRITE		(0x42)
@@ -153,6 +232,11 @@ void ast_driver_unload(struct drm_device *dev);
 #define AST_IO_MISC_PORT_READ		(0x4C)
 
 #define AST_IO_MM_OFFSET		(0x380)
+
+#define AST_IO_VGAIR1_VREFRESH		BIT(3)
+
+#define AST_IO_VGACRCB_HWC_ENABLED     BIT(1)
+#define AST_IO_VGACRCB_HWC_16BPP       BIT(0) /* set: ARGB4444, cleared: 2bpp palette */
 
 #define __ast_read(x) \
 static inline u##x ast_read##x(struct ast_private *ast, u32 reg) { \
@@ -222,30 +306,6 @@ static inline void ast_open_key(struct ast_private *ast)
 
 #define AST_VIDMEM_DEFAULT_SIZE AST_VIDMEM_SIZE_8M
 
-struct ast_i2c_chan {
-	struct i2c_adapter adapter;
-	struct drm_device *dev;
-	struct i2c_algo_bit_data bit;
-};
-
-struct ast_connector {
-	struct drm_connector base;
-	struct ast_i2c_chan *i2c;
-};
-
-struct ast_crtc {
-	struct drm_crtc base;
-	u8 offset_x, offset_y;
-};
-
-struct ast_encoder {
-	struct drm_encoder base;
-};
-
-#define to_ast_crtc(x) container_of(x, struct ast_crtc, base)
-#define to_ast_connector(x) container_of(x, struct ast_connector, base)
-#define to_ast_encoder(x) container_of(x, struct ast_encoder, base)
-
 struct ast_vbios_stdtable {
 	u8 misc;
 	u8 seq[4];
@@ -292,14 +352,131 @@ struct ast_crtc_state {
 
 #define to_ast_crtc_state(state) container_of(state, struct ast_crtc_state, base)
 
-extern int ast_mode_init(struct drm_device *dev);
-extern void ast_mode_fini(struct drm_device *dev);
+int ast_mode_config_init(struct ast_private *ast);
 
 #define AST_MM_ALIGN_SHIFT 4
 #define AST_MM_ALIGN_MASK ((1 << AST_MM_ALIGN_SHIFT) - 1)
 
+#define AST_DP501_FW_VERSION_MASK	GENMASK(7, 4)
+#define AST_DP501_FW_VERSION_1		BIT(4)
+#define AST_DP501_PNP_CONNECTED		BIT(1)
+
+#define AST_DP501_DEFAULT_DCLK	65
+
+#define AST_DP501_GBL_VERSION	0xf000
+#define AST_DP501_PNPMONITOR	0xf010
+#define AST_DP501_LINKRATE	0xf014
+#define AST_DP501_EDID_DATA	0xf020
+
+/* Define for Soc scratched reg */
+#define COPROCESSOR_LAUNCH			BIT(5)
+
+/*
+ * Display Transmitter Type:
+ */
+#define TX_TYPE_MASK				GENMASK(3, 1)
+#define NO_TX						(0 << 1)
+#define ITE66121_VBIOS_TX			(1 << 1)
+#define SI164_VBIOS_TX				(2 << 1)
+#define CH7003_VBIOS_TX			(3 << 1)
+#define DP501_VBIOS_TX				(4 << 1)
+#define ANX9807_VBIOS_TX			(5 << 1)
+#define TX_FW_EMBEDDED_FW_TX		(6 << 1)
+#define ASTDP_DPMCU_TX				(7 << 1)
+
+#define AST_VRAM_INIT_STATUS_MASK	GENMASK(7, 6)
+//#define AST_VRAM_INIT_BY_BMC		BIT(7)
+//#define AST_VRAM_INIT_READY		BIT(6)
+
+/* Define for Soc scratched reg used on ASTDP */
+#define AST_DP_PHY_SLEEP			BIT(4)
+#define AST_DP_VIDEO_ENABLE		BIT(0)
+
+#define AST_DP_POWER_ON			true
+#define AST_DP_POWER_OFF			false
+
+/*
+ * CRD1[b5]: DP MCU FW is executing
+ * CRDC[b0]: DP link success
+ * CRDF[b0]: DP HPD
+ * CRE5[b0]: Host reading EDID process is done
+ */
+#define ASTDP_MCU_FW_EXECUTING			BIT(5)
+#define ASTDP_LINK_SUCCESS				BIT(0)
+#define ASTDP_HPD						BIT(0)
+#define ASTDP_HOST_EDID_READ_DONE		BIT(0)
+#define ASTDP_HOST_EDID_READ_DONE_MASK	GENMASK(0, 0)
+
+/*
+ * CRB8[b1]: Enable VSYNC off
+ * CRB8[b0]: Enable HSYNC off
+ */
+#define AST_DPMS_VSYNC_OFF				BIT(1)
+#define AST_DPMS_HSYNC_OFF				BIT(0)
+
+/*
+ * CRDF[b4]: Mirror of AST_DP_VIDEO_ENABLE
+ * Precondition:	A. ~AST_DP_PHY_SLEEP  &&
+ *			B. DP_HPD &&
+ *			C. DP_LINK_SUCCESS
+ */
+#define ASTDP_MIRROR_VIDEO_ENABLE		BIT(4)
+
+#define ASTDP_EDID_READ_POINTER_MASK	GENMASK(7, 0)
+#define ASTDP_EDID_VALID_FLAG_MASK		GENMASK(0, 0)
+#define ASTDP_EDID_READ_DATA_MASK		GENMASK(7, 0)
+
+/*
+ * ASTDP setmode registers:
+ * CRE0[7:0]: MISC0 ((0x00: 18-bpp) or (0x20: 24-bpp)
+ * CRE1[7:0]: MISC1 (default: 0x00)
+ * CRE2[7:0]: video format index (0x00 ~ 0x20 or 0x40 ~ 0x50)
+ */
+#define ASTDP_MISC0_24bpp			BIT(5)
+#define ASTDP_MISC1				0
+#define ASTDP_AND_CLEAR_MASK		0x00
+
+/*
+ * ASTDP resoultion table:
+ * EX:	ASTDP_A_B_C:
+ *		A: Resolution
+ *		B: Refresh Rate
+ *		C: Misc information, such as CVT, Reduce Blanked
+ */
+#define ASTDP_640x480_60		0x00
+#define ASTDP_640x480_72		0x01
+#define ASTDP_640x480_75		0x02
+#define ASTDP_640x480_85		0x03
+#define ASTDP_800x600_56		0x04
+#define ASTDP_800x600_60		0x05
+#define ASTDP_800x600_72		0x06
+#define ASTDP_800x600_75		0x07
+#define ASTDP_800x600_85		0x08
+#define ASTDP_1024x768_60		0x09
+#define ASTDP_1024x768_70		0x0A
+#define ASTDP_1024x768_75		0x0B
+#define ASTDP_1024x768_85		0x0C
+#define ASTDP_1280x1024_60		0x0D
+#define ASTDP_1280x1024_75		0x0E
+#define ASTDP_1280x1024_85		0x0F
+#define ASTDP_1600x1200_60		0x10
+#define ASTDP_320x240_60		0x11
+#define ASTDP_400x300_60		0x12
+#define ASTDP_512x384_60		0x13
+#define ASTDP_1920x1200_60		0x14
+#define ASTDP_1920x1080_60		0x15
+#define ASTDP_1280x800_60		0x16
+#define ASTDP_1280x800_60_RB	0x17
+#define ASTDP_1440x900_60		0x18
+#define ASTDP_1440x900_60_RB	0x19
+#define ASTDP_1680x1050_60		0x1A
+#define ASTDP_1680x1050_60_RB	0x1B
+#define ASTDP_1600x900_60		0x1C
+#define ASTDP_1600x900_60_RB	0x1D
+#define ASTDP_1366x768_60		0x1E
+#define ASTDP_1152x864_75		0x1F
+
 int ast_mm_init(struct ast_private *ast);
-void ast_mm_fini(struct ast_private *ast);
 
 /* ast post */
 void ast_enable_vga(struct drm_device *dev);
@@ -308,11 +485,22 @@ bool ast_is_vga_enabled(struct drm_device *dev);
 void ast_post_gpu(struct drm_device *dev);
 u32 ast_mindwm(struct ast_private *ast, u32 r);
 void ast_moutdwm(struct ast_private *ast, u32 r, u32 v);
+void ast_patch_ahb_2500(struct ast_private *ast);
 /* ast dp501 */
 void ast_set_dp501_video_output(struct drm_device *dev, u8 mode);
 bool ast_backup_fw(struct drm_device *dev, u8 *addr, u32 size);
 bool ast_dp501_read_edid(struct drm_device *dev, u8 *ediddata);
 u8 ast_get_dp501_max_clk(struct drm_device *dev);
 void ast_init_3rdtx(struct drm_device *dev);
-void ast_release_firmware(struct drm_device *dev);
+
+/* ast_i2c.c */
+struct ast_i2c_chan *ast_i2c_create(struct drm_device *dev);
+
+/* aspeed DP */
+int ast_astdp_read_edid(struct drm_device *dev, u8 *ediddata);
+void ast_dp_launch(struct drm_device *dev, u8 bPower);
+void ast_dp_power_on_off(struct drm_device *dev, bool no);
+void ast_dp_set_on_off(struct drm_device *dev, bool no);
+void ast_dp_set_mode(struct drm_crtc *crtc, struct ast_vbios_mode_info *vbios_mode);
+
 #endif

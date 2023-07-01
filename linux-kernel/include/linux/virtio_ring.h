@@ -46,16 +46,15 @@ static inline void virtio_wmb(bool weak_barriers)
 		dma_wmb();
 }
 
-static inline void virtio_store_mb(bool weak_barriers,
-				   __virtio16 *p, __virtio16 v)
-{
-	if (weak_barriers) {
-		virt_store_mb(*p, v);
-	} else {
-		WRITE_ONCE(*p, v);
-		mb();
-	}
-}
+#define virtio_store_mb(weak_barriers, p, v) \
+do { \
+	if (weak_barriers) { \
+		virt_store_mb(*p, v); \
+	} else { \
+		WRITE_ONCE(*p, v); \
+		mb(); \
+	} \
+} while (0) \
 
 struct virtio_device;
 struct virtqueue;
@@ -77,15 +76,21 @@ struct virtqueue *vring_create_virtqueue(unsigned int index,
 					 void (*callback)(struct virtqueue *vq),
 					 const char *name);
 
-/* Creates a virtqueue with a custom layout. */
-struct virtqueue *__vring_new_virtqueue(unsigned int index,
-					struct vring vring,
-					struct virtio_device *vdev,
-					bool weak_barriers,
-					bool ctx,
-					bool (*notify)(struct virtqueue *),
-					void (*callback)(struct virtqueue *),
-					const char *name);
+/*
+ * Creates a virtqueue and allocates the descriptor ring with per
+ * virtqueue DMA device.
+ */
+struct virtqueue *vring_create_virtqueue_dma(unsigned int index,
+					     unsigned int num,
+					     unsigned int vring_align,
+					     struct virtio_device *vdev,
+					     bool weak_barriers,
+					     bool may_reduce_num,
+					     bool ctx,
+					     bool (*notify)(struct virtqueue *vq),
+					     void (*callback)(struct virtqueue *vq),
+					     const char *name,
+					     struct device *dma_dev);
 
 /*
  * Creates a virtqueue with a standard layout but a caller-allocated

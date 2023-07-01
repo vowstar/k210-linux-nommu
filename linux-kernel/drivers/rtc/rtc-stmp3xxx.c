@@ -107,6 +107,8 @@ static void stmp3xxx_wdt_register(struct platform_device *rtc_pdev)
 		wdt_pdev->dev.parent = &rtc_pdev->dev;
 		wdt_pdev->dev.platform_data = &wdt_pdata;
 		rc = platform_device_add(wdt_pdev);
+		if (rc)
+			platform_device_put(wdt_pdev);
 	}
 
 	if (rc)
@@ -331,7 +333,7 @@ static int stmp3xxx_rtc_probe(struct platform_device *pdev)
 	default:
 		dev_warn(&pdev->dev,
 			 "invalid crystal-freq specified in device-tree. Assuming no crystal\n");
-		/* fall-through */
+		fallthrough;
 	case 0:
 		/* keep XTAL on in low-power mode */
 		pers0_set = STMP3XXX_RTC_PERSISTENT0_XTAL24MHZ_PWRUP;
@@ -366,7 +368,7 @@ static int stmp3xxx_rtc_probe(struct platform_device *pdev)
 	rtc_data->rtc->ops = &stmp3xxx_rtc_ops;
 	rtc_data->rtc->range_max = U32_MAX;
 
-	err = rtc_register_device(rtc_data->rtc);
+	err = devm_rtc_register_device(rtc_data->rtc);
 	if (err)
 		return err;
 
@@ -416,5 +418,5 @@ module_platform_driver(stmp3xxx_rtcdrv);
 
 MODULE_DESCRIPTION("STMP3xxx RTC Driver");
 MODULE_AUTHOR("dmitry pervushin <dpervushin@embeddedalley.com> and "
-		"Wolfram Sang <w.sang@pengutronix.de>");
+		"Wolfram Sang <kernel@pengutronix.de>");
 MODULE_LICENSE("GPL");

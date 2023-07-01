@@ -694,7 +694,7 @@ thumb2arm(u16 tinstr)
 			return subset[(L<<1) | ((tinstr & (1<<8)) >> 8)] |
 			    (tinstr & 255);		/* register_list */
 		}
-		/* Else, fall through - for illegal instruction case */
+		fallthrough;	/* for illegal instruction case */
 
 	default:
 		return BAD_INSTR;
@@ -750,7 +750,7 @@ do_alignment_t32_to_handler(u32 *pinstr, struct pt_regs *regs,
 	case 0xe8e0:
 	case 0xe9e0:
 		poffset->un = (tinst2 & 0xff) << 2;
-		/* Fall through */
+		fallthrough;
 
 	case 0xe940:
 	case 0xe9c0:
@@ -774,7 +774,7 @@ static int alignment_get_arm(struct pt_regs *regs, u32 *ip, u32 *inst)
 	if (user_mode(regs))
 		fault = get_user(instr, ip);
 	else
-		fault = probe_kernel_address(ip, instr);
+		fault = get_kernel_nofault(instr, ip);
 
 	*inst = __mem_to_opcode_arm(instr);
 
@@ -789,7 +789,7 @@ static int alignment_get_thumb(struct pt_regs *regs, u16 *ip, u16 *inst)
 	if (user_mode(regs))
 		fault = get_user(instr, ip);
 	else
-		fault = probe_kernel_address(ip, instr);
+		fault = get_kernel_nofault(instr, ip);
 
 	*inst = __mem_to_opcode_thumb16(instr);
 
@@ -799,7 +799,7 @@ static int alignment_get_thumb(struct pt_regs *regs, u16 *ip, u16 *inst)
 static int
 do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 {
-	union offset_union uninitialized_var(offset);
+	union offset_union offset;
 	unsigned long instrptr;
 	int (*handler)(unsigned long addr, u32 instr, struct pt_regs *regs);
 	unsigned int type;
@@ -935,6 +935,9 @@ do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 	if (type == TYPE_LDST)
 		do_alignment_finish_ldst(addr, instr, regs, offset);
 
+	if (thumb_mode(regs))
+		regs->ARM_cpsr = it_advance(regs->ARM_cpsr);
+
 	return 0;
 
  bad_or_fault:
@@ -990,7 +993,7 @@ do_alignment(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
 		 * there is no work pending for this thread.
 		 */
 		raw_local_irq_disable();
-		if (!(current_thread_info()->flags & _TIF_WORK_MASK))
+		if (!(read_thread_flags() & _TIF_WORK_MASK))
 			set_cr(cr_no_alignment);
 	}
 
@@ -1005,7 +1008,7 @@ static int __init noalign_setup(char *__unused)
 __setup("noalign", noalign_setup);
 
 /*
- * This needs to be done after sysctl_init, otherwise sys/ will be
+ * This needs to be done after sysctl_init_bases(), otherwise sys/ will be
  * overwritten.  Actually, this shouldn't be in sys/ at all since
  * it isn't a sysctl, and it doesn't contain sysctl information.
  * We now locate it in /proc/cpu/alignment instead.

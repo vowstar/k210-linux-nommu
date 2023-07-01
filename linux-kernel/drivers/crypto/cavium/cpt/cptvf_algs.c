@@ -28,7 +28,7 @@ static void cvm_callback(u32 status, void *arg)
 {
 	struct crypto_async_request *req = (struct crypto_async_request *)arg;
 
-	req->complete(req, !status);
+	crypto_request_complete(req, !status);
 }
 
 static inline void update_input_iv(struct cpt_request_info *req_info,
@@ -97,12 +97,12 @@ static inline u32 create_ctx_hdr(struct skcipher_request *req, u32 enc,
 {
 	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
 	struct cvm_enc_ctx *ctx = crypto_skcipher_ctx(tfm);
-	struct cvm_req_ctx *rctx = skcipher_request_ctx(req);
+	struct cvm_req_ctx *rctx = skcipher_request_ctx_dma(req);
 	struct fc_context *fctx = &rctx->fctx;
-	u64 *offset_control = &rctx->control_word;
 	u32 enc_iv_len = crypto_skcipher_ivsize(tfm);
 	struct cpt_request_info *req_info = &rctx->cpt_req;
-	u64 *ctrl_flags = NULL;
+	__be64 *ctrl_flags = NULL;
+	__be64 *offset_control;
 
 	req_info->ctrl.s.grp = 0;
 	req_info->ctrl.s.dma_mode = DMA_GATHER_SCATTER;
@@ -126,9 +126,10 @@ static inline u32 create_ctx_hdr(struct skcipher_request *req, u32 enc,
 		memcpy(fctx->enc.encr_key, ctx->enc_key, ctx->key_len * 2);
 	else
 		memcpy(fctx->enc.encr_key, ctx->enc_key, ctx->key_len);
-	ctrl_flags = (u64 *)&fctx->enc.enc_ctrl.flags;
-	*ctrl_flags = cpu_to_be64(*ctrl_flags);
+	ctrl_flags = (__be64 *)&fctx->enc.enc_ctrl.flags;
+	*ctrl_flags = cpu_to_be64(fctx->enc.enc_ctrl.flags);
 
+	offset_control = (__be64 *)&rctx->control_word;
 	*offset_control = cpu_to_be64(((u64)(enc_iv_len) << 16));
 	/* Storing  Packet Data Information in offset
 	 * Control Word First 8 bytes
@@ -150,7 +151,7 @@ static inline u32 create_ctx_hdr(struct skcipher_request *req, u32 enc,
 static inline u32 create_input_list(struct skcipher_request  *req, u32 enc,
 				    u32 enc_iv_len)
 {
-	struct cvm_req_ctx *rctx = skcipher_request_ctx(req);
+	struct cvm_req_ctx *rctx = skcipher_request_ctx_dma(req);
 	struct cpt_request_info *req_info = &rctx->cpt_req;
 	u32 argcnt =  0;
 
@@ -172,7 +173,7 @@ static inline void store_cb_info(struct skcipher_request *req,
 static inline void create_output_list(struct skcipher_request *req,
 				      u32 enc_iv_len)
 {
-	struct cvm_req_ctx *rctx = skcipher_request_ctx(req);
+	struct cvm_req_ctx *rctx = skcipher_request_ctx_dma(req);
 	struct cpt_request_info *req_info = &rctx->cpt_req;
 	u32 argcnt = 0;
 
@@ -192,7 +193,7 @@ static inline void create_output_list(struct skcipher_request *req,
 static inline int cvm_enc_dec(struct skcipher_request *req, u32 enc)
 {
 	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
-	struct cvm_req_ctx *rctx = skcipher_request_ctx(req);
+	struct cvm_req_ctx *rctx = skcipher_request_ctx_dma(req);
 	u32 enc_iv_len = crypto_skcipher_ivsize(tfm);
 	struct fc_context *fctx = &rctx->fctx;
 	struct cpt_request_info *req_info = &rctx->cpt_req;
@@ -200,6 +201,7 @@ static inline int cvm_enc_dec(struct skcipher_request *req, u32 enc)
 	int status;
 
 	memset(req_info, 0, sizeof(struct cpt_request_info));
+	req_info->may_sleep = (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) != 0;
 	memset(fctx, 0, sizeof(struct fc_context));
 	create_input_list(req, enc, enc_iv_len);
 	create_output_list(req, enc_iv_len);
@@ -230,13 +232,12 @@ static int cvm_decrypt(struct skcipher_request *req)
 static int cvm_xts_setkey(struct crypto_skcipher *cipher, const u8 *key,
 		   u32 keylen)
 {
-	struct crypto_tfm *tfm = crypto_skcipher_tfm(cipher);
-	struct cvm_enc_ctx *ctx = crypto_tfm_ctx(tfm);
+	struct cvm_enc_ctx *ctx = crypto_skcipher_ctx(cipher);
 	int err;
 	const u8 *key1 = key;
 	const u8 *key2 = key + (keylen / 2);
 
-	err = xts_check_key(tfm, key, keylen);
+	err = xts_verify_key(cipher, key, keylen);
 	if (err)
 		return err;
 	ctx->key_len = keylen;
@@ -287,8 +288,7 @@ static int cvm_validate_keylen(struct cvm_enc_ctx *ctx, u32 keylen)
 static int cvm_setkey(struct crypto_skcipher *cipher, const u8 *key,
 		      u32 keylen, u8 cipher_type)
 {
-	struct crypto_tfm *tfm = crypto_skcipher_tfm(cipher);
-	struct cvm_enc_ctx *ctx = crypto_tfm_ctx(tfm);
+	struct cvm_enc_ctx *ctx = crypto_skcipher_ctx(cipher);
 
 	ctx->cipher_type = cipher_type;
 	if (!cvm_validate_keylen(ctx, keylen)) {
@@ -333,13 +333,14 @@ static int cvm_ecb_des3_setkey(struct crypto_skcipher *cipher, const u8 *key,
 
 static int cvm_enc_dec_init(struct crypto_skcipher *tfm)
 {
-	crypto_skcipher_set_reqsize(tfm, sizeof(struct cvm_req_ctx));
+	crypto_skcipher_set_reqsize_dma(tfm, sizeof(struct cvm_req_ctx));
 
 	return 0;
 }
 
 static struct skcipher_alg algs[] = { {
-	.base.cra_flags		= CRYPTO_ALG_ASYNC,
+	.base.cra_flags		= CRYPTO_ALG_ASYNC |
+				  CRYPTO_ALG_ALLOCATES_MEMORY,
 	.base.cra_blocksize	= AES_BLOCK_SIZE,
 	.base.cra_ctxsize	= sizeof(struct cvm_enc_ctx),
 	.base.cra_alignmask	= 7,
@@ -356,7 +357,8 @@ static struct skcipher_alg algs[] = { {
 	.decrypt		= cvm_decrypt,
 	.init			= cvm_enc_dec_init,
 }, {
-	.base.cra_flags		= CRYPTO_ALG_ASYNC,
+	.base.cra_flags		= CRYPTO_ALG_ASYNC |
+				  CRYPTO_ALG_ALLOCATES_MEMORY,
 	.base.cra_blocksize	= AES_BLOCK_SIZE,
 	.base.cra_ctxsize	= sizeof(struct cvm_enc_ctx),
 	.base.cra_alignmask	= 7,
@@ -373,7 +375,8 @@ static struct skcipher_alg algs[] = { {
 	.decrypt		= cvm_decrypt,
 	.init			= cvm_enc_dec_init,
 }, {
-	.base.cra_flags		= CRYPTO_ALG_ASYNC,
+	.base.cra_flags		= CRYPTO_ALG_ASYNC |
+				  CRYPTO_ALG_ALLOCATES_MEMORY,
 	.base.cra_blocksize	= AES_BLOCK_SIZE,
 	.base.cra_ctxsize	= sizeof(struct cvm_enc_ctx),
 	.base.cra_alignmask	= 7,
@@ -389,7 +392,8 @@ static struct skcipher_alg algs[] = { {
 	.decrypt		= cvm_decrypt,
 	.init			= cvm_enc_dec_init,
 }, {
-	.base.cra_flags		= CRYPTO_ALG_ASYNC,
+	.base.cra_flags		= CRYPTO_ALG_ASYNC |
+				  CRYPTO_ALG_ALLOCATES_MEMORY,
 	.base.cra_blocksize	= AES_BLOCK_SIZE,
 	.base.cra_ctxsize	= sizeof(struct cvm_enc_ctx),
 	.base.cra_alignmask	= 7,
@@ -406,7 +410,8 @@ static struct skcipher_alg algs[] = { {
 	.decrypt		= cvm_decrypt,
 	.init			= cvm_enc_dec_init,
 }, {
-	.base.cra_flags		= CRYPTO_ALG_ASYNC,
+	.base.cra_flags		= CRYPTO_ALG_ASYNC |
+				  CRYPTO_ALG_ALLOCATES_MEMORY,
 	.base.cra_blocksize	= DES3_EDE_BLOCK_SIZE,
 	.base.cra_ctxsize	= sizeof(struct cvm_des3_ctx),
 	.base.cra_alignmask	= 7,
@@ -423,7 +428,8 @@ static struct skcipher_alg algs[] = { {
 	.decrypt		= cvm_decrypt,
 	.init			= cvm_enc_dec_init,
 }, {
-	.base.cra_flags		= CRYPTO_ALG_ASYNC,
+	.base.cra_flags		= CRYPTO_ALG_ASYNC |
+				  CRYPTO_ALG_ALLOCATES_MEMORY,
 	.base.cra_blocksize	= DES3_EDE_BLOCK_SIZE,
 	.base.cra_ctxsize	= sizeof(struct cvm_des3_ctx),
 	.base.cra_alignmask	= 7,
@@ -443,13 +449,7 @@ static struct skcipher_alg algs[] = { {
 
 static inline int cav_register_algs(void)
 {
-	int err = 0;
-
-	err = crypto_register_skciphers(algs, ARRAY_SIZE(algs));
-	if (err)
-		return err;
-
-	return 0;
+	return crypto_register_skciphers(algs, ARRAY_SIZE(algs));
 }
 
 static inline void cav_unregister_algs(void)

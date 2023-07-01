@@ -1,7 +1,8 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //
 // Copyright(c) 2019 Intel Corporation. All rights reserved.
 
+#include <linux/module.h>
 #include <sound/pcm.h>
 #include <sound/soc.h>
 #include <sound/hda_codec.h>
@@ -10,12 +11,14 @@
 
 #include "hda_dsp_common.h"
 
+#if IS_ENABLED(CONFIG_SND_SOC_SOF_HDA_AUDIO_CODEC)
+
 /*
  * Search card topology and return PCM device number
  * matching Nth HDMI device (zero-based index).
  */
-struct snd_pcm *hda_dsp_hdmi_pcm_handle(struct snd_soc_card *card,
-					int hdmi_idx)
+static struct snd_pcm *hda_dsp_hdmi_pcm_handle(struct snd_soc_card *card,
+					       int hdmi_idx)
 {
 	struct snd_soc_pcm_runtime *rtd;
 	struct snd_pcm *spcm;
@@ -34,7 +37,6 @@ struct snd_pcm *hda_dsp_hdmi_pcm_handle(struct snd_soc_card *card,
 	return NULL;
 }
 
-#if IS_ENABLED(CONFIG_SND_SOC_SOF_HDA_AUDIO_CODEC)
 /*
  * Search card topology and register HDMI PCM related controls
  * to codec driver.
@@ -52,7 +54,7 @@ int hda_dsp_hdmi_build_controls(struct snd_soc_card *card,
 		return -EINVAL;
 
 	hda_pvt = snd_soc_component_get_drvdata(comp);
-	hcodec = &hda_pvt->codec;
+	hcodec = hda_pvt->codec;
 
 	list_for_each_entry(hpcm, &hcodec->pcm_list_head, list) {
 		spcm = hda_dsp_hdmi_pcm_handle(card, i);
@@ -60,13 +62,13 @@ int hda_dsp_hdmi_build_controls(struct snd_soc_card *card,
 			hpcm->pcm = spcm;
 			hpcm->device = spcm->device;
 			dev_dbg(card->dev,
-				"%s: mapping HDMI converter %d to PCM %d (%p)\n",
-				__func__, i, hpcm->device, spcm);
+				"mapping HDMI converter %d to PCM %d (%p)\n",
+				i, hpcm->device, spcm);
 		} else {
 			hpcm->pcm = NULL;
 			hpcm->device = SNDRV_PCM_INVALID_DEVICE;
 			dev_warn(card->dev,
-				 "%s: no PCM in topology for HDMI converter %d\n\n",
+				 "%s: no PCM in topology for HDMI converter %d\n",
 				 __func__, i);
 		}
 		i++;
@@ -81,5 +83,9 @@ int hda_dsp_hdmi_build_controls(struct snd_soc_card *card,
 
 	return err;
 }
+EXPORT_SYMBOL_NS(hda_dsp_hdmi_build_controls, SND_SOC_INTEL_HDA_DSP_COMMON);
 
 #endif
+
+MODULE_DESCRIPTION("ASoC Intel HDMI helpers");
+MODULE_LICENSE("GPL");

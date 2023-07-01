@@ -42,6 +42,8 @@
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
 #include <linux/idr.h>
+#include <net/sock.h>
+#include <uapi/linux/pidfd.h>
 
 struct pid init_struct_pid = {
 	.count		= REFCOUNT_INIT(1),
@@ -71,7 +73,7 @@ int pid_max_max = PID_MAX_LIMIT;
  * the scheme scales to up to 4 million PIDs, runtime.
  */
 struct pid_namespace init_pid_ns = {
-	.kref = KREF_INIT(2),
+	.ns.count = REFCOUNT_INIT(2),
 	.idr = IDR_INIT(init_pid_ns.idr),
 	.pid_allocated = PIDNS_ADDING,
 	.level = 0,
@@ -144,9 +146,6 @@ void free_pid(struct pid *pid)
 			/* Handle a fork failure of the first process */
 			WARN_ON(ns->child_reaper);
 			ns->pid_allocated = 0;
-			/* fall through */
-		case 0:
-			schedule_work(&ns->proc_work);
 			break;
 		}
 
@@ -201,7 +200,7 @@ struct pid *alloc_pid(struct pid_namespace *ns, pid_t *set_tid,
 			if (tid != 1 && !tmp->child_reaper)
 				goto out_free;
 			retval = -EPERM;
-			if (!ns_capable(tmp->user_ns, CAP_SYS_ADMIN))
+			if (!checkpoint_restore_ns_capable(tmp->user_ns))
 				goto out_free;
 			set_tid_size--;
 		}
@@ -247,17 +246,24 @@ struct pid *alloc_pid(struct pid_namespace *ns, pid_t *set_tid,
 		tmp = tmp->parent;
 	}
 
-	if (unlikely(is_child_reaper(pid))) {
-		if (pid_ns_prepare_proc(ns))
-			goto out_free;
-	}
+	/*
+	 * ENOMEM is not the most obvious choice especially for the case
+	 * where the child subreaper has already exited and the pid
+	 * namespace denies the creation of any new processes. But ENOMEM
+	 * is what we have exposed to userspace for a long time and it is
+	 * documented behavior for pid namespaces. So we can't easily
+	 * change it even if there were an error code better suited.
+	 */
+	retval = -ENOMEM;
 
 	get_pid_ns(ns);
 	refcount_set(&pid->count, 1);
+	spin_lock_init(&pid->lock);
 	for (type = 0; type < PIDTYPE_MAX; ++type)
 		INIT_HLIST_HEAD(&pid->tasks[type]);
 
 	init_waitqueue_head(&pid->wait_pidfd);
+	INIT_HLIST_HEAD(&pid->inodes);
 
 	upid = pid->numbers + ns->level;
 	spin_lock_irq(&pidmap_lock);
@@ -357,6 +363,25 @@ void change_pid(struct task_struct *task, enum pid_type type,
 {
 	__change_pid(task, type, pid);
 	attach_pid(task, type);
+}
+
+void exchange_tids(struct task_struct *left, struct task_struct *right)
+{
+	struct pid *pid1 = left->thread_pid;
+	struct pid *pid2 = right->thread_pid;
+	struct hlist_head *head1 = &pid1->tasks[PIDTYPE_PID];
+	struct hlist_head *head2 = &pid2->tasks[PIDTYPE_PID];
+
+	/* Swap the single entry tid lists */
+	hlists_swap_heads_rcu(head1, head2);
+
+	/* Swap the per task_struct pid */
+	rcu_assign_pointer(left->thread_pid, pid2);
+	rcu_assign_pointer(right->thread_pid, pid1);
+
+	/* Swap the cached value */
+	WRITE_ONCE(left->pid, pid_nr(pid2));
+	WRITE_ONCE(right->pid, pid_nr(pid1));
 }
 
 /* transfer_pid is an optimization of attach_pid(new), detach_pid(old) */
@@ -472,8 +497,7 @@ pid_t __task_pid_nr_ns(struct task_struct *task, enum pid_type type,
 	rcu_read_lock();
 	if (!ns)
 		ns = task_active_pid_ns(current);
-	if (likely(pid_alive(task)))
-		nr = pid_nr_ns(rcu_dereference(*task_pid_ptr(task, type)), ns);
+	nr = pid_nr_ns(rcu_dereference(*task_pid_ptr(task, type)), ns);
 	rcu_read_unlock();
 
 	return nr;
@@ -495,26 +519,91 @@ struct pid *find_ge_pid(int nr, struct pid_namespace *ns)
 {
 	return idr_get_next(&ns->idr, &nr);
 }
+EXPORT_SYMBOL_GPL(find_ge_pid);
+
+struct pid *pidfd_get_pid(unsigned int fd, unsigned int *flags)
+{
+	struct fd f;
+	struct pid *pid;
+
+	f = fdget(fd);
+	if (!f.file)
+		return ERR_PTR(-EBADF);
+
+	pid = pidfd_pid(f.file);
+	if (!IS_ERR(pid)) {
+		get_pid(pid);
+		*flags = f.file->f_flags;
+	}
+
+	fdput(f);
+	return pid;
+}
+
+/**
+ * pidfd_get_task() - Get the task associated with a pidfd
+ *
+ * @pidfd: pidfd for which to get the task
+ * @flags: flags associated with this pidfd
+ *
+ * Return the task associated with @pidfd. The function takes a reference on
+ * the returned task. The caller is responsible for releasing that reference.
+ *
+ * Currently, the process identified by @pidfd is always a thread-group leader.
+ * This restriction currently exists for all aspects of pidfds including pidfd
+ * creation (CLONE_PIDFD cannot be used with CLONE_THREAD) and pidfd polling
+ * (only supports thread group leaders).
+ *
+ * Return: On success, the task_struct associated with the pidfd.
+ *	   On error, a negative errno number will be returned.
+ */
+struct task_struct *pidfd_get_task(int pidfd, unsigned int *flags)
+{
+	unsigned int f_flags;
+	struct pid *pid;
+	struct task_struct *task;
+
+	pid = pidfd_get_pid(pidfd, &f_flags);
+	if (IS_ERR(pid))
+		return ERR_CAST(pid);
+
+	task = get_pid_task(pid, PIDTYPE_TGID);
+	put_pid(pid);
+	if (!task)
+		return ERR_PTR(-ESRCH);
+
+	*flags = f_flags;
+	return task;
+}
 
 /**
  * pidfd_create() - Create a new pid file descriptor.
  *
- * @pid:  struct pid that the pidfd will reference
+ * @pid:   struct pid that the pidfd will reference
+ * @flags: flags to pass
  *
  * This creates a new pid file descriptor with the O_CLOEXEC flag set.
  *
  * Note, that this function can only be called after the fd table has
  * been unshared to avoid leaking the pidfd to the new process.
  *
+ * This symbol should not be explicitly exported to loadable modules.
+ *
  * Return: On success, a cloexec pidfd is returned.
  *         On error, a negative errno number will be returned.
  */
-static int pidfd_create(struct pid *pid)
+int pidfd_create(struct pid *pid, unsigned int flags)
 {
 	int fd;
 
+	if (!pid || !pid_has_task(pid, PIDTYPE_TGID))
+		return -EINVAL;
+
+	if (flags & ~(O_NONBLOCK | O_RDWR | O_CLOEXEC))
+		return -EINVAL;
+
 	fd = anon_inode_getfd("[pidfd]", &pidfd_fops, get_pid(pid),
-			      O_RDWR | O_CLOEXEC);
+			      flags | O_RDWR | O_CLOEXEC);
 	if (fd < 0)
 		put_pid(pid);
 
@@ -542,7 +631,7 @@ SYSCALL_DEFINE2(pidfd_open, pid_t, pid, unsigned int, flags)
 	int fd;
 	struct pid *p;
 
-	if (flags)
+	if (flags & ~PIDFD_NONBLOCK)
 		return -EINVAL;
 
 	if (pid <= 0)
@@ -552,10 +641,7 @@ SYSCALL_DEFINE2(pidfd_open, pid_t, pid, unsigned int, flags)
 	if (!p)
 		return -ESRCH;
 
-	if (pid_has_task(p, PIDTYPE_TGID))
-		fd = pidfd_create(p);
-	else
-		fd = -EINVAL;
+	fd = pidfd_create(p, flags);
 
 	put_pid(p);
 	return fd;
@@ -584,7 +670,7 @@ static struct file *__pidfd_fget(struct task_struct *task, int fd)
 	struct file *file;
 	int ret;
 
-	ret = mutex_lock_killable(&task->signal->cred_guard_mutex);
+	ret = down_read_killable(&task->signal->exec_update_lock);
 	if (ret)
 		return ERR_PTR(ret);
 
@@ -593,7 +679,7 @@ static struct file *__pidfd_fget(struct task_struct *task, int fd)
 	else
 		file = ERR_PTR(-EPERM);
 
-	mutex_unlock(&task->signal->cred_guard_mutex);
+	up_read(&task->signal->exec_update_lock);
 
 	return file ?: ERR_PTR(-EBADF);
 }
@@ -613,17 +699,8 @@ static int pidfd_getfd(struct pid *pid, int fd)
 	if (IS_ERR(file))
 		return PTR_ERR(file);
 
-	ret = security_file_receive(file);
-	if (ret) {
-		fput(file);
-		return ret;
-	}
-
-	ret = get_unused_fd_flags(O_CLOEXEC);
-	if (ret < 0)
-		fput(file);
-	else
-		fd_install(ret, file);
+	ret = receive_fd(file, O_CLOEXEC);
+	fput(file);
 
 	return ret;
 }

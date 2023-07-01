@@ -384,7 +384,8 @@ static int flctl_dma_fifo0_transfer(struct sh_flctl *flctl, unsigned long *buf,
 	dma_addr_t dma_addr;
 	dma_cookie_t cookie;
 	uint32_t reg;
-	int ret;
+	int ret = 0;
+	unsigned long time_left;
 
 	if (dir == DMA_FROM_DEVICE) {
 		chan = flctl->chan_fifo0_rx;
@@ -425,13 +426,14 @@ static int flctl_dma_fifo0_transfer(struct sh_flctl *flctl, unsigned long *buf,
 		goto out;
 	}
 
-	ret =
+	time_left =
 	wait_for_completion_timeout(&flctl->dma_complete,
 				msecs_to_jiffies(3000));
 
-	if (ret <= 0) {
+	if (time_left == 0) {
 		dmaengine_terminate_all(chan);
 		dev_err(&flctl->pdev->dev, "wait_for_completion_timeout\n");
+		ret = -ETIMEDOUT;
 	}
 
 out:
@@ -441,7 +443,7 @@ out:
 
 	dma_unmap_single(chan->device->dev, dma_addr, len, dir);
 
-	/* ret > 0 is success */
+	/* ret == 0 is success */
 	return ret;
 }
 
@@ -465,7 +467,7 @@ static void read_fiforeg(struct sh_flctl *flctl, int rlen, int offset)
 
 	/* initiate DMA transfer */
 	if (flctl->chan_fifo0_rx && rlen >= 32 &&
-		flctl_dma_fifo0_transfer(flctl, buf, rlen, DMA_FROM_DEVICE) > 0)
+		!flctl_dma_fifo0_transfer(flctl, buf, rlen, DMA_FROM_DEVICE))
 			goto convert;	/* DMA success */
 
 	/* do polling transfer */
@@ -524,7 +526,7 @@ static void write_ec_fiforeg(struct sh_flctl *flctl, int rlen,
 
 	/* initiate DMA transfer */
 	if (flctl->chan_fifo0_tx && rlen >= 32 &&
-		flctl_dma_fifo0_transfer(flctl, buf, rlen, DMA_TO_DEVICE) > 0)
+		!flctl_dma_fifo0_transfer(flctl, buf, rlen, DMA_TO_DEVICE))
 			return;	/* DMA success */
 
 	/* do polling transfer */
@@ -1039,13 +1041,13 @@ static int flctl_chip_attach_chip(struct nand_chip *chip)
 		chip->ecc.strength = 4;
 		chip->ecc.read_page = flctl_read_page_hwecc;
 		chip->ecc.write_page = flctl_write_page_hwecc;
-		chip->ecc.mode = NAND_ECC_HW;
+		chip->ecc.engine_type = NAND_ECC_ENGINE_TYPE_ON_HOST;
 
 		/* 4 symbols ECC enabled */
 		flctl->flcmncr_base |= _4ECCEN;
 	} else {
-		chip->ecc.mode = NAND_ECC_SOFT;
-		chip->ecc.algo = NAND_ECC_HAMMING;
+		chip->ecc.engine_type = NAND_ECC_ENGINE_TYPE_SOFT;
+		chip->ecc.algo = NAND_ECC_ALGO_HAMMING;
 	}
 
 	return 0;
@@ -1204,9 +1206,13 @@ err_chip:
 static int flctl_remove(struct platform_device *pdev)
 {
 	struct sh_flctl *flctl = platform_get_drvdata(pdev);
+	struct nand_chip *chip = &flctl->chip;
+	int ret;
 
 	flctl_release_dma(flctl);
-	nand_release(&flctl->chip);
+	ret = mtd_device_unregister(nand_to_mtd(chip));
+	WARN_ON(ret);
+	nand_cleanup(chip);
 	pm_runtime_disable(&pdev->dev);
 
 	return 0;
@@ -1216,7 +1222,7 @@ static struct platform_driver flctl_driver = {
 	.remove		= flctl_remove,
 	.driver = {
 		.name	= "sh_flctl",
-		.of_match_table = of_match_ptr(of_flctl_match),
+		.of_match_table = of_flctl_match,
 	},
 };
 

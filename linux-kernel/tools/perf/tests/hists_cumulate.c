@@ -47,7 +47,7 @@ static struct sample fake_samples[] = {
 };
 
 /*
- * Will be casted to struct ip_callchain which has all 64 bit entries
+ * Will be cast to struct ip_callchain which has all 64 bit entries
  * of nr and ips[].
  */
 static u64 fake_callchains[][10] = {
@@ -190,7 +190,7 @@ static int do_test(struct hists *hists, struct result *expected, size_t nr_expec
 	 * function since TEST_ASSERT_VAL() returns in case of failure.
 	 */
 	hists__collapse_resort(hists, NULL);
-	perf_evsel__output_resort(hists_to_evsel(hists), NULL);
+	evsel__output_resort(hists_to_evsel(hists), NULL);
 
 	if (verbose > 2) {
 		pr_info("use callchain: %d, cumulate callchain: %d\n",
@@ -280,7 +280,7 @@ static int test1(struct evsel *evsel, struct machine *machine)
 
 	symbol_conf.use_callchain = false;
 	symbol_conf.cumulate_callchain = false;
-	perf_evsel__reset_sample_bit(evsel, CALLCHAIN);
+	evsel__reset_sample_bit(evsel, CALLCHAIN);
 
 	setup_sorting(NULL);
 	callchain_register_param(&callchain_param);
@@ -297,7 +297,7 @@ out:
 	return err;
 }
 
-/* callcain + NO children */
+/* callchain + NO children */
 static int test2(struct evsel *evsel, struct machine *machine)
 {
 	int err;
@@ -427,7 +427,7 @@ static int test2(struct evsel *evsel, struct machine *machine)
 
 	symbol_conf.use_callchain = true;
 	symbol_conf.cumulate_callchain = false;
-	perf_evsel__set_sample_bit(evsel, CALLCHAIN);
+	evsel__set_sample_bit(evsel, CALLCHAIN);
 
 	setup_sorting(NULL);
 	callchain_register_param(&callchain_param);
@@ -485,7 +485,7 @@ static int test3(struct evsel *evsel, struct machine *machine)
 
 	symbol_conf.use_callchain = false;
 	symbol_conf.cumulate_callchain = true;
-	perf_evsel__reset_sample_bit(evsel, CALLCHAIN);
+	evsel__reset_sample_bit(evsel, CALLCHAIN);
 
 	setup_sorting(NULL);
 	callchain_register_param(&callchain_param);
@@ -669,7 +669,7 @@ static int test4(struct evsel *evsel, struct machine *machine)
 
 	symbol_conf.use_callchain = true;
 	symbol_conf.cumulate_callchain = true;
-	perf_evsel__set_sample_bit(evsel, CALLCHAIN);
+	evsel__set_sample_bit(evsel, CALLCHAIN);
 
 	setup_sorting(NULL);
 
@@ -689,7 +689,7 @@ out:
 	return err;
 }
 
-int test__hists_cumulate(struct test *test __maybe_unused, int subtest __maybe_unused)
+static int test__hists_cumulate(struct test_suite *test __maybe_unused, int subtest __maybe_unused)
 {
 	int err = TEST_FAIL;
 	struct machines machines;
@@ -706,7 +706,7 @@ int test__hists_cumulate(struct test *test __maybe_unused, int subtest __maybe_u
 
 	TEST_ASSERT_VAL("No memory", evlist);
 
-	err = parse_events(evlist, "cpu-clock", NULL);
+	err = parse_event(evlist, "cpu-clock");
 	if (err)
 		goto out;
 	err = TEST_FAIL;
@@ -736,3 +736,5 @@ out:
 
 	return err;
 }
+
+DEFINE_SUITE("Cumulate child hist entries", hists_cumulate);

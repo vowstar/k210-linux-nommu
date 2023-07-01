@@ -128,8 +128,8 @@ static const struct uniphier_aio_spec *find_spec(struct uniphier_aio *aio,
 static int find_divider(struct uniphier_aio *aio, int pll_id, unsigned int freq)
 {
 	struct uniphier_aio_pll *pll;
-	int mul[] = { 1, 1, 1, 2, };
-	int div[] = { 2, 3, 1, 3, };
+	static const int mul[] = { 1, 1, 1, 2, };
+	static const int div[] = { 2, 3, 1, 3, };
 	int i;
 
 	if (!is_valid_pll(aio->chip, pll_id))
@@ -256,17 +256,12 @@ static int uniphier_aio_startup(struct snd_pcm_substream *substream,
 {
 	struct uniphier_aio *aio = uniphier_priv(dai);
 	struct uniphier_aio_sub *sub = &aio->sub[substream->stream];
-	int ret;
 
 	sub->substream = substream;
 	sub->pass_through = 0;
 	sub->use_mmap = true;
 
-	ret = aio_init(sub);
-	if (ret)
-		return ret;
-
-	return 0;
+	return aio_init(sub);
 }
 
 static void uniphier_aio_shutdown(struct snd_pcm_substream *substream,
@@ -424,7 +419,7 @@ static void uniphier_aio_dai_suspend(struct snd_soc_dai *dai)
 {
 	struct uniphier_aio *aio = uniphier_priv(dai);
 
-	if (!dai->active)
+	if (!snd_soc_dai_active(dai))
 		return;
 
 	aio->chip->num_wup_aios--;
@@ -448,7 +443,7 @@ static int uniphier_aio_dai_resume(struct snd_soc_dai *dai)
 	struct uniphier_aio *aio = uniphier_priv(dai);
 	int ret, i;
 
-	if (!dai->active)
+	if (!snd_soc_dai_active(dai))
 		return 0;
 
 	if (!aio->chip->active)

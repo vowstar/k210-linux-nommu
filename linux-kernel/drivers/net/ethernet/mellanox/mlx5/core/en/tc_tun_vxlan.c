@@ -88,6 +88,8 @@ static int mlx5e_gen_ip_tunnel_header_vxlan(char buf[],
 	struct udphdr *udp = (struct udphdr *)(buf);
 	struct vxlanhdr *vxh;
 
+	if (tun_key->tun_flags & TUNNEL_VXLAN_OPT)
+		return -EOPNOTSUPP;
 	vxh = (struct vxlanhdr *)((char *)udp + sizeof(struct udphdr));
 	*ip_proto = IPPROTO_UDP;
 
@@ -136,7 +138,17 @@ static int mlx5e_tc_tun_parse_vxlan(struct mlx5e_priv *priv,
 	MLX5_SET(fte_match_set_misc, misc_v, vxlan_vni,
 		 be32_to_cpu(enc_keyid.key->keyid));
 
+	spec->match_criteria_enable |= MLX5_MATCH_MISC_PARAMETERS;
+
 	return 0;
+}
+
+static int mlx5e_tc_tun_get_remote_ifindex(struct net_device *mirred_dev)
+{
+	const struct vxlan_dev *vxlan = netdev_priv(mirred_dev);
+	const struct vxlan_rdst *dst = &vxlan->default_dst;
+
+	return dst->remote_ifindex;
 }
 
 struct mlx5e_tc_tunnel vxlan_tunnel = {
@@ -148,4 +160,6 @@ struct mlx5e_tc_tunnel vxlan_tunnel = {
 	.generate_ip_tun_hdr  = mlx5e_gen_ip_tunnel_header_vxlan,
 	.parse_udp_ports      = mlx5e_tc_tun_parse_udp_ports_vxlan,
 	.parse_tunnel         = mlx5e_tc_tun_parse_vxlan,
+	.encap_info_equal     = mlx5e_tc_tun_encap_info_equal_generic,
+	.get_remote_ifindex   = mlx5e_tc_tun_get_remote_ifindex,
 };

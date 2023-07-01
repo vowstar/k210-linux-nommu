@@ -10,16 +10,17 @@
 #include "etnaviv_gem.h"
 #include "etnaviv_mmu.h"
 #include "etnaviv_drv.h"
+#include "common.xml.h"
 
 struct etnaviv_gem_submit;
 struct etnaviv_vram_mapping;
 
 struct etnaviv_chip_identity {
-	/* Chip model. */
 	u32 model;
-
-	/* Revision value.*/
 	u32 revision;
+	u32 product_id;
+	u32 customer_id;
+	u32 eco_id;
 
 	/* Supported feature fields. */
 	u32 features;
@@ -49,6 +50,9 @@ struct etnaviv_chip_identity {
 
 	/* Number of shader cores. */
 	u32 shader_core_count;
+
+	/* Number of Neural Network cores. */
+	u32 nn_core_count;
 
 	/* Size of the vertex cache. */
 	u32 vertex_cache_size;
@@ -99,8 +103,10 @@ struct etnaviv_gpu {
 	struct etnaviv_chip_identity identity;
 	enum etnaviv_sec_mode sec_mode;
 	struct workqueue_struct *wq;
+	struct mutex sched_lock;
 	struct drm_gpu_scheduler sched;
 	bool initialized;
+	bool fe_running;
 
 	/* 'ring'-buffer: */
 	struct etnaviv_cmdbuf buffer;
@@ -115,8 +121,8 @@ struct etnaviv_gpu {
 	u32 idle_mask;
 
 	/* Fencing support */
-	struct mutex fence_lock;
-	struct idr fence_idr;
+	struct xarray user_fences;
+	u32 next_user_fence;
 	u32 next_fence;
 	u32 completed_fence;
 	wait_queue_head_t fence_event;
@@ -129,6 +135,7 @@ struct etnaviv_gpu {
 
 	/* hang detection */
 	u32 hangcheck_dma_addr;
+	u32 hangcheck_fence;
 
 	void __iomem *mmio;
 	int irq;
@@ -157,6 +164,26 @@ static inline u32 gpu_read(struct etnaviv_gpu *gpu, u32 reg)
 	return readl(gpu->mmio + reg);
 }
 
+static inline u32 gpu_fix_power_address(struct etnaviv_gpu *gpu, u32 reg)
+{
+	/* Power registers in GC300 < 2.0 are offset by 0x100 */
+	if (gpu->identity.model == chipModel_GC300 &&
+	    gpu->identity.revision < 0x2000)
+		reg += 0x100;
+
+	return reg;
+}
+
+static inline void gpu_write_power(struct etnaviv_gpu *gpu, u32 reg, u32 data)
+{
+	writel(data, gpu->mmio + gpu_fix_power_address(gpu, reg));
+}
+
+static inline u32 gpu_read_power(struct etnaviv_gpu *gpu, u32 reg)
+{
+	return readl(gpu->mmio + gpu_fix_power_address(gpu, reg));
+}
+
 int etnaviv_gpu_get_param(struct etnaviv_gpu *gpu, u32 param, u64 *value);
 
 int etnaviv_gpu_init(struct etnaviv_gpu *gpu);
@@ -166,7 +193,7 @@ bool etnaviv_fill_identity_from_hwdb(struct etnaviv_gpu *gpu);
 int etnaviv_gpu_debugfs(struct etnaviv_gpu *gpu, struct seq_file *m);
 #endif
 
-void etnaviv_gpu_recover_hang(struct etnaviv_gpu *gpu);
+void etnaviv_gpu_recover_hang(struct etnaviv_gem_submit *submit);
 void etnaviv_gpu_retire(struct etnaviv_gpu *gpu);
 int etnaviv_gpu_wait_fence_interruptible(struct etnaviv_gpu *gpu,
 	u32 fence, struct drm_etnaviv_timespec *timeout);

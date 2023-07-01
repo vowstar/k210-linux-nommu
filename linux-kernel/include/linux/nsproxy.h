@@ -42,6 +42,30 @@ struct nsproxy {
 extern struct nsproxy init_nsproxy;
 
 /*
+ * A structure to encompass all bits needed to install
+ * a partial or complete new set of namespaces.
+ *
+ * If a new user namespace is requested cred will
+ * point to a modifiable set of credentials. If a pointer
+ * to a modifiable set is needed nsset_cred() must be
+ * used and tested.
+ */
+struct nsset {
+	unsigned flags;
+	struct nsproxy *nsproxy;
+	struct fs_struct *fs;
+	const struct cred *cred;
+};
+
+static inline struct cred *nsset_cred(struct nsset *set)
+{
+	if (set->flags & CLONE_NEWUSER)
+		return (struct cred *)set->cred;
+
+	return NULL;
+}
+
+/*
  * the namespaces access rules are:
  *
  *  1. only current task is allowed to change tsk->nsproxy pointer or
@@ -70,6 +94,7 @@ extern struct nsproxy init_nsproxy;
 int copy_namespaces(unsigned long flags, struct task_struct *tsk);
 void exit_task_namespaces(struct task_struct *tsk);
 void switch_task_namespaces(struct task_struct *tsk, struct nsproxy *new);
+int exec_task_namespaces(void);
 void free_nsproxy(struct nsproxy *ns);
 int unshare_nsproxy_namespaces(unsigned long, struct nsproxy **,
 	struct cred *, struct fs_struct *);

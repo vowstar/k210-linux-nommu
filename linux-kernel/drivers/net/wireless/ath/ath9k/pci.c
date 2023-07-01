@@ -804,14 +804,14 @@ static bool ath_pci_eeprom_read(struct ath_common *common, u32 off, u16 *data)
 	common->ops->read(ah, AR5416_EEPROM_OFFSET + (off << AR5416_EEPROM_S));
 
 	if (!ath9k_hw_wait(ah,
-				AR_EEPROM_STATUS_DATA,
+				AR_EEPROM_STATUS_DATA(ah),
 				AR_EEPROM_STATUS_DATA_BUSY |
 				AR_EEPROM_STATUS_DATA_PROT_ACCESS, 0,
 				AH_WAIT_TIMEOUT)) {
 		return false;
 	}
 
-	*data = MS(common->ops->read(ah, AR_EEPROM_STATUS_DATA),
+	*data = MS(common->ops->read(ah, AR_EEPROM_STATUS_DATA(ah)),
 			AR_EEPROM_STATUS_DATA_VAL);
 
 	return true;
@@ -825,6 +825,7 @@ static void ath_pci_aspm_init(struct ath_common *common)
 	struct pci_dev *pdev = to_pci_dev(sc->dev);
 	struct pci_dev *parent;
 	u16 aspm;
+	int ret;
 
 	if (!ah->is_pciexpress)
 		return;
@@ -866,8 +867,8 @@ static void ath_pci_aspm_init(struct ath_common *common)
 	if (AR_SREV_9462(ah))
 		pci_read_config_dword(pdev, 0x70c, &ah->config.aspm_l1_fix);
 
-	pcie_capability_read_word(parent, PCI_EXP_LNKCTL, &aspm);
-	if (aspm & (PCI_EXP_LNKCTL_ASPM_L0S | PCI_EXP_LNKCTL_ASPM_L1)) {
+	ret = pcie_capability_read_word(parent, PCI_EXP_LNKCTL, &aspm);
+	if (!ret && (aspm & (PCI_EXP_LNKCTL_ASPM_L0S | PCI_EXP_LNKCTL_ASPM_L1))) {
 		ah->aspm_enabled = true;
 		/* Initialize PCIe PM and SERDES registers. */
 		ath9k_hw_configpcipowersave(ah, false);
@@ -895,15 +896,9 @@ static int ath_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (pcim_enable_device(pdev))
 		return -EIO;
 
-	ret =  pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 	if (ret) {
 		pr_err("32-bit DMA not available\n");
-		return ret;
-	}
-
-	ret = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
-	if (ret) {
-		pr_err("32-bit DMA consistent DMA enable failed\n");
 		return ret;
 	}
 

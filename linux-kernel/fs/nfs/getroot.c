@@ -67,19 +67,20 @@ static int nfs_superblock_set_dummy_root(struct super_block *sb, struct inode *i
 int nfs_get_root(struct super_block *s, struct fs_context *fc)
 {
 	struct nfs_fs_context *ctx = nfs_fc2context(fc);
-	struct nfs_server *server = NFS_SB(s);
+	struct nfs_server *server = NFS_SB(s), *clone_server;
 	struct nfs_fsinfo fsinfo;
 	struct dentry *root;
 	struct inode *inode;
 	char *name;
 	int error = -ENOMEM;
+	unsigned long kflags = 0, kflags_out = 0;
 
 	name = kstrdup(fc->source, GFP_KERNEL);
 	if (!name)
 		goto out;
 
 	/* get the actual root for this mount */
-	fsinfo.fattr = nfs_alloc_fattr();
+	fsinfo.fattr = nfs_alloc_fattr_with_label(server);
 	if (fsinfo.fattr == NULL)
 		goto out_name;
 
@@ -90,7 +91,7 @@ int nfs_get_root(struct super_block *s, struct fs_context *fc)
 		goto out_fattr;
 	}
 
-	inode = nfs_fhget(s, ctx->mntfh, fsinfo.fattr, NULL);
+	inode = nfs_fhget(s, ctx->mntfh, fsinfo.fattr);
 	if (IS_ERR(inode)) {
 		dprintk("nfs_get_root: get root inode failed\n");
 		error = PTR_ERR(inode);
@@ -123,6 +124,31 @@ int nfs_get_root(struct super_block *s, struct fs_context *fc)
 	}
 	spin_unlock(&root->d_lock);
 	fc->root = root;
+	if (server->caps & NFS_CAP_SECURITY_LABEL)
+		kflags |= SECURITY_LSM_NATIVE_LABELS;
+	if (ctx->clone_data.sb) {
+		if (d_inode(fc->root)->i_fop != &nfs_dir_operations) {
+			error = -ESTALE;
+			goto error_splat_root;
+		}
+		/* clone lsm security options from the parent to the new sb */
+		error = security_sb_clone_mnt_opts(ctx->clone_data.sb,
+						   s, kflags, &kflags_out);
+		if (error)
+			goto error_splat_root;
+		clone_server = NFS_SB(ctx->clone_data.sb);
+		server->has_sec_mnt_opts = clone_server->has_sec_mnt_opts;
+	} else {
+		error = security_sb_set_mnt_opts(s, fc->security,
+							kflags, &kflags_out);
+	}
+	if (error)
+		goto error_splat_root;
+	if (server->caps & NFS_CAP_SECURITY_LABEL &&
+		!(kflags_out & SECURITY_LSM_NATIVE_LABELS))
+		server->caps &= ~NFS_CAP_SECURITY_LABEL;
+
+	nfs_setsecurity(inode, fsinfo.fattr);
 	error = 0;
 
 out_fattr:
@@ -131,4 +157,8 @@ out_name:
 	kfree(name);
 out:
 	return error;
+error_splat_root:
+	dput(fc->root);
+	fc->root = NULL;
+	goto out_fattr;
 }

@@ -30,7 +30,7 @@ struct cxlflash_global global;
 
 /**
  * marshal_rele_to_resize() - translate release to resize structure
- * @rele:	Source structure from which to translate/copy.
+ * @release:	Source structure from which to translate/copy.
  * @resize:	Destination structure for the translate/copy.
  */
 static void marshal_rele_to_resize(struct dk_cxlflash_release *release,
@@ -44,7 +44,7 @@ static void marshal_rele_to_resize(struct dk_cxlflash_release *release,
 /**
  * marshal_det_to_rele() - translate detach to release structure
  * @detach:	Destination structure for the translate/copy.
- * @rele:	Source structure from which to translate/copy.
+ * @release:	Source structure from which to translate/copy.
  */
 static void marshal_det_to_rele(struct dk_cxlflash_detach *detach,
 				struct dk_cxlflash_release *release)
@@ -308,19 +308,19 @@ out:
  * @lli:	LUN destined for capacity request.
  *
  * The READ_CAP16 can take quite a while to complete. Should an EEH occur while
- * in scsi_execute(), the EEH handler will attempt to recover. As part of the
- * recovery, the handler drains all currently running ioctls, waiting until they
- * have completed before proceeding with a reset. As this routine is used on the
- * ioctl path, this can create a condition where the EEH handler becomes stuck,
- * infinitely waiting for this ioctl thread. To avoid this behavior, temporarily
- * unmark this thread as an ioctl thread by releasing the ioctl read semaphore.
- * This will allow the EEH handler to proceed with a recovery while this thread
- * is still running. Once the scsi_execute() returns, reacquire the ioctl read
- * semaphore and check the adapter state in case it changed while inside of
- * scsi_execute(). The state check will wait if the adapter is still being
- * recovered or return a failure if the recovery failed. In the event that the
- * adapter reset failed, simply return the failure as the ioctl would be unable
- * to continue.
+ * in scsi_execute_cmd(), the EEH handler will attempt to recover. As part of
+ * the recovery, the handler drains all currently running ioctls, waiting until
+ * they have completed before proceeding with a reset. As this routine is used
+ * on the ioctl path, this can create a condition where the EEH handler becomes
+ * stuck, infinitely waiting for this ioctl thread. To avoid this behavior,
+ * temporarily unmark this thread as an ioctl thread by releasing the ioctl
+ * read semaphore. This will allow the EEH handler to proceed with a recovery
+ * while this thread is still running. Once the scsi_execute_cmd() returns,
+ * reacquire the ioctl read semaphore and check the adapter state in case it
+ * changed while inside of scsi_execute_cmd(). The state check will wait if the
+ * adapter is still being recovered or return a failure if the recovery failed.
+ * In the event that the adapter reset failed, simply return the failure as the
+ * ioctl would be unable to continue.
  *
  * Note that the above puts a requirement on this routine to only be called on
  * an ioctl thread.
@@ -333,6 +333,9 @@ static int read_cap16(struct scsi_device *sdev, struct llun_info *lli)
 	struct device *dev = &cfg->dev->dev;
 	struct glun_info *gli = lli->parent;
 	struct scsi_sense_hdr sshdr;
+	const struct scsi_exec_args exec_args = {
+		.sshdr = &sshdr,
+	};
 	u8 *cmd_buf = NULL;
 	u8 *scsi_cmd = NULL;
 	int rc = 0;
@@ -357,9 +360,8 @@ retry:
 
 	/* Drop the ioctl read semahpore across lengthy call */
 	up_read(&cfg->ioctl_rwsem);
-	result = scsi_execute(sdev, scsi_cmd, DMA_FROM_DEVICE, cmd_buf,
-			      CMD_BUFSIZE, NULL, &sshdr, to, CMD_RETRIES,
-			      0, 0, NULL);
+	result = scsi_execute_cmd(sdev, scsi_cmd, REQ_OP_DRV_IN, cmd_buf,
+				  CMD_BUFSIZE, to, CMD_RETRIES, &exec_args);
 	down_read(&cfg->ioctl_rwsem);
 	rc = check_state(cfg);
 	if (rc) {
@@ -369,20 +371,18 @@ retry:
 		goto out;
 	}
 
-	if (driver_byte(result) == DRIVER_SENSE) {
-		result &= ~(0xFF<<24); /* DRIVER_SENSE is not an error */
+	if (result > 0 && scsi_sense_valid(&sshdr)) {
 		if (result & SAM_STAT_CHECK_CONDITION) {
 			switch (sshdr.sense_key) {
 			case NO_SENSE:
 			case RECOVERED_ERROR:
-				/* fall through */
 			case NOT_READY:
 				result &= ~SAM_STAT_CHECK_CONDITION;
 				break;
 			case UNIT_ATTENTION:
 				switch (sshdr.asc) {
 				case 0x29: /* Power on Reset or Device Reset */
-					/* fall through */
+					fallthrough;
 				case 0x2A: /* Device capacity changed */
 				case 0x3F: /* Report LUNs changed */
 					/* Retry the command once more */
@@ -518,7 +518,7 @@ void rhte_checkin(struct ctx_info *ctxi,
 }
 
 /**
- * rhte_format1() - populates a RHTE for format 1
+ * rht_format1() - populates a RHTE for format 1
  * @rhte:	RHTE to populate.
  * @lun_id:	LUN ID of LUN associated with RHTE.
  * @perm:	Desired permissions for RHTE.
@@ -1791,13 +1791,12 @@ static int process_sense(struct scsi_device *sdev,
 	switch (sshdr.sense_key) {
 	case NO_SENSE:
 	case RECOVERED_ERROR:
-		/* fall through */
 	case NOT_READY:
 		break;
 	case UNIT_ATTENTION:
 		switch (sshdr.asc) {
 		case 0x29: /* Power on Reset or Device Reset */
-			/* fall through */
+			fallthrough;
 		case 0x2A: /* Device settings/capacity changed */
 			rc = read_cap16(sdev, lli);
 			if (rc) {
@@ -2157,7 +2156,7 @@ int cxlflash_ioctl(struct scsi_device *sdev, unsigned int cmd, void __user *arg)
 		if (unlikely(rc))
 			goto cxlflash_ioctl_exit;
 
-		/* fall through */
+		fallthrough;
 
 	case DK_CXLFLASH_MANAGE_LUN:
 		known_ioctl = true;
@@ -2168,7 +2167,7 @@ int cxlflash_ioctl(struct scsi_device *sdev, unsigned int cmd, void __user *arg)
 		if (likely(do_ioctl))
 			break;
 
-		/* fall through */
+		fallthrough;
 	default:
 		rc = -EINVAL;
 		goto cxlflash_ioctl_exit;

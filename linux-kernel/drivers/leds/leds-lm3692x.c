@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
 // TI LM3692x LED chip family driver
-// Copyright (C) 2017-18 Texas Instruments Incorporated - http://www.ti.com/
+// Copyright (C) 2017-18 Texas Instruments Incorporated - https://www.ti.com/
 
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/init.h>
 #include <linux/leds.h>
 #include <linux/log2.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
-#include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
@@ -96,15 +95,15 @@
 #define LM3692X_FAULT_FLAG_OPEN BIT(4)
 
 /**
- * struct lm3692x_led -
- * @lock - Lock for reading/writing the device
- * @client - Pointer to the I2C client
- * @led_dev - LED class device pointer
- * @regmap - Devices register map
- * @enable_gpio - VDDIO/EN gpio to enable communication interface
- * @regulator - LED supply regulator pointer
- * @led_enable - LED sync to be enabled
- * @model_id - Current device model ID enumerated
+ * struct lm3692x_led
+ * @lock: Lock for reading/writing the device
+ * @client: Pointer to the I2C client
+ * @led_dev: LED class device pointer
+ * @regmap: Devices register map
+ * @enable_gpio: VDDIO/EN gpio to enable communication interface
+ * @regulator: LED supply regulator pointer
+ * @led_enable: LED sync to be enabled
+ * @model_id: Current device model ID enumerated
  */
 struct lm3692x_led {
 	struct mutex lock;
@@ -394,13 +393,10 @@ static int lm3692x_probe_dt(struct lm3692x_led *led)
 	led->regulator = devm_regulator_get_optional(&led->client->dev, "vled");
 	if (IS_ERR(led->regulator)) {
 		ret = PTR_ERR(led->regulator);
-		if (ret != -ENODEV) {
-			if (ret != -EPROBE_DEFER)
-				dev_err(&led->client->dev,
-					"Failed to get vled regulator: %d\n",
-					ret);
-			return ret;
-		}
+		if (ret != -ENODEV)
+			return dev_err_probe(&led->client->dev, ret,
+					     "Failed to get vled regulator\n");
+
 		led->regulator = NULL;
 	}
 
@@ -436,11 +432,9 @@ static int lm3692x_probe_dt(struct lm3692x_led *led)
 		return -ENODEV;
 	}
 
-	fwnode_property_read_string(child, "linux,default-trigger",
-				    &led->led_dev.default_trigger);
-
 	ret = fwnode_property_read_u32(child, "reg", &led->led_enable);
 	if (ret) {
+		fwnode_handle_put(child);
 		dev_err(&led->client->dev, "reg DT property missing\n");
 		return ret;
 	}
@@ -455,17 +449,16 @@ static int lm3692x_probe_dt(struct lm3692x_led *led)
 
 	ret = devm_led_classdev_register_ext(&led->client->dev, &led->led_dev,
 					     &init_data);
-	if (ret) {
+	if (ret)
 		dev_err(&led->client->dev, "led register err: %d\n", ret);
-		return ret;
-	}
 
-	return 0;
+	fwnode_handle_put(init_data.fwnode);
+	return ret;
 }
 
-static int lm3692x_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int lm3692x_probe(struct i2c_client *client)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct lm3692x_led *led;
 	int ret;
 
@@ -498,17 +491,12 @@ static int lm3692x_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int lm3692x_remove(struct i2c_client *client)
+static void lm3692x_remove(struct i2c_client *client)
 {
 	struct lm3692x_led *led = i2c_get_clientdata(client);
-	int ret;
 
-	ret = lm3692x_leds_disable(led);
-	if (ret)
-		return ret;
+	lm3692x_leds_disable(led);
 	mutex_destroy(&led->lock);
-
-	return 0;
 }
 
 static const struct i2c_device_id lm3692x_id[] = {
@@ -530,7 +518,7 @@ static struct i2c_driver lm3692x_driver = {
 		.name	= "lm3692x",
 		.of_match_table = of_lm3692x_leds_match,
 	},
-	.probe		= lm3692x_probe,
+	.probe_new	= lm3692x_probe,
 	.remove		= lm3692x_remove,
 	.id_table	= lm3692x_id,
 };

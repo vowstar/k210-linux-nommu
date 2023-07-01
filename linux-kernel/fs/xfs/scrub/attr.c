@@ -25,11 +25,11 @@
  * reallocating the buffer if necessary.  Buffer contents are not preserved
  * across a reallocation.
  */
-int
+static int
 xchk_setup_xattr_buf(
 	struct xfs_scrub	*sc,
 	size_t			value_size,
-	xfs_km_flags_t		flags)
+	gfp_t			flags)
 {
 	size_t			sz;
 	struct xchk_xattr_buf	*ab = sc->buf;
@@ -49,7 +49,7 @@ xchk_setup_xattr_buf(
 	if (ab) {
 		if (sz <= ab->sz)
 			return 0;
-		kmem_free(ab);
+		kvfree(ab);
 		sc->buf = NULL;
 	}
 
@@ -57,7 +57,7 @@ xchk_setup_xattr_buf(
 	 * Don't zero the buffer upon allocation to avoid runtime overhead.
 	 * All users must be careful never to read uninitialized contents.
 	 */
-	ab = kmem_alloc_large(sizeof(*ab) + sz, flags);
+	ab = kvmalloc(sizeof(*ab) + sz, flags);
 	if (!ab)
 		return -ENOMEM;
 
@@ -69,8 +69,7 @@ xchk_setup_xattr_buf(
 /* Set us up to scrub an inode's extended attributes. */
 int
 xchk_setup_xattr(
-	struct xfs_scrub	*sc,
-	struct xfs_inode	*ip)
+	struct xfs_scrub	*sc)
 {
 	int			error;
 
@@ -80,12 +79,13 @@ xchk_setup_xattr(
 	 * without the inode lock held, which means we can sleep.
 	 */
 	if (sc->flags & XCHK_TRY_HARDER) {
-		error = xchk_setup_xattr_buf(sc, XATTR_SIZE_MAX, 0);
+		error = xchk_setup_xattr_buf(sc, XATTR_SIZE_MAX,
+				XCHK_GFP_FLAGS);
 		if (error)
 			return error;
 	}
 
-	return xchk_setup_inode_contents(sc, ip, 0);
+	return xchk_setup_inode_contents(sc, 0);
 }
 
 /* Extended Attributes */
@@ -98,7 +98,7 @@ struct xchk_xattr {
 /*
  * Check that an extended attribute key can be looked up by hash.
  *
- * We use the XFS attribute list iterator (i.e. xfs_attr_list_int_ilocked)
+ * We use the XFS attribute list iterator (i.e. xfs_attr_list_ilocked)
  * to call this function for every attribute key in an inode.  Once
  * we're here, we load the attribute value to see if any errors happen,
  * or if we get more or less data than we expected.
@@ -139,7 +139,7 @@ xchk_xattr_listent(
 	 * doesn't work, we overload the seen_enough variable to convey
 	 * the error message back to the main scrub function.
 	 */
-	error = xchk_setup_xattr_buf(sx->sc, valuelen, KM_MAYFAIL);
+	error = xchk_setup_xattr_buf(sx->sc, valuelen, XCHK_GFP_FLAGS);
 	if (error == -ENOMEM)
 		error = -EDEADLOCK;
 	if (error) {
@@ -147,11 +147,8 @@ xchk_xattr_listent(
 		return;
 	}
 
-	args.flags = ATTR_KERNOTIME;
-	if (flags & XFS_ATTR_ROOT)
-		args.flags |= ATTR_ROOT;
-	else if (flags & XFS_ATTR_SECURE)
-		args.flags |= ATTR_SECURE;
+	args.op_flags = XFS_DA_OP_NOTIME;
+	args.attr_filter = flags & XFS_ATTR_NSP_ONDISK_MASK;
 	args.geo = context->dp->i_mount->m_attr_geo;
 	args.whichfork = XFS_ATTR_FORK;
 	args.dp = context->dp;
@@ -162,7 +159,10 @@ xchk_xattr_listent(
 	args.value = xchk_xattr_valuebuf(sx->sc);
 	args.valuelen = valuelen;
 
-	error = xfs_attr_get_ilocked(context->dp, &args);
+	error = xfs_attr_get_ilocked(&args);
+	/* ENODATA means the hash lookup failed and the attr is bad */
+	if (error == -ENODATA)
+		error = -EFSCORRUPTED;
 	if (!xchk_fblock_process_error(sx->sc, XFS_ATTR_FORK, args.blkno,
 			&error))
 		goto fail_xref;
@@ -324,7 +324,7 @@ xchk_xattr_block(
 		return 0;
 
 	/* Allocate memory for block usage checking. */
-	error = xchk_setup_xattr_buf(ds->sc, 0, KM_MAYFAIL);
+	error = xchk_setup_xattr_buf(ds->sc, 0, XCHK_GFP_FLAGS);
 	if (error == -ENOMEM)
 		return -EDEADLOCK;
 	if (error)
@@ -335,7 +335,7 @@ xchk_xattr_block(
 	bitmap_zero(usedmap, mp->m_attr_geo->blksize);
 
 	/* Check all the padding. */
-	if (xfs_sb_version_hascrc(&ds->sc->mp->m_sb)) {
+	if (xfs_has_crc(ds->sc->mp)) {
 		struct xfs_attr3_leafblock	*leaf = bp->b_addr;
 
 		if (leaf->hdr.pad1 != 0 || leaf->hdr.pad2 != 0 ||
@@ -474,7 +474,6 @@ xchk_xattr(
 	struct xfs_scrub		*sc)
 {
 	struct xchk_xattr		sx;
-	struct attrlist_cursor_kern	cursor = { 0 };
 	xfs_dablk_t			last_checked = -1U;
 	int				error = 0;
 
@@ -493,11 +492,10 @@ xchk_xattr(
 
 	/* Check that every attr key can also be looked up by hash. */
 	sx.context.dp = sc->ip;
-	sx.context.cursor = &cursor;
 	sx.context.resynch = 1;
 	sx.context.put_listent = xchk_xattr_listent;
 	sx.context.tp = sc->tp;
-	sx.context.flags = ATTR_INCOMPLETE;
+	sx.context.allow_incomplete = true;
 	sx.sc = sc;
 
 	/*
@@ -516,7 +514,7 @@ xchk_xattr(
 	 * iteration, which doesn't really follow the usual buffer
 	 * locking order.
 	 */
-	error = xfs_attr_list_int_ilocked(&sx.context);
+	error = xfs_attr_list_ilocked(&sx.context);
 	if (!xchk_fblock_process_error(sc, XFS_ATTR_FORK, 0, &error))
 		goto out;
 

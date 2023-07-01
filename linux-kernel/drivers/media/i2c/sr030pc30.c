@@ -468,7 +468,7 @@ static int sr030pc30_s_ctrl(struct v4l2_ctrl *ctrl)
 }
 
 static int sr030pc30_enum_mbus_code(struct v4l2_subdev *sd,
-		struct v4l2_subdev_pad_config *cfg,
+		struct v4l2_subdev_state *sd_state,
 		struct v4l2_subdev_mbus_code_enum *code)
 {
 	if (!code || code->pad ||
@@ -480,7 +480,7 @@ static int sr030pc30_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static int sr030pc30_get_fmt(struct v4l2_subdev *sd,
-		struct v4l2_subdev_pad_config *cfg,
+		struct v4l2_subdev_state *sd_state,
 		struct v4l2_subdev_format *format)
 {
 	struct v4l2_mbus_framefmt *mf;
@@ -525,7 +525,7 @@ static const struct sr030pc30_format *try_fmt(struct v4l2_subdev *sd,
 
 /* Return nearest media bus frame format. */
 static int sr030pc30_set_fmt(struct v4l2_subdev *sd,
-		struct v4l2_subdev_pad_config *cfg,
+		struct v4l2_subdev_state *sd_state,
 		struct v4l2_subdev_format *format)
 {
 	struct sr030pc30_info *info = sd ? to_sr030pc30(sd) : NULL;
@@ -541,7 +541,7 @@ static int sr030pc30_set_fmt(struct v4l2_subdev *sd,
 
 	fmt = try_fmt(sd, mf);
 	if (format->which == V4L2_SUBDEV_FORMAT_TRY) {
-		cfg->try_fmt = *mf;
+		sd_state->pads->try_fmt = *mf;
 		return 0;
 	}
 
@@ -675,8 +675,7 @@ static int sr030pc30_detect(struct i2c_client *client)
 }
 
 
-static int sr030pc30_probe(struct i2c_client *client,
-			   const struct i2c_device_id *id)
+static int sr030pc30_probe(struct i2c_client *client)
 {
 	struct sr030pc30_info *info;
 	struct v4l2_subdev *sd;
@@ -732,13 +731,12 @@ static int sr030pc30_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int sr030pc30_remove(struct i2c_client *client)
+static void sr030pc30_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 
 	v4l2_device_unregister_subdev(sd);
 	v4l2_ctrl_handler_free(sd->ctrl_handler);
-	return 0;
 }
 
 static const struct i2c_device_id sr030pc30_id[] = {
@@ -752,7 +750,7 @@ static struct i2c_driver sr030pc30_i2c_driver = {
 	.driver = {
 		.name = MODULE_NAME
 	},
-	.probe		= sr030pc30_probe,
+	.probe_new	= sr030pc30_probe,
 	.remove		= sr030pc30_remove,
 	.id_table	= sr030pc30_id,
 };

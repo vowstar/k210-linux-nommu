@@ -5,8 +5,11 @@
 
 #include <linux/bitops.h>
 #include <linux/device.h>
+#include <linux/power_supply.h>
 #include <linux/types.h>
 #include <linux/usb/typec.h>
+#include <linux/usb/pd.h>
+#include <linux/usb/role.h>
 
 /* -------------------------------------------------------------------------- */
 
@@ -21,7 +24,7 @@ struct ucsi_altmode;
 #define UCSI_MESSAGE_OUT		32
 
 /* Command Status and Connector Change Indication (CCI) bits */
-#define UCSI_CCI_CONNECTOR(_c_)		(((_c_) & GENMASK(7, 0)) >> 1)
+#define UCSI_CCI_CONNECTOR(_c_)		(((_c_) & GENMASK(7, 1)) >> 1)
 #define UCSI_CCI_LENGTH(_c_)		(((_c_) & GENMASK(15, 8)) >> 8)
 #define UCSI_CCI_NOT_SUPPORTED		BIT(25)
 #define UCSI_CCI_CANCEL_COMPLETE	BIT(26)
@@ -119,14 +122,23 @@ void ucsi_connector_change(struct ucsi *ucsi, u8 num);
 #define UCSI_SET_PDR_ACCEPT_ROLE_SWAPS		BIT(25)
 
 /* GET_ALTERNATE_MODES command bits */
+#define UCSI_ALTMODE_RECIPIENT(_r_)		(((_r_) >> 16) & 0x7)
 #define UCSI_GET_ALTMODE_RECIPIENT(_r_)		((u64)(_r_) << 16)
 #define   UCSI_RECIPIENT_CON			0
 #define   UCSI_RECIPIENT_SOP			1
 #define   UCSI_RECIPIENT_SOP_P			2
 #define   UCSI_RECIPIENT_SOP_PP			3
 #define UCSI_GET_ALTMODE_CONNECTOR_NUMBER(_r_)	((u64)(_r_) << 24)
+#define UCSI_ALTMODE_OFFSET(_r_)		(((_r_) >> 32) & 0xff)
 #define UCSI_GET_ALTMODE_OFFSET(_r_)		((u64)(_r_) << 32)
 #define UCSI_GET_ALTMODE_NUM_ALTMODES(_r_)	((u64)(_r_) << 40)
+
+/* GET_PDOS command bits */
+#define UCSI_GET_PDOS_PARTNER_PDO(_r_)		((u64)(_r_) << 23)
+#define UCSI_GET_PDOS_PDO_OFFSET(_r_)		((u64)(_r_) << 24)
+#define UCSI_GET_PDOS_NUM_PDOS(_r_)		((u64)(_r_) << 32)
+#define UCSI_MAX_PDOS				(4)
+#define UCSI_GET_PDOS_SRC_PDOS			((u64)1 << 34)
 
 /* -------------------------------------------------------------------------- */
 
@@ -275,7 +287,12 @@ struct ucsi {
 	struct ucsi_capability cap;
 	struct ucsi_connector *connector;
 
-	struct work_struct work;
+	struct work_struct resume_work;
+	struct delayed_work work;
+	int work_count;
+#define UCSI_ROLE_SWITCH_RETRY_PER_HZ	10
+#define UCSI_ROLE_SWITCH_INTERVAL	(HZ / UCSI_ROLE_SWITCH_RETRY_PER_HZ)
+#define UCSI_ROLE_SWITCH_WAIT_COUNT	(10 * UCSI_ROLE_SWITCH_RETRY_PER_HZ)
 
 	/* PPM Communication lock */
 	struct mutex ppm_lock;
@@ -293,6 +310,10 @@ struct ucsi {
 #define UCSI_MAX_SVID		5
 #define UCSI_MAX_ALTMODES	(UCSI_MAX_SVID * 6)
 
+#define UCSI_TYPEC_VSAFE5V	5000
+#define UCSI_TYPEC_1_5_CURRENT	1500
+#define UCSI_TYPEC_3_0_CURRENT	3000
+
 struct ucsi_connector {
 	int num;
 
@@ -300,6 +321,8 @@ struct ucsi_connector {
 	struct mutex lock; /* port lock */
 	struct work_struct work;
 	struct completion complete;
+	struct workqueue_struct *wq;
+	struct list_head partner_tasks;
 
 	struct typec_port *port;
 	struct typec_partner *partner;
@@ -311,6 +334,21 @@ struct ucsi_connector {
 
 	struct ucsi_connector_status status;
 	struct ucsi_connector_capability cap;
+	struct power_supply *psy;
+	struct power_supply_desc psy_desc;
+	u32 rdo;
+	u32 src_pdos[PDO_MAX_OBJECTS];
+	int num_pdos;
+
+	/* USB PD objects */
+	struct usb_power_delivery *pd;
+	struct usb_power_delivery_capabilities *port_source_caps;
+	struct usb_power_delivery_capabilities *port_sink_caps;
+	struct usb_power_delivery *partner_pd;
+	struct usb_power_delivery_capabilities *partner_source_caps;
+	struct usb_power_delivery_capabilities *partner_sink_caps;
+
+	struct usb_role_switch *usb_role_sw;
 };
 
 int ucsi_send_command(struct ucsi *ucsi, u64 command,
@@ -318,6 +356,16 @@ int ucsi_send_command(struct ucsi *ucsi, u64 command,
 
 void ucsi_altmode_update_active(struct ucsi_connector *con);
 int ucsi_resume(struct ucsi *ucsi);
+
+#if IS_ENABLED(CONFIG_POWER_SUPPLY)
+int ucsi_register_port_psy(struct ucsi_connector *con);
+void ucsi_unregister_port_psy(struct ucsi_connector *con);
+void ucsi_port_psy_changed(struct ucsi_connector *con);
+#else
+static inline int ucsi_register_port_psy(struct ucsi_connector *con) { return 0; }
+static inline void ucsi_unregister_port_psy(struct ucsi_connector *con) { }
+static inline void ucsi_port_psy_changed(struct ucsi_connector *con) { }
+#endif /* CONFIG_POWER_SUPPLY */
 
 #if IS_ENABLED(CONFIG_TYPEC_DP_ALTMODE)
 struct typec_altmode *
@@ -339,5 +387,12 @@ ucsi_register_displayport(struct ucsi_connector *con,
 static inline void
 ucsi_displayport_remove_partner(struct typec_altmode *adev) { }
 #endif /* CONFIG_TYPEC_DP_ALTMODE */
+
+/*
+ * NVIDIA VirtualLink (svid 0x955) has two altmode. VirtualLink
+ * DP mode with vdo=0x1 and NVIDIA test mode with vdo=0x3
+ */
+#define USB_TYPEC_NVIDIA_VLINK_DP_VDO	0x1
+#define USB_TYPEC_NVIDIA_VLINK_DBG_VDO	0x3
 
 #endif /* __DRIVER_USB_TYPEC_UCSI_H */

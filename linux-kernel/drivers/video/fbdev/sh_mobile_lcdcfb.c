@@ -16,7 +16,6 @@
 #include <linux/dma-mapping.h>
 #include <linux/delay.h>
 #include <linux/fbcon.h>
-#include <linux/gpio.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/ioctl.h>
@@ -341,8 +340,7 @@ static void lcdc_wait_bit(struct sh_mobile_lcdc_priv *priv,
 static void sh_mobile_lcdc_clk_on(struct sh_mobile_lcdc_priv *priv)
 {
 	if (atomic_inc_and_test(&priv->hw_usecnt)) {
-		if (priv->dot_clk)
-			clk_prepare_enable(priv->dot_clk);
+		clk_prepare_enable(priv->dot_clk);
 		pm_runtime_get_sync(priv->dev);
 	}
 }
@@ -351,8 +349,7 @@ static void sh_mobile_lcdc_clk_off(struct sh_mobile_lcdc_priv *priv)
 {
 	if (atomic_sub_return(1, &priv->hw_usecnt) == -1) {
 		pm_runtime_put(priv->dev);
-		if (priv->dot_clk)
-			clk_disable_unprepare(priv->dot_clk);
+		clk_disable_unprepare(priv->dot_clk);
 	}
 }
 
@@ -438,24 +435,23 @@ static struct sh_mobile_lcdc_sys_bus_ops sh_mobile_lcdc_sys_bus_ops = {
 	.read_data	= lcdc_sys_read_data,
 };
 
-static int sh_mobile_lcdc_sginit(struct fb_info *info,
-				  struct list_head *pagelist)
+static int sh_mobile_lcdc_sginit(struct fb_info *info, struct list_head *pagereflist)
 {
 	struct sh_mobile_lcdc_chan *ch = info->par;
 	unsigned int nr_pages_max = ch->fb_size >> PAGE_SHIFT;
-	struct page *page;
+	struct fb_deferred_io_pageref *pageref;
 	int nr_pages = 0;
 
 	sg_init_table(ch->sglist, nr_pages_max);
 
-	list_for_each_entry(page, pagelist, lru)
-		sg_set_page(&ch->sglist[nr_pages++], page, PAGE_SIZE, 0);
+	list_for_each_entry(pageref, pagereflist, list) {
+		sg_set_page(&ch->sglist[nr_pages++], pageref->page, PAGE_SIZE, 0);
+	}
 
 	return nr_pages;
 }
 
-static void sh_mobile_lcdc_deferred_io(struct fb_info *info,
-				       struct list_head *pagelist)
+static void sh_mobile_lcdc_deferred_io(struct fb_info *info, struct list_head *pagereflist)
 {
 	struct sh_mobile_lcdc_chan *ch = info->par;
 	const struct sh_mobile_lcdc_panel_cfg *panel = &ch->cfg->panel_cfg;
@@ -464,7 +460,7 @@ static void sh_mobile_lcdc_deferred_io(struct fb_info *info,
 	sh_mobile_lcdc_clk_on(ch->lcdc);
 
 	/*
-	 * It's possible to get here without anything on the pagelist via
+	 * It's possible to get here without anything on the pagereflist via
 	 * sh_mobile_lcdc_deferred_io_touch() or via a userspace fsync()
 	 * invocation. In the former case, the acceleration routines are
 	 * stepped in to when using the framebuffer console causing the
@@ -474,12 +470,12 @@ static void sh_mobile_lcdc_deferred_io(struct fb_info *info,
 	 * acceleration routines have their own methods for writing in
 	 * that still need to be updated.
 	 *
-	 * The fsync() and empty pagelist case could be optimized for,
+	 * The fsync() and empty pagereflist case could be optimized for,
 	 * but we don't bother, as any application exhibiting such
 	 * behaviour is fundamentally broken anyways.
 	 */
-	if (!list_empty(pagelist)) {
-		unsigned int nr_pages = sh_mobile_lcdc_sginit(info, pagelist);
+	if (!list_empty(pagereflist)) {
+		unsigned int nr_pages = sh_mobile_lcdc_sginit(info, pagereflist);
 
 		/* trigger panel update */
 		dma_map_sg(ch->lcdc->dev, ch->sglist, nr_pages, DMA_TO_DEVICE);
@@ -533,9 +529,6 @@ static void sh_mobile_lcdc_display_off(struct sh_mobile_lcdc_chan *ch)
 	if (ch->tx_dev)
 		ch->tx_dev->ops->display_off(ch->tx_dev);
 }
-
-static int sh_mobile_lcdc_check_var(struct fb_var_screeninfo *var,
-				    struct fb_info *info);
 
 /* -----------------------------------------------------------------------------
  * Format helpers
@@ -1195,7 +1188,7 @@ overlay_alpha_show(struct device *dev, struct device_attribute *attr, char *buf)
 	struct fb_info *info = dev_get_drvdata(dev);
 	struct sh_mobile_lcdc_overlay *ovl = info->par;
 
-	return scnprintf(buf, PAGE_SIZE, "%u\n", ovl->alpha);
+	return sysfs_emit(buf, "%u\n", ovl->alpha);
 }
 
 static ssize_t
@@ -1233,7 +1226,7 @@ overlay_mode_show(struct device *dev, struct device_attribute *attr, char *buf)
 	struct fb_info *info = dev_get_drvdata(dev);
 	struct sh_mobile_lcdc_overlay *ovl = info->par;
 
-	return scnprintf(buf, PAGE_SIZE, "%u\n", ovl->mode);
+	return sysfs_emit(buf, "%u\n", ovl->mode);
 }
 
 static ssize_t
@@ -1272,7 +1265,7 @@ overlay_position_show(struct device *dev, struct device_attribute *attr,
 	struct fb_info *info = dev_get_drvdata(dev);
 	struct sh_mobile_lcdc_overlay *ovl = info->par;
 
-	return scnprintf(buf, PAGE_SIZE, "%d,%d\n", ovl->pos_x, ovl->pos_y);
+	return sysfs_emit(buf, "%d,%d\n", ovl->pos_x, ovl->pos_y);
 }
 
 static ssize_t
@@ -1313,7 +1306,7 @@ overlay_rop3_show(struct device *dev, struct device_attribute *attr, char *buf)
 	struct fb_info *info = dev_get_drvdata(dev);
 	struct sh_mobile_lcdc_overlay *ovl = info->par;
 
-	return scnprintf(buf, PAGE_SIZE, "%u\n", ovl->rop3);
+	return sysfs_emit(buf, "%u\n", ovl->rop3);
 }
 
 static ssize_t
@@ -1486,6 +1479,9 @@ sh_mobile_lcdc_overlay_mmap(struct fb_info *info, struct vm_area_struct *vma)
 {
 	struct sh_mobile_lcdc_overlay *ovl = info->par;
 
+	if (info->fbdefio)
+		return fb_deferred_io_mmap(info, vma);
+
 	return dma_mmap_coherent(ovl->channel->lcdc->dev, vma, ovl->fb_mem,
 				 ovl->dma_handle, ovl->fb_size);
 }
@@ -1572,7 +1568,7 @@ sh_mobile_lcdc_overlay_fb_init(struct sh_mobile_lcdc_overlay *ovl)
 	info->flags = FBINFO_FLAG_DEFAULT;
 	info->fbops = &sh_mobile_lcdc_overlay_ops;
 	info->device = priv->dev;
-	info->screen_base = ovl->fb_mem;
+	info->screen_buffer = ovl->fb_mem;
 	info->par = ovl;
 
 	/* Initialize fixed screen information. Restrict pan to 2 lines steps
@@ -1594,7 +1590,7 @@ sh_mobile_lcdc_overlay_fb_init(struct sh_mobile_lcdc_overlay *ovl)
 	case V4L2_PIX_FMT_NV12:
 	case V4L2_PIX_FMT_NV21:
 		info->fix.ypanstep = 2;
-		/* Fall through */
+		fallthrough;
 	case V4L2_PIX_FMT_NV16:
 	case V4L2_PIX_FMT_NV61:
 		info->fix.xpanstep = 2;
@@ -1960,6 +1956,9 @@ sh_mobile_lcdc_mmap(struct fb_info *info, struct vm_area_struct *vma)
 {
 	struct sh_mobile_lcdc_chan *ch = info->par;
 
+	if (info->fbdefio)
+		return fb_deferred_io_mmap(info, vma);
+
 	return dma_mmap_coherent(ch->lcdc->dev, vma, ch->fb_mem,
 				 ch->dma_handle, ch->fb_size);
 }
@@ -2056,7 +2055,7 @@ sh_mobile_lcdc_channel_fb_init(struct sh_mobile_lcdc_chan *ch,
 	info->flags = FBINFO_FLAG_DEFAULT;
 	info->fbops = &sh_mobile_lcdc_ops;
 	info->device = priv->dev;
-	info->screen_base = ch->fb_mem;
+	info->screen_buffer = ch->fb_mem;
 	info->pseudo_palette = &ch->pseudo_palette;
 	info->par = ch;
 
@@ -2085,7 +2084,7 @@ sh_mobile_lcdc_channel_fb_init(struct sh_mobile_lcdc_chan *ch,
 	case V4L2_PIX_FMT_NV12:
 	case V4L2_PIX_FMT_NV21:
 		info->fix.ypanstep = 2;
-		/* Fall through */
+		fallthrough;
 	case V4L2_PIX_FMT_NV16:
 	case V4L2_PIX_FMT_NV61:
 		info->fix.xpanstep = 2;

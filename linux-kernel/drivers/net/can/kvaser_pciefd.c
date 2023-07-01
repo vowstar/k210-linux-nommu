@@ -9,6 +9,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/device.h>
+#include <linux/ethtool.h>
 #include <linux/pci.h>
 #include <linux/can/dev.h>
 #include <linux/timer.h>
@@ -57,6 +58,7 @@ MODULE_DESCRIPTION("CAN driver for Kvaser CAN/PCIe devices");
 #define KVASER_PCIEFD_KCAN_STAT_REG 0x418
 #define KVASER_PCIEFD_KCAN_MODE_REG 0x41c
 #define KVASER_PCIEFD_KCAN_BTRN_REG 0x420
+#define KVASER_PCIEFD_KCAN_BUS_LOAD_REG 0x424
 #define KVASER_PCIEFD_KCAN_BTRD_REG 0x428
 #define KVASER_PCIEFD_KCAN_PWM_REG 0x430
 /* Loopback control register */
@@ -247,6 +249,9 @@ MODULE_DESCRIPTION("CAN driver for Kvaser CAN/PCIe devices");
 #define KVASER_PCIEFD_SPACK_EWLR BIT(23)
 #define KVASER_PCIEFD_SPACK_EPLR BIT(24)
 
+/* Kvaser KCAN_EPACK second word */
+#define KVASER_PCIEFD_EPACK_DIR_TX BIT(0)
+
 struct kvaser_pciefd;
 
 struct kvaser_pciefd_can {
@@ -287,12 +292,12 @@ struct kvaser_pciefd_tx_packet {
 static const struct can_bittiming_const kvaser_pciefd_bittiming_const = {
 	.name = KVASER_PCIEFD_DRV_NAME,
 	.tseg1_min = 1,
-	.tseg1_max = 255,
+	.tseg1_max = 512,
 	.tseg2_min = 1,
 	.tseg2_max = 32,
 	.sjw_max = 16,
 	.brp_min = 1,
-	.brp_max = 4096,
+	.brp_max = 8192,
 	.brp_inc = 1,
 };
 
@@ -324,12 +329,9 @@ MODULE_DEVICE_TABLE(pci, kvaser_pciefd_id_table);
 static int kvaser_pciefd_spi_wait_loop(struct kvaser_pciefd *pcie, int msk)
 {
 	u32 res;
-	int ret;
 
-	ret = readl_poll_timeout(pcie->reg_base + KVASER_PCIEFD_SPI_STATUS_REG,
-				 res, res & msk, 0, 10);
-
-	return ret;
+	return readl_poll_timeout(pcie->reg_base + KVASER_PCIEFD_SPI_STATUS_REG,
+			res, res & msk, 0, 10);
 }
 
 static int kvaser_pciefd_spi_cmd(struct kvaser_pciefd *pcie, const u8 *tx,
@@ -692,8 +694,10 @@ static int kvaser_pciefd_open(struct net_device *netdev)
 		return err;
 
 	err = kvaser_pciefd_bus_on(can);
-	if (err)
+	if (err) {
+		close_candev(netdev);
 		return err;
+	}
 
 	return 0;
 }
@@ -740,7 +744,7 @@ static int kvaser_pciefd_prepare_tx_packet(struct kvaser_pciefd_tx_packet *p,
 		p->header[0] |= KVASER_PCIEFD_RPACKET_IDE;
 
 	p->header[0] |= cf->can_id & CAN_EFF_MASK;
-	p->header[1] |= can_len2dlc(cf->len) << KVASER_PCIEFD_RPACKET_DLC_SHIFT;
+	p->header[1] |= can_fd_len2dlc(cf->len) << KVASER_PCIEFD_RPACKET_DLC_SHIFT;
 	p->header[1] |= KVASER_PCIEFD_TPACKET_AREQ;
 
 	if (can_is_canfd_skb(skb)) {
@@ -768,7 +772,7 @@ static netdev_tx_t kvaser_pciefd_start_xmit(struct sk_buff *skb,
 	int nwords;
 	u8 count;
 
-	if (can_dropped_invalid_skb(netdev, skb))
+	if (can_dev_dropped_skb(netdev, skb))
 		return NETDEV_TX_OK;
 
 	nwords = kvaser_pciefd_prepare_tx_packet(&packet, can, skb);
@@ -776,7 +780,7 @@ static netdev_tx_t kvaser_pciefd_start_xmit(struct sk_buff *skb,
 	spin_lock_irqsave(&can->echo_lock, irq_flags);
 
 	/* Prepare and save echo skb in internal slot */
-	can_put_echo_skb(skb, netdev, can->echo_idx);
+	can_put_echo_skb(skb, netdev, can->echo_idx, 0);
 
 	/* Move echo index to the next slot */
 	can->echo_idx = (can->echo_idx + 1) % can->can.echo_skb_max;
@@ -913,8 +917,13 @@ static void kvaser_pciefd_bec_poll_timer(struct timer_list *data)
 static const struct net_device_ops kvaser_pciefd_netdev_ops = {
 	.ndo_open = kvaser_pciefd_open,
 	.ndo_stop = kvaser_pciefd_stop,
+	.ndo_eth_ioctl = can_eth_ioctl_hwts,
 	.ndo_start_xmit = kvaser_pciefd_start_xmit,
 	.ndo_change_mtu = can_change_mtu,
+};
+
+static const struct ethtool_ops kvaser_pciefd_ethtool_ops = {
+	.get_ts_info = can_ethtool_op_get_ts_info_hwts,
 };
 
 static int kvaser_pciefd_setup_can_ctrls(struct kvaser_pciefd *pcie)
@@ -933,6 +942,7 @@ static int kvaser_pciefd_setup_can_ctrls(struct kvaser_pciefd *pcie)
 
 		can = netdev_priv(netdev);
 		netdev->netdev_ops = &kvaser_pciefd_netdev_ops;
+		netdev->ethtool_ops = &kvaser_pciefd_ethtool_ops;
 		can->reg_base = pcie->reg_base + KVASER_PCIEFD_KCAN0_BASE +
 				i * KVASER_PCIEFD_KCAN_BASE_OFFSET;
 
@@ -946,6 +956,9 @@ static int kvaser_pciefd_setup_can_ctrls(struct kvaser_pciefd *pcie)
 		init_completion(&can->flush_comp);
 		timer_setup(&can->bec_poll_timer, kvaser_pciefd_bec_poll_timer,
 			    0);
+
+		/* Disable Bus load reporting */
+		iowrite32(0, can->reg_base + KVASER_PCIEFD_KCAN_BUS_LOAD_REG);
 
 		tx_npackets = ioread32(can->reg_base +
 				       KVASER_PCIEFD_KCAN_TX_NPACKETS_REG);
@@ -1174,21 +1187,22 @@ static int kvaser_pciefd_handle_data_packet(struct kvaser_pciefd *pcie,
 	if (p->header[0] & KVASER_PCIEFD_RPACKET_IDE)
 		cf->can_id |= CAN_EFF_FLAG;
 
-	cf->len = can_dlc2len(p->header[1] >> KVASER_PCIEFD_RPACKET_DLC_SHIFT);
+	cf->len = can_fd_dlc2len(p->header[1] >> KVASER_PCIEFD_RPACKET_DLC_SHIFT);
 
-	if (p->header[0] & KVASER_PCIEFD_RPACKET_RTR)
+	if (p->header[0] & KVASER_PCIEFD_RPACKET_RTR) {
 		cf->can_id |= CAN_RTR_FLAG;
-	else
+	} else {
 		memcpy(cf->data, data, cf->len);
+
+		stats->rx_bytes += cf->len;
+	}
+	stats->rx_packets++;
 
 	shhwtstamps = skb_hwtstamps(skb);
 
 	shhwtstamps->hwtstamp =
 		ns_to_ktime(div_u64(p->timestamp * 1000,
 				    pcie->freq_to_ticks_div));
-
-	stats->rx_bytes += cf->len;
-	stats->rx_packets++;
 
 	return netif_rx(skb);
 }
@@ -1279,7 +1293,10 @@ static int kvaser_pciefd_rx_error_frame(struct kvaser_pciefd_can *can,
 
 	can->err_rep_cnt++;
 	can->can.can_stats.bus_error++;
-	stats->rx_errors++;
+	if (p->header[1] & KVASER_PCIEFD_EPACK_DIR_TX)
+		stats->tx_errors++;
+	else
+		stats->rx_errors++;
 
 	can->bec.txerr = bec.txerr;
 	can->bec.rxerr = bec.rxerr;
@@ -1293,13 +1310,10 @@ static int kvaser_pciefd_rx_error_frame(struct kvaser_pciefd_can *can,
 	shhwtstamps->hwtstamp =
 		ns_to_ktime(div_u64(p->timestamp * 1000,
 				    can->kv_pcie->freq_to_ticks_div));
-	cf->can_id |= CAN_ERR_BUSERROR;
+	cf->can_id |= CAN_ERR_BUSERROR | CAN_ERR_CNT;
 
 	cf->data[6] = bec.txerr;
 	cf->data[7] = bec.rxerr;
-
-	stats->rx_packets++;
-	stats->rx_bytes += cf->can_dlc;
 
 	netif_rx(skb);
 	return 0;
@@ -1465,7 +1479,7 @@ static int kvaser_pciefd_handle_eack_packet(struct kvaser_pciefd *pcie,
 				  can->reg_base + KVASER_PCIEFD_KCAN_CTRL_REG);
 	} else {
 		int echo_idx = p->header[0] & KVASER_PCIEFD_PACKET_SEQ_MSK;
-		int dlc = can_get_echo_skb(can->can.dev, echo_idx);
+		int dlc = can_get_echo_skb(can->can.dev, echo_idx, NULL);
 		struct net_device_stats *stats = &can->can.dev->stats;
 
 		stats->tx_bytes += dlc;
@@ -1498,8 +1512,6 @@ static void kvaser_pciefd_handle_nack_packet(struct kvaser_pciefd_can *can,
 
 	if (skb) {
 		cf->can_id |= CAN_ERR_BUSERROR;
-		stats->rx_bytes += cf->can_dlc;
-		stats->rx_packets++;
 		netif_rx(skb);
 	} else {
 		stats->rx_dropped++;
@@ -1531,7 +1543,7 @@ static int kvaser_pciefd_handle_ack_packet(struct kvaser_pciefd *pcie,
 		netdev_dbg(can->can.dev, "Packet was flushed\n");
 	} else {
 		int echo_idx = p->header[0] & KVASER_PCIEFD_PACKET_SEQ_MSK;
-		int dlc = can_get_echo_skb(can->can.dev, echo_idx);
+		int dlc = can_get_echo_skb(can->can.dev, echo_idx, NULL);
 		u8 count = ioread32(can->reg_base +
 				    KVASER_PCIEFD_KCAN_TX_NPACKETS_REG) & 0xff;
 
@@ -1600,7 +1612,7 @@ static int kvaser_pciefd_read_packet(struct kvaser_pciefd *pcie, int *start_pos,
 		if (!(p->header[0] & KVASER_PCIEFD_RPACKET_RTR)) {
 			u8 data_len;
 
-			data_len = can_dlc2len(p->header[1] >>
+			data_len = can_fd_dlc2len(p->header[1] >>
 					       KVASER_PCIEFD_RPACKET_DLC_SHIFT);
 			pos += DIV_ROUND_UP(data_len, 4);
 		}

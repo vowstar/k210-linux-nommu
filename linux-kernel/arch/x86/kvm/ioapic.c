@@ -26,6 +26,7 @@
  *  Yaozu (Eddie) Dong <eddie.dong@intel.com>
  *  Based on Xen 3.1 code.
  */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/kvm_host.h>
 #include <linux/kvm.h>
@@ -54,9 +55,7 @@ static void kvm_ioapic_update_eoi_one(struct kvm_vcpu *vcpu,
 				      int trigger_mode,
 				      int pin);
 
-static unsigned long ioapic_read_indirect(struct kvm_ioapic *ioapic,
-					  unsigned long addr,
-					  unsigned long length)
+static unsigned long ioapic_read_indirect(struct kvm_ioapic *ioapic)
 {
 	unsigned long result = 0;
 
@@ -96,7 +95,7 @@ static unsigned long ioapic_read_indirect(struct kvm_ioapic *ioapic,
 static void rtc_irq_eoi_tracking_reset(struct kvm_ioapic *ioapic)
 {
 	ioapic->rtc_status.pending_eoi = 0;
-	bitmap_zero(ioapic->rtc_status.dest_map.map, KVM_MAX_VCPU_ID);
+	bitmap_zero(ioapic->rtc_status.dest_map.map, KVM_MAX_VCPU_IDS);
 }
 
 static void kvm_rtc_eoi_tracking_restore_all(struct kvm_ioapic *ioapic);
@@ -149,7 +148,7 @@ void kvm_rtc_eoi_tracking_restore_one(struct kvm_vcpu *vcpu)
 static void kvm_rtc_eoi_tracking_restore_all(struct kvm_ioapic *ioapic)
 {
 	struct kvm_vcpu *vcpu;
-	int i;
+	unsigned long i;
 
 	if (RTC_GSI >= IOAPIC_NUM_PINS)
 		return;
@@ -184,7 +183,7 @@ static bool rtc_irq_check_coalesced(struct kvm_ioapic *ioapic)
 
 static void ioapic_lazy_update_eoi(struct kvm_ioapic *ioapic, int irq)
 {
-	int i;
+	unsigned long i;
 	struct kvm_vcpu *vcpu;
 	union kvm_ioapic_redirect_entry *entry = &ioapic->redirtbl[irq];
 
@@ -197,12 +196,9 @@ static void ioapic_lazy_update_eoi(struct kvm_ioapic *ioapic, int irq)
 
 		/*
 		 * If no longer has pending EOI in LAPICs, update
-		 * EOI for this vetor.
+		 * EOI for this vector.
 		 */
 		rtc_irq_eoi(ioapic, vcpu, entry->fields.vector);
-		kvm_ioapic_update_eoi_one(vcpu, ioapic,
-					  entry->fields.trig_mode,
-					  irq);
 		break;
 	}
 }
@@ -225,12 +221,12 @@ static int ioapic_set_irq(struct kvm_ioapic *ioapic, unsigned int irq,
 	}
 
 	/*
-	 * AMD SVM AVIC accelerate EOI write and do not trap,
-	 * in-kernel IOAPIC will not be able to receive the EOI.
-	 * In this case, we do lazy update of the pending EOI when
-	 * trying to set IOAPIC irq.
+	 * AMD SVM AVIC accelerate EOI write iff the interrupt is edge
+	 * triggered, in which case the in-kernel IOAPIC will not be able
+	 * to receive the EOI.  In this case, we do a lazy update of the
+	 * pending EOI when trying to set IOAPIC irq.
 	 */
-	if (kvm_apicv_activated(ioapic->kvm))
+	if (edge && kvm_apicv_activated(ioapic->kvm))
 		ioapic_lazy_update_eoi(ioapic, irq);
 
 	/*
@@ -322,8 +318,8 @@ static void ioapic_write_indirect(struct kvm_ioapic *ioapic, u32 val)
 	unsigned index;
 	bool mask_before, mask_after;
 	union kvm_ioapic_redirect_entry *e;
-	unsigned long vcpu_bitmap;
 	int old_remote_irr, old_delivery_status, old_dest_id, old_dest_mode;
+	DECLARE_BITMAP(vcpu_bitmap, KVM_MAX_VCPUS);
 
 	switch (ioapic->ioregsel) {
 	case IOAPIC_REG_VERSION:
@@ -372,21 +368,54 @@ static void ioapic_write_indirect(struct kvm_ioapic *ioapic, u32 val)
 		mask_after = e->fields.mask;
 		if (mask_before != mask_after)
 			kvm_fire_mask_notifiers(ioapic->kvm, KVM_IRQCHIP_IOAPIC, index, mask_after);
-		if (e->fields.trig_mode == IOAPIC_LEVEL_TRIG
-		    && ioapic->irr & (1 << index))
-			ioapic_service(ioapic, index, false);
+		if (e->fields.trig_mode == IOAPIC_LEVEL_TRIG &&
+		    ioapic->irr & (1 << index) && !e->fields.mask && !e->fields.remote_irr) {
+			/*
+			 * Pending status in irr may be outdated: the IRQ line may have
+			 * already been deasserted by a device while the IRQ was masked.
+			 * This occurs, for instance, if the interrupt is handled in a
+			 * Linux guest as a oneshot interrupt (IRQF_ONESHOT). In this
+			 * case the guest acknowledges the interrupt to the device in
+			 * its threaded irq handler, i.e. after the EOI but before
+			 * unmasking, so at the time of unmasking the IRQ line is
+			 * already down but our pending irr bit is still set. In such
+			 * cases, injecting this pending interrupt to the guest is
+			 * buggy: the guest will receive an extra unwanted interrupt.
+			 *
+			 * So we need to check here if the IRQ is actually still pending.
+			 * As we are generally not able to probe the IRQ line status
+			 * directly, we do it through irqfd resampler. Namely, we clear
+			 * the pending status and notify the resampler that this interrupt
+			 * is done, without actually injecting it into the guest. If the
+			 * IRQ line is actually already deasserted, we are done. If it is
+			 * still asserted, a new interrupt will be shortly triggered
+			 * through irqfd and injected into the guest.
+			 *
+			 * If, however, it's not possible to resample (no irqfd resampler
+			 * registered for this irq), then unconditionally inject this
+			 * pending interrupt into the guest, so the guest will not miss
+			 * an interrupt, although may get an extra unwanted interrupt.
+			 */
+			if (kvm_notify_irqfd_resampler(ioapic->kvm, KVM_IRQCHIP_IOAPIC, index))
+				ioapic->irr &= ~(1 << index);
+			else
+				ioapic_service(ioapic, index, false);
+		}
 		if (e->fields.delivery_mode == APIC_DM_FIXED) {
 			struct kvm_lapic_irq irq;
 
-			irq.shorthand = APIC_DEST_NOSHORT;
 			irq.vector = e->fields.vector;
 			irq.delivery_mode = e->fields.delivery_mode << 8;
-			irq.dest_id = e->fields.dest_id;
 			irq.dest_mode =
 			    kvm_lapic_irq_dest_mode(!!e->fields.dest_mode);
-			bitmap_zero(&vcpu_bitmap, 16);
+			irq.level = false;
+			irq.trig_mode = e->fields.trig_mode;
+			irq.shorthand = APIC_DEST_NOSHORT;
+			irq.dest_id = e->fields.dest_id;
+			irq.msi_redir_hint = false;
+			bitmap_zero(vcpu_bitmap, KVM_MAX_VCPUS);
 			kvm_bitmap_or_dest_vcpus(ioapic->kvm, &irq,
-						 &vcpu_bitmap);
+						 vcpu_bitmap);
 			if (old_dest_mode != e->fields.dest_mode ||
 			    old_dest_id != e->fields.dest_id) {
 				/*
@@ -399,10 +428,10 @@ static void ioapic_write_indirect(struct kvm_ioapic *ioapic, u32 val)
 				    kvm_lapic_irq_dest_mode(
 					!!e->fields.dest_mode);
 				kvm_bitmap_or_dest_vcpus(ioapic->kvm, &irq,
-							 &vcpu_bitmap);
+							 vcpu_bitmap);
 			}
 			kvm_make_scan_ioapic_request_mask(ioapic->kvm,
-							  &vcpu_bitmap);
+							  vcpu_bitmap);
 		} else {
 			kvm_make_scan_ioapic_request(ioapic->kvm);
 		}
@@ -593,7 +622,7 @@ static int ioapic_mmio_read(struct kvm_vcpu *vcpu, struct kvm_io_device *this,
 		break;
 
 	case IOAPIC_REG_WINDOW:
-		result = ioapic_read_indirect(ioapic, addr, len);
+		result = ioapic_read_indirect(ioapic);
 		break;
 
 	default:

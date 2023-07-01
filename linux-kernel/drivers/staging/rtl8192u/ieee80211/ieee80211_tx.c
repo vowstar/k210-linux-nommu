@@ -180,9 +180,8 @@ int ieee80211_encrypt_fragment(
 			struct rtl_80211_hdr_3addrqos *header;
 
 			header = (struct rtl_80211_hdr_3addrqos *)frag->data;
-			printk(KERN_DEBUG "%s: TKIP countermeasures: dropped "
-			       "TX packet to %pM\n",
-			       ieee->dev->name, header->addr1);
+			netdev_dbg(ieee->dev, "TKIP countermeasures: dropped "
+			       "TX packet to %pM\n", header->addr1);
 		}
 		return -1;
 	}
@@ -204,8 +203,8 @@ int ieee80211_encrypt_fragment(
 
 	atomic_dec(&crypt->refcnt);
 	if (res < 0) {
-		printk(KERN_INFO "%s: Encryption failed: len=%d.\n",
-		       ieee->dev->name, frag->len);
+		netdev_info(ieee->dev, "Encryption failed: len=%d.\n",
+			    frag->len);
 		ieee->ieee_stats.tx_discards++;
 		return -1;
 	}
@@ -302,9 +301,9 @@ static void ieee80211_tx_query_agg_cap(struct ieee80211_device *ieee,
 	if (is_multicast_ether_addr(hdr->addr1))
 		return;
 	//check packet and mode later
-	if (!ieee->GetNmodeSupportBySecCfg(ieee->dev)) {
+	if (!ieee->GetNmodeSupportBySecCfg(ieee->dev))
 		return;
-	}
+
 	if (pHTInfo->bCurrentAMPDUEnable) {
 		if (!GetTs(ieee, (struct ts_common_info **)(&pTxTs), hdr->addr1, skb->priority, TX_DIR, true)) {
 			printk("===>can't get TS\n");
@@ -328,20 +327,20 @@ static void ieee80211_tx_query_agg_cap(struct ieee80211_device *ieee,
 	}
 FORCED_AGG_SETTING:
 	switch (pHTInfo->ForcedAMPDUMode) {
-		case HT_AGG_AUTO:
-			break;
+	case HT_AGG_AUTO:
+		break;
 
-		case HT_AGG_FORCE_ENABLE:
-			tcb_desc->bAMPDUEnable = true;
-			tcb_desc->ampdu_density = pHTInfo->ForcedMPDUDensity;
-			tcb_desc->ampdu_factor = pHTInfo->ForcedAMPDUFactor;
-			break;
+	case HT_AGG_FORCE_ENABLE:
+		tcb_desc->bAMPDUEnable = true;
+		tcb_desc->ampdu_density = pHTInfo->ForcedMPDUDensity;
+		tcb_desc->ampdu_factor = pHTInfo->ForcedAMPDUFactor;
+		break;
 
-		case HT_AGG_FORCE_DISABLE:
-			tcb_desc->bAMPDUEnable = false;
-			tcb_desc->ampdu_density = 0;
-			tcb_desc->ampdu_factor = 0;
-			break;
+	case HT_AGG_FORCE_DISABLE:
+		tcb_desc->bAMPDUEnable = false;
+		tcb_desc->ampdu_density = 0;
+		tcb_desc->ampdu_factor = 0;
+		break;
 
 	}
 		return;
@@ -373,9 +372,9 @@ ieee80211_query_HTCapShortGI(struct ieee80211_device *ieee, struct cb_desc *tcb_
 		return;
 	}
 
-	if ((pHTInfo->bCurBW40MHz == true) && pHTInfo->bCurShortGI40MHz)
+	if (pHTInfo->bCurBW40MHz && pHTInfo->bCurShortGI40MHz)
 		tcb_desc->bUseShortGI = true;
-	else if ((pHTInfo->bCurBW40MHz == false) && pHTInfo->bCurShortGI20MHz)
+	else if (!pHTInfo->bCurBW40MHz && pHTInfo->bCurShortGI20MHz)
 		tcb_desc->bUseShortGI = true;
 }
 
@@ -527,7 +526,7 @@ static void ieee80211_query_seqnum(struct ieee80211_device *ieee,
 	}
 }
 
-int ieee80211_xmit(struct sk_buff *skb, struct net_device *dev)
+netdev_tx_t ieee80211_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct ieee80211_device *ieee = netdev_priv(dev);
 	struct ieee80211_txb *txb = NULL;
@@ -557,16 +556,15 @@ int ieee80211_xmit(struct sk_buff *skb, struct net_device *dev)
 	 */
 	if ((!ieee->hard_start_xmit && !(ieee->softmac_features & IEEE_SOFTMAC_TX_QUEUE)) ||
 	   ((!ieee->softmac_data_hard_start_xmit && (ieee->softmac_features & IEEE_SOFTMAC_TX_QUEUE)))) {
-		printk(KERN_WARNING "%s: No xmit handler.\n",
-		       ieee->dev->name);
+		netdev_warn(ieee->dev, "No xmit handler.\n");
 		goto success;
 	}
 
 
 	if (likely(ieee->raw_tx == 0)) {
 		if (unlikely(skb->len < SNAP_SIZE + sizeof(u16))) {
-			printk(KERN_WARNING "%s: skb too small (%d).\n",
-			ieee->dev->name, skb->len);
+			netdev_warn(ieee->dev, "skb too small (%d).\n",
+				    skb->len);
 			goto success;
 		}
 
@@ -685,8 +683,7 @@ int ieee80211_xmit(struct sk_buff *skb, struct net_device *dev)
 		 */
 		txb = ieee80211_alloc_txb(nr_frags, frag_size + ieee->tx_headroom, GFP_ATOMIC);
 		if (unlikely(!txb)) {
-			printk(KERN_WARNING "%s: Could not allocate TXB\n",
-			ieee->dev->name);
+			netdev_warn(ieee->dev, "Could not allocate TXB\n");
 			goto failed;
 		}
 		txb->encrypted = encrypt;
@@ -779,15 +776,14 @@ int ieee80211_xmit(struct sk_buff *skb, struct net_device *dev)
 		}
 	} else {
 		if (unlikely(skb->len < sizeof(struct rtl_80211_hdr_3addr))) {
-			printk(KERN_WARNING "%s: skb too small (%d).\n",
-			ieee->dev->name, skb->len);
+			netdev_warn(ieee->dev, "skb too small (%d).\n",
+				    skb->len);
 			goto success;
 		}
 
 		txb = ieee80211_alloc_txb(1, skb->len, GFP_ATOMIC);
 		if (!txb) {
-			printk(KERN_WARNING "%s: Could not allocate TXB\n",
-			ieee->dev->name);
+			netdev_warn(ieee->dev, "Could not allocate TXB\n");
 			goto failed;
 		}
 
@@ -799,7 +795,7 @@ int ieee80211_xmit(struct sk_buff *skb, struct net_device *dev)
  success:
 //WB add to fill data tcb_desc here. only first fragment is considered, need to change, and you may remove to other place.
 	if (txb) {
-		struct cb_desc *tcb_desc = (struct cb_desc *)(txb->fragments[0]->cb + MAX_DEV_ADDR_SIZE);
+		tcb_desc = (struct cb_desc *)(txb->fragments[0]->cb + MAX_DEV_ADDR_SIZE);
 		tcb_desc->bTxEnableFwCalcDur = 1;
 		if (is_multicast_ether_addr(header.addr1))
 			tcb_desc->bMulticast = 1;
@@ -826,13 +822,13 @@ int ieee80211_xmit(struct sk_buff *skb, struct net_device *dev)
 			if ((*ieee->hard_start_xmit)(txb, dev) == 0) {
 				stats->tx_packets++;
 				stats->tx_bytes += __le16_to_cpu(txb->payload_size);
-				return 0;
+				return NETDEV_TX_OK;
 			}
 			ieee80211_txb_free(txb);
 		}
 	}
 
-	return 0;
+	return NETDEV_TX_OK;
 
  failed:
 	spin_unlock_irqrestore(&ieee->lock, flags);

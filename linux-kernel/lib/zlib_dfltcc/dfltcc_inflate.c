@@ -2,8 +2,9 @@
 
 #include "../zlib_inflate/inflate.h"
 #include "dfltcc_util.h"
-#include "dfltcc.h"
+#include "dfltcc_inflate.h"
 #include <asm/setup.h>
+#include <linux/export.h>
 #include <linux/zutil.h>
 
 /*
@@ -21,14 +22,19 @@ int dfltcc_can_inflate(
             zlib_dfltcc_support == ZLIB_DFLTCC_DEFLATE_ONLY)
         return 0;
 
-    /* Unsupported compression settings */
-    if (state->wbits != HB_BITS)
-        return 0;
-
     /* Unsupported hardware */
     return is_bit_set(dfltcc_state->af.fns, DFLTCC_XPND) &&
                is_bit_set(dfltcc_state->af.fmts, DFLTCC_FMT0);
 }
+EXPORT_SYMBOL(dfltcc_can_inflate);
+
+void dfltcc_reset_inflate_state(z_streamp strm) {
+    struct inflate_state *state = (struct inflate_state *)strm->state;
+    struct dfltcc_state *dfltcc_state = GET_DFLTCC_STATE(state);
+
+    dfltcc_reset_state(dfltcc_state);
+}
+EXPORT_SYMBOL(dfltcc_reset_inflate_state);
 
 static int dfltcc_was_inflate_used(
     z_streamp strm
@@ -89,8 +95,10 @@ dfltcc_inflate_action dfltcc_inflate(
     struct dfltcc_param_v0 *param = &dfltcc_state->param;
     dfltcc_cc cc;
 
-    if (flush == Z_BLOCK) {
-        /* DFLTCC does not support stopping on block boundaries */
+    if (flush == Z_BLOCK || flush == Z_PACKET_FLUSH) {
+        /* DFLTCC does not support stopping on block boundaries (Z_BLOCK flush option)
+         * as well as the use of Z_PACKET_FLUSH option (used exclusively by PPP driver)
+         */
         if (dfltcc_inflate_disable(strm)) {
             *ret = Z_STREAM_ERROR;
             return DFLTCC_INFLATE_BREAK;
@@ -119,11 +127,9 @@ dfltcc_inflate_action dfltcc_inflate(
     /* Translate stream to parameter block */
     param->cvt = CVT_ADLER32;
     param->sbb = state->bits;
-    param->hl = state->whave; /* Software and hardware history formats match */
-    param->ho = (state->write - state->whave) & ((1 << HB_BITS) - 1);
     if (param->hl)
         param->nt = 0; /* Honor history for the first block */
-    param->cv = state->flags ? REVERSE(state->check) : state->check;
+    param->cv = state->check;
 
     /* Inflate */
     do {
@@ -134,9 +140,7 @@ dfltcc_inflate_action dfltcc_inflate(
     strm->msg = oesc_msg(dfltcc_state->msg, param->oesc);
     state->last = cc == DFLTCC_CC_OK;
     state->bits = param->sbb;
-    state->whave = param->hl;
-    state->write = (param->ho + param->hl) & ((1 << HB_BITS) - 1);
-    state->check = state->flags ? REVERSE(param->cv) : param->cv;
+    state->check = param->cv;
     if (cc == DFLTCC_CC_OP2_CORRUPT && param->oesc != 0) {
         /* Report an error if stream is corrupted */
         state->mode = BAD;
@@ -147,3 +151,4 @@ dfltcc_inflate_action dfltcc_inflate(
     return (cc == DFLTCC_CC_OP1_TOO_SHORT || cc == DFLTCC_CC_OP2_TOO_SHORT) ?
         DFLTCC_INFLATE_BREAK : DFLTCC_INFLATE_CONTINUE;
 }
+EXPORT_SYMBOL(dfltcc_inflate);

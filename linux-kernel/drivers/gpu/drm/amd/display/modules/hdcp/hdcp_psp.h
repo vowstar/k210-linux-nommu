@@ -44,7 +44,8 @@ enum bgd_security_hdcp2_content_type {
 enum ta_dtm_command {
 	TA_DTM_COMMAND__UNUSED_1 = 1,
 	TA_DTM_COMMAND__TOPOLOGY_UPDATE_V2,
-	TA_DTM_COMMAND__TOPOLOGY_ASSR_ENABLE
+	TA_DTM_COMMAND__TOPOLOGY_ASSR_ENABLE,
+	TA_DTM_COMMAND__TOPOLOGY_UPDATE_V3
 };
 
 /* DTM related enumerations */
@@ -86,6 +87,43 @@ struct ta_dtm_topology_update_input_v2 {
 	uint32_t max_hdcp_supported_version;
 };
 
+/* For security reason/HW may change value, these encoder type enum values are not HW register values */
+/* Security code will check real HW register values and these SW enum values */
+enum ta_dtm_encoder_type {
+	TA_DTM_ENCODER_TYPE__INVALID    = 0,
+	TA_DTM_ENCODER_TYPE__DIG        = 0x10
+};
+
+/* @enum ta_dtm_dio_output_type
+ * This enum defines software value for dio_output_type
+ */
+typedef enum {
+    TA_DTM_DIO_OUTPUT_TYPE__INVALID,
+    TA_DTM_DIO_OUTPUT_TYPE__DIRECT,
+    TA_DTM_DIO_OUTPUT_TYPE__DPIA
+} ta_dtm_dio_output_type;
+
+struct ta_dtm_topology_update_input_v3 {
+	/* display handle is unique across the driver and is used to identify a display */
+	/* for all security interfaces which reference displays such as HDCP */
+	/* link_hdcp_cap means link is HDCP-capable for audio HDCP capable property(informational), not for other logic(e.g. Crossbar) */
+	uint32_t display_handle;
+	uint32_t is_active;
+	uint32_t is_miracast;
+	uint32_t controller;
+	uint32_t ddc_line;
+	uint32_t link_enc;
+	uint32_t stream_enc;
+	uint32_t dp_mst_vcid;
+	uint32_t is_assr;
+	uint32_t max_hdcp_supported_version;
+	enum ta_dtm_encoder_type encoder_type;
+	uint32_t phy_id;
+	uint32_t link_hdcp_cap;
+	ta_dtm_dio_output_type dio_output_type;
+	uint32_t dio_output_id;
+};
+
 struct ta_dtm_topology_assr_enable {
 	uint32_t display_topology_dig_be_index;
 };
@@ -99,6 +137,7 @@ struct ta_dtm_topology_assr_enable {
 union ta_dtm_cmd_input {
 	struct ta_dtm_topology_update_input_v2 topology_update_v2;
 	struct ta_dtm_topology_assr_enable topology_assr_enable;
+	struct ta_dtm_topology_update_input_v3 topology_update_v3;
 };
 
 union ta_dtm_cmd_output {
@@ -117,6 +156,8 @@ struct ta_dtm_shared_memory {
 int psp_cmd_submit_buf(struct psp_context *psp, struct amdgpu_firmware_info *ucode, struct psp_gfx_cmd_resp *cmd,
 		uint64_t fence_mc_addr);
 
+enum { PSP_HDCP_SRM_FIRST_GEN_MAX_SIZE = 5120 };
+
 enum ta_hdcp_command {
 	TA_HDCP_COMMAND__INITIALIZE,
 	TA_HDCP_COMMAND__HDCP1_CREATE_SESSION,
@@ -134,7 +175,10 @@ enum ta_hdcp_command {
 	TA_HDCP_COMMAND__UNUSED_3,
 	TA_HDCP_COMMAND__HDCP2_CREATE_SESSION_V2,
 	TA_HDCP_COMMAND__HDCP2_PREPARE_PROCESS_AUTHENTICATION_MSG_V2,
-	TA_HDCP_COMMAND__HDCP2_ENABLE_DP_STREAM_ENCRYPTION
+	TA_HDCP_COMMAND__HDCP2_ENABLE_DP_STREAM_ENCRYPTION,
+	TA_HDCP_COMMAND__HDCP_DESTROY_ALL_SESSIONS,
+	TA_HDCP_COMMAND__HDCP_SET_SRM,
+	TA_HDCP_COMMAND__HDCP_GET_SRM
 };
 
 enum ta_hdcp2_msg_id {
@@ -235,7 +279,8 @@ enum ta_hdcp_authentication_status {
 	TA_HDCP_AUTHENTICATION_STATUS__HDCP22_AUTHENTICATION_PENDING = 0x06,
 	TA_HDCP_AUTHENTICATION_STATUS__HDCP22_AUTHENTICATION_FAILED = 0x07,
 	TA_HDCP_AUTHENTICATION_STATUS__HDCP22_AUTHENTICATED = 0x08,
-	TA_HDCP_AUTHENTICATION_STATUS__HDCP1_KSV_VALIDATION_FAILED = 0x09
+	TA_HDCP_AUTHENTICATION_STATUS__HDCP1_KSV_VALIDATION_FAILED = 0x09,
+	TA_HDCP_AUTHENTICATION_STATUS__HDCP1_KSV_REVOKED = 0x0A
 };
 
 enum ta_hdcp2_msg_authentication_status {
@@ -253,7 +298,8 @@ enum ta_hdcp2_msg_authentication_status {
 	TA_HDCP2_MSG_AUTHENTICATION_STATUS__INVALID_SEQ_NUM,
 	TA_HDCP2_MSG_AUTHENTICATION_STATUS__INVALID_SIZE,
 	TA_HDCP2_MSG_AUTHENTICATION_STATUS__INVALID_LENGTH,
-	TA_HDCP2_MSG_AUTHENTICATION_STATUS__REAUTH_REQUEST
+	TA_HDCP2_MSG_AUTHENTICATION_STATUS__REAUTH_REQUEST,
+	TA_HDCP2_MSG_AUTHENTICATION_STATUS__RECEIVERID_REVOKED
 };
 
 enum ta_hdcp_content_type {
@@ -271,7 +317,8 @@ enum ta_hdcp2_version {
 	TA_HDCP2_VERSION_UNKNOWN = 0,
 	TA_HDCP2_VERSION_2_0 = 20,
 	TA_HDCP2_VERSION_2_1 = 21,
-	TA_HDCP2_VERSION_2_2 = 22
+	TA_HDCP2_VERSION_2_2 = 22,
+	TA_HDCP2_VERSION_2_3 = 23,
 };
 
 /* input/output structures for HDCP commands */
@@ -415,6 +462,22 @@ struct ta_hdcp_cmd_hdcp2_enable_dp_stream_encryption_input {
 	uint32_t display_handle;
 };
 
+struct ta_hdcp_cmd_set_srm_input {
+	uint32_t srm_buf_size;
+	uint8_t srm_buf[PSP_HDCP_SRM_FIRST_GEN_MAX_SIZE];
+};
+
+struct ta_hdcp_cmd_set_srm_output {
+	uint8_t valid_signature;
+	uint32_t srm_version;
+};
+
+struct ta_hdcp_cmd_get_srm_output {
+	uint32_t srm_version;
+	uint32_t srm_buf_size;
+	uint8_t srm_buf[PSP_HDCP_SRM_FIRST_GEN_MAX_SIZE];
+};
+
 /**********************************************************/
 /* Common input structure for HDCP callbacks */
 union ta_hdcp_cmd_input {
@@ -432,6 +495,7 @@ union ta_hdcp_cmd_input {
 	struct ta_hdcp_cmd_hdcp2_process_prepare_authentication_message_input_v2
 		hdcp2_prepare_process_authentication_message_v2;
 	struct ta_hdcp_cmd_hdcp2_enable_dp_stream_encryption_input hdcp2_enable_dp_stream_encryption;
+	struct ta_hdcp_cmd_set_srm_input hdcp_set_srm;
 };
 
 /* Common output structure for HDCP callbacks */
@@ -444,6 +508,8 @@ union ta_hdcp_cmd_output {
 	struct ta_hdcp_cmd_hdcp2_create_session_output_v2 hdcp2_create_session_v2;
 	struct ta_hdcp_cmd_hdcp2_process_prepare_authentication_message_output_v2
 		hdcp2_prepare_process_authentication_message_v2;
+	struct ta_hdcp_cmd_set_srm_output hdcp_set_srm;
+	struct ta_hdcp_cmd_get_srm_output hdcp_get_srm;
 };
 /**********************************************************/
 

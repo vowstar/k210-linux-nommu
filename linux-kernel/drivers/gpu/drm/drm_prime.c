@@ -29,6 +29,7 @@
 #include <linux/export.h>
 #include <linux/dma-buf.h>
 #include <linux/rbtree.h>
+#include <linux/module.h>
 
 #include <drm/drm.h>
 #include <drm/drm_drv.h>
@@ -38,6 +39,8 @@
 #include <drm/drm_prime.h>
 
 #include "drm_internal.h"
+
+MODULE_IMPORT_NS(DMA_BUF);
 
 /**
  * DOC: overview and lifetime rules
@@ -73,7 +76,7 @@
  * Thus the chain of references always flows in one direction, avoiding loops:
  * importing GEM object -> dma-buf -> exported GEM bo. A further complication
  * are the lookup caches for import and export. These are required to guarantee
- * that any given object will always have only one uniqe userspace handle. This
+ * that any given object will always have only one unique userspace handle. This
  * is required to allow userspace to detect duplicated imports, since some GEM
  * drivers do fail command submissions if a given buffer object is listed more
  * than once. These import and export caches in &drm_prime_file_private only
@@ -187,29 +190,33 @@ static int drm_prime_lookup_buf_handle(struct drm_prime_file_private *prime_fpri
 	return -ENOENT;
 }
 
-void drm_prime_remove_buf_handle_locked(struct drm_prime_file_private *prime_fpriv,
-					struct dma_buf *dma_buf)
+void drm_prime_remove_buf_handle(struct drm_prime_file_private *prime_fpriv,
+				 uint32_t handle)
 {
 	struct rb_node *rb;
 
-	rb = prime_fpriv->dmabufs.rb_node;
+	mutex_lock(&prime_fpriv->lock);
+
+	rb = prime_fpriv->handles.rb_node;
 	while (rb) {
 		struct drm_prime_member *member;
 
-		member = rb_entry(rb, struct drm_prime_member, dmabuf_rb);
-		if (member->dma_buf == dma_buf) {
+		member = rb_entry(rb, struct drm_prime_member, handle_rb);
+		if (member->handle == handle) {
 			rb_erase(&member->handle_rb, &prime_fpriv->handles);
 			rb_erase(&member->dmabuf_rb, &prime_fpriv->dmabufs);
 
-			dma_buf_put(dma_buf);
+			dma_buf_put(member->dma_buf);
 			kfree(member);
-			return;
-		} else if (member->dma_buf < dma_buf) {
+			break;
+		} else if (member->handle < handle) {
 			rb = rb->rb_right;
 		} else {
 			rb = rb->rb_left;
 		}
 	}
+
+	mutex_unlock(&prime_fpriv->lock);
 }
 
 void drm_prime_init_file_private(struct drm_prime_file_private *prime_fpriv)
@@ -270,7 +277,7 @@ void drm_gem_dmabuf_release(struct dma_buf *dma_buf)
 	struct drm_device *dev = obj->dev;
 
 	/* drop the reference on the export fd holds */
-	drm_gem_object_put_unlocked(obj);
+	drm_gem_object_put(obj);
 
 	drm_dev_put(dev);
 }
@@ -329,7 +336,7 @@ int drm_gem_prime_fd_to_handle(struct drm_device *dev,
 
 	/* _handle_create_tail unconditionally unlocks dev->object_name_lock. */
 	ret = drm_gem_handle_create_tail(file_priv, obj, handle);
-	drm_gem_object_put_unlocked(obj);
+	drm_gem_object_put(obj);
 	if (ret)
 		goto out_put;
 
@@ -386,8 +393,6 @@ static struct dma_buf *export_and_register_object(struct drm_device *dev,
 
 	if (obj->funcs && obj->funcs->export)
 		dmabuf = obj->funcs->export(obj, flags);
-	else if (dev->driver->gem_prime_export)
-		dmabuf = dev->driver->gem_prime_export(obj, flags);
 	else
 		dmabuf = drm_gem_prime_export(obj, flags);
 	if (IS_ERR(dmabuf)) {
@@ -419,7 +424,7 @@ static struct dma_buf *export_and_register_object(struct drm_device *dev,
  * This is the PRIME export function which must be used mandatorily by GEM
  * drivers to ensure correct lifetime management of the underlying GEM object.
  * The actual exporting from GEM object to a dma-buf is done through the
- * &drm_driver.gem_prime_export driver callback.
+ * &drm_gem_object_funcs.export callback.
  */
 int drm_gem_prime_handle_to_fd(struct drm_device *dev,
 			       struct drm_file *file_priv, uint32_t handle,
@@ -500,7 +505,7 @@ out_have_handle:
 fail_put_dmabuf:
 	dma_buf_put(dmabuf);
 out:
-	drm_gem_object_put_unlocked(obj);
+	drm_gem_object_put(obj);
 out_unlock:
 	mutex_unlock(&file_priv->prime.lock);
 
@@ -551,7 +556,7 @@ int drm_prime_handle_to_fd_ioctl(struct drm_device *dev, void *data,
  *
  * FIXME: The underlying helper functions are named rather inconsistently.
  *
- * Exporting buffers
+ * Importing buffers
  * ~~~~~~~~~~~~~~~~~
  *
  * Importing dma-bufs using drm_gem_prime_import() relies on
@@ -617,20 +622,24 @@ struct sg_table *drm_gem_map_dma_buf(struct dma_buf_attachment *attach,
 {
 	struct drm_gem_object *obj = attach->dmabuf->priv;
 	struct sg_table *sgt;
+	int ret;
 
 	if (WARN_ON(dir == DMA_NONE))
 		return ERR_PTR(-EINVAL);
 
-	if (obj->funcs)
-		sgt = obj->funcs->get_sg_table(obj);
-	else
-		sgt = obj->dev->driver->gem_prime_get_sg_table(obj);
+	if (WARN_ON(!obj->funcs->get_sg_table))
+		return ERR_PTR(-ENOSYS);
 
-	if (!dma_map_sg_attrs(attach->dev, sgt->sgl, sgt->nents, dir,
-			      DMA_ATTR_SKIP_CPU_SYNC)) {
+	sgt = obj->funcs->get_sg_table(obj);
+	if (IS_ERR(sgt))
+		return sgt;
+
+	ret = dma_map_sgtable(attach->dev, sgt, dir,
+			      DMA_ATTR_SKIP_CPU_SYNC);
+	if (ret) {
 		sg_free_table(sgt);
 		kfree(sgt);
-		sgt = ERR_PTR(-ENOMEM);
+		sgt = ERR_PTR(ret);
 	}
 
 	return sgt;
@@ -652,8 +661,7 @@ void drm_gem_unmap_dma_buf(struct dma_buf_attachment *attach,
 	if (!sgt)
 		return;
 
-	dma_unmap_sg_attrs(attach->dev, sgt->sgl, sgt->nents, dir,
-			   DMA_ATTR_SKIP_CPU_SYNC);
+	dma_unmap_sgtable(attach->dev, sgt, dir, DMA_ATTR_SKIP_CPU_SYNC);
 	sg_free_table(sgt);
 	kfree(sgt);
 }
@@ -662,38 +670,35 @@ EXPORT_SYMBOL(drm_gem_unmap_dma_buf);
 /**
  * drm_gem_dmabuf_vmap - dma_buf vmap implementation for GEM
  * @dma_buf: buffer to be mapped
+ * @map: the virtual address of the buffer
  *
  * Sets up a kernel virtual mapping. This can be used as the &dma_buf_ops.vmap
  * callback. Calls into &drm_gem_object_funcs.vmap for device specific handling.
+ * The kernel virtual address is returned in map.
  *
- * Returns the kernel virtual address or NULL on failure.
+ * Returns 0 on success or a negative errno code otherwise.
  */
-void *drm_gem_dmabuf_vmap(struct dma_buf *dma_buf)
+int drm_gem_dmabuf_vmap(struct dma_buf *dma_buf, struct iosys_map *map)
 {
 	struct drm_gem_object *obj = dma_buf->priv;
-	void *vaddr;
 
-	vaddr = drm_gem_vmap(obj);
-	if (IS_ERR(vaddr))
-		vaddr = NULL;
-
-	return vaddr;
+	return drm_gem_vmap(obj, map);
 }
 EXPORT_SYMBOL(drm_gem_dmabuf_vmap);
 
 /**
  * drm_gem_dmabuf_vunmap - dma_buf vunmap implementation for GEM
  * @dma_buf: buffer to be unmapped
- * @vaddr: the virtual address of the buffer
+ * @map: the virtual address of the buffer
  *
  * Releases a kernel virtual mapping. This can be used as the
  * &dma_buf_ops.vunmap callback. Calls into &drm_gem_object_funcs.vunmap for device specific handling.
  */
-void drm_gem_dmabuf_vunmap(struct dma_buf *dma_buf, void *vaddr)
+void drm_gem_dmabuf_vunmap(struct dma_buf *dma_buf, struct iosys_map *map)
 {
 	struct drm_gem_object *obj = dma_buf->priv;
 
-	drm_gem_vunmap(obj, vaddr);
+	drm_gem_vunmap(obj, map);
 }
 EXPORT_SYMBOL(drm_gem_dmabuf_vunmap);
 
@@ -719,11 +724,15 @@ int drm_gem_prime_mmap(struct drm_gem_object *obj, struct vm_area_struct *vma)
 	vma->vm_pgoff += drm_vma_node_start(&obj->vma_node);
 
 	if (obj->funcs && obj->funcs->mmap) {
-		ret = obj->funcs->mmap(obj, vma);
-		if (ret)
-			return ret;
-		vma->vm_private_data = obj;
+		vma->vm_ops = obj->funcs->vm_ops;
+
 		drm_gem_object_get(obj);
+		ret = obj->funcs->mmap(obj, vma);
+		if (ret) {
+			drm_gem_object_put(obj);
+			return ret;
+		}
+		vma->vm_private_data = obj;
 		return 0;
 	}
 
@@ -772,6 +781,8 @@ int drm_gem_dmabuf_mmap(struct dma_buf *dma_buf, struct vm_area_struct *vma)
 	struct drm_gem_object *obj = dma_buf->priv;
 	struct drm_device *dev = obj->dev;
 
+	dma_resv_assert_held(dma_buf->resv);
+
 	if (!dev->driver->gem_prime_mmap)
 		return -ENOSYS;
 
@@ -793,6 +804,7 @@ static const struct dma_buf_ops drm_gem_prime_dmabuf_ops =  {
 
 /**
  * drm_prime_pages_to_sg - converts a page array into an sg list
+ * @dev: DRM device
  * @pages: pointer to the array of page pointers to convert
  * @nr_pages: length of the page vector
  *
@@ -802,28 +814,62 @@ static const struct dma_buf_ops drm_gem_prime_dmabuf_ops =  {
  *
  * This is useful for implementing &drm_gem_object_funcs.get_sg_table.
  */
-struct sg_table *drm_prime_pages_to_sg(struct page **pages, unsigned int nr_pages)
+struct sg_table *drm_prime_pages_to_sg(struct drm_device *dev,
+				       struct page **pages, unsigned int nr_pages)
 {
-	struct sg_table *sg = NULL;
-	int ret;
+	struct sg_table *sg;
+	size_t max_segment = 0;
+	int err;
 
 	sg = kmalloc(sizeof(struct sg_table), GFP_KERNEL);
-	if (!sg) {
-		ret = -ENOMEM;
-		goto out;
+	if (!sg)
+		return ERR_PTR(-ENOMEM);
+
+	if (dev)
+		max_segment = dma_max_mapping_size(dev->dev);
+	if (max_segment == 0)
+		max_segment = UINT_MAX;
+	err = sg_alloc_table_from_pages_segment(sg, pages, nr_pages, 0,
+						nr_pages << PAGE_SHIFT,
+						max_segment, GFP_KERNEL);
+	if (err) {
+		kfree(sg);
+		sg = ERR_PTR(err);
 	}
-
-	ret = sg_alloc_table_from_pages(sg, pages, nr_pages, 0,
-				nr_pages << PAGE_SHIFT, GFP_KERNEL);
-	if (ret)
-		goto out;
-
 	return sg;
-out:
-	kfree(sg);
-	return ERR_PTR(ret);
 }
 EXPORT_SYMBOL(drm_prime_pages_to_sg);
+
+/**
+ * drm_prime_get_contiguous_size - returns the contiguous size of the buffer
+ * @sgt: sg_table describing the buffer to check
+ *
+ * This helper calculates the contiguous size in the DMA address space
+ * of the buffer described by the provided sg_table.
+ *
+ * This is useful for implementing
+ * &drm_gem_object_funcs.gem_prime_import_sg_table.
+ */
+unsigned long drm_prime_get_contiguous_size(struct sg_table *sgt)
+{
+	dma_addr_t expected = sg_dma_address(sgt->sgl);
+	struct scatterlist *sg;
+	unsigned long size = 0;
+	int i;
+
+	for_each_sgtable_dma_sg(sgt, sg, i) {
+		unsigned int len = sg_dma_len(sg);
+
+		if (!len)
+			break;
+		if (sg_dma_address(sg) != expected)
+			break;
+		expected += len;
+		size += len;
+	}
+	return size;
+}
+EXPORT_SYMBOL(drm_prime_get_contiguous_size);
 
 /**
  * drm_gem_prime_export - helper library implementation of the export callback
@@ -896,7 +942,7 @@ struct drm_gem_object *drm_gem_prime_import_dev(struct drm_device *dev,
 
 	get_dma_buf(dma_buf);
 
-	sgt = dma_buf_map_attachment(attach, DMA_BIDIRECTIONAL);
+	sgt = dma_buf_map_attachment_unlocked(attach, DMA_BIDIRECTIONAL);
 	if (IS_ERR(sgt)) {
 		ret = PTR_ERR(sgt);
 		goto fail_detach;
@@ -914,7 +960,7 @@ struct drm_gem_object *drm_gem_prime_import_dev(struct drm_device *dev,
 	return obj;
 
 fail_unmap:
-	dma_buf_unmap_attachment(attach, sgt, DMA_BIDIRECTIONAL);
+	dma_buf_unmap_attachment_unlocked(attach, sgt, DMA_BIDIRECTIONAL);
 fail_detach:
 	dma_buf_detach(dma_buf, attach);
 	dma_buf_put(dma_buf);
@@ -944,50 +990,58 @@ struct drm_gem_object *drm_gem_prime_import(struct drm_device *dev,
 EXPORT_SYMBOL(drm_gem_prime_import);
 
 /**
- * drm_prime_sg_to_page_addr_arrays - convert an sg table into a page array
+ * drm_prime_sg_to_page_array - convert an sg table into a page array
  * @sgt: scatter-gather table to convert
- * @pages: optional array of page pointers to store the page array in
- * @addrs: optional array to store the dma bus address of each page
- * @max_entries: size of both the passed-in arrays
+ * @pages: array of page pointers to store the pages in
+ * @max_entries: size of the passed-in array
  *
- * Exports an sg table into an array of pages and addresses. This is currently
- * required by the TTM driver in order to do correct fault handling.
+ * Exports an sg table into an array of pages.
  *
- * Drivers can use this in their &drm_driver.gem_prime_import_sg_table
- * implementation.
+ * This function is deprecated and strongly discouraged to be used.
+ * The page array is only useful for page faults and those can corrupt fields
+ * in the struct page if they are not handled by the exporting driver.
  */
-int drm_prime_sg_to_page_addr_arrays(struct sg_table *sgt, struct page **pages,
-				     dma_addr_t *addrs, int max_entries)
+int __deprecated drm_prime_sg_to_page_array(struct sg_table *sgt,
+					    struct page **pages,
+					    int max_entries)
 {
-	unsigned count;
-	struct scatterlist *sg;
-	struct page *page;
-	u32 len, index;
-	dma_addr_t addr;
+	struct sg_page_iter page_iter;
+	struct page **p = pages;
 
-	index = 0;
-	for_each_sg(sgt->sgl, sg, sgt->nents, count) {
-		len = sg->length;
-		page = sg_page(sg);
-		addr = sg_dma_address(sg);
-
-		while (len > 0) {
-			if (WARN_ON(index >= max_entries))
-				return -1;
-			if (pages)
-				pages[index] = page;
-			if (addrs)
-				addrs[index] = addr;
-
-			page++;
-			addr += PAGE_SIZE;
-			len -= PAGE_SIZE;
-			index++;
-		}
+	for_each_sgtable_page(sgt, &page_iter, 0) {
+		if (WARN_ON(p - pages >= max_entries))
+			return -1;
+		*p++ = sg_page_iter_page(&page_iter);
 	}
 	return 0;
 }
-EXPORT_SYMBOL(drm_prime_sg_to_page_addr_arrays);
+EXPORT_SYMBOL(drm_prime_sg_to_page_array);
+
+/**
+ * drm_prime_sg_to_dma_addr_array - convert an sg table into a dma addr array
+ * @sgt: scatter-gather table to convert
+ * @addrs: array to store the dma bus address of each page
+ * @max_entries: size of both the passed-in arrays
+ *
+ * Exports an sg table into an array of addresses.
+ *
+ * Drivers should use this in their &drm_driver.gem_prime_import_sg_table
+ * implementation.
+ */
+int drm_prime_sg_to_dma_addr_array(struct sg_table *sgt, dma_addr_t *addrs,
+				   int max_entries)
+{
+	struct sg_dma_page_iter dma_iter;
+	dma_addr_t *a = addrs;
+
+	for_each_sgtable_dma_page(sgt, &dma_iter, 0) {
+		if (WARN_ON(a - addrs >= max_entries))
+			return -1;
+		*a++ = sg_page_iter_dma_address(&dma_iter);
+	}
+	return 0;
+}
+EXPORT_SYMBOL(drm_prime_sg_to_dma_addr_array);
 
 /**
  * drm_prime_gem_destroy - helper to clean up a PRIME-imported GEM object
@@ -1001,9 +1055,10 @@ void drm_prime_gem_destroy(struct drm_gem_object *obj, struct sg_table *sg)
 {
 	struct dma_buf_attachment *attach;
 	struct dma_buf *dma_buf;
+
 	attach = obj->import_attach;
 	if (sg)
-		dma_buf_unmap_attachment(attach, sg, DMA_BIDIRECTIONAL);
+		dma_buf_unmap_attachment_unlocked(attach, sg, DMA_BIDIRECTIONAL);
 	dma_buf = attach->dmabuf;
 	dma_buf_detach(attach->dmabuf, attach);
 	/* remove the reference */

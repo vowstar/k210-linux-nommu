@@ -73,7 +73,7 @@ static struct task_struct *kopald_tsk;
 static struct opal_msg *opal_msg;
 static u32 opal_msg_size __ro_after_init;
 
-void opal_configure_cores(void)
+void __init opal_configure_cores(void)
 {
 	u64 reinit_flags = 0;
 
@@ -588,7 +588,7 @@ static int opal_recover_mce(struct pt_regs *regs,
 {
 	int recovered = 0;
 
-	if (!(regs->msr & MSR_RI)) {
+	if (regs_is_unrecoverable(regs)) {
 		/* If MSR_RI isn't set, we cannot recover */
 		pr_err("Machine check interrupt unrecoverable: MSR(RI=0)\n");
 		recovered = 0;
@@ -624,7 +624,7 @@ static int opal_recover_mce(struct pt_regs *regs,
 			 */
 			recovered = 0;
 		} else {
-			die("Machine check", regs, SIGBUS);
+			die_mce("Machine check", regs, SIGBUS);
 			recovered = 1;
 		}
 	}
@@ -731,7 +731,7 @@ int opal_hmi_exception_early2(struct pt_regs *regs)
 	return 1;
 }
 
-/* HMI exception handler called in virtual mode during check_irq_replay. */
+/* HMI exception handler called in virtual mode when irqs are next enabled. */
 int opal_handle_hmi_exception(struct pt_regs *regs)
 {
 	/*
@@ -773,13 +773,13 @@ bool opal_mce_check_early_recovery(struct pt_regs *regs)
 	 * Setup regs->nip to rfi into fixup address.
 	 */
 	if (recover_addr)
-		regs->nip = recover_addr;
+		regs_set_return_ip(regs, recover_addr);
 
 out:
 	return !!recover_addr;
 }
 
-static int opal_sysfs_init(void)
+static int __init opal_sysfs_init(void)
 {
 	opal_kobj = kobject_create_and_add("opal", firmware_kobj);
 	if (!opal_kobj) {
@@ -811,6 +811,10 @@ static int opal_add_one_export(struct kobject *parent, const char *export_name,
 		goto out;
 
 	attr = kzalloc(sizeof(*attr), GFP_KERNEL);
+	if (!attr) {
+		rc = -ENOMEM;
+		goto out;
+	}
 	name = kstrdup(export_name, GFP_KERNEL);
 	if (!name) {
 		rc = -ENOMEM;
@@ -888,6 +892,7 @@ static void opal_export_attrs(void)
 	kobj = kobject_create_and_add("exports", opal_kobj);
 	if (!kobj) {
 		pr_warn("kobject_create_and_add() of exports failed\n");
+		of_node_put(np);
 		return;
 	}
 
@@ -933,7 +938,7 @@ static void __init opal_dump_region_init(void)
 			"rc = %d\n", rc);
 }
 
-static void opal_pdev_init(const char *compatible)
+static void __init opal_pdev_init(const char *compatible)
 {
 	struct device_node *np;
 
@@ -948,6 +953,8 @@ static void __init opal_imc_init_dev(void)
 	np = of_find_compatible_node(NULL, NULL, IMC_DTB_COMPAT);
 	if (np)
 		of_platform_device_create(np, NULL, NULL);
+
+	of_node_put(np);
 }
 
 static int kopald(void *unused)
@@ -977,7 +984,7 @@ void opal_wake_poller(void)
 		wake_up_process(kopald_tsk);
 }
 
-static void opal_init_heartbeat(void)
+static void __init opal_init_heartbeat(void)
 {
 	/* Old firwmware, we assume the HVC heartbeat is sufficient */
 	if (of_property_read_u32(opal_node, "ibm,heartbeat-ms",

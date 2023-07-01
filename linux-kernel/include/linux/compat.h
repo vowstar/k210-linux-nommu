@@ -20,11 +20,8 @@
 #include <linux/unistd.h>
 
 #include <asm/compat.h>
-
-#ifdef CONFIG_COMPAT
 #include <asm/siginfo.h>
 #include <asm/signal.h>
-#endif
 
 #ifdef CONFIG_ARCH_HAS_SYSCALL_WRAPPER
 /*
@@ -75,7 +72,6 @@
 	__diag_push();								\
 	__diag_ignore(GCC, 8, "-Wattribute-alias",				\
 		      "Type aliasing is used to sanitize syscall arguments");\
-	asmlinkage long compat_sys##name(__MAP(x,__SC_DECL,__VA_ARGS__));	\
 	asmlinkage long compat_sys##name(__MAP(x,__SC_DECL,__VA_ARGS__))	\
 		__attribute__((alias(__stringify(__se_compat_sys##name))));	\
 	ALLOW_ERROR_INJECTION(compat_sys##name, ERRNO);				\
@@ -91,7 +87,10 @@
 	static inline long __do_compat_sys##name(__MAP(x,__SC_DECL,__VA_ARGS__))
 #endif /* COMPAT_SYSCALL_DEFINEx */
 
-#ifdef CONFIG_COMPAT
+struct compat_iovec {
+	compat_uptr_t	iov_base;
+	compat_size_t	iov_len;
+};
 
 #ifndef compat_user_stack_pointer
 #define compat_user_stack_pointer() current_user_stack_pointer()
@@ -209,12 +208,11 @@ typedef struct compat_siginfo {
 		/* SIGILL, SIGFPE, SIGSEGV, SIGBUS, SIGTRAP, SIGEMT */
 		struct {
 			compat_uptr_t _addr;	/* faulting insn/memory ref. */
-#ifdef __ARCH_SI_TRAPNO
-			int _trapno;	/* TRAP # which caused the signal */
-#endif
 #define __COMPAT_ADDR_BND_PKEY_PAD  (__alignof__(compat_uptr_t) < sizeof(short) ? \
 				     sizeof(short) : __alignof__(compat_uptr_t))
 			union {
+				/* used on alpha and sparc */
+				int _trapno;	/* TRAP # which caused the signal */
 				/*
 				 * used when si_code=BUS_MCEERR_AR or
 				 * used when si_code=BUS_MCEERR_AO
@@ -231,6 +229,12 @@ typedef struct compat_siginfo {
 					char _dummy_pkey[__COMPAT_ADDR_BND_PKEY_PAD];
 					u32 _pkey;
 				} _addr_pkey;
+				/* used when si_code=TRAP_PERF */
+				struct {
+					compat_ulong_t _data;
+					u32 _type;
+					u32 _flags;
+				} _perf;
 			};
 		} _sigfault;
 
@@ -248,24 +252,41 @@ typedef struct compat_siginfo {
 	} _sifields;
 } compat_siginfo_t;
 
-/*
- * These functions operate on 32- or 64-bit specs depending on
- * COMPAT_USE_64BIT_TIME, hence the void user pointer arguments.
- */
-extern int compat_get_timespec(struct timespec *, const void __user *);
-extern int compat_put_timespec(const struct timespec *, void __user *);
-extern int compat_get_timeval(struct timeval *, const void __user *);
-extern int compat_put_timeval(const struct timeval *, void __user *);
-
-struct compat_iovec {
-	compat_uptr_t	iov_base;
-	compat_size_t	iov_len;
-};
-
 struct compat_rlimit {
 	compat_ulong_t	rlim_cur;
 	compat_ulong_t	rlim_max;
 };
+
+#ifdef __ARCH_NEED_COMPAT_FLOCK64_PACKED
+#define __ARCH_COMPAT_FLOCK64_PACK	__attribute__((packed))
+#else
+#define __ARCH_COMPAT_FLOCK64_PACK
+#endif
+
+struct compat_flock {
+	short			l_type;
+	short			l_whence;
+	compat_off_t		l_start;
+	compat_off_t		l_len;
+#ifdef __ARCH_COMPAT_FLOCK_EXTRA_SYSID
+	__ARCH_COMPAT_FLOCK_EXTRA_SYSID
+#endif
+	compat_pid_t		l_pid;
+#ifdef __ARCH_COMPAT_FLOCK_PAD
+	__ARCH_COMPAT_FLOCK_PAD
+#endif
+};
+
+struct compat_flock64 {
+	short		l_type;
+	short		l_whence;
+	compat_loff_t	l_start;
+	compat_loff_t	l_len;
+	compat_pid_t	l_pid;
+#ifdef __ARCH_COMPAT_FLOCK64_PAD
+	__ARCH_COMPAT_FLOCK64_PAD
+#endif
+} __ARCH_COMPAT_FLOCK64_PACK;
 
 struct compat_rusage {
 	struct old_timeval32 ru_utime;
@@ -390,6 +411,7 @@ struct compat_keyctl_kdf_params {
 	__u32 __spare[8];
 };
 
+struct compat_stat;
 struct compat_statfs;
 struct compat_statfs64;
 struct compat_old_linux_dirent;
@@ -403,38 +425,17 @@ struct compat_kexec_segment;
 struct compat_mq_attr;
 struct compat_msgbuf;
 
-#define BITS_PER_COMPAT_LONG    (8*sizeof(compat_long_t))
-
-#define BITS_TO_COMPAT_LONGS(bits) DIV_ROUND_UP(bits, BITS_PER_COMPAT_LONG)
-
-long compat_get_bitmap(unsigned long *mask, const compat_ulong_t __user *umask,
-		       unsigned long bitmap_size);
-long compat_put_bitmap(compat_ulong_t __user *umask, unsigned long *mask,
-		       unsigned long bitmap_size);
-int copy_siginfo_from_user32(kernel_siginfo_t *to, const struct compat_siginfo __user *from);
-int copy_siginfo_to_user32(struct compat_siginfo __user *to, const kernel_siginfo_t *from);
+void copy_siginfo_to_external32(struct compat_siginfo *to,
+		const struct kernel_siginfo *from);
+int copy_siginfo_from_user32(kernel_siginfo_t *to,
+		const struct compat_siginfo __user *from);
+int __copy_siginfo_to_user32(struct compat_siginfo __user *to,
+		const kernel_siginfo_t *from);
+#ifndef copy_siginfo_to_user32
+#define copy_siginfo_to_user32 __copy_siginfo_to_user32
+#endif
 int get_compat_sigevent(struct sigevent *event,
 		const struct compat_sigevent __user *u_event);
-
-static inline int old_timeval32_compare(struct old_timeval32 *lhs,
-					struct old_timeval32 *rhs)
-{
-	if (lhs->tv_sec < rhs->tv_sec)
-		return -1;
-	if (lhs->tv_sec > rhs->tv_sec)
-		return 1;
-	return lhs->tv_usec - rhs->tv_usec;
-}
-
-static inline int old_timespec32_compare(struct old_timespec32 *lhs,
-					struct old_timespec32 *rhs)
-{
-	if (lhs->tv_sec < rhs->tv_sec)
-		return -1;
-	if (lhs->tv_sec > rhs->tv_sec)
-		return 1;
-	return lhs->tv_nsec - rhs->tv_nsec;
-}
 
 extern int get_compat_sigset(sigset_t *set, const compat_sigset_t __user *compat);
 
@@ -447,15 +448,15 @@ put_compat_sigset(compat_sigset_t __user *compat, const sigset_t *set,
 		  unsigned int size)
 {
 	/* size <= sizeof(compat_sigset_t) <= sizeof(sigset_t) */
-#ifdef __BIG_ENDIAN
+#if defined(__BIG_ENDIAN) && defined(CONFIG_64BIT)
 	compat_sigset_t v;
 	switch (_NSIG_WORDS) {
 	case 4: v.sig[7] = (set->sig[3] >> 32); v.sig[6] = set->sig[3];
-		/* fall through */
+		fallthrough;
 	case 3: v.sig[5] = (set->sig[2] >> 32); v.sig[4] = set->sig[2];
-		/* fall through */
+		fallthrough;
 	case 2: v.sig[3] = (set->sig[1] >> 32); v.sig[2] = set->sig[1];
-		/* fall through */
+		fallthrough;
 	case 1: v.sig[1] = (set->sig[0] >> 32); v.sig[0] = set->sig[0];
 	}
 	return copy_to_user(compat, &v, size) ? -EFAULT : 0;
@@ -463,6 +464,73 @@ put_compat_sigset(compat_sigset_t __user *compat, const sigset_t *set,
 	return copy_to_user(compat, set, size) ? -EFAULT : 0;
 #endif
 }
+
+#ifdef CONFIG_CPU_BIG_ENDIAN
+#define unsafe_put_compat_sigset(compat, set, label) do {		\
+	compat_sigset_t __user *__c = compat;				\
+	const sigset_t *__s = set;					\
+									\
+	switch (_NSIG_WORDS) {						\
+	case 4:								\
+		unsafe_put_user(__s->sig[3] >> 32, &__c->sig[7], label);	\
+		unsafe_put_user(__s->sig[3], &__c->sig[6], label);	\
+		fallthrough;						\
+	case 3:								\
+		unsafe_put_user(__s->sig[2] >> 32, &__c->sig[5], label);	\
+		unsafe_put_user(__s->sig[2], &__c->sig[4], label);	\
+		fallthrough;						\
+	case 2:								\
+		unsafe_put_user(__s->sig[1] >> 32, &__c->sig[3], label);	\
+		unsafe_put_user(__s->sig[1], &__c->sig[2], label);	\
+		fallthrough;						\
+	case 1:								\
+		unsafe_put_user(__s->sig[0] >> 32, &__c->sig[1], label);	\
+		unsafe_put_user(__s->sig[0], &__c->sig[0], label);	\
+	}								\
+} while (0)
+
+#define unsafe_get_compat_sigset(set, compat, label) do {		\
+	const compat_sigset_t __user *__c = compat;			\
+	compat_sigset_word hi, lo;					\
+	sigset_t *__s = set;						\
+									\
+	switch (_NSIG_WORDS) {						\
+	case 4:								\
+		unsafe_get_user(lo, &__c->sig[7], label);		\
+		unsafe_get_user(hi, &__c->sig[6], label);		\
+		__s->sig[3] = hi | (((long)lo) << 32);			\
+		fallthrough;						\
+	case 3:								\
+		unsafe_get_user(lo, &__c->sig[5], label);		\
+		unsafe_get_user(hi, &__c->sig[4], label);		\
+		__s->sig[2] = hi | (((long)lo) << 32);			\
+		fallthrough;						\
+	case 2:								\
+		unsafe_get_user(lo, &__c->sig[3], label);		\
+		unsafe_get_user(hi, &__c->sig[2], label);		\
+		__s->sig[1] = hi | (((long)lo) << 32);			\
+		fallthrough;						\
+	case 1:								\
+		unsafe_get_user(lo, &__c->sig[1], label);		\
+		unsafe_get_user(hi, &__c->sig[0], label);		\
+		__s->sig[0] = hi | (((long)lo) << 32);			\
+	}								\
+} while (0)
+#else
+#define unsafe_put_compat_sigset(compat, set, label) do {		\
+	compat_sigset_t __user *__c = compat;				\
+	const sigset_t *__s = set;					\
+									\
+	unsafe_copy_to_user(__c, __s, sizeof(*__c), label);		\
+} while (0)
+
+#define unsafe_get_compat_sigset(set, compat, label) do {		\
+	const compat_sigset_t __user *__c = compat;			\
+	sigset_t *__s = set;						\
+									\
+	unsafe_copy_from_user(__s, __c, sizeof(*__c), label);		\
+} while (0)
+#endif
 
 extern int compat_ptrace_request(struct task_struct *child,
 				 compat_long_t request,
@@ -473,24 +541,15 @@ extern long compat_arch_ptrace(struct task_struct *child, compat_long_t request,
 
 struct epoll_event;	/* fortunately, this one is fixed-layout */
 
-extern ssize_t compat_rw_copy_check_uvector(int type,
-		const struct compat_iovec __user *uvector,
-		unsigned long nr_segs,
-		unsigned long fast_segs, struct iovec *fast_pointer,
-		struct iovec **ret_pointer);
-
-extern void __user *compat_alloc_user_space(unsigned long len);
-
 int compat_restore_altstack(const compat_stack_t __user *uss);
 int __compat_save_altstack(compat_stack_t __user *, unsigned long);
-#define compat_save_altstack_ex(uss, sp) do { \
+#define unsafe_compat_save_altstack(uss, sp, label) do { \
 	compat_stack_t __user *__uss = uss; \
 	struct task_struct *t = current; \
-	put_user_ex(ptr_to_compat((void __user *)t->sas_ss_sp), &__uss->ss_sp); \
-	put_user_ex(t->sas_ss_flags, &__uss->ss_flags); \
-	put_user_ex(t->sas_ss_size, &__uss->ss_size); \
-	if (t->sas_ss_flags & SS_AUTODISARM) \
-		sas_ss_reset(t); \
+	unsafe_put_user(ptr_to_compat((void __user *)t->sas_ss_sp), \
+			&__uss->ss_sp, label); \
+	unsafe_put_user(t->sas_ss_flags, &__uss->ss_flags, label); \
+	unsafe_put_user(t->sas_ss_size, &__uss->ss_size, label); \
 } while (0);
 
 /*
@@ -532,6 +591,12 @@ asmlinkage long compat_sys_epoll_pwait(int epfd,
 			int maxevents, int timeout,
 			const compat_sigset_t __user *sigmask,
 			compat_size_t sigsetsize);
+asmlinkage long compat_sys_epoll_pwait2(int epfd,
+			struct epoll_event __user *events,
+			int maxevents,
+			const struct __kernel_timespec __user *timeout,
+			const compat_sigset_t __user *sigmask,
+			compat_size_t sigsetsize);
 
 /* fs/fcntl.c */
 asmlinkage long compat_sys_fcntl(unsigned int fd, unsigned int cmd,
@@ -542,12 +607,6 @@ asmlinkage long compat_sys_fcntl64(unsigned int fd, unsigned int cmd,
 /* fs/ioctl.c */
 asmlinkage long compat_sys_ioctl(unsigned int fd, unsigned int cmd,
 				 compat_ulong_t arg);
-
-/* fs/namespace.c */
-asmlinkage long compat_sys_mount(const char __user *dev_name,
-				 const char __user *dir_name,
-				 const char __user *type, compat_ulong_t flags,
-				 const void __user *data);
 
 /* fs/open.c */
 asmlinkage long compat_sys_statfs(const char __user *pathname,
@@ -572,26 +631,22 @@ asmlinkage long compat_sys_getdents(unsigned int fd,
 
 /* fs/read_write.c */
 asmlinkage long compat_sys_lseek(unsigned int, compat_off_t, unsigned int);
-asmlinkage ssize_t compat_sys_readv(compat_ulong_t fd,
-		const struct compat_iovec __user *vec, compat_ulong_t vlen);
-asmlinkage ssize_t compat_sys_writev(compat_ulong_t fd,
-		const struct compat_iovec __user *vec, compat_ulong_t vlen);
 /* No generic prototype for pread64 and pwrite64 */
 asmlinkage ssize_t compat_sys_preadv(compat_ulong_t fd,
-		const struct compat_iovec __user *vec,
+		const struct iovec __user *vec,
 		compat_ulong_t vlen, u32 pos_low, u32 pos_high);
 asmlinkage ssize_t compat_sys_pwritev(compat_ulong_t fd,
-		const struct compat_iovec __user *vec,
+		const struct iovec __user *vec,
 		compat_ulong_t vlen, u32 pos_low, u32 pos_high);
 #ifdef __ARCH_WANT_COMPAT_SYS_PREADV64
 asmlinkage long compat_sys_preadv64(unsigned long fd,
-		const struct compat_iovec __user *vec,
+		const struct iovec __user *vec,
 		unsigned long vlen, loff_t pos);
 #endif
 
 #ifdef __ARCH_WANT_COMPAT_SYS_PWRITEV64
 asmlinkage long compat_sys_pwritev64(unsigned long fd,
-		const struct compat_iovec __user *vec,
+		const struct iovec __user *vec,
 		unsigned long vlen, loff_t pos);
 #endif
 
@@ -627,10 +682,6 @@ asmlinkage long compat_sys_ppoll_time64(struct pollfd __user *ufds,
 asmlinkage long compat_sys_signalfd4(int ufd,
 				     const compat_sigset_t __user *sigmask,
 				     compat_size_t sigsetsize, int flags);
-
-/* fs/splice.c */
-asmlinkage long compat_sys_vmsplice(int fd, const struct compat_iovec __user *,
-				    unsigned int nr_segs, unsigned int flags);
 
 /* fs/stat.c */
 asmlinkage long compat_sys_newfstatat(unsigned int dfd,
@@ -758,10 +809,6 @@ asmlinkage long compat_sys_shmat(int shmid, compat_uptr_t shmaddr, int shmflg);
 asmlinkage long compat_sys_recvfrom(int fd, void __user *buf, compat_size_t len,
 			    unsigned flags, struct sockaddr __user *addr,
 			    int __user *addrlen);
-asmlinkage long compat_sys_setsockopt(int fd, int level, int optname,
-				      char __user *optval, unsigned int optlen);
-asmlinkage long compat_sys_getsockopt(int fd, int level, int optname,
-				      char __user *optval, int __user *optlen);
 asmlinkage long compat_sys_sendmsg(int fd, struct compat_msghdr __user *msg,
 				   unsigned flags);
 asmlinkage long compat_sys_recvmsg(int fd, struct compat_msghdr __user *msg,
@@ -780,26 +827,6 @@ asmlinkage long compat_sys_execve(const char __user *filename, const compat_uptr
 /* mm/fadvise.c: No generic prototype for fadvise64_64 */
 
 /* mm/, CONFIG_MMU only */
-asmlinkage long compat_sys_mbind(compat_ulong_t start, compat_ulong_t len,
-				 compat_ulong_t mode,
-				 compat_ulong_t __user *nmask,
-				 compat_ulong_t maxnode, compat_ulong_t flags);
-asmlinkage long compat_sys_get_mempolicy(int __user *policy,
-					 compat_ulong_t __user *nmask,
-					 compat_ulong_t maxnode,
-					 compat_ulong_t addr,
-					 compat_ulong_t flags);
-asmlinkage long compat_sys_set_mempolicy(int mode, compat_ulong_t __user *nmask,
-					 compat_ulong_t maxnode);
-asmlinkage long compat_sys_migrate_pages(compat_pid_t pid,
-		compat_ulong_t maxnode, const compat_ulong_t __user *old_nodes,
-		const compat_ulong_t __user *new_nodes);
-asmlinkage long compat_sys_move_pages(pid_t pid, compat_ulong_t nr_pages,
-				      __u32 __user *pages,
-				      const int __user *nodes,
-				      int __user *status,
-				      int flags);
-
 asmlinkage long compat_sys_rt_tgsigqueueinfo(compat_pid_t tgid,
 					compat_pid_t pid, int sig,
 					struct compat_siginfo __user *uinfo);
@@ -819,32 +846,24 @@ asmlinkage long compat_sys_open_by_handle_at(int mountdirfd,
 					     int flags);
 asmlinkage long compat_sys_sendmmsg(int fd, struct compat_mmsghdr __user *mmsg,
 				    unsigned vlen, unsigned int flags);
-asmlinkage ssize_t compat_sys_process_vm_readv(compat_pid_t pid,
-		const struct compat_iovec __user *lvec,
-		compat_ulong_t liovcnt, const struct compat_iovec __user *rvec,
-		compat_ulong_t riovcnt, compat_ulong_t flags);
-asmlinkage ssize_t compat_sys_process_vm_writev(compat_pid_t pid,
-		const struct compat_iovec __user *lvec,
-		compat_ulong_t liovcnt, const struct compat_iovec __user *rvec,
-		compat_ulong_t riovcnt, compat_ulong_t flags);
 asmlinkage long compat_sys_execveat(int dfd, const char __user *filename,
 		     const compat_uptr_t __user *argv,
 		     const compat_uptr_t __user *envp, int flags);
 asmlinkage ssize_t compat_sys_preadv2(compat_ulong_t fd,
-		const struct compat_iovec __user *vec,
+		const struct iovec __user *vec,
 		compat_ulong_t vlen, u32 pos_low, u32 pos_high, rwf_t flags);
 asmlinkage ssize_t compat_sys_pwritev2(compat_ulong_t fd,
-		const struct compat_iovec __user *vec,
+		const struct iovec __user *vec,
 		compat_ulong_t vlen, u32 pos_low, u32 pos_high, rwf_t flags);
 #ifdef __ARCH_WANT_COMPAT_SYS_PREADV64V2
-asmlinkage long  compat_sys_readv64v2(unsigned long fd,
-		const struct compat_iovec __user *vec,
+asmlinkage long  compat_sys_preadv64v2(unsigned long fd,
+		const struct iovec __user *vec,
 		unsigned long vlen, loff_t pos, rwf_t flags);
 #endif
 
 #ifdef __ARCH_WANT_COMPAT_SYS_PWRITEV64V2
 asmlinkage long compat_sys_pwritev64v2(unsigned long fd,
-		const struct compat_iovec __user *vec,
+		const struct iovec __user *vec,
 		unsigned long vlen, loff_t pos, rwf_t flags);
 #endif
 
@@ -876,7 +895,6 @@ asmlinkage long compat_sys_select(int n, compat_ulong_t __user *inp,
 asmlinkage long compat_sys_ustat(unsigned dev, struct compat_ustat __user *u32);
 asmlinkage long compat_sys_recv(int fd, void __user *buf, compat_size_t len,
 				unsigned flags);
-asmlinkage long compat_sys_sysctl(struct compat_sysctl_args __user *args);
 
 /* obsolete: fs/readdir.c */
 asmlinkage long compat_sys_old_readdir(unsigned int fd,
@@ -907,18 +925,44 @@ asmlinkage long compat_sys_sigaction(int sig,
 /* obsolete: net/socket.c */
 asmlinkage long compat_sys_socketcall(int call, u32 __user *args);
 
-#endif /* CONFIG_ARCH_HAS_SYSCALL_WRAPPER */
-
-
-/*
- * For most but not all architectures, "am I in a compat syscall?" and
- * "am I a compat task?" are the same question.  For architectures on which
- * they aren't the same question, arch code can override in_compat_syscall.
- */
-
-#ifndef in_compat_syscall
-static inline bool in_compat_syscall(void) { return is_compat_task(); }
+#ifdef __ARCH_WANT_COMPAT_TRUNCATE64
+asmlinkage long compat_sys_truncate64(const char __user *pathname, compat_arg_u64(len));
 #endif
+
+#ifdef __ARCH_WANT_COMPAT_FTRUNCATE64
+asmlinkage long compat_sys_ftruncate64(unsigned int fd, compat_arg_u64(len));
+#endif
+
+#ifdef __ARCH_WANT_COMPAT_FALLOCATE
+asmlinkage long compat_sys_fallocate(int fd, int mode, compat_arg_u64(offset),
+				     compat_arg_u64(len));
+#endif
+
+#ifdef __ARCH_WANT_COMPAT_PREAD64
+asmlinkage long compat_sys_pread64(unsigned int fd, char __user *buf, size_t count,
+				   compat_arg_u64(pos));
+#endif
+
+#ifdef __ARCH_WANT_COMPAT_PWRITE64
+asmlinkage long compat_sys_pwrite64(unsigned int fd, const char __user *buf, size_t count,
+				    compat_arg_u64(pos));
+#endif
+
+#ifdef __ARCH_WANT_COMPAT_SYNC_FILE_RANGE
+asmlinkage long compat_sys_sync_file_range(int fd, compat_arg_u64(pos),
+					   compat_arg_u64(nbytes), unsigned int flags);
+#endif
+
+#ifdef __ARCH_WANT_COMPAT_FADVISE64_64
+asmlinkage long compat_sys_fadvise64_64(int fd, compat_arg_u64(pos),
+					compat_arg_u64(len), int advice);
+#endif
+
+#ifdef __ARCH_WANT_COMPAT_READAHEAD
+asmlinkage long compat_sys_readahead(int fd, compat_arg_u64(offset), size_t count);
+#endif
+
+#endif /* CONFIG_ARCH_HAS_SYSCALL_WRAPPER */
 
 /**
  * ns_to_old_timeval32 - Compat version of ns_to_timeval
@@ -949,6 +993,17 @@ int kcompat_sys_statfs64(const char __user * pathname, compat_size_t sz,
 int kcompat_sys_fstatfs64(unsigned int fd, compat_size_t sz,
 			  struct compat_statfs64 __user * buf);
 
+#ifdef CONFIG_COMPAT
+
+/*
+ * For most but not all architectures, "am I in a compat syscall?" and
+ * "am I a compat task?" are the same question.  For architectures on which
+ * they aren't the same question, arch code can override in_compat_syscall.
+ */
+#ifndef in_compat_syscall
+static inline bool in_compat_syscall(void) { return is_compat_task(); }
+#endif
+
 #else /* !CONFIG_COMPAT */
 
 #define is_compat_task() (0)
@@ -957,6 +1012,24 @@ int kcompat_sys_fstatfs64(unsigned int fd, compat_size_t sz,
 static inline bool in_compat_syscall(void) { return false; }
 
 #endif /* CONFIG_COMPAT */
+
+#define BITS_PER_COMPAT_LONG    (8*sizeof(compat_long_t))
+
+#define BITS_TO_COMPAT_LONGS(bits) DIV_ROUND_UP(bits, BITS_PER_COMPAT_LONG)
+
+long compat_get_bitmap(unsigned long *mask, const compat_ulong_t __user *umask,
+		       unsigned long bitmap_size);
+long compat_put_bitmap(compat_ulong_t __user *umask, unsigned long *mask,
+		       unsigned long bitmap_size);
+
+/*
+ * Some legacy ABIs like the i386 one use less than natural alignment for 64-bit
+ * types, and will need special compat treatment for that.  Most architectures
+ * don't need that special handling even for compat syscalls.
+ */
+#ifndef compat_need_64bit_alignment_fixup
+#define compat_need_64bit_alignment_fixup()		false
+#endif
 
 /*
  * A pointer passed in from user mode. This should not

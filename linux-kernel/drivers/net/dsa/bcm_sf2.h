@@ -44,7 +44,9 @@ struct bcm_sf2_hw_params {
 #define BCM_SF2_REGS_NUM	6
 
 struct bcm_sf2_port_status {
+	phy_interface_t mode;
 	unsigned int link;
+	bool enabled;
 };
 
 struct bcm_sf2_cfp_priv {
@@ -72,6 +74,7 @@ struct bcm_sf2_priv {
 	const u16			*reg_offsets;
 	unsigned int			core_reg_align;
 	unsigned int			num_cfp_rules;
+	unsigned int			num_crossbar_int_ports;
 
 	/* spinlock protecting access to the indirect registers */
 	spinlock_t			indir_lock;
@@ -92,6 +95,9 @@ struct bcm_sf2_priv {
 
 	/* Mask of ports enabled for Wake-on-LAN */
 	u32				wol_ports_mask;
+
+	struct clk			*clk;
+	struct clk			*clk_mdiv;
 
 	/* MoCA port location */
 	int				moca_port;
@@ -203,6 +209,16 @@ SF2_IO_MACRO(acb);
 
 SWITCH_INTR_L2(0);
 SWITCH_INTR_L2(1);
+
+static inline u32 reg_led_readl(struct bcm_sf2_priv *priv, u16 off, u16 reg)
+{
+	return readl_relaxed(priv->reg + priv->reg_offsets[off] + reg);
+}
+
+static inline void reg_led_writel(struct bcm_sf2_priv *priv, u32 val, u16 off, u16 reg)
+{
+	writel_relaxed(val, priv->reg + priv->reg_offsets[off] + reg);
+}
 
 /* RXNFC */
 int bcm_sf2_get_rxnfc(struct dsa_switch *ds, int port,

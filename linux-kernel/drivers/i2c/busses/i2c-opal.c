@@ -125,7 +125,7 @@ static int i2c_opal_smbus_xfer(struct i2c_adapter *adap, u16 addr,
 	case I2C_SMBUS_BYTE:
 		req.buffer_ra = cpu_to_be64(__pa(&data->byte));
 		req.size = cpu_to_be32(1);
-		/* Fall through */
+		fallthrough;
 	case I2C_SMBUS_QUICK:
 		req.type = (read_write == I2C_SMBUS_READ) ?
 			OPAL_I2C_RAW_READ : OPAL_I2C_RAW_WRITE;
@@ -220,9 +220,9 @@ static int i2c_opal_probe(struct platform_device *pdev)
 	adapter->dev.of_node = of_node_get(pdev->dev.of_node);
 	pname = of_get_property(pdev->dev.of_node, "ibm,port-name", NULL);
 	if (pname)
-		strlcpy(adapter->name, pname, sizeof(adapter->name));
+		strscpy(adapter->name, pname, sizeof(adapter->name));
 	else
-		strlcpy(adapter->name, "opal", sizeof(adapter->name));
+		strscpy(adapter->name, "opal", sizeof(adapter->name));
 
 	platform_set_drvdata(pdev, adapter);
 	rc = i2c_add_adapter(adapter);

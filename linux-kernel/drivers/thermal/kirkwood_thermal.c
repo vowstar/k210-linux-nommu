@@ -64,14 +64,13 @@ static int kirkwood_thermal_probe(struct platform_device *pdev)
 {
 	struct thermal_zone_device *thermal = NULL;
 	struct kirkwood_thermal_priv *priv;
-	struct resource *res;
+	int ret;
 
 	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	priv->sensor = devm_ioremap_resource(&pdev->dev, res);
+	priv->sensor = devm_platform_get_and_ioremap_resource(pdev, 0, NULL);
 	if (IS_ERR(priv->sensor))
 		return PTR_ERR(priv->sensor);
 
@@ -81,6 +80,12 @@ static int kirkwood_thermal_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev,
 			"Failed to register thermal zone device\n");
 		return PTR_ERR(thermal);
+	}
+	ret = thermal_zone_device_enable(thermal);
+	if (ret) {
+		thermal_zone_device_unregister(thermal);
+		dev_err(&pdev->dev, "Failed to enable thermal zone device\n");
+		return ret;
 	}
 
 	platform_set_drvdata(pdev, thermal);

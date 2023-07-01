@@ -51,7 +51,7 @@
 	PER_CPU_ATTRIBUTES
 
 #define __PCPU_DUMMY_ATTRS						\
-	__attribute__((section(".discard"), unused))
+	__section(".discard") __attribute__((unused))
 
 /*
  * s390 and alpha modules require percpu variables to be defined as
@@ -310,7 +310,7 @@ extern void __bad_size_call_parameter(void);
 #ifdef CONFIG_DEBUG_PREEMPT
 extern void __this_cpu_preempt_check(const char *op);
 #else
-static inline void __this_cpu_preempt_check(const char *op) { }
+static __always_inline void __this_cpu_preempt_check(const char *op) { }
 #endif
 
 #define __pcpu_size_call_return(stem, variable)				\
@@ -412,7 +412,7 @@ do {									\
  * instead.
  *
  * If there is no other protection through preempt disable and/or disabling
- * interupts then one of these RMW operations can show unexpected behavior
+ * interrupts then one of these RMW operations can show unexpected behavior
  * because the execution thread was rescheduled on another processor or an
  * interrupt occurred and the same percpu variable was modified from the
  * interrupt context.

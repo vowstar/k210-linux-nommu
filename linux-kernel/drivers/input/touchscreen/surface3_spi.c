@@ -94,9 +94,7 @@ static void surface3_spi_report_touch(struct surface3_ts_data *ts_data,
 
 static void surface3_spi_process_touch(struct surface3_ts_data *ts_data, u8 *data)
 {
-	u16 timestamp;
 	unsigned int i;
-	timestamp = get_unaligned_le16(&data[15]);
 
 	for (i = 0; i < 13; i++) {
 		struct surface3_ts_data_finger *finger;
@@ -219,7 +217,7 @@ static void surface3_spi_power(struct surface3_ts_data *data, bool on)
 /**
  * surface3_spi_get_gpio_config - Get GPIO config from ACPI/DT
  *
- * @ts: surface3_spi_ts_data pointer
+ * @data: surface3_spi_ts_data pointer
  */
 static int surface3_spi_get_gpio_config(struct surface3_ts_data *data)
 {
@@ -371,7 +369,7 @@ static int surface3_spi_probe(struct spi_device *spi)
 	return 0;
 }
 
-static int __maybe_unused surface3_spi_suspend(struct device *dev)
+static int surface3_spi_suspend(struct device *dev)
 {
 	struct spi_device *spi = to_spi_device(dev);
 	struct surface3_ts_data *data = spi_get_drvdata(spi);
@@ -383,7 +381,7 @@ static int __maybe_unused surface3_spi_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused surface3_spi_resume(struct device *dev)
+static int surface3_spi_resume(struct device *dev)
 {
 	struct spi_device *spi = to_spi_device(dev);
 	struct surface3_ts_data *data = spi_get_drvdata(spi);
@@ -395,9 +393,9 @@ static int __maybe_unused surface3_spi_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(surface3_spi_pm_ops,
-			 surface3_spi_suspend,
-			 surface3_spi_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(surface3_spi_pm_ops,
+				surface3_spi_suspend,
+				surface3_spi_resume);
 
 #ifdef CONFIG_ACPI
 static const struct acpi_device_id surface3_spi_acpi_match[] = {
@@ -411,7 +409,7 @@ static struct spi_driver surface3_spi_driver = {
 	.driver = {
 		.name	= "Surface3-spi",
 		.acpi_match_table = ACPI_PTR(surface3_spi_acpi_match),
-		.pm = &surface3_spi_pm_ops,
+		.pm = pm_sleep_ptr(&surface3_spi_pm_ops),
 	},
 	.probe = surface3_spi_probe,
 };

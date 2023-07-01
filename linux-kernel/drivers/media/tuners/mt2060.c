@@ -215,7 +215,7 @@ static int mt2060_set_params(struct dvb_frontend *fe)
 	f_lo2 = f_lo1 - freq - IF2;
 	// From the Comtech datasheet, the step used is 50kHz. The tuner chip could be more precise
 	f_lo2 = ((f_lo2 + 25) / 50) * 50;
-	priv->frequency =  (f_lo1 - f_lo2 - IF2) * 1000,
+	priv->frequency =  (f_lo1 - f_lo2 - IF2) * 1000;
 
 #ifdef MT2060_SPURCHECK
 	// LO-related spurs detection and correction
@@ -442,8 +442,7 @@ struct dvb_frontend * mt2060_attach(struct dvb_frontend *fe, struct i2c_adapter 
 }
 EXPORT_SYMBOL(mt2060_attach);
 
-static int mt2060_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int mt2060_probe(struct i2c_client *client)
 {
 	struct mt2060_platform_data *pdata = client->dev.platform_data;
 	struct dvb_frontend *fe;
@@ -509,11 +508,9 @@ err:
 	return ret;
 }
 
-static int mt2060_remove(struct i2c_client *client)
+static void mt2060_remove(struct i2c_client *client)
 {
 	dev_dbg(&client->dev, "\n");
-
-	return 0;
 }
 
 static const struct i2c_device_id mt2060_id_table[] = {
@@ -527,7 +524,7 @@ static struct i2c_driver mt2060_driver = {
 		.name = "mt2060",
 		.suppress_bind_attrs = true,
 	},
-	.probe		= mt2060_probe,
+	.probe_new	= mt2060_probe,
 	.remove		= mt2060_remove,
 	.id_table	= mt2060_id_table,
 };

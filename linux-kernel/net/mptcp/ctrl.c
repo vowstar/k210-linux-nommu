@@ -4,7 +4,9 @@
  * Copyright (c) 2019, Tessares SA.
  */
 
+#ifdef CONFIG_SYSCTL
 #include <linux/sysctl.h>
+#endif
 
 #include <net/net_namespace.h>
 #include <net/netns/generic.h>
@@ -14,39 +16,120 @@
 #define MPTCP_SYSCTL_PATH "net/mptcp"
 
 static int mptcp_pernet_id;
-struct mptcp_pernet {
-	struct ctl_table_header *ctl_table_hdr;
 
-	int mptcp_enabled;
+#ifdef CONFIG_SYSCTL
+static int mptcp_pm_type_max = __MPTCP_PM_TYPE_MAX;
+#endif
+
+struct mptcp_pernet {
+#ifdef CONFIG_SYSCTL
+	struct ctl_table_header *ctl_table_hdr;
+#endif
+
+	unsigned int add_addr_timeout;
+	unsigned int stale_loss_cnt;
+	u8 mptcp_enabled;
+	u8 checksum_enabled;
+	u8 allow_join_initial_addr_port;
+	u8 pm_type;
 };
 
-static struct mptcp_pernet *mptcp_get_pernet(struct net *net)
+static struct mptcp_pernet *mptcp_get_pernet(const struct net *net)
 {
 	return net_generic(net, mptcp_pernet_id);
 }
 
-int mptcp_is_enabled(struct net *net)
+int mptcp_is_enabled(const struct net *net)
 {
 	return mptcp_get_pernet(net)->mptcp_enabled;
 }
 
-static struct ctl_table mptcp_sysctl_table[] = {
-	{
-		.procname = "enabled",
-		.maxlen = sizeof(int),
-		.mode = 0644,
-		/* users with CAP_NET_ADMIN or root (not and) can change this
-		 * value, same as other sysctl or the 'net' tree.
-		 */
-		.proc_handler = proc_dointvec,
-	},
-	{}
-};
+unsigned int mptcp_get_add_addr_timeout(const struct net *net)
+{
+	return mptcp_get_pernet(net)->add_addr_timeout;
+}
+
+int mptcp_is_checksum_enabled(const struct net *net)
+{
+	return mptcp_get_pernet(net)->checksum_enabled;
+}
+
+int mptcp_allow_join_id0(const struct net *net)
+{
+	return mptcp_get_pernet(net)->allow_join_initial_addr_port;
+}
+
+unsigned int mptcp_stale_loss_cnt(const struct net *net)
+{
+	return mptcp_get_pernet(net)->stale_loss_cnt;
+}
+
+int mptcp_get_pm_type(const struct net *net)
+{
+	return mptcp_get_pernet(net)->pm_type;
+}
 
 static void mptcp_pernet_set_defaults(struct mptcp_pernet *pernet)
 {
 	pernet->mptcp_enabled = 1;
+	pernet->add_addr_timeout = TCP_RTO_MAX;
+	pernet->checksum_enabled = 0;
+	pernet->allow_join_initial_addr_port = 1;
+	pernet->stale_loss_cnt = 4;
+	pernet->pm_type = MPTCP_PM_TYPE_KERNEL;
 }
+
+#ifdef CONFIG_SYSCTL
+static struct ctl_table mptcp_sysctl_table[] = {
+	{
+		.procname = "enabled",
+		.maxlen = sizeof(u8),
+		.mode = 0644,
+		/* users with CAP_NET_ADMIN or root (not and) can change this
+		 * value, same as other sysctl or the 'net' tree.
+		 */
+		.proc_handler = proc_dou8vec_minmax,
+		.extra1       = SYSCTL_ZERO,
+		.extra2       = SYSCTL_ONE
+	},
+	{
+		.procname = "add_addr_timeout",
+		.maxlen = sizeof(unsigned int),
+		.mode = 0644,
+		.proc_handler = proc_dointvec_jiffies,
+	},
+	{
+		.procname = "checksum_enabled",
+		.maxlen = sizeof(u8),
+		.mode = 0644,
+		.proc_handler = proc_dou8vec_minmax,
+		.extra1       = SYSCTL_ZERO,
+		.extra2       = SYSCTL_ONE
+	},
+	{
+		.procname = "allow_join_initial_addr_port",
+		.maxlen = sizeof(u8),
+		.mode = 0644,
+		.proc_handler = proc_dou8vec_minmax,
+		.extra1       = SYSCTL_ZERO,
+		.extra2       = SYSCTL_ONE
+	},
+	{
+		.procname = "stale_loss_cnt",
+		.maxlen = sizeof(unsigned int),
+		.mode = 0644,
+		.proc_handler = proc_douintvec_minmax,
+	},
+	{
+		.procname = "pm_type",
+		.maxlen = sizeof(u8),
+		.mode = 0644,
+		.proc_handler = proc_dou8vec_minmax,
+		.extra1       = SYSCTL_ZERO,
+		.extra2       = &mptcp_pm_type_max
+	},
+	{}
+};
 
 static int mptcp_pernet_new_table(struct net *net, struct mptcp_pernet *pernet)
 {
@@ -61,6 +144,11 @@ static int mptcp_pernet_new_table(struct net *net, struct mptcp_pernet *pernet)
 	}
 
 	table[0].data = &pernet->mptcp_enabled;
+	table[1].data = &pernet->add_addr_timeout;
+	table[2].data = &pernet->checksum_enabled;
+	table[3].data = &pernet->allow_join_initial_addr_port;
+	table[4].data = &pernet->stale_loss_cnt;
+	table[5].data = &pernet->pm_type;
 
 	hdr = register_net_sysctl(net, MPTCP_SYSCTL_PATH, table);
 	if (!hdr)
@@ -85,6 +173,17 @@ static void mptcp_pernet_del_table(struct mptcp_pernet *pernet)
 
 	kfree(table);
 }
+
+#else
+
+static int mptcp_pernet_new_table(struct net *net, struct mptcp_pernet *pernet)
+{
+	return 0;
+}
+
+static void mptcp_pernet_del_table(struct mptcp_pernet *pernet) {}
+
+#endif /* CONFIG_SYSCTL */
 
 static int __net_init mptcp_net_init(struct net *net)
 {
@@ -112,6 +211,7 @@ static struct pernet_operations mptcp_pernet_ops = {
 
 void __init mptcp_init(void)
 {
+	mptcp_join_cookie_init();
 	mptcp_proto_init();
 
 	if (register_pernet_subsys(&mptcp_pernet_ops) < 0)

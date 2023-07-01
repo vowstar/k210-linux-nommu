@@ -15,7 +15,8 @@
 #include <linux/err.h>
 
 /* The array of function pointers for syscalls. */
-extern void *sys_call_table[];
+extern void * const sys_call_table[];
+extern void * const compat_sys_call_table[];
 
 /*
  * Only the low 32 bits of orig_r0 are meaningful, so we return int.
@@ -26,13 +27,6 @@ static inline int syscall_get_nr(struct task_struct *task,
 				 struct pt_regs *regs)
 {
 	return regs->a7;
-}
-
-static inline void syscall_set_nr(struct task_struct *task,
-				  struct pt_regs *regs,
-				  int sysno)
-{
-	regs->a7 = sysno;
 }
 
 static inline void syscall_rollback(struct task_struct *task,
@@ -71,15 +65,6 @@ static inline void syscall_get_arguments(struct task_struct *task,
 	memcpy(args, &regs->a1, 5 * sizeof(args[0]));
 }
 
-static inline void syscall_set_arguments(struct task_struct *task,
-					 struct pt_regs *regs,
-					 const unsigned long *args)
-{
-	regs->orig_a0 = args[0];
-	args++;
-	memcpy(&regs->a1, args, 5 * sizeof(regs->a1));
-}
-
 static inline int syscall_get_arch(struct task_struct *task)
 {
 #ifdef CONFIG_64BIT
@@ -89,4 +74,5 @@ static inline int syscall_get_arch(struct task_struct *task)
 #endif
 }
 
+asmlinkage long sys_riscv_flush_icache(uintptr_t, uintptr_t, uintptr_t);
 #endif	/* _ASM_RISCV_SYSCALL_H */

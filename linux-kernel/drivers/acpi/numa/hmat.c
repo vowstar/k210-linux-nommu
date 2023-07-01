@@ -9,7 +9,6 @@
  */
 
 #define pr_fmt(fmt) "acpi/hmat: " fmt
-#define dev_fmt(fmt) "acpi/hmat: " fmt
 
 #include <linux/acpi.h>
 #include <linux/bitops.h>
@@ -24,8 +23,15 @@
 #include <linux/mutex.h>
 #include <linux/node.h>
 #include <linux/sysfs.h>
+#include <linux/dax.h>
 
 static u8 hmat_revision;
+static int hmat_disable __initdata;
+
+void __init disable_hmat(void)
+{
+	hmat_disable = 1;
+}
 
 static LIST_HEAD(targets);
 static LIST_HEAD(initiators);
@@ -56,7 +62,7 @@ struct memory_target {
 	unsigned int memory_pxm;
 	unsigned int processor_pxm;
 	struct resource memregions;
-	struct node_hmem_attrs hmem_attrs;
+	struct node_hmem_attrs hmem_attrs[2];
 	struct list_head caches;
 	struct node_cache_attrs cache_attrs;
 	bool registered;
@@ -65,6 +71,7 @@ struct memory_target {
 struct memory_initiator {
 	struct list_head node;
 	unsigned int processor_pxm;
+	bool has_cpu;
 };
 
 struct memory_locality {
@@ -108,6 +115,7 @@ static __init void alloc_memory_initiator(unsigned int cpu_pxm)
 		return;
 
 	initiator->processor_pxm = cpu_pxm;
+	initiator->has_cpu = node_state(pxm_to_node(cpu_pxm), N_CPU);
 	list_add_tail(&initiator->node, &initiators);
 }
 
@@ -215,28 +223,28 @@ static u32 hmat_normalize(u16 entry, u64 base, u8 type)
 }
 
 static void hmat_update_target_access(struct memory_target *target,
-					     u8 type, u32 value)
+				      u8 type, u32 value, int access)
 {
 	switch (type) {
 	case ACPI_HMAT_ACCESS_LATENCY:
-		target->hmem_attrs.read_latency = value;
-		target->hmem_attrs.write_latency = value;
+		target->hmem_attrs[access].read_latency = value;
+		target->hmem_attrs[access].write_latency = value;
 		break;
 	case ACPI_HMAT_READ_LATENCY:
-		target->hmem_attrs.read_latency = value;
+		target->hmem_attrs[access].read_latency = value;
 		break;
 	case ACPI_HMAT_WRITE_LATENCY:
-		target->hmem_attrs.write_latency = value;
+		target->hmem_attrs[access].write_latency = value;
 		break;
 	case ACPI_HMAT_ACCESS_BANDWIDTH:
-		target->hmem_attrs.read_bandwidth = value;
-		target->hmem_attrs.write_bandwidth = value;
+		target->hmem_attrs[access].read_bandwidth = value;
+		target->hmem_attrs[access].write_bandwidth = value;
 		break;
 	case ACPI_HMAT_READ_BANDWIDTH:
-		target->hmem_attrs.read_bandwidth = value;
+		target->hmem_attrs[access].read_bandwidth = value;
 		break;
 	case ACPI_HMAT_WRITE_BANDWIDTH:
-		target->hmem_attrs.write_bandwidth = value;
+		target->hmem_attrs[access].write_bandwidth = value;
 		break;
 	default:
 		break;
@@ -293,7 +301,7 @@ static __init int hmat_parse_locality(union acpi_subtable_headers *header,
 	u8 type, mem_hier;
 
 	if (hmat_loc->header.length < sizeof(*hmat_loc)) {
-		pr_notice("HMAT: Unexpected locality header length: %u\n",
+		pr_notice("Unexpected locality header length: %u\n",
 			 hmat_loc->header.length);
 		return -EINVAL;
 	}
@@ -305,12 +313,12 @@ static __init int hmat_parse_locality(union acpi_subtable_headers *header,
 	total_size = sizeof(*hmat_loc) + sizeof(*entries) * ipds * tpds +
 		     sizeof(*inits) * ipds + sizeof(*targs) * tpds;
 	if (hmat_loc->header.length < total_size) {
-		pr_notice("HMAT: Unexpected locality header length:%u, minimum required:%u\n",
+		pr_notice("Unexpected locality header length:%u, minimum required:%u\n",
 			 hmat_loc->header.length, total_size);
 		return -EINVAL;
 	}
 
-	pr_info("HMAT: Locality: Flags:%02x Type:%s Initiator Domains:%u Target Domains:%u Base:%lld\n",
+	pr_info("Locality: Flags:%02x Type:%s Initiator Domains:%u Target Domains:%u Base:%lld\n",
 		hmat_loc->flags, hmat_data_type(type), ipds, tpds,
 		hmat_loc->entry_base_unit);
 
@@ -329,8 +337,12 @@ static __init int hmat_parse_locality(union acpi_subtable_headers *header,
 
 			if (mem_hier == ACPI_HMAT_MEMORY) {
 				target = find_mem_target(targs[targ]);
-				if (target && target->processor_pxm == inits[init])
-					hmat_update_target_access(target, type, value);
+				if (target && target->processor_pxm == inits[init]) {
+					hmat_update_target_access(target, type, value, 0);
+					/* If the node has a CPU, update access 1 */
+					if (node_state(pxm_to_node(inits[init]), N_CPU))
+						hmat_update_target_access(target, type, value, 1);
+				}
 			}
 		}
 	}
@@ -350,13 +362,13 @@ static __init int hmat_parse_cache(union acpi_subtable_headers *header,
 	u32 attrs;
 
 	if (cache->header.length < sizeof(*cache)) {
-		pr_notice("HMAT: Unexpected cache header length: %u\n",
+		pr_notice("Unexpected cache header length: %u\n",
 			 cache->header.length);
 		return -EINVAL;
 	}
 
 	attrs = cache->cache_attributes;
-	pr_info("HMAT: Cache: Domain:%u Size:%llu Attrs:%08x SMBIOS Handles:%d\n",
+	pr_info("Cache: Domain:%u Size:%llu Attrs:%08x SMBIOS Handles:%d\n",
 		cache->memory_PD, cache->cache_size, attrs,
 		cache->number_of_SMBIOShandles);
 
@@ -411,23 +423,24 @@ static int __init hmat_parse_proximity_domain(union acpi_subtable_headers *heade
 	struct memory_target *target = NULL;
 
 	if (p->header.length != sizeof(*p)) {
-		pr_notice("HMAT: Unexpected address range header length: %u\n",
+		pr_notice("Unexpected address range header length: %u\n",
 			 p->header.length);
 		return -EINVAL;
 	}
 
 	if (hmat_revision == 1)
-		pr_info("HMAT: Memory (%#llx length %#llx) Flags:%04x Processor Domain:%u Memory Domain:%u\n",
+		pr_info("Memory (%#llx length %#llx) Flags:%04x Processor Domain:%u Memory Domain:%u\n",
 			p->reserved3, p->reserved4, p->flags, p->processor_PD,
 			p->memory_PD);
 	else
-		pr_info("HMAT: Memory Flags:%04x Processor Domain:%u Memory Domain:%u\n",
+		pr_info("Memory Flags:%04x Processor Domain:%u Memory Domain:%u\n",
 			p->flags, p->processor_PD, p->memory_PD);
 
-	if (p->flags & ACPI_HMAT_MEMORY_PD_VALID && hmat_revision == 1) {
+	if ((hmat_revision == 1 && p->flags & ACPI_HMAT_MEMORY_PD_VALID) ||
+	    hmat_revision > 1) {
 		target = find_mem_target(p->memory_PD);
 		if (!target) {
-			pr_debug("HMAT: Memory Domain missing from SRAT\n");
+			pr_debug("Memory Domain missing from SRAT\n");
 			return -EINVAL;
 		}
 	}
@@ -435,7 +448,7 @@ static int __init hmat_parse_proximity_domain(union acpi_subtable_headers *heade
 		int p_node = pxm_to_node(p->processor_PD);
 
 		if (p_node == NUMA_NO_NODE) {
-			pr_debug("HMAT: Invalid Processor Domain\n");
+			pr_debug("Invalid Processor Domain\n");
 			return -EINVAL;
 		}
 		target->processor_pxm = p->processor_PD;
@@ -544,19 +557,29 @@ static bool hmat_update_best(u8 type, u32 value, u32 *best)
 	return updated;
 }
 
-static int initiator_cmp(void *priv, struct list_head *a, struct list_head *b)
+static int initiator_cmp(void *priv, const struct list_head *a,
+			 const struct list_head *b)
 {
 	struct memory_initiator *ia;
 	struct memory_initiator *ib;
-	unsigned long *p_nodes = priv;
 
 	ia = list_entry(a, struct memory_initiator, node);
 	ib = list_entry(b, struct memory_initiator, node);
 
-	set_bit(ia->processor_pxm, p_nodes);
-	set_bit(ib->processor_pxm, p_nodes);
-
 	return ia->processor_pxm - ib->processor_pxm;
+}
+
+static int initiators_to_nodemask(unsigned long *p_nodes)
+{
+	struct memory_initiator *initiator;
+
+	if (list_empty(&initiators))
+		return -ENXIO;
+
+	list_for_each_entry(initiator, &initiators, node)
+		set_bit(initiator->processor_pxm, p_nodes);
+
+	return 0;
 }
 
 static void hmat_register_target_initiators(struct memory_target *target)
@@ -566,6 +589,7 @@ static void hmat_register_target_initiators(struct memory_target *target)
 	unsigned int mem_nid, cpu_nid;
 	struct memory_locality *loc = NULL;
 	u32 best = 0;
+	bool access0done = false;
 	int i;
 
 	mem_nid = pxm_to_node(target->memory_pxm);
@@ -577,7 +601,11 @@ static void hmat_register_target_initiators(struct memory_target *target)
 	if (target->processor_pxm != PXM_INVAL) {
 		cpu_nid = pxm_to_node(target->processor_pxm);
 		register_memory_node_under_compute_node(mem_nid, cpu_nid, 0);
-		return;
+		access0done = true;
+		if (node_state(cpu_nid, N_CPU)) {
+			register_memory_node_under_compute_node(mem_nid, cpu_nid, 1);
+			return;
+		}
 	}
 
 	if (list_empty(&localities))
@@ -590,7 +618,46 @@ static void hmat_register_target_initiators(struct memory_target *target)
 	 * initiators.
 	 */
 	bitmap_zero(p_nodes, MAX_NUMNODES);
-	list_sort(p_nodes, &initiators, initiator_cmp);
+	list_sort(NULL, &initiators, initiator_cmp);
+	if (initiators_to_nodemask(p_nodes) < 0)
+		return;
+
+	if (!access0done) {
+		for (i = WRITE_LATENCY; i <= READ_BANDWIDTH; i++) {
+			loc = localities_types[i];
+			if (!loc)
+				continue;
+
+			best = 0;
+			list_for_each_entry(initiator, &initiators, node) {
+				u32 value;
+
+				if (!test_bit(initiator->processor_pxm, p_nodes))
+					continue;
+
+				value = hmat_initiator_perf(target, initiator,
+							    loc->hmat_loc);
+				if (hmat_update_best(loc->hmat_loc->data_type, value, &best))
+					bitmap_clear(p_nodes, 0, initiator->processor_pxm);
+				if (value != best)
+					clear_bit(initiator->processor_pxm, p_nodes);
+			}
+			if (best)
+				hmat_update_target_access(target, loc->hmat_loc->data_type,
+							  best, 0);
+		}
+
+		for_each_set_bit(i, p_nodes, MAX_NUMNODES) {
+			cpu_nid = pxm_to_node(i);
+			register_memory_node_under_compute_node(mem_nid, cpu_nid, 0);
+		}
+	}
+
+	/* Access 1 ignores Generic Initiators */
+	bitmap_zero(p_nodes, MAX_NUMNODES);
+	if (initiators_to_nodemask(p_nodes) < 0)
+		return;
+
 	for (i = WRITE_LATENCY; i <= READ_BANDWIDTH; i++) {
 		loc = localities_types[i];
 		if (!loc)
@@ -600,6 +667,10 @@ static void hmat_register_target_initiators(struct memory_target *target)
 		list_for_each_entry(initiator, &initiators, node) {
 			u32 value;
 
+			if (!initiator->has_cpu) {
+				clear_bit(initiator->processor_pxm, p_nodes);
+				continue;
+			}
 			if (!test_bit(initiator->processor_pxm, p_nodes))
 				continue;
 
@@ -610,12 +681,11 @@ static void hmat_register_target_initiators(struct memory_target *target)
 				clear_bit(initiator->processor_pxm, p_nodes);
 		}
 		if (best)
-			hmat_update_target_access(target, loc->hmat_loc->data_type, best);
+			hmat_update_target_access(target, loc->hmat_loc->data_type, best, 1);
 	}
-
 	for_each_set_bit(i, p_nodes, MAX_NUMNODES) {
 		cpu_nid = pxm_to_node(i);
-		register_memory_node_under_compute_node(mem_nid, cpu_nid, 0);
+		register_memory_node_under_compute_node(mem_nid, cpu_nid, 1);
 	}
 }
 
@@ -628,70 +698,10 @@ static void hmat_register_target_cache(struct memory_target *target)
 		node_add_cache(mem_nid, &tcache->cache_attrs);
 }
 
-static void hmat_register_target_perf(struct memory_target *target)
+static void hmat_register_target_perf(struct memory_target *target, int access)
 {
 	unsigned mem_nid = pxm_to_node(target->memory_pxm);
-	node_set_perf_attrs(mem_nid, &target->hmem_attrs, 0);
-}
-
-static void hmat_register_target_device(struct memory_target *target,
-		struct resource *r)
-{
-	/* define a clean / non-busy resource for the platform device */
-	struct resource res = {
-		.start = r->start,
-		.end = r->end,
-		.flags = IORESOURCE_MEM,
-	};
-	struct platform_device *pdev;
-	struct memregion_info info;
-	int rc, id;
-
-	rc = region_intersects(res.start, resource_size(&res), IORESOURCE_MEM,
-			IORES_DESC_SOFT_RESERVED);
-	if (rc != REGION_INTERSECTS)
-		return;
-
-	id = memregion_alloc(GFP_KERNEL);
-	if (id < 0) {
-		pr_err("memregion allocation failure for %pr\n", &res);
-		return;
-	}
-
-	pdev = platform_device_alloc("hmem", id);
-	if (!pdev) {
-		pr_err("hmem device allocation failure for %pr\n", &res);
-		goto out_pdev;
-	}
-
-	pdev->dev.numa_node = acpi_map_pxm_to_online_node(target->memory_pxm);
-	info = (struct memregion_info) {
-		.target_node = acpi_map_pxm_to_node(target->memory_pxm),
-	};
-	rc = platform_device_add_data(pdev, &info, sizeof(info));
-	if (rc < 0) {
-		pr_err("hmem memregion_info allocation failure for %pr\n", &res);
-		goto out_pdev;
-	}
-
-	rc = platform_device_add_resources(pdev, &res, 1);
-	if (rc < 0) {
-		pr_err("hmem resource allocation failure for %pr\n", &res);
-		goto out_resource;
-	}
-
-	rc = platform_device_add(pdev);
-	if (rc < 0) {
-		dev_err(&pdev->dev, "device add failed for %pr\n", &res);
-		goto out_resource;
-	}
-
-	return;
-
-out_resource:
-	put_device(&pdev->dev);
-out_pdev:
-	memregion_free(id);
+	node_set_perf_attrs(mem_nid, &target->hmem_attrs[access], access);
 }
 
 static void hmat_register_target_devices(struct memory_target *target)
@@ -705,8 +715,11 @@ static void hmat_register_target_devices(struct memory_target *target)
 	if (!IS_ENABLED(CONFIG_DEV_DAX_HMEM))
 		return;
 
-	for (res = target->memregions.child; res; res = res->sibling)
-		hmat_register_target_device(target, res);
+	for (res = target->memregions.child; res; res = res->sibling) {
+		int target_nid = pxm_to_node(target->memory_pxm);
+
+		hmem_register_resource(target_nid, res);
+	}
 }
 
 static void hmat_register_target(struct memory_target *target)
@@ -722,7 +735,7 @@ static void hmat_register_target(struct memory_target *target)
 	/*
 	 * Skip offline nodes. This can happen when memory
 	 * marked EFI_MEMORY_SP, "specific purpose", is applied
-	 * to all the memory in a promixity domain leading to
+	 * to all the memory in a proximity domain leading to
 	 * the node being marked offline / unplugged, or if
 	 * memory-only "hotplug" node is offline.
 	 */
@@ -733,7 +746,8 @@ static void hmat_register_target(struct memory_target *target)
 	if (!target->registered) {
 		hmat_register_target_initiators(target);
 		hmat_register_target_cache(target);
-		hmat_register_target_perf(target);
+		hmat_register_target_perf(target, 0);
+		hmat_register_target_perf(target, 1);
 		target->registered = true;
 	}
 	mutex_unlock(&target_lock);
@@ -765,11 +779,6 @@ static int hmat_callback(struct notifier_block *self,
 	hmat_register_target(target);
 	return NOTIFY_OK;
 }
-
-static struct notifier_block hmat_callback_nb = {
-	.notifier_call = hmat_callback,
-	.priority = 2,
-};
 
 static __init void hmat_free_structures(void)
 {
@@ -814,7 +823,7 @@ static __init int hmat_init(void)
 	enum acpi_hmat_type i;
 	acpi_status status;
 
-	if (srat_disabled())
+	if (srat_disabled() || hmat_disable)
 		return 0;
 
 	status = acpi_get_table(ACPI_SIG_SRAT, 0, &tbl);
@@ -838,7 +847,7 @@ static __init int hmat_init(void)
 	case 2:
 		break;
 	default:
-		pr_notice("Ignoring HMAT: Unknown revision:%d\n", hmat_revision);
+		pr_notice("Ignoring: Unknown revision:%d\n", hmat_revision);
 		goto out_put;
 	}
 
@@ -846,18 +855,18 @@ static __init int hmat_init(void)
 		if (acpi_table_parse_entries(ACPI_SIG_HMAT,
 					     sizeof(struct acpi_table_hmat), i,
 					     hmat_parse_subtable, 0) < 0) {
-			pr_notice("Ignoring HMAT: Invalid table");
+			pr_notice("Ignoring: Invalid table");
 			goto out_put;
 		}
 	}
 	hmat_register_targets();
 
 	/* Keep the table and structures if the notifier may use them */
-	if (!register_hotmemory_notifier(&hmat_callback_nb))
+	if (!hotplug_memory_notifier(hmat_callback, HMAT_CALLBACK_PRI))
 		return 0;
 out_put:
 	hmat_free_structures();
 	acpi_put_table(tbl);
 	return 0;
 }
-device_initcall(hmat_init);
+subsys_initcall(hmat_init);

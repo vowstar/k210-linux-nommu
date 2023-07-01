@@ -21,26 +21,20 @@
 #include <linux/dmi.h>
 #include <acpi/button.h>
 
-#define PREFIX "ACPI: "
-
 #define ACPI_BUTTON_CLASS		"button"
-#define ACPI_BUTTON_FILE_INFO		"info"
 #define ACPI_BUTTON_FILE_STATE		"state"
 #define ACPI_BUTTON_TYPE_UNKNOWN	0x00
 #define ACPI_BUTTON_NOTIFY_STATUS	0x80
 
 #define ACPI_BUTTON_SUBCLASS_POWER	"power"
-#define ACPI_BUTTON_HID_POWER		"PNP0C0C"
 #define ACPI_BUTTON_DEVICE_NAME_POWER	"Power Button"
 #define ACPI_BUTTON_TYPE_POWER		0x01
 
 #define ACPI_BUTTON_SUBCLASS_SLEEP	"sleep"
-#define ACPI_BUTTON_HID_SLEEP		"PNP0C0E"
 #define ACPI_BUTTON_DEVICE_NAME_SLEEP	"Sleep Button"
 #define ACPI_BUTTON_TYPE_SLEEP		0x03
 
 #define ACPI_BUTTON_SUBCLASS_LID	"lid"
-#define ACPI_BUTTON_HID_LID		"PNP0C0D"
 #define ACPI_BUTTON_DEVICE_NAME_LID	"Lid Switch"
 #define ACPI_BUTTON_TYPE_LID		0x05
 
@@ -57,9 +51,6 @@ static const char * const lid_init_state_str[] = {
 	[ACPI_BUTTON_LID_INIT_METHOD]		= "method",
 	[ACPI_BUTTON_LID_INIT_DISABLED]		= "disabled",
 };
-
-#define _COMPONENT		ACPI_BUTTON_COMPONENT
-ACPI_MODULE_NAME("button");
 
 MODULE_AUTHOR("Paul Diefenbaugh");
 MODULE_DESCRIPTION("ACPI Button Driver");
@@ -78,31 +69,6 @@ MODULE_DEVICE_TABLE(acpi, button_device_ids);
 /* Please keep this list sorted alphabetically by vendor and model */
 static const struct dmi_system_id dmi_lid_quirks[] = {
 	{
-		/*
-		 * Acer Switch 10 SW5-012. _LID method messes with home and
-		 * power button GPIO IRQ settings causing an interrupt storm on
-		 * both GPIOs. This is unfixable without a DSDT override, so we
-		 * have to disable the lid-switch functionality altogether :|
-		 */
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "Aspire SW5-012"),
-		},
-		.driver_data = (void *)(long)ACPI_BUTTON_LID_INIT_DISABLED,
-	},
-	{
-		/*
-		 * Asus T200TA, _LID keeps reporting closed after every second
-		 * openening of the lid. Causing immediate re-suspend after
-		 * opening every other open. Using LID_INIT_OPEN fixes this.
-		 */
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTeK COMPUTER INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "T200TA"),
-		},
-		.driver_data = (void *)(long)ACPI_BUTTON_LID_INIT_OPEN,
-	},
-	{
 		/* GP-electronic T701, _LID method points to a floating GPIO */
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "Insyde"),
@@ -113,12 +79,34 @@ static const struct dmi_system_id dmi_lid_quirks[] = {
 	},
 	{
 		/*
+		 * Lenovo Yoga 9 14ITL5, initial notification of the LID device
+		 * never happens.
+		 */
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "82BG"),
+		},
+		.driver_data = (void *)(long)ACPI_BUTTON_LID_INIT_OPEN,
+	},
+	{
+		/*
 		 * Medion Akoya E2215T, notification of the LID device only
 		 * happens on close, not on open and _LID always returns closed.
 		 */
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "MEDION"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "E2215T MD60198"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "E2215T"),
+		},
+		.driver_data = (void *)(long)ACPI_BUTTON_LID_INIT_OPEN,
+	},
+	{
+		/*
+		 * Medion Akoya E2228T, notification of the LID device only
+		 * happens on close, not on open and _LID always returns closed.
+		 */
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "MEDION"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "E2228T"),
 		},
 		.driver_data = (void *)(long)ACPI_BUTTON_LID_INIT_OPEN,
 	},
@@ -137,7 +125,7 @@ static const struct dmi_system_id dmi_lid_quirks[] = {
 };
 
 static int acpi_button_add(struct acpi_device *device);
-static int acpi_button_remove(struct acpi_device *device);
+static void acpi_button_remove(struct acpi_device *device);
 static void acpi_button_notify(struct acpi_device *device, u32 event);
 
 #ifdef CONFIG_PM_SLEEP
@@ -169,6 +157,7 @@ struct acpi_button {
 	int last_state;
 	ktime_t last_time;
 	bool suspended;
+	bool lid_state_initialized;
 };
 
 static struct acpi_device *lid_device;
@@ -178,10 +167,7 @@ static unsigned long lid_report_interval __read_mostly = 500;
 module_param(lid_report_interval, ulong, 0644);
 MODULE_PARM_DESC(lid_report_interval, "Interval (ms) between lid key events");
 
-/* --------------------------------------------------------------------------
-                              FS Interface (/proc)
-   -------------------------------------------------------------------------- */
-
+/* FS Interface (/proc) */
 static struct proc_dir_entry *acpi_button_dir;
 static struct proc_dir_entry *acpi_lid_dir;
 
@@ -302,7 +288,7 @@ static int acpi_button_add_fs(struct acpi_device *device)
 		return 0;
 
 	if (acpi_button_dir || acpi_lid_dir) {
-		printk(KERN_ERR PREFIX "More than one Lid device found!\n");
+		pr_info("More than one Lid device found!\n");
 		return -EEXIST;
 	}
 
@@ -370,9 +356,7 @@ static int acpi_button_remove_fs(struct acpi_device *device)
 	return 0;
 }
 
-/* --------------------------------------------------------------------------
-                                Driver Interface
-   -------------------------------------------------------------------------- */
+/* Driver Interface */
 int acpi_lid_open(void)
 {
 	if (!lid_device)
@@ -399,6 +383,8 @@ static int acpi_lid_update_state(struct acpi_device *device,
 
 static void acpi_lid_initialize_state(struct acpi_device *device)
 {
+	struct acpi_button *button = acpi_driver_data(device);
+
 	switch (lid_init_state) {
 	case ACPI_BUTTON_LID_INIT_OPEN:
 		(void)acpi_lid_notify_state(device, 1);
@@ -410,25 +396,23 @@ static void acpi_lid_initialize_state(struct acpi_device *device)
 	default:
 		break;
 	}
+
+	button->lid_state_initialized = true;
 }
 
 static void acpi_button_notify(struct acpi_device *device, u32 event)
 {
 	struct acpi_button *button = acpi_driver_data(device);
 	struct input_dev *input;
-	int users;
 
 	switch (event) {
 	case ACPI_FIXED_HARDWARE_EVENT:
 		event = ACPI_BUTTON_NOTIFY_STATUS;
-		/* fall through */
+		fallthrough;
 	case ACPI_BUTTON_NOTIFY_STATUS:
 		input = button->input;
 		if (button->type == ACPI_BUTTON_TYPE_LID) {
-			mutex_lock(&button->input->mutex);
-			users = button->input->users;
-			mutex_unlock(&button->input->mutex);
-			if (users)
+			if (button->lid_state_initialized)
 				acpi_lid_update_state(device, true);
 		} else {
 			int keycode;
@@ -451,8 +435,8 @@ static void acpi_button_notify(struct acpi_device *device, u32 event)
 		}
 		break;
 	default:
-		ACPI_DEBUG_PRINT((ACPI_DB_INFO,
-				  "Unsupported event [0x%x]\n", event));
+		acpi_handle_debug(device->handle, "Unsupported event [0x%x]\n",
+				  event);
 		break;
 	}
 }
@@ -473,7 +457,7 @@ static int acpi_button_resume(struct device *dev)
 	struct acpi_button *button = acpi_driver_data(device);
 
 	button->suspended = false;
-	if (button->type == ACPI_BUTTON_TYPE_LID && button->input->users) {
+	if (button->type == ACPI_BUTTON_TYPE_LID) {
 		button->last_state = !!acpi_lid_evaluate_state(device);
 		button->last_time = ktime_get();
 		acpi_lid_initialize_state(device);
@@ -540,7 +524,7 @@ static int acpi_button_add(struct acpi_device *device)
 			ACPI_BUTTON_CLASS, ACPI_BUTTON_SUBCLASS_LID);
 		input->open = acpi_lid_input_open;
 	} else {
-		printk(KERN_ERR PREFIX "Unsupported hid [%s]\n", hid);
+		pr_info("Unsupported hid [%s]\n", hid);
 		error = -ENODEV;
 		goto err_free_input;
 	}
@@ -584,7 +568,7 @@ static int acpi_button_add(struct acpi_device *device)
 	}
 
 	device_init_wakeup(&device->dev, true);
-	printk(KERN_INFO PREFIX "%s [%s]\n", name, acpi_device_bid(device));
+	pr_info("%s [%s]\n", name, acpi_device_bid(device));
 	return 0;
 
  err_remove_fs:
@@ -596,14 +580,13 @@ static int acpi_button_add(struct acpi_device *device)
 	return error;
 }
 
-static int acpi_button_remove(struct acpi_device *device)
+static void acpi_button_remove(struct acpi_device *device)
 {
 	struct acpi_button *button = acpi_driver_data(device);
 
 	acpi_button_remove_fs(device);
 	input_unregister_device(button->input);
 	kfree(button);
-	return 0;
 }
 
 static int param_set_lid_init_state(const char *val,

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/**
+/*
  * AMCC SoC PPC4xx Crypto Driver
  *
  * Copyright (c) 2008 Applied Micro Circuits Corporation.
@@ -30,7 +30,7 @@
 #include <crypto/aes.h>
 #include <crypto/ctr.h>
 #include <crypto/gcm.h>
-#include <crypto/sha.h>
+#include <crypto/sha1.h>
 #include <crypto/rng.h>
 #include <crypto/scatterwalk.h>
 #include <crypto/skcipher.h>
@@ -44,7 +44,7 @@
 
 #define PPC4XX_SEC_VERSION_STR			"0.5"
 
-/**
+/*
  * PPC4xx Crypto Engine Initialization Routine
  */
 static void crypto4xx_hw_init(struct crypto4xx_device *dev)
@@ -159,7 +159,7 @@ void crypto4xx_free_sa(struct crypto4xx_ctx *ctx)
 	ctx->sa_len = 0;
 }
 
-/**
+/*
  * alloc memory for the gather ring
  * no need to alloc buf for the ring
  * gdr_tail, gdr_head and gdr_count are initialized by this function
@@ -268,7 +268,7 @@ static u32 crypto4xx_put_pd_to_pdr(struct crypto4xx_device *dev, u32 idx)
 	return tail;
 }
 
-/**
+/*
  * alloc memory for the gather ring
  * no need to alloc buf for the ring
  * gdr_tail, gdr_head and gdr_count are initialized by this function
@@ -346,7 +346,7 @@ static inline struct ce_gd *crypto4xx_get_gdp(struct crypto4xx_device *dev,
 	return &dev->gdr[idx];
 }
 
-/**
+/*
  * alloc memory for the scatter ring
  * need to alloc buf for the ring
  * sdr_tail, sdr_head and sdr_count are initialized by this function
@@ -522,7 +522,6 @@ static void crypto4xx_cipher_done(struct crypto4xx_device *dev,
 {
 	struct skcipher_request *req;
 	struct scatterlist *dst;
-	dma_addr_t addr;
 
 	req = skcipher_request_cast(pd_uinfo->async_req);
 
@@ -531,8 +530,8 @@ static void crypto4xx_cipher_done(struct crypto4xx_device *dev,
 					  req->cryptlen, req->dst);
 	} else {
 		dst = pd_uinfo->dest_va;
-		addr = dma_map_page(dev->core_dev->device, sg_page(dst),
-				    dst->offset, dst->length, DMA_FROM_DEVICE);
+		dma_unmap_page(dev->core_dev->device, pd->dest, dst->length,
+			       DMA_FROM_DEVICE);
 	}
 
 	if (pd_uinfo->sa_va->sa_command_0.bf.save_iv == SA_SAVE_IV) {
@@ -557,10 +556,9 @@ static void crypto4xx_ahash_done(struct crypto4xx_device *dev,
 	struct ahash_request *ahash_req;
 
 	ahash_req = ahash_request_cast(pd_uinfo->async_req);
-	ctx  = crypto_tfm_ctx(ahash_req->base.tfm);
+	ctx = crypto_ahash_ctx(crypto_ahash_reqtfm(ahash_req));
 
-	crypto4xx_copy_digest_to_dst(ahash_req->result, pd_uinfo,
-				     crypto_tfm_ctx(ahash_req->base.tfm));
+	crypto4xx_copy_digest_to_dst(ahash_req->result, pd_uinfo, ctx);
 	crypto4xx_ret_sg_desc(dev, pd_uinfo);
 
 	if (pd_uinfo->state & PD_ENTRY_BUSY)
@@ -917,7 +915,7 @@ int crypto4xx_build_pd(struct crypto_async_request *req,
 	}
 
 	pd->pd_ctl.w = PD_CTL_HOST_READY |
-		((crypto_tfm_alg_type(req->tfm) == CRYPTO_ALG_TYPE_AHASH) |
+		((crypto_tfm_alg_type(req->tfm) == CRYPTO_ALG_TYPE_AHASH) ||
 		 (crypto_tfm_alg_type(req->tfm) == CRYPTO_ALG_TYPE_AEAD) ?
 			PD_CTL_HASH_FINAL : 0);
 	pd->pd_ctl_len.w = 0x00400000 | (assoclen + datalen);
@@ -930,7 +928,7 @@ int crypto4xx_build_pd(struct crypto_async_request *req,
 	return is_busy ? -EBUSY : -EINPROGRESS;
 }
 
-/**
+/*
  * Algorithm Registration Functions
  */
 static void crypto4xx_ctx_init(struct crypto4xx_alg *amcc_alg,
@@ -1097,7 +1095,7 @@ static void crypto4xx_bh_tasklet_cb(unsigned long data)
 	} while (head != tail);
 }
 
-/**
+/*
  * Top Half of isr.
  */
 static inline irqreturn_t crypto4xx_interrupt_handler(int irq, void *data,
@@ -1186,7 +1184,7 @@ static int crypto4xx_prng_seed(struct crypto_rng *tfm, const u8 *seed,
 	return 0;
 }
 
-/**
+/*
  * Supported Crypto Algorithms
  */
 static struct crypto4xx_alg_common crypto4xx_alg[] = {
@@ -1369,7 +1367,7 @@ static struct crypto4xx_alg_common crypto4xx_alg[] = {
 	} },
 };
 
-/**
+/*
  * Module Initialization Routine
  */
 static int crypto4xx_probe(struct platform_device *ofdev)
@@ -1378,6 +1376,7 @@ static int crypto4xx_probe(struct platform_device *ofdev)
 	struct resource res;
 	struct device *dev = &ofdev->dev;
 	struct crypto4xx_core_device *core_dev;
+	struct device_node *np;
 	u32 pvr;
 	bool is_revb = true;
 
@@ -1385,28 +1384,35 @@ static int crypto4xx_probe(struct platform_device *ofdev)
 	if (rc)
 		return -ENODEV;
 
-	if (of_find_compatible_node(NULL, NULL, "amcc,ppc460ex-crypto")) {
+	np = of_find_compatible_node(NULL, NULL, "amcc,ppc460ex-crypto");
+	if (np) {
 		mtdcri(SDR0, PPC460EX_SDR0_SRST,
 		       mfdcri(SDR0, PPC460EX_SDR0_SRST) | PPC460EX_CE_RESET);
 		mtdcri(SDR0, PPC460EX_SDR0_SRST,
 		       mfdcri(SDR0, PPC460EX_SDR0_SRST) & ~PPC460EX_CE_RESET);
-	} else if (of_find_compatible_node(NULL, NULL,
-			"amcc,ppc405ex-crypto")) {
-		mtdcri(SDR0, PPC405EX_SDR0_SRST,
-		       mfdcri(SDR0, PPC405EX_SDR0_SRST) | PPC405EX_CE_RESET);
-		mtdcri(SDR0, PPC405EX_SDR0_SRST,
-		       mfdcri(SDR0, PPC405EX_SDR0_SRST) & ~PPC405EX_CE_RESET);
-		is_revb = false;
-	} else if (of_find_compatible_node(NULL, NULL,
-			"amcc,ppc460sx-crypto")) {
-		mtdcri(SDR0, PPC460SX_SDR0_SRST,
-		       mfdcri(SDR0, PPC460SX_SDR0_SRST) | PPC460SX_CE_RESET);
-		mtdcri(SDR0, PPC460SX_SDR0_SRST,
-		       mfdcri(SDR0, PPC460SX_SDR0_SRST) & ~PPC460SX_CE_RESET);
 	} else {
-		printk(KERN_ERR "Crypto Function Not supported!\n");
-		return -EINVAL;
+		np = of_find_compatible_node(NULL, NULL, "amcc,ppc405ex-crypto");
+		if (np) {
+			mtdcri(SDR0, PPC405EX_SDR0_SRST,
+				   mfdcri(SDR0, PPC405EX_SDR0_SRST) | PPC405EX_CE_RESET);
+			mtdcri(SDR0, PPC405EX_SDR0_SRST,
+				   mfdcri(SDR0, PPC405EX_SDR0_SRST) & ~PPC405EX_CE_RESET);
+			is_revb = false;
+		} else {
+			np = of_find_compatible_node(NULL, NULL, "amcc,ppc460sx-crypto");
+			if (np) {
+				mtdcri(SDR0, PPC460SX_SDR0_SRST,
+					mfdcri(SDR0, PPC460SX_SDR0_SRST) | PPC460SX_CE_RESET);
+				mtdcri(SDR0, PPC460SX_SDR0_SRST,
+					mfdcri(SDR0, PPC460SX_SDR0_SRST) & ~PPC460SX_CE_RESET);
+			} else {
+				printk(KERN_ERR "Crypto Function Not supported!\n");
+				return -EINVAL;
+			}
+		}
 	}
+
+	of_node_put(np);
 
 	core_dev = kzalloc(sizeof(struct crypto4xx_core_device), GFP_KERNEL);
 	if (!core_dev)

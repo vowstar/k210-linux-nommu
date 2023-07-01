@@ -15,7 +15,7 @@
 #include <dt-bindings/mfd/st,stpmic1.h>
 
 /**
- * stpmic1 regulator description: this structure is used as driver data
+ * struct stpmic1 regulator description: this structure is used as driver data
  * @desc: regulator framework description
  * @mask_reset_reg: mask reset register address
  * @mask_reset_mask: mask rank and mask reset register mask
@@ -32,7 +32,8 @@ struct stpmic1_regulator_cfg {
 
 static int stpmic1_set_mode(struct regulator_dev *rdev, unsigned int mode);
 static unsigned int stpmic1_get_mode(struct regulator_dev *rdev);
-static int stpmic1_set_icc(struct regulator_dev *rdev);
+static int stpmic1_set_icc(struct regulator_dev *rdev, int lim, int severity,
+			   bool enable);
 static unsigned int stpmic1_map_mode(unsigned int mode);
 
 enum {
@@ -57,13 +58,13 @@ enum {
 /* Ramp delay worst case is (2250uV/uS) */
 #define PMIC_RAMP_DELAY 2200
 
-static const struct regulator_linear_range buck1_ranges[] = {
+static const struct linear_range buck1_ranges[] = {
 	REGULATOR_LINEAR_RANGE(725000, 0, 4, 0),
 	REGULATOR_LINEAR_RANGE(725000, 5, 36, 25000),
 	REGULATOR_LINEAR_RANGE(1500000, 37, 63, 0),
 };
 
-static const struct regulator_linear_range buck2_ranges[] = {
+static const struct linear_range buck2_ranges[] = {
 	REGULATOR_LINEAR_RANGE(1000000, 0, 17, 0),
 	REGULATOR_LINEAR_RANGE(1050000, 18, 19, 0),
 	REGULATOR_LINEAR_RANGE(1100000, 20, 21, 0),
@@ -77,7 +78,7 @@ static const struct regulator_linear_range buck2_ranges[] = {
 	REGULATOR_LINEAR_RANGE(1500000, 36, 63, 0),
 };
 
-static const struct regulator_linear_range buck3_ranges[] = {
+static const struct linear_range buck3_ranges[] = {
 	REGULATOR_LINEAR_RANGE(1000000, 0, 19, 0),
 	REGULATOR_LINEAR_RANGE(1100000, 20, 23, 0),
 	REGULATOR_LINEAR_RANGE(1200000, 24, 27, 0),
@@ -87,7 +88,7 @@ static const struct regulator_linear_range buck3_ranges[] = {
 	REGULATOR_LINEAR_RANGE(3400000, 56, 63, 0),
 };
 
-static const struct regulator_linear_range buck4_ranges[] = {
+static const struct linear_range buck4_ranges[] = {
 	REGULATOR_LINEAR_RANGE(600000, 0, 27, 25000),
 	REGULATOR_LINEAR_RANGE(1300000, 28, 29, 0),
 	REGULATOR_LINEAR_RANGE(1350000, 30, 31, 0),
@@ -97,19 +98,19 @@ static const struct regulator_linear_range buck4_ranges[] = {
 	REGULATOR_LINEAR_RANGE(3900000, 61, 63, 0),
 };
 
-static const struct regulator_linear_range ldo1_ranges[] = {
+static const struct linear_range ldo1_ranges[] = {
 	REGULATOR_LINEAR_RANGE(1700000, 0, 7, 0),
 	REGULATOR_LINEAR_RANGE(1700000, 8, 24, 100000),
 	REGULATOR_LINEAR_RANGE(3300000, 25, 31, 0),
 };
 
-static const struct regulator_linear_range ldo2_ranges[] = {
+static const struct linear_range ldo2_ranges[] = {
 	REGULATOR_LINEAR_RANGE(1700000, 0, 7, 0),
 	REGULATOR_LINEAR_RANGE(1700000, 8, 24, 100000),
 	REGULATOR_LINEAR_RANGE(3300000, 25, 30, 0),
 };
 
-static const struct regulator_linear_range ldo3_ranges[] = {
+static const struct linear_range ldo3_ranges[] = {
 	REGULATOR_LINEAR_RANGE(1700000, 0, 7, 0),
 	REGULATOR_LINEAR_RANGE(1700000, 8, 24, 100000),
 	REGULATOR_LINEAR_RANGE(3300000, 25, 30, 0),
@@ -117,13 +118,13 @@ static const struct regulator_linear_range ldo3_ranges[] = {
 	REGULATOR_LINEAR_RANGE(500000, 31, 31, 0),
 };
 
-static const struct regulator_linear_range ldo5_ranges[] = {
+static const struct linear_range ldo5_ranges[] = {
 	REGULATOR_LINEAR_RANGE(1700000, 0, 7, 0),
 	REGULATOR_LINEAR_RANGE(1700000, 8, 30, 100000),
 	REGULATOR_LINEAR_RANGE(3900000, 31, 31, 0),
 };
 
-static const struct regulator_linear_range ldo6_ranges[] = {
+static const struct linear_range ldo6_ranges[] = {
 	REGULATOR_LINEAR_RANGE(900000, 0, 24, 100000),
 	REGULATOR_LINEAR_RANGE(3300000, 25, 31, 0),
 };
@@ -491,10 +492,25 @@ static int stpmic1_set_mode(struct regulator_dev *rdev, unsigned int mode)
 				  STPMIC1_BUCK_MODE_LP, value);
 }
 
-static int stpmic1_set_icc(struct regulator_dev *rdev)
+static int stpmic1_set_icc(struct regulator_dev *rdev, int lim, int severity,
+			   bool enable)
 {
 	struct stpmic1_regulator_cfg *cfg = rdev_get_drvdata(rdev);
 	struct regmap *regmap = rdev_get_regmap(rdev);
+
+	/*
+	 * The code seems like one bit in a register controls whether OCP is
+	 * enabled. So we might be able to turn it off here is if that
+	 * was requested. I won't support this because I don't have the HW.
+	 * Feel free to try and implement if you have the HW and need kernel
+	 * to disable this.
+	 *
+	 * Also, I don't know if limit can be configured or if we support
+	 * error/warning instead of protect. So I just keep existing logic
+	 * and assume no.
+	 */
+	if (lim || severity != REGULATOR_SEVERITY_PROT || !enable)
+		return -EINVAL;
 
 	/* enable switch off in case of over current */
 	return regmap_update_bits(regmap, cfg->icc_reg, cfg->icc_mask,
@@ -505,14 +521,10 @@ static irqreturn_t stpmic1_curlim_irq_handler(int irq, void *data)
 {
 	struct regulator_dev *rdev = (struct regulator_dev *)data;
 
-	regulator_lock(rdev);
-
 	/* Send an overcurrent notification */
 	regulator_notifier_call_chain(rdev,
 				      REGULATOR_EVENT_OVER_CURRENT,
 				      NULL);
-
-	regulator_unlock(rdev);
 
 	return IRQ_HANDLED;
 }

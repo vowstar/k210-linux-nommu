@@ -615,7 +615,7 @@ static ssize_t l3cache_pmu_format_show(struct device *dev,
 	struct dev_ext_attribute *eattr;
 
 	eattr = container_of(attr, struct dev_ext_attribute, attr);
-	return sprintf(buf, "%s\n", (char *) eattr->var);
+	return sysfs_emit(buf, "%s\n", (char *) eattr->var);
 }
 
 #define L3CACHE_PMU_FORMAT_ATTR(_name, _config)				      \
@@ -630,7 +630,7 @@ static struct attribute *qcom_l3_cache_pmu_formats[] = {
 	NULL,
 };
 
-static struct attribute_group qcom_l3_cache_pmu_format_group = {
+static const struct attribute_group qcom_l3_cache_pmu_format_group = {
 	.name = "format",
 	.attrs = qcom_l3_cache_pmu_formats,
 };
@@ -643,14 +643,11 @@ static ssize_t l3cache_pmu_event_show(struct device *dev,
 	struct perf_pmu_events_attr *pmu_attr;
 
 	pmu_attr = container_of(attr, struct perf_pmu_events_attr, attr);
-	return sprintf(page, "event=0x%02llx\n", pmu_attr->id);
+	return sysfs_emit(page, "event=0x%02llx\n", pmu_attr->id);
 }
 
 #define L3CACHE_EVENT_ATTR(_name, _id)					     \
-	(&((struct perf_pmu_events_attr[]) {				     \
-		{ .attr = __ATTR(_name, 0444, l3cache_pmu_event_show, NULL), \
-		  .id = _id, }						     \
-	})[0].attr.attr)
+	PMU_EVENT_ATTR_ID(_name, l3cache_pmu_event_show, _id)
 
 static struct attribute *qcom_l3_cache_pmu_events[] = {
 	L3CACHE_EVENT_ATTR(cycles, L3_EVENT_CYCLES),
@@ -663,29 +660,29 @@ static struct attribute *qcom_l3_cache_pmu_events[] = {
 	NULL
 };
 
-static struct attribute_group qcom_l3_cache_pmu_events_group = {
+static const struct attribute_group qcom_l3_cache_pmu_events_group = {
 	.name = "events",
 	.attrs = qcom_l3_cache_pmu_events,
 };
 
 /* cpumask */
 
-static ssize_t qcom_l3_cache_pmu_cpumask_show(struct device *dev,
-				     struct device_attribute *attr, char *buf)
+static ssize_t cpumask_show(struct device *dev,
+			    struct device_attribute *attr, char *buf)
 {
 	struct l3cache_pmu *l3pmu = to_l3cache_pmu(dev_get_drvdata(dev));
 
 	return cpumap_print_to_pagebuf(true, buf, &l3pmu->cpumask);
 }
 
-static DEVICE_ATTR(cpumask, 0444, qcom_l3_cache_pmu_cpumask_show, NULL);
+static DEVICE_ATTR_RO(cpumask);
 
 static struct attribute *qcom_l3_cache_pmu_cpumask_attrs[] = {
 	&dev_attr_cpumask.attr,
 	NULL,
 };
 
-static struct attribute_group qcom_l3_cache_pmu_cpumask_attr_group = {
+static const struct attribute_group qcom_l3_cache_pmu_cpumask_attr_group = {
 	.attrs = qcom_l3_cache_pmu_cpumask_attrs,
 };
 
@@ -745,7 +742,8 @@ static int qcom_l3_cache_pmu_probe(struct platform_device *pdev)
 
 	l3pmu = devm_kzalloc(&pdev->dev, sizeof(*l3pmu), GFP_KERNEL);
 	name = devm_kasprintf(&pdev->dev, GFP_KERNEL, "l3cache_%s_%s",
-		      acpi_dev->parent->pnp.unique_id, acpi_dev->pnp.unique_id);
+		      acpi_dev_parent(acpi_dev)->pnp.unique_id,
+		      acpi_dev->pnp.unique_id);
 	if (!l3pmu || !name)
 		return -ENOMEM;
 
@@ -767,10 +765,8 @@ static int qcom_l3_cache_pmu_probe(struct platform_device *pdev)
 
 	memrc = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	l3pmu->regs = devm_ioremap_resource(&pdev->dev, memrc);
-	if (IS_ERR(l3pmu->regs)) {
-		dev_err(&pdev->dev, "Can't map PMU @%pa\n", &memrc->start);
+	if (IS_ERR(l3pmu->regs))
 		return PTR_ERR(l3pmu->regs);
-	}
 
 	qcom_l3_cache__init(l3pmu);
 
@@ -814,6 +810,7 @@ static struct platform_driver qcom_l3_cache_pmu_driver = {
 	.driver = {
 		.name = "qcom-l3cache-pmu",
 		.acpi_match_table = ACPI_PTR(qcom_l3_cache_pmu_acpi_match),
+		.suppress_bind_attrs = true,
 	},
 	.probe = qcom_l3_cache_pmu_probe,
 };

@@ -60,6 +60,51 @@ static const struct strset_info info_template[] = {
 		.count		= WOL_MODE_COUNT,
 		.strings	= wol_mode_names,
 	},
+	[ETH_SS_SOF_TIMESTAMPING] = {
+		.per_dev	= false,
+		.count		= __SOF_TIMESTAMPING_CNT,
+		.strings	= sof_timestamping_names,
+	},
+	[ETH_SS_TS_TX_TYPES] = {
+		.per_dev	= false,
+		.count		= __HWTSTAMP_TX_CNT,
+		.strings	= ts_tx_type_names,
+	},
+	[ETH_SS_TS_RX_FILTERS] = {
+		.per_dev	= false,
+		.count		= __HWTSTAMP_FILTER_CNT,
+		.strings	= ts_rx_filter_names,
+	},
+	[ETH_SS_UDP_TUNNEL_TYPES] = {
+		.per_dev	= false,
+		.count		= __ETHTOOL_UDP_TUNNEL_TYPE_CNT,
+		.strings	= udp_tunnel_type_names,
+	},
+	[ETH_SS_STATS_STD] = {
+		.per_dev	= false,
+		.count		= __ETHTOOL_STATS_CNT,
+		.strings	= stats_std_names,
+	},
+	[ETH_SS_STATS_ETH_PHY] = {
+		.per_dev	= false,
+		.count		= __ETHTOOL_A_STATS_ETH_PHY_CNT,
+		.strings	= stats_eth_phy_names,
+	},
+	[ETH_SS_STATS_ETH_MAC] = {
+		.per_dev	= false,
+		.count		= __ETHTOOL_A_STATS_ETH_MAC_CNT,
+		.strings	= stats_eth_mac_names,
+	},
+	[ETH_SS_STATS_ETH_CTRL] = {
+		.per_dev	= false,
+		.count		= __ETHTOOL_A_STATS_ETH_CTRL_CNT,
+		.strings	= stats_eth_ctrl_names,
+	},
+	[ETH_SS_STATS_RMON] = {
+		.per_dev	= false,
+		.count		= __ETHTOOL_A_STATS_RMON_CNT,
+		.strings	= stats_rmon_names,
+	},
 };
 
 struct strset_req_info {
@@ -79,18 +124,15 @@ struct strset_reply_data {
 #define STRSET_REPDATA(__reply_base) \
 	container_of(__reply_base, struct strset_reply_data, base)
 
-static const struct nla_policy strset_get_policy[ETHTOOL_A_STRSET_MAX + 1] = {
-	[ETHTOOL_A_STRSET_UNSPEC]	= { .type = NLA_REJECT },
-	[ETHTOOL_A_STRSET_HEADER]	= { .type = NLA_NESTED },
+const struct nla_policy ethnl_strset_get_policy[] = {
+	[ETHTOOL_A_STRSET_HEADER]	=
+		NLA_POLICY_NESTED(ethnl_header_policy),
 	[ETHTOOL_A_STRSET_STRINGSETS]	= { .type = NLA_NESTED },
+	[ETHTOOL_A_STRSET_COUNTS_ONLY]	= { .type = NLA_FLAG },
 };
 
-static const struct nla_policy
-get_stringset_policy[ETHTOOL_A_STRINGSET_MAX + 1] = {
-	[ETHTOOL_A_STRINGSET_UNSPEC]	= { .type = NLA_REJECT },
+static const struct nla_policy get_stringset_policy[] = {
 	[ETHTOOL_A_STRINGSET_ID]	= { .type = NLA_U32 },
-	[ETHTOOL_A_STRINGSET_COUNT]	= { .type = NLA_REJECT },
-	[ETHTOOL_A_STRINGSET_STRINGS]	= { .type = NLA_REJECT },
 };
 
 /**
@@ -118,23 +160,21 @@ static bool strset_include(const struct strset_req_info *info,
 static int strset_get_id(const struct nlattr *nest, u32 *val,
 			 struct netlink_ext_ack *extack)
 {
-	struct nlattr *tb[ETHTOOL_A_STRINGSET_MAX + 1];
+	struct nlattr *tb[ARRAY_SIZE(get_stringset_policy)];
 	int ret;
 
-	ret = nla_parse_nested(tb, ETHTOOL_A_STRINGSET_MAX, nest,
+	ret = nla_parse_nested(tb, ARRAY_SIZE(get_stringset_policy) - 1, nest,
 			       get_stringset_policy, extack);
 	if (ret < 0)
 		return ret;
-	if (!tb[ETHTOOL_A_STRINGSET_ID])
+	if (NL_REQ_ATTR_CHECK(extack, nest, tb, ETHTOOL_A_STRINGSET_ID))
 		return -EINVAL;
 
 	*val = nla_get_u32(tb[ETHTOOL_A_STRINGSET_ID]);
 	return 0;
 }
 
-static const struct nla_policy
-strset_stringsets_policy[ETHTOOL_A_STRINGSETS_MAX + 1] = {
-	[ETHTOOL_A_STRINGSETS_UNSPEC]		= { .type = NLA_REJECT },
+static const struct nla_policy strset_stringsets_policy[] = {
 	[ETHTOOL_A_STRINGSETS_STRINGSET]	= { .type = NLA_NESTED },
 };
 
@@ -149,7 +189,8 @@ static int strset_parse_request(struct ethnl_req_info *req_base,
 
 	if (!nest)
 		return 0;
-	ret = nla_validate_nested(nest, ETHTOOL_A_STRINGSETS_MAX,
+	ret = nla_validate_nested(nest,
+				  ARRAY_SIZE(strset_stringsets_policy) - 1,
 				  strset_stringsets_policy, extack);
 	if (ret < 0)
 		return ret;
@@ -166,7 +207,7 @@ static int strset_parse_request(struct ethnl_req_info *req_base,
 		ret = strset_get_id(attr, &id, extack);
 		if (ret < 0)
 			return ret;
-		if (ret >= ETH_SS_COUNT) {
+		if (id >= ETH_SS_COUNT) {
 			NL_SET_ERR_MSG_ATTR(extack, attr,
 					    "unknown string set id");
 			return -EOPNOTSUPP;
@@ -194,13 +235,15 @@ static void strset_cleanup_data(struct ethnl_reply_data *reply_base)
 static int strset_prepare_set(struct strset_info *info, struct net_device *dev,
 			      unsigned int id, bool counts_only)
 {
+	const struct ethtool_phy_ops *phy_ops = ethtool_phy_ops;
 	const struct ethtool_ops *ops = dev->ethtool_ops;
 	void *strings;
 	int count, ret;
 
 	if (id == ETH_SS_PHY_STATS && dev->phydev &&
-	    !ops->get_ethtool_phy_stats)
-		ret = phy_ethtool_get_sset_count(dev->phydev);
+	    !ops->get_ethtool_phy_stats && phy_ops &&
+	    phy_ops->get_sset_count)
+		ret = phy_ops->get_sset_count(dev->phydev);
 	else if (ops->get_sset_count && ops->get_strings)
 		ret = ops->get_sset_count(dev, id);
 	else
@@ -216,8 +259,9 @@ static int strset_prepare_set(struct strset_info *info, struct net_device *dev,
 		if (!strings)
 			return -ENOMEM;
 		if (id == ETH_SS_PHY_STATS && dev->phydev &&
-		    !ops->get_ethtool_phy_stats)
-			phy_ethtool_get_strings(dev->phydev, strings);
+		    !ops->get_ethtool_phy_stats && phy_ops &&
+		    phy_ops->get_strings)
+			phy_ops->get_strings(dev->phydev, strings);
 		else
 			ops->get_strings(dev, id, strings);
 		info->strings = strings;
@@ -309,7 +353,8 @@ static int strset_reply_size(const struct ethnl_req_info *req_base,
 	int len = 0;
 	int ret;
 
-	len += ethnl_reply_header_size();
+	len += nla_total_size(0); /* ETHTOOL_A_STRSET_STRINGSETS */
+
 	for (i = 0; i < ETH_SS_COUNT; i++) {
 		const struct strset_info *set_info = &data->sets[i];
 
@@ -423,10 +468,8 @@ const struct ethnl_request_ops ethnl_strset_request_ops = {
 	.request_cmd		= ETHTOOL_MSG_STRSET_GET,
 	.reply_cmd		= ETHTOOL_MSG_STRSET_GET_REPLY,
 	.hdr_attr		= ETHTOOL_A_STRSET_HEADER,
-	.max_attr		= ETHTOOL_A_STRSET_MAX,
 	.req_info_size		= sizeof(struct strset_req_info),
 	.reply_data_size	= sizeof(struct strset_reply_data),
-	.request_policy		= strset_get_policy,
 	.allow_nodev_do		= true,
 
 	.parse_request		= strset_parse_request,

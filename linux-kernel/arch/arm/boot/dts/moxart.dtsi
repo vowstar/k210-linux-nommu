@@ -93,8 +93,8 @@
 			clock-names = "PCLK";
 		};
 
-		sdhci: sdhci@98e00000 {
-			compatible = "moxa,moxart-sdhci";
+		mmc: mmc@98e00000 {
+			compatible = "moxa,moxart-mmc";
 			reg = <0x98e00000 0x5C>;
 			interrupts = <5 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&clk_apb>;
@@ -138,7 +138,7 @@
 			status = "disabled";
 		};
 
-		uart0: uart@98200000 {
+		uart0: serial@98200000 {
 			compatible = "ns16550a";
 			reg = <0x98200000 0x20>;
 			interrupts = <31 IRQ_TYPE_LEVEL_HIGH>;

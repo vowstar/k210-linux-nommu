@@ -65,6 +65,8 @@ size_t syscall_arg__scnprintf_statx_mask(char *bf, size_t size, struct syscall_a
 	P_FLAG(SIZE);
 	P_FLAG(BLOCKS);
 	P_FLAG(BTIME);
+	P_FLAG(MNT_ID);
+	P_FLAG(DIOALIGN);
 
 #undef P_FLAG
 

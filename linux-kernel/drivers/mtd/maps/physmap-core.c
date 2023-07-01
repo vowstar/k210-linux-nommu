@@ -41,6 +41,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/gpio/consumer.h>
 
+#include "physmap-bt1-rom.h"
 #include "physmap-gemini.h"
 #include "physmap-ixp4xx.h"
 #include "physmap-versatile.h"
@@ -65,16 +66,12 @@ static int physmap_flash_remove(struct platform_device *dev)
 {
 	struct physmap_flash_info *info;
 	struct physmap_flash_data *physmap_data;
-	int i, err = 0;
+	int i;
 
 	info = platform_get_drvdata(dev);
-	if (!info)
-		goto out;
 
 	if (info->cmtd) {
-		err = mtd_device_unregister(info->cmtd);
-		if (err)
-			goto out;
+		WARN_ON(mtd_device_unregister(info->cmtd));
 
 		if (info->cmtd != info->mtds[0])
 			mtd_concat_destroy(info->cmtd);
@@ -89,10 +86,9 @@ static int physmap_flash_remove(struct platform_device *dev)
 	if (physmap_data && physmap_data->exit)
 		physmap_data->exit(dev);
 
-out:
 	pm_runtime_put(&dev->dev);
 	pm_runtime_disable(&dev->dev);
-	return err;
+	return 0;
 }
 
 static void physmap_set_vpp(struct map_info *map, int state)
@@ -304,6 +300,9 @@ static const char *of_select_probe_type(struct platform_device *dev)
 	const char *probe_type;
 
 	match = of_match_device(of_flash_match, &dev->dev);
+	if (!match)
+		return NULL;
+
 	probe_type = match->data;
 	if (probe_type)
 		return probe_type;
@@ -370,6 +369,10 @@ static int physmap_flash_of_init(struct platform_device *dev)
 		info->maps[i].swap = swap;
 		info->maps[i].bankwidth = bankwidth;
 		info->maps[i].device_node = dp;
+
+		err = of_flash_probe_bt1_rom(dev, dp, &info->maps[i]);
+		if (err)
+			return err;
 
 		err = of_flash_probe_gemini(dev, dp, &info->maps[i]);
 		if (err)
@@ -515,7 +518,8 @@ static int physmap_flash_probe(struct platform_device *dev)
 		dev_notice(&dev->dev, "physmap platform flash device: %pR\n",
 			   res);
 
-		info->maps[i].name = dev_name(&dev->dev);
+		if (!info->maps[i].name)
+			info->maps[i].name = dev_name(&dev->dev);
 
 		if (!info->maps[i].phys)
 			info->maps[i].phys = res->start;

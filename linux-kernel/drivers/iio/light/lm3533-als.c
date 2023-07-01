@@ -417,7 +417,7 @@ static ssize_t show_thresh_either_en(struct device *dev,
 		enable = 0;
 	}
 
-	return scnprintf(buf, PAGE_SIZE, "%u\n", enable);
+	return sysfs_emit(buf, "%u\n", enable);
 }
 
 static ssize_t store_thresh_either_en(struct device *dev,
@@ -474,7 +474,7 @@ static ssize_t show_zone(struct device *dev,
 	if (ret)
 		return ret;
 
-	return scnprintf(buf, PAGE_SIZE, "%u\n", zone);
+	return sysfs_emit(buf, "%u\n", zone);
 }
 
 enum lm3533_als_attribute_type {
@@ -530,7 +530,7 @@ static ssize_t show_als_attr(struct device *dev,
 	if (ret)
 		return ret;
 
-	return scnprintf(buf, PAGE_SIZE, "%u\n", val);
+	return sysfs_emit(buf, "%u\n", val);
 }
 
 static ssize_t store_als_attr(struct device *dev,
@@ -852,7 +852,7 @@ static int lm3533_als_probe(struct platform_device *pdev)
 	indio_dev->channels = lm3533_als_channels;
 	indio_dev->num_channels = ARRAY_SIZE(lm3533_als_channels);
 	indio_dev->name = dev_name(&pdev->dev);
-	indio_dev->dev.parent = pdev->dev.parent;
+	iio_device_set_parent(indio_dev, pdev->dev.parent);
 	indio_dev->modes = INDIO_DIRECT_MODE;
 
 	als = iio_priv(indio_dev);

@@ -120,9 +120,9 @@ bool __init wg_ratelimiter_selftest(void)
 	enum { TRIALS_BEFORE_GIVING_UP = 5000 };
 	bool success = false;
 	int test = 0, trials;
-	struct sk_buff *skb4, *skb6;
+	struct sk_buff *skb4, *skb6 = NULL;
 	struct iphdr *hdr4;
-	struct ipv6hdr *hdr6;
+	struct ipv6hdr *hdr6 = NULL;
 
 	if (IS_ENABLED(CONFIG_KASAN) || IS_ENABLED(CONFIG_UBSAN))
 		return true;
@@ -167,7 +167,7 @@ bool __init wg_ratelimiter_selftest(void)
 	++test;
 #endif
 
-	for (trials = TRIALS_BEFORE_GIVING_UP;;) {
+	for (trials = TRIALS_BEFORE_GIVING_UP; IS_ENABLED(DEBUG_RATELIMITER_TIMINGS);) {
 		int test_count = 0, ret;
 
 		ret = timings_test(skb4, hdr4, skb6, hdr6, &test_count);
@@ -176,7 +176,6 @@ bool __init wg_ratelimiter_selftest(void)
 				test += test_count;
 				goto err;
 			}
-			msleep(500);
 			continue;
 		} else if (ret < 0) {
 			test += test_count;
@@ -195,7 +194,6 @@ bool __init wg_ratelimiter_selftest(void)
 				test += test_count;
 				goto err;
 			}
-			msleep(50);
 			continue;
 		}
 		test += test_count;

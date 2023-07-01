@@ -8,11 +8,13 @@
  * This code is licenced under the GPL.
  */
 
+#include "linux/percpu-defs.h"
 #include <linux/clockchips.h>
 #include <linux/kernel.h>
 #include <linux/mutex.h>
 #include <linux/sched.h>
 #include <linux/sched/clock.h>
+#include <linux/sched/idle.h>
 #include <linux/notifier.h>
 #include <linux/pm_qos.h>
 #include <linux/cpu.h>
@@ -22,6 +24,8 @@
 #include <linux/module.h>
 #include <linux/suspend.h>
 #include <linux/tick.h>
+#include <linux/mmu_context.h>
+#include <linux/context_tracking.h>
 #include <trace/events/power.h>
 
 #include "cpuidle.h"
@@ -133,39 +137,43 @@ int cpuidle_find_deepest_state(struct cpuidle_driver *drv,
 }
 
 #ifdef CONFIG_SUSPEND
-static void enter_s2idle_proper(struct cpuidle_driver *drv,
-				struct cpuidle_device *dev, int index)
+static noinstr void enter_s2idle_proper(struct cpuidle_driver *drv,
+					 struct cpuidle_device *dev, int index)
 {
+	struct cpuidle_state *target_state = &drv->states[index];
 	ktime_t time_start, time_end;
+
+	instrumentation_begin();
 
 	time_start = ns_to_ktime(local_clock());
 
-	/*
-	 * trace_suspend_resume() called by tick_freeze() for the last CPU
-	 * executing it contains RCU usage regarded as invalid in the idle
-	 * context, so tell RCU about that.
-	 */
-	RCU_NONIDLE(tick_freeze());
+	tick_freeze();
 	/*
 	 * The state used here cannot be a "coupled" one, because the "coupled"
 	 * cpuidle mechanism enables interrupts and doing that with timekeeping
 	 * suspended is generally unsafe.
 	 */
 	stop_critical_timings();
-	drv->states[index].enter_s2idle(dev, drv, index);
-	WARN_ON(!irqs_disabled());
-	/*
-	 * timekeeping_resume() that will be called by tick_unfreeze() for the
-	 * first CPU executing it calls functions containing RCU read-side
-	 * critical sections, so tell RCU about that.
-	 */
-	RCU_NONIDLE(tick_unfreeze());
+	if (!(target_state->flags & CPUIDLE_FLAG_RCU_IDLE)) {
+		ct_cpuidle_enter();
+		/* Annotate away the indirect call */
+		instrumentation_begin();
+	}
+	target_state->enter_s2idle(dev, drv, index);
+	if (WARN_ON_ONCE(!irqs_disabled()))
+		raw_local_irq_disable();
+	if (!(target_state->flags & CPUIDLE_FLAG_RCU_IDLE)) {
+		instrumentation_end();
+		ct_cpuidle_exit();
+	}
+	tick_unfreeze();
 	start_critical_timings();
 
 	time_end = ns_to_ktime(local_clock());
 
 	dev->states_usage[index].s2idle_time += ktime_us_delta(time_end, time_start);
 	dev->states_usage[index].s2idle_usage++;
+	instrumentation_end();
 }
 
 /**
@@ -186,9 +194,10 @@ int cpuidle_enter_s2idle(struct cpuidle_driver *drv, struct cpuidle_device *dev)
 	 * be frozen safely.
 	 */
 	index = find_deepest_state(drv, dev, U64_MAX, 0, true);
-	if (index > 0)
+	if (index > 0) {
 		enter_s2idle_proper(drv, dev, index);
-
+		local_irq_enable();
+	}
 	return index;
 }
 #endif /* CONFIG_SUSPEND */
@@ -199,14 +208,17 @@ int cpuidle_enter_s2idle(struct cpuidle_driver *drv, struct cpuidle_device *dev)
  * @drv: cpuidle driver for this cpu
  * @index: index into the states table in @drv of the state to enter
  */
-int cpuidle_enter_state(struct cpuidle_device *dev, struct cpuidle_driver *drv,
-			int index)
+noinstr int cpuidle_enter_state(struct cpuidle_device *dev,
+				 struct cpuidle_driver *drv,
+				 int index)
 {
 	int entered_state;
 
 	struct cpuidle_state *target_state = &drv->states[index];
 	bool broadcast = !!(target_state->flags & CPUIDLE_FLAG_TIMER_STOP);
 	ktime_t time_start, time_end;
+
+	instrumentation_begin();
 
 	/*
 	 * Tell the time framework to switch to a broadcast timer because our
@@ -224,29 +236,54 @@ int cpuidle_enter_state(struct cpuidle_device *dev, struct cpuidle_driver *drv,
 		broadcast = false;
 	}
 
+	if (target_state->flags & CPUIDLE_FLAG_TLB_FLUSHED)
+		leave_mm(dev->cpu);
+
 	/* Take note of the planned idle state. */
 	sched_idle_set_state(target_state);
 
-	trace_cpu_idle_rcuidle(index, dev->cpu);
+	trace_cpu_idle(index, dev->cpu);
 	time_start = ns_to_ktime(local_clock());
 
 	stop_critical_timings();
+	if (!(target_state->flags & CPUIDLE_FLAG_RCU_IDLE)) {
+		ct_cpuidle_enter();
+		/* Annotate away the indirect call */
+		instrumentation_begin();
+	}
+
+	/*
+	 * NOTE!!
+	 *
+	 * For cpuidle_state::enter() methods that do *NOT* set
+	 * CPUIDLE_FLAG_RCU_IDLE RCU will be disabled here and these functions
+	 * must be marked either noinstr or __cpuidle.
+	 *
+	 * For cpuidle_state::enter() methods that *DO* set
+	 * CPUIDLE_FLAG_RCU_IDLE this isn't required, but they must mark the
+	 * function calling ct_cpuidle_enter() as noinstr/__cpuidle and all
+	 * functions called within the RCU-idle region.
+	 */
 	entered_state = target_state->enter(dev, drv, index);
+
+	if (WARN_ONCE(!irqs_disabled(), "%ps leaked IRQ state", target_state->enter))
+		raw_local_irq_disable();
+
+	if (!(target_state->flags & CPUIDLE_FLAG_RCU_IDLE)) {
+		instrumentation_end();
+		ct_cpuidle_exit();
+	}
 	start_critical_timings();
 
 	sched_clock_idle_wakeup_event();
 	time_end = ns_to_ktime(local_clock());
-	trace_cpu_idle_rcuidle(PWR_EVENT_EXIT, dev->cpu);
+	trace_cpu_idle(PWR_EVENT_EXIT, dev->cpu);
 
 	/* The cpu is no longer idle or about to enter idle. */
 	sched_idle_set_state(NULL);
 
-	if (broadcast) {
-		if (WARN_ON_ONCE(!irqs_disabled()))
-			local_irq_disable();
-
+	if (broadcast)
 		tick_broadcast_exit();
-	}
 
 	if (!cpuidle_state_is_coupled(drv, index))
 		local_irq_enable();
@@ -273,6 +310,7 @@ int cpuidle_enter_state(struct cpuidle_device *dev, struct cpuidle_driver *drv,
 
 				/* Shallower states are enabled, so update. */
 				dev->states_usage[entered_state].above++;
+				trace_cpu_idle_miss(dev->cpu, entered_state, false);
 				break;
 			}
 		} else if (diff > delay) {
@@ -284,15 +322,20 @@ int cpuidle_enter_state(struct cpuidle_device *dev, struct cpuidle_driver *drv,
 				 * Update if a deeper state would have been a
 				 * better match for the observed idle duration.
 				 */
-				if (diff - delay >= drv->states[i].target_residency_ns)
+				if (diff - delay >= drv->states[i].target_residency_ns) {
 					dev->states_usage[entered_state].below++;
+					trace_cpu_idle_miss(dev->cpu, entered_state, true);
+				}
 
 				break;
 			}
 		}
 	} else {
 		dev->last_residency_ns = 0;
+		dev->states_usage[index].rejected++;
 	}
+
+	instrumentation_end();
 
 	return entered_state;
 }
@@ -362,6 +405,19 @@ void cpuidle_reflect(struct cpuidle_device *dev, int index)
 		cpuidle_curr_governor->reflect(dev, index);
 }
 
+/*
+ * Min polling interval of 10usec is a guess. It is assuming that
+ * for most users, the time for a single ping-pong workload like
+ * perf bench pipe would generally complete within 10usec but
+ * this is hardware dependant. Actual time can be estimated with
+ *
+ * perf bench sched pipe -l 10000
+ *
+ * Run multiple times to avoid cpufreq effects.
+ */
+#define CPUIDLE_POLL_MIN 10000
+#define CPUIDLE_POLL_MAX (TICK_NSEC / 16)
+
 /**
  * cpuidle_poll_time - return amount of time to poll for,
  * governors can override dev->poll_limit_ns if necessary
@@ -370,21 +426,29 @@ void cpuidle_reflect(struct cpuidle_device *dev, int index)
  * @dev:   the cpuidle device
  *
  */
-u64 cpuidle_poll_time(struct cpuidle_driver *drv,
+__cpuidle u64 cpuidle_poll_time(struct cpuidle_driver *drv,
 		      struct cpuidle_device *dev)
 {
 	int i;
 	u64 limit_ns;
 
+	BUILD_BUG_ON(CPUIDLE_POLL_MIN > CPUIDLE_POLL_MAX);
+
 	if (dev->poll_limit_ns)
 		return dev->poll_limit_ns;
 
-	limit_ns = TICK_NSEC;
+	limit_ns = CPUIDLE_POLL_MAX;
 	for (i = 1; i < drv->state_count; i++) {
+		u64 state_limit;
+
 		if (dev->states_usage[i].disable)
 			continue;
 
-		limit_ns = drv->states[i].target_residency_ns;
+		state_limit = drv->states[i].target_residency_ns;
+		if (state_limit < CPUIDLE_POLL_MIN)
+			continue;
+
+		limit_ns = min_t(u64, state_limit, CPUIDLE_POLL_MAX);
 		break;
 	}
 
@@ -736,53 +800,15 @@ int cpuidle_register(struct cpuidle_driver *drv,
 }
 EXPORT_SYMBOL_GPL(cpuidle_register);
 
-#ifdef CONFIG_SMP
-
-/*
- * This function gets called when a part of the kernel has a new latency
- * requirement.  This means we need to get all processors out of their C-state,
- * and then recalculate a new suitable C-state. Just do a cross-cpu IPI; that
- * wakes them all right up.
- */
-static int cpuidle_latency_notify(struct notifier_block *b,
-		unsigned long l, void *v)
-{
-	wake_up_all_idle_cpus();
-	return NOTIFY_OK;
-}
-
-static struct notifier_block cpuidle_latency_notifier = {
-	.notifier_call = cpuidle_latency_notify,
-};
-
-static inline void latency_notifier_init(struct notifier_block *n)
-{
-	pm_qos_add_notifier(PM_QOS_CPU_DMA_LATENCY, n);
-}
-
-#else /* CONFIG_SMP */
-
-#define latency_notifier_init(x) do { } while (0)
-
-#endif /* CONFIG_SMP */
-
 /**
  * cpuidle_init - core initializer
  */
 static int __init cpuidle_init(void)
 {
-	int ret;
-
 	if (cpuidle_disabled())
 		return -ENODEV;
 
-	ret = cpuidle_add_interface(cpu_subsys.dev_root);
-	if (ret)
-		return ret;
-
-	latency_notifier_init(&cpuidle_latency_notifier);
-
-	return 0;
+	return cpuidle_add_interface(cpu_subsys.dev_root);
 }
 
 module_param(off, int, 0444);

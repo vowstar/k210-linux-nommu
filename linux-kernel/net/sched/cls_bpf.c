@@ -19,6 +19,7 @@
 #include <net/rtnetlink.h>
 #include <net/pkt_cls.h>
 #include <net/sock.h>
+#include <net/tc_wrapper.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Daniel Borkmann <dborkman@redhat.com>");
@@ -77,16 +78,15 @@ static int cls_bpf_exec_opcode(int code)
 	}
 }
 
-static int cls_bpf_classify(struct sk_buff *skb, const struct tcf_proto *tp,
-			    struct tcf_result *res)
+TC_INDIRECT_SCOPE int cls_bpf_classify(struct sk_buff *skb,
+				       const struct tcf_proto *tp,
+				       struct tcf_result *res)
 {
 	struct cls_bpf_head *head = rcu_dereference_bh(tp->root);
 	bool at_ingress = skb_at_tc_ingress(skb);
 	struct cls_bpf_prog *prog;
 	int ret = -1;
 
-	/* Needed here for accessing maps. */
-	rcu_read_lock();
 	list_for_each_entry_rcu(prog, &head->plist, link) {
 		int filter_res;
 
@@ -98,12 +98,14 @@ static int cls_bpf_classify(struct sk_buff *skb, const struct tcf_proto *tp,
 			/* It is safe to push/pull even if skb_shared() */
 			__skb_push(skb, skb->mac_len);
 			bpf_compute_data_pointers(skb);
-			filter_res = BPF_PROG_RUN(prog->filter, skb);
+			filter_res = bpf_prog_run(prog->filter, skb);
 			__skb_pull(skb, skb->mac_len);
 		} else {
 			bpf_compute_data_pointers(skb);
-			filter_res = BPF_PROG_RUN(prog->filter, skb);
+			filter_res = bpf_prog_run(prog->filter, skb);
 		}
+		if (unlikely(!skb->tstamp && skb->mono_delivery_time))
+			skb->mono_delivery_time = 0;
 
 		if (prog->exts_integrated) {
 			res->class   = 0;
@@ -131,7 +133,6 @@ static int cls_bpf_classify(struct sk_buff *skb, const struct tcf_proto *tp,
 
 		break;
 	}
-	rcu_read_unlock();
 
 	return ret;
 }
@@ -407,7 +408,7 @@ static int cls_bpf_prog_from_efd(struct nlattr **tb, struct cls_bpf_prog *prog,
 
 static int cls_bpf_set_parms(struct net *net, struct tcf_proto *tp,
 			     struct cls_bpf_prog *prog, unsigned long base,
-			     struct nlattr **tb, struct nlattr *est, bool ovr,
+			     struct nlattr **tb, struct nlattr *est, u32 flags,
 			     struct netlink_ext_ack *extack)
 {
 	bool is_bpf, is_ebpf, have_exts = false;
@@ -419,7 +420,7 @@ static int cls_bpf_set_parms(struct net *net, struct tcf_proto *tp,
 	if ((!is_bpf && !is_ebpf) || (is_bpf && is_ebpf))
 		return -EINVAL;
 
-	ret = tcf_exts_validate(net, tp, tb, est, &prog->exts, ovr, true,
+	ret = tcf_exts_validate(net, tp, tb, est, &prog->exts, flags,
 				extack);
 	if (ret < 0)
 		return ret;
@@ -458,7 +459,7 @@ static int cls_bpf_set_parms(struct net *net, struct tcf_proto *tp,
 static int cls_bpf_change(struct net *net, struct sk_buff *in_skb,
 			  struct tcf_proto *tp, unsigned long base,
 			  u32 handle, struct nlattr **tca,
-			  void **arg, bool ovr, bool rtnl_held,
+			  void **arg, u32 flags,
 			  struct netlink_ext_ack *extack)
 {
 	struct cls_bpf_head *head = rtnl_dereference(tp->root);
@@ -503,7 +504,7 @@ static int cls_bpf_change(struct net *net, struct sk_buff *in_skb,
 		goto errout;
 	prog->handle = handle;
 
-	ret = cls_bpf_set_parms(net, tp, prog, base, tb, tca[TCA_RATE], ovr,
+	ret = cls_bpf_set_parms(net, tp, prog, base, tb, tca[TCA_RATE], flags,
 				extack);
 	if (ret < 0)
 		goto errout_idr;
@@ -636,12 +637,7 @@ static void cls_bpf_bind_class(void *fh, u32 classid, unsigned long cl,
 {
 	struct cls_bpf_prog *prog = fh;
 
-	if (prog && prog->res.classid == classid) {
-		if (cl)
-			__tcf_bind_filter(q, &prog->res, base);
-		else
-			__tcf_unbind_filter(q, &prog->res);
-	}
+	tc_cls_bind_class(classid, cl, q, &prog->res, base);
 }
 
 static void cls_bpf_walk(struct tcf_proto *tp, struct tcf_walker *arg,
@@ -651,14 +647,8 @@ static void cls_bpf_walk(struct tcf_proto *tp, struct tcf_walker *arg,
 	struct cls_bpf_prog *prog;
 
 	list_for_each_entry(prog, &head->plist, link) {
-		if (arg->count < arg->skip)
-			goto skip;
-		if (arg->fn(tp, prog, arg) < 0) {
-			arg->stop = 1;
+		if (!tc_cls_stats_dump(tp, arg, prog))
 			break;
-		}
-skip:
-		arg->count++;
 	}
 }
 

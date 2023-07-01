@@ -1,12 +1,14 @@
 /* SPDX-License-Identifier: BSD-3-Clause-Clear */
 /*
  * Copyright (c) 2018-2019 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef ATH11K_HAL_TX_H
 #define ATH11K_HAL_TX_H
 
 #include "hal_desc.h"
+#include "core.h"
 
 #define HAL_TX_ADDRX_EN			1
 #define HAL_TX_ADDRY_EN			2
@@ -28,10 +30,13 @@ struct hal_tx_info {
 	u32 flags1; /* %HAL_TCL_DATA_CMD_INFO2_ */
 	u16 addr_search_flags; /* %HAL_TCL_DATA_CMD_INFO0_ADDR(X/Y)_ */
 	u16 bss_ast_hash;
+	u16 bss_ast_idx;
 	u8 tid;
 	u8 search_type; /* %HAL_TX_ADDR_SEARCH_ */
 	u8 lmac_id;
 	u8 dscp_tid_tbl_idx;
+	bool enable_mesh;
+	u8 rbm_id;
 };
 
 /* TODO: Check if the actual desc macros can be used instead */

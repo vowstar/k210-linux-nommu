@@ -76,6 +76,7 @@ static int snooze_loop(struct cpuidle_device *dev,
 	local_irq_enable();
 
 	snooze_exit_time = get_tb() + get_snooze_timeout(dev, drv, index);
+	dev->poll_time_limit = false;
 	ppc64_runlatch_off();
 	HMT_very_low();
 	while (!need_resched()) {
@@ -86,6 +87,7 @@ static int snooze_loop(struct cpuidle_device *dev,
 			 * cleared to order subsequent test of need_resched().
 			 */
 			clear_thread_flag(TIF_POLLING_NRFLAG);
+			dev->poll_time_limit = true;
 			smp_mb();
 			break;
 		}
@@ -141,7 +143,7 @@ static int stop_loop(struct cpuidle_device *dev,
 		     struct cpuidle_driver *drv,
 		     int index)
 {
-	power9_idle_type(stop_psscr_table[index].val,
+	arch300_idle_type(stop_psscr_table[index].val,
 			 stop_psscr_table[index].mask);
 	return index;
 }
@@ -155,7 +157,8 @@ static struct cpuidle_state powernv_states[CPUIDLE_STATE_MAX] = {
 		.desc = "snooze",
 		.exit_latency = 0,
 		.target_residency = 0,
-		.enter = snooze_loop },
+		.enter = snooze_loop,
+		.flags = CPUIDLE_FLAG_POLLING },
 };
 
 static int powernv_cpuidle_cpu_online(unsigned int cpu)
@@ -233,8 +236,8 @@ static inline void add_powernv_state(int index, const char *name,
 				     unsigned int exit_latency,
 				     u64 psscr_val, u64 psscr_mask)
 {
-	strlcpy(powernv_states[index].name, name, CPUIDLE_NAME_LEN);
-	strlcpy(powernv_states[index].desc, name, CPUIDLE_NAME_LEN);
+	strscpy(powernv_states[index].name, name, CPUIDLE_NAME_LEN);
+	strscpy(powernv_states[index].desc, name, CPUIDLE_NAME_LEN);
 	powernv_states[index].flags = flags;
 	powernv_states[index].target_residency = target_residency;
 	powernv_states[index].exit_latency = exit_latency;
@@ -242,20 +245,6 @@ static inline void add_powernv_state(int index, const char *name,
 	/* For power8 and below psscr_* will be 0 */
 	stop_psscr_table[index].val = psscr_val;
 	stop_psscr_table[index].mask = psscr_mask;
-}
-
-/*
- * Returns 0 if prop1_len == prop2_len. Else returns -1
- */
-static inline int validate_dt_prop_sizes(const char *prop1, int prop1_len,
-					 const char *prop2, int prop2_len)
-{
-	if (prop1_len == prop2_len)
-		return 0;
-
-	pr_warn("cpuidle-powernv: array sizes don't match for %s and %s\n",
-		prop1, prop2);
-	return -1;
 }
 
 extern u32 pnv_get_supported_cpuidle_states(void);

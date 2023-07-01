@@ -10,6 +10,34 @@
 
 #include <linux/types.h>
 
+/*
+ * Linux EFI stub v1.0 adds the following functionality:
+ * - Loading initrd from the LINUX_EFI_INITRD_MEDIA_GUID device path,
+ * - Loading/starting the kernel from firmware that targets a different
+ *   machine type, via the entrypoint exposed in the .compat PE/COFF section.
+ *
+ * The recommended way of loading and starting v1.0 or later kernels is to use
+ * the LoadImage() and StartImage() EFI boot services, and expose the initrd
+ * via the LINUX_EFI_INITRD_MEDIA_GUID device path.
+ *
+ * Versions older than v1.0 support initrd loading via the image load options
+ * (using initrd=, limited to the volume from which the kernel itself was
+ * loaded), or via arch specific means (bootparams, DT, etc).
+ *
+ * On x86, LoadImage() and StartImage() can be omitted if the EFI handover
+ * protocol is implemented, which can be inferred from the version,
+ * handover_offset and xloadflags fields in the bootparams structure.
+ */
+#define LINUX_EFISTUB_MAJOR_VERSION		0x1
+#define LINUX_EFISTUB_MINOR_VERSION		0x1
+
+/*
+ * LINUX_PE_MAGIC appears at offset 0x38 into the MS-DOS header of EFI bootable
+ * Linux kernel images that target the architecture as specified by the PE/COFF
+ * header machine type field.
+ */
+#define LINUX_PE_MAGIC	0x818223cd
+
 #define MZ_MAGIC	0x5a4d	/* "MZ" */
 
 #define PE_MAGIC		0x00004550	/* "PE\0\0" */
@@ -34,6 +62,9 @@
 #define	IMAGE_FILE_MACHINE_POWERPC	0x01f0
 #define	IMAGE_FILE_MACHINE_POWERPCFP	0x01f1
 #define	IMAGE_FILE_MACHINE_R4000	0x0166
+#define	IMAGE_FILE_MACHINE_RISCV32	0x5032
+#define	IMAGE_FILE_MACHINE_RISCV64	0x5064
+#define	IMAGE_FILE_MACHINE_RISCV128	0x5128
 #define	IMAGE_FILE_MACHINE_SH3		0x01a2
 #define	IMAGE_FILE_MACHINE_SH3DSP	0x01a3
 #define	IMAGE_FILE_MACHINE_SH3E		0x01a4
@@ -41,6 +72,8 @@
 #define	IMAGE_FILE_MACHINE_SH5		0x01a8
 #define	IMAGE_FILE_MACHINE_THUMB	0x01c2
 #define	IMAGE_FILE_MACHINE_WCEMIPSV2	0x0169
+#define	IMAGE_FILE_MACHINE_LOONGARCH32	0x6232
+#define	IMAGE_FILE_MACHINE_LOONGARCH64	0x6264
 
 /* flags */
 #define IMAGE_FILE_RELOCS_STRIPPED           0x0001

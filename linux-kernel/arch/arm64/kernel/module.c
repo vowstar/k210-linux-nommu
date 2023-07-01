@@ -15,9 +15,11 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/moduleloader.h>
+#include <linux/scs.h>
 #include <linux/vmalloc.h>
 #include <asm/alternative.h>
 #include <asm/insn.h>
+#include <asm/scs.h>
 #include <asm/sections.h>
 
 void *module_alloc(unsigned long size)
@@ -30,22 +32,26 @@ void *module_alloc(unsigned long size)
 	if (IS_ENABLED(CONFIG_ARM64_MODULE_PLTS))
 		gfp_mask |= __GFP_NOWARN;
 
-	if (IS_ENABLED(CONFIG_KASAN))
+	if (IS_ENABLED(CONFIG_KASAN_GENERIC) ||
+	    IS_ENABLED(CONFIG_KASAN_SW_TAGS))
 		/* don't exceed the static module region - see below */
 		module_alloc_end = MODULES_END;
 
 	p = __vmalloc_node_range(size, MODULE_ALIGN, module_alloc_base,
-				module_alloc_end, gfp_mask, PAGE_KERNEL, 0,
+				module_alloc_end, gfp_mask, PAGE_KERNEL, VM_DEFER_KMEMLEAK,
 				NUMA_NO_NODE, __builtin_return_address(0));
 
 	if (!p && IS_ENABLED(CONFIG_ARM64_MODULE_PLTS) &&
-	    !IS_ENABLED(CONFIG_KASAN))
+	    (IS_ENABLED(CONFIG_KASAN_VMALLOC) ||
+	     (!IS_ENABLED(CONFIG_KASAN_GENERIC) &&
+	      !IS_ENABLED(CONFIG_KASAN_SW_TAGS))))
 		/*
-		 * KASAN can only deal with module allocations being served
-		 * from the reserved module region, since the remainder of
-		 * the vmalloc region is already backed by zero shadow pages,
-		 * and punching holes into it is non-trivial. Since the module
-		 * region is not randomized when KASAN is enabled, it is even
+		 * KASAN without KASAN_VMALLOC can only deal with module
+		 * allocations being served from the reserved module region,
+		 * since the remainder of the vmalloc region is already
+		 * backed by zero shadow pages, and punching holes into it
+		 * is non-trivial. Since the module region is not randomized
+		 * when KASAN is enabled without KASAN_VMALLOC, it is even
 		 * less likely that the module region gets exhausted, so we
 		 * can simply omit this fallback in that case.
 		 */
@@ -54,12 +60,13 @@ void *module_alloc(unsigned long size)
 				PAGE_KERNEL, 0, NUMA_NO_NODE,
 				__builtin_return_address(0));
 
-	if (p && (kasan_module_alloc(p, size) < 0)) {
+	if (p && (kasan_alloc_module_shadow(p, size, gfp_mask) < 0)) {
 		vfree(p);
 		return NULL;
 	}
 
-	return p;
+	/* Memory is intended to be executable, reset the pointer tag. */
+	return kasan_reset_tag(p);
 }
 
 enum aarch64_reloc_op {
@@ -315,21 +322,21 @@ int apply_relocate_add(Elf64_Shdr *sechdrs,
 		/* MOVW instruction relocations. */
 		case R_AARCH64_MOVW_UABS_G0_NC:
 			overflow_check = false;
-			/* Fall through */
+			fallthrough;
 		case R_AARCH64_MOVW_UABS_G0:
 			ovf = reloc_insn_movw(RELOC_OP_ABS, loc, val, 0,
 					      AARCH64_INSN_IMM_MOVKZ);
 			break;
 		case R_AARCH64_MOVW_UABS_G1_NC:
 			overflow_check = false;
-			/* Fall through */
+			fallthrough;
 		case R_AARCH64_MOVW_UABS_G1:
 			ovf = reloc_insn_movw(RELOC_OP_ABS, loc, val, 16,
 					      AARCH64_INSN_IMM_MOVKZ);
 			break;
 		case R_AARCH64_MOVW_UABS_G2_NC:
 			overflow_check = false;
-			/* Fall through */
+			fallthrough;
 		case R_AARCH64_MOVW_UABS_G2:
 			ovf = reloc_insn_movw(RELOC_OP_ABS, loc, val, 32,
 					      AARCH64_INSN_IMM_MOVKZ);
@@ -397,7 +404,7 @@ int apply_relocate_add(Elf64_Shdr *sechdrs,
 			break;
 		case R_AARCH64_ADR_PREL_PG_HI21_NC:
 			overflow_check = false;
-			/* Fall through */
+			fallthrough;
 		case R_AARCH64_ADR_PREL_PG_HI21:
 			ovf = reloc_insn_adrp(me, sechdrs, loc, val);
 			if (ovf && ovf != -ERANGE)
@@ -471,21 +478,6 @@ overflow:
 	return -ENOEXEC;
 }
 
-static const Elf_Shdr *find_section(const Elf_Ehdr *hdr,
-				    const Elf_Shdr *sechdrs,
-				    const char *name)
-{
-	const Elf_Shdr *s, *se;
-	const char *secstrs = (void *)hdr + sechdrs[hdr->e_shstrndx].sh_offset;
-
-	for (s = sechdrs, se = sechdrs + hdr->e_shnum; s < se; s++) {
-		if (strcmp(name, secstrs + s->sh_name) == 0)
-			return s;
-	}
-
-	return NULL;
-}
-
 static inline void __init_plt(struct plt_entry *plt, unsigned long addr)
 {
 	*plt = get_plt_entry(addr, plt);
@@ -507,9 +499,6 @@ static int module_init_ftrace_plt(const Elf_Ehdr *hdr,
 
 	__init_plt(&plts[FTRACE_PLT_IDX], FTRACE_ADDR);
 
-	if (IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_REGS))
-		__init_plt(&plts[FTRACE_REGS_PLT_IDX], FTRACE_REGS_ADDR);
-
 	mod->arch.ftrace_trampolines = plts;
 #endif
 	return 0;
@@ -523,6 +512,12 @@ int module_finalize(const Elf_Ehdr *hdr,
 	s = find_section(hdr, sechdrs, ".altinstructions");
 	if (s)
 		apply_alternatives_module((void *)s->sh_addr, s->sh_size);
+
+	if (scs_is_dynamic()) {
+		s = find_section(hdr, sechdrs, ".init.eh_frame");
+		if (s)
+			scs_patch((void *)s->sh_addr, s->sh_size);
+	}
 
 	return module_init_ftrace_plt(hdr, sechdrs, me);
 }

@@ -137,7 +137,7 @@ static void plx_dma_process_desc(struct plx_dma_dev *plxdev)
 	struct plx_dma_desc *desc;
 	u32 flags;
 
-	spin_lock_bh(&plxdev->ring_lock);
+	spin_lock(&plxdev->ring_lock);
 
 	while (plxdev->tail != plxdev->head) {
 		desc = plx_dma_get_desc(plxdev, plxdev->tail);
@@ -165,7 +165,7 @@ static void plx_dma_process_desc(struct plx_dma_dev *plxdev)
 		plxdev->tail++;
 	}
 
-	spin_unlock_bh(&plxdev->ring_lock);
+	spin_unlock(&plxdev->ring_lock);
 }
 
 static void plx_dma_abort_desc(struct plx_dma_dev *plxdev)
@@ -241,9 +241,9 @@ static void plx_dma_stop(struct plx_dma_dev *plxdev)
 	rcu_read_unlock();
 }
 
-static void plx_dma_desc_task(unsigned long data)
+static void plx_dma_desc_task(struct tasklet_struct *t)
 {
-	struct plx_dma_dev *plxdev = (void *)data;
+	struct plx_dma_dev *plxdev = from_tasklet(plxdev, t, desc_task);
 
 	plx_dma_process_desc(plxdev);
 }
@@ -507,14 +507,11 @@ static int plx_dma_create(struct pci_dev *pdev)
 
 	rc = request_irq(pci_irq_vector(pdev, 0), plx_dma_isr, 0,
 			 KBUILD_MODNAME, plxdev);
-	if (rc) {
-		kfree(plxdev);
-		return rc;
-	}
+	if (rc)
+		goto free_plx;
 
 	spin_lock_init(&plxdev->ring_lock);
-	tasklet_init(&plxdev->desc_task, plx_dma_desc_task,
-		     (unsigned long)plxdev);
+	tasklet_setup(&plxdev->desc_task, plx_dma_desc_task);
 
 	RCU_INIT_POINTER(plxdev->pdev, pdev);
 	plxdev->bar = pcim_iomap_table(pdev)[0];
@@ -541,14 +538,20 @@ static int plx_dma_create(struct pci_dev *pdev)
 	rc = dma_async_device_register(dma);
 	if (rc) {
 		pci_err(pdev, "Failed to register dma device: %d\n", rc);
-		free_irq(pci_irq_vector(pdev, 0),  plxdev);
-		kfree(plxdev);
-		return rc;
+		goto put_device;
 	}
 
 	pci_set_drvdata(pdev, plxdev);
 
 	return 0;
+
+put_device:
+	put_device(&pdev->dev);
+	free_irq(pci_irq_vector(pdev, 0),  plxdev);
+free_plx:
+	kfree(plxdev);
+
+	return rc;
 }
 
 static int plx_dma_probe(struct pci_dev *pdev,
@@ -560,15 +563,9 @@ static int plx_dma_probe(struct pci_dev *pdev,
 	if (rc)
 		return rc;
 
-	rc = pci_set_dma_mask(pdev, DMA_BIT_MASK(48));
+	rc = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(48));
 	if (rc)
-		rc = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
-	if (rc)
-		return rc;
-
-	rc = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(48));
-	if (rc)
-		rc = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
+		rc = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 	if (rc)
 		return rc;
 

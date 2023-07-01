@@ -49,8 +49,7 @@ void dst_init(struct dst_entry *dst, struct dst_ops *ops,
 	      unsigned short flags)
 {
 	dst->dev = dev;
-	if (dev)
-		dev_hold(dev);
+	netdev_hold(dev, &dst->dev_tracker, GFP_ATOMIC);
 	dst->ops = ops;
 	dst_init_metrics(dst, dst_default_metrics.metrics, true);
 	dst->expires = 0UL;
@@ -81,14 +80,10 @@ void *dst_alloc(struct dst_ops *ops, struct net_device *dev,
 {
 	struct dst_entry *dst;
 
-	if (ops->gc && dst_entries_get_fast(ops) > ops->gc_thresh) {
-		if (ops->gc(ops)) {
-			printk_ratelimited(KERN_NOTICE "Route cache is full: "
-					   "consider increasing sysctl "
-					   "net.ipv[4|6].route.max_size.\n");
-			return NULL;
-		}
-	}
+	if (ops->gc &&
+	    !(flags & DST_NOCOUNT) &&
+	    dst_entries_get_fast(ops) > ops->gc_thresh)
+		ops->gc(ops);
 
 	dst = kmem_cache_alloc(ops->kmem_cachep, GFP_ATOMIC);
 	if (!dst)
@@ -118,8 +113,7 @@ struct dst_entry *dst_destroy(struct dst_entry * dst)
 
 	if (dst->ops->destroy)
 		dst->ops->destroy(dst);
-	if (dst->dev)
-		dev_put(dst->dev);
+	netdev_put(dst->dev, &dst->dev_tracker);
 
 	lwtstate_put(dst->lwtstate);
 
@@ -144,7 +138,7 @@ static void dst_destroy_rcu(struct rcu_head *head)
 
 /* Operations to mark dst as DEAD and clean up the net device referenced
  * by dst:
- * 1. put the dst under loopback interface and discard all tx/rx packets
+ * 1. put the dst under blackhole interface and discard all tx/rx packets
  *    on this route.
  * 2. release the net_device
  * This function should be called when removing routes from the fib tree
@@ -161,8 +155,8 @@ void dst_dev_put(struct dst_entry *dst)
 	dst->input = dst_discard;
 	dst->output = dst_discard_out;
 	dst->dev = blackhole_netdev;
-	dev_hold(dst->dev);
-	dev_put(dev);
+	netdev_ref_replace(dev, blackhole_netdev, &dst->dev_tracker,
+			   GFP_ATOMIC);
 }
 EXPORT_SYMBOL(dst_dev_put);
 
@@ -176,7 +170,7 @@ void dst_release(struct dst_entry *dst)
 			net_warn_ratelimited("%s: dst:%p refcnt:%d\n",
 					     __func__, dst, newrefcnt);
 		if (!newrefcnt)
-			call_rcu(&dst->rcu_head, dst_destroy_rcu);
+			call_rcu_hurry(&dst->rcu_head, dst_destroy_rcu);
 	}
 }
 EXPORT_SYMBOL(dst_release);
@@ -237,37 +231,62 @@ void __dst_destroy_metrics_generic(struct dst_entry *dst, unsigned long old)
 }
 EXPORT_SYMBOL(__dst_destroy_metrics_generic);
 
-static struct dst_ops md_dst_ops = {
-	.family =		AF_UNSPEC,
+struct dst_entry *dst_blackhole_check(struct dst_entry *dst, u32 cookie)
+{
+	return NULL;
+}
+
+u32 *dst_blackhole_cow_metrics(struct dst_entry *dst, unsigned long old)
+{
+	return NULL;
+}
+
+struct neighbour *dst_blackhole_neigh_lookup(const struct dst_entry *dst,
+					     struct sk_buff *skb,
+					     const void *daddr)
+{
+	return NULL;
+}
+
+void dst_blackhole_update_pmtu(struct dst_entry *dst, struct sock *sk,
+			       struct sk_buff *skb, u32 mtu,
+			       bool confirm_neigh)
+{
+}
+EXPORT_SYMBOL_GPL(dst_blackhole_update_pmtu);
+
+void dst_blackhole_redirect(struct dst_entry *dst, struct sock *sk,
+			    struct sk_buff *skb)
+{
+}
+EXPORT_SYMBOL_GPL(dst_blackhole_redirect);
+
+unsigned int dst_blackhole_mtu(const struct dst_entry *dst)
+{
+	unsigned int mtu = dst_metric_raw(dst, RTAX_MTU);
+
+	return mtu ? : dst->dev->mtu;
+}
+EXPORT_SYMBOL_GPL(dst_blackhole_mtu);
+
+static struct dst_ops dst_blackhole_ops = {
+	.family		= AF_UNSPEC,
+	.neigh_lookup	= dst_blackhole_neigh_lookup,
+	.check		= dst_blackhole_check,
+	.cow_metrics	= dst_blackhole_cow_metrics,
+	.update_pmtu	= dst_blackhole_update_pmtu,
+	.redirect	= dst_blackhole_redirect,
+	.mtu		= dst_blackhole_mtu,
 };
-
-static int dst_md_discard_out(struct net *net, struct sock *sk, struct sk_buff *skb)
-{
-	WARN_ONCE(1, "Attempting to call output on metadata dst\n");
-	kfree_skb(skb);
-	return 0;
-}
-
-static int dst_md_discard(struct sk_buff *skb)
-{
-	WARN_ONCE(1, "Attempting to call input on metadata dst\n");
-	kfree_skb(skb);
-	return 0;
-}
 
 static void __metadata_dst_init(struct metadata_dst *md_dst,
 				enum metadata_type type, u8 optslen)
-
 {
 	struct dst_entry *dst;
 
 	dst = &md_dst->dst;
-	dst_init(dst, &md_dst_ops, NULL, 1, DST_OBSOLETE_NONE,
+	dst_init(dst, &dst_blackhole_ops, NULL, 1, DST_OBSOLETE_NONE,
 		 DST_METADATA | DST_NOCOUNT);
-
-	dst->input = dst_md_discard;
-	dst->output = dst_md_discard_out;
-
 	memset(dst + 1, 0, sizeof(*md_dst) + optslen - sizeof(*dst));
 	md_dst->type = type;
 }
@@ -293,6 +312,8 @@ void metadata_dst_free(struct metadata_dst *md_dst)
 	if (md_dst->type == METADATA_IP_TUNNEL)
 		dst_cache_destroy(&md_dst->u.tun_info.dst_cache);
 #endif
+	if (md_dst->type == METADATA_XFRM)
+		dst_release(md_dst->u.xfrm_info.dst_orig);
 	kfree(md_dst);
 }
 EXPORT_SYMBOL_GPL(metadata_dst_free);
@@ -317,16 +338,18 @@ EXPORT_SYMBOL_GPL(metadata_dst_alloc_percpu);
 
 void metadata_dst_free_percpu(struct metadata_dst __percpu *md_dst)
 {
-#ifdef CONFIG_DST_CACHE
 	int cpu;
 
 	for_each_possible_cpu(cpu) {
 		struct metadata_dst *one_md_dst = per_cpu_ptr(md_dst, cpu);
 
+#ifdef CONFIG_DST_CACHE
 		if (one_md_dst->type == METADATA_IP_TUNNEL)
 			dst_cache_destroy(&one_md_dst->u.tun_info.dst_cache);
-	}
 #endif
+		if (one_md_dst->type == METADATA_XFRM)
+			dst_release(one_md_dst->u.xfrm_info.dst_orig);
+	}
 	free_percpu(md_dst);
 }
 EXPORT_SYMBOL_GPL(metadata_dst_free_percpu);

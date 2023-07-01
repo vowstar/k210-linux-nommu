@@ -22,6 +22,7 @@
 #include <linux/mmc/pm.h>
 #include <linux/mmc/host.h>
 #include <linux/mmc/card.h>
+#include <linux/mmc/sd.h>
 #include <linux/mmc/slot-gpio.h>
 #include <linux/amba/bus.h>
 #include <linux/clk.h>
@@ -35,6 +36,7 @@
 #include <linux/types.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/reset.h>
+#include <linux/gpio/consumer.h>
 
 #include <asm/div64.h>
 #include <asm/io.h>
@@ -266,7 +268,35 @@ static struct variant_data variant_stm32_sdmmc = {
 	.datalength_bits	= 25,
 	.datactrl_blocksz	= 14,
 	.datactrl_any_blocksz	= true,
+	.datactrl_mask_sdio	= MCI_DPSM_ST_SDIOEN,
 	.stm32_idmabsize_mask	= GENMASK(12, 5),
+	.busy_timeout		= true,
+	.busy_detect		= true,
+	.busy_detect_flag	= MCI_STM32_BUSYD0,
+	.busy_detect_mask	= MCI_STM32_BUSYD0ENDMASK,
+	.init			= sdmmc_variant_init,
+};
+
+static struct variant_data variant_stm32_sdmmcv2 = {
+	.fifosize		= 16 * 4,
+	.fifohalfsize		= 8 * 4,
+	.f_max			= 267000000,
+	.stm32_clkdiv		= true,
+	.cmdreg_cpsm_enable	= MCI_CPSM_STM32_ENABLE,
+	.cmdreg_lrsp_crc	= MCI_CPSM_STM32_LRSP_CRC,
+	.cmdreg_srsp_crc	= MCI_CPSM_STM32_SRSP_CRC,
+	.cmdreg_srsp		= MCI_CPSM_STM32_SRSP,
+	.cmdreg_stop		= MCI_CPSM_STM32_CMDSTOP,
+	.data_cmd_enable	= MCI_CPSM_STM32_CMDTRANS,
+	.irq_pio_mask		= MCI_IRQ_PIO_STM32_MASK,
+	.datactrl_first		= true,
+	.datacnt_useless	= true,
+	.datalength_bits	= 25,
+	.datactrl_blocksz	= 14,
+	.datactrl_any_blocksz	= true,
+	.datactrl_mask_sdio	= MCI_DPSM_ST_SDIOEN,
+	.stm32_idmabsize_mask	= GENMASK(16, 5),
+	.dma_lli		= true,
 	.busy_timeout		= true,
 	.busy_detect		= true,
 	.busy_detect_flag	= MCI_STM32_BUSYD0,
@@ -732,7 +762,7 @@ int mmci_dmae_setup(struct mmci_host *host)
 
 	/*
 	 * If only an RX channel is specified, the driver will
-	 * attempt to use it bidirectionally, however if it is
+	 * attempt to use it bidirectionally, however if it
 	 * is specified but cannot be located, DMA will be disabled.
 	 */
 	if (dmae->rx_channel && !dmae->tx_channel)
@@ -1212,10 +1242,17 @@ mmci_start_command(struct mmci_host *host, struct mmc_command *cmd, u32 c)
 		if (!cmd->busy_timeout)
 			cmd->busy_timeout = 10 * MSEC_PER_SEC;
 
-		clks = (unsigned long long)cmd->busy_timeout * host->cclk;
+		if (cmd->busy_timeout > host->mmc->max_busy_timeout)
+			clks = (unsigned long long)host->mmc->max_busy_timeout * host->cclk;
+		else
+			clks = (unsigned long long)cmd->busy_timeout * host->cclk;
+
 		do_div(clks, MSEC_PER_SEC);
 		writel_relaxed(clks, host->base + MMCIDATATIMER);
 	}
+
+	if (host->ops->pre_sig_volt_switch && cmd->opcode == SD_SWITCH_VOLTAGE)
+		host->ops->pre_sig_volt_switch(host);
 
 	if (/*interrupt*/0)
 		c |= MCI_CPSM_INTERRUPT;
@@ -1357,6 +1394,10 @@ mmci_cmd_irq(struct mmci_host *host, struct mmc_command *cmd,
 	} else if (host->variant->busy_timeout && busy_resp &&
 		   status & MCI_DATATIMEOUT) {
 		cmd->error = -ETIMEDOUT;
+		/*
+		 * This will wake up mmci_irq_thread() which will issue
+		 * a hardware reset of the MMCI block.
+		 */
 		host->irq_action = IRQ_WAKE_THREAD;
 	} else {
 		cmd->resp[0] = readl(base + MMCIRESPONSE0);
@@ -1578,6 +1619,8 @@ static irqreturn_t mmci_irq(int irq, void *dev_id)
 
 	do {
 		status = readl(host->base + MMCISTATUS);
+		if (!status)
+			break;
 
 		if (host->singleirq) {
 			if (status & host->mask1_reg)
@@ -1705,10 +1748,6 @@ static void mmci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 	unsigned long flags;
 	int ret;
 
-	if (host->plat->ios_handler &&
-		host->plat->ios_handler(mmc_dev(mmc), ios))
-			dev_err(mmc_dev(mmc), "platform ios_handler failed\n");
-
 	switch (ios->power_mode) {
 	case MMC_POWER_OFF:
 		if (!IS_ERR(mmc->supply.vmmc))
@@ -1830,28 +1869,18 @@ static int mmci_get_cd(struct mmc_host *mmc)
 
 static int mmci_sig_volt_switch(struct mmc_host *mmc, struct mmc_ios *ios)
 {
-	int ret = 0;
+	struct mmci_host *host = mmc_priv(mmc);
+	int ret;
 
-	if (!IS_ERR(mmc->supply.vqmmc)) {
+	ret = mmc_regulator_set_vqmmc(mmc, ios);
 
-		switch (ios->signal_voltage) {
-		case MMC_SIGNAL_VOLTAGE_330:
-			ret = regulator_set_voltage(mmc->supply.vqmmc,
-						2700000, 3600000);
-			break;
-		case MMC_SIGNAL_VOLTAGE_180:
-			ret = regulator_set_voltage(mmc->supply.vqmmc,
-						1700000, 1950000);
-			break;
-		case MMC_SIGNAL_VOLTAGE_120:
-			ret = regulator_set_voltage(mmc->supply.vqmmc,
-						1100000, 1300000);
-			break;
-		}
+	if (!ret && host->ops && host->ops->post_sig_volt_switch)
+		ret = host->ops->post_sig_volt_switch(host, ios);
+	else if (ret)
+		ret = 0;
 
-		if (ret)
-			dev_warn(mmc_dev(mmc), "Voltage switch failed\n");
-	}
+	if (ret < 0)
+		dev_warn(mmc_dev(mmc), "Voltage switch failed\n");
 
 	return ret;
 }
@@ -1865,6 +1894,65 @@ static struct mmc_host_ops mmci_ops = {
 	.get_cd		= mmci_get_cd,
 	.start_signal_voltage_switch = mmci_sig_volt_switch,
 };
+
+static void mmci_probe_level_translator(struct mmc_host *mmc)
+{
+	struct device *dev = mmc_dev(mmc);
+	struct mmci_host *host = mmc_priv(mmc);
+	struct gpio_desc *cmd_gpio;
+	struct gpio_desc *ck_gpio;
+	struct gpio_desc *ckin_gpio;
+	int clk_hi, clk_lo;
+
+	/*
+	 * Assume the level translator is present if st,use-ckin is set.
+	 * This is to cater for DTs which do not implement this test.
+	 */
+	host->clk_reg_add |= MCI_STM32_CLK_SELCKIN;
+
+	cmd_gpio = gpiod_get(dev, "st,cmd", GPIOD_OUT_HIGH);
+	if (IS_ERR(cmd_gpio))
+		goto exit_cmd;
+
+	ck_gpio = gpiod_get(dev, "st,ck", GPIOD_OUT_HIGH);
+	if (IS_ERR(ck_gpio))
+		goto exit_ck;
+
+	ckin_gpio = gpiod_get(dev, "st,ckin", GPIOD_IN);
+	if (IS_ERR(ckin_gpio))
+		goto exit_ckin;
+
+	/* All GPIOs are valid, test whether level translator works */
+
+	/* Sample CKIN */
+	clk_hi = !!gpiod_get_value(ckin_gpio);
+
+	/* Set CK low */
+	gpiod_set_value(ck_gpio, 0);
+
+	/* Sample CKIN */
+	clk_lo = !!gpiod_get_value(ckin_gpio);
+
+	/* Tristate all */
+	gpiod_direction_input(cmd_gpio);
+	gpiod_direction_input(ck_gpio);
+
+	/* Level translator is present if CK signal is propagated to CKIN */
+	if (!clk_hi || clk_lo) {
+		host->clk_reg_add &= ~MCI_STM32_CLK_SELCKIN;
+		dev_warn(dev,
+			 "Level translator inoperable, CK signal not detected on CKIN, disabling.\n");
+	}
+
+	gpiod_put(ckin_gpio);
+
+exit_ckin:
+	gpiod_put(ck_gpio);
+exit_ck:
+	gpiod_put(cmd_gpio);
+exit_cmd:
+	pinctrl_select_default_state(dev);
+}
 
 static int mmci_of_parse(struct device_node *np, struct mmc_host *mmc)
 {
@@ -1891,7 +1979,7 @@ static int mmci_of_parse(struct device_node *np, struct mmc_host *mmc)
 	if (of_get_property(np, "st,neg-edge", NULL))
 		host->clk_reg_add |= MCI_STM32_CLK_NEGEDGE;
 	if (of_get_property(np, "st,use-ckin", NULL))
-		host->clk_reg_add |= MCI_STM32_CLK_SELCKIN;
+		mmci_probe_level_translator(mmc);
 
 	if (of_get_property(np, "mmc-cap-mmc-highspeed", NULL))
 		mmc->caps |= MMC_CAP_MMC_HIGHSPEED;
@@ -1927,12 +2015,14 @@ static int mmci_probe(struct amba_device *dev,
 	if (!mmc)
 		return -ENOMEM;
 
+	host = mmc_priv(mmc);
+	host->mmc = mmc;
+	host->mmc_ops = &mmci_ops;
+	mmc->ops = &mmci_ops;
+
 	ret = mmci_of_parse(np, mmc);
 	if (ret)
 		goto host_free;
-
-	host = mmc_priv(mmc);
-	host->mmc = mmc;
 
 	/*
 	 * Some variant (STM32) doesn't have opendrain bit, nevertheless
@@ -2038,6 +2128,9 @@ static int mmci_probe(struct amba_device *dev,
 		ret = PTR_ERR(host->rst);
 		goto clk_disable;
 	}
+	ret = reset_control_deassert(host->rst);
+	if (ret)
+		dev_err(mmc_dev(mmc), "failed to de-assert reset\n");
 
 	/* Get regulators and the supported OCR mask */
 	ret = mmc_regulator_get_supply(mmc);
@@ -2067,12 +2160,14 @@ static int mmci_probe(struct amba_device *dev,
 		mmc->caps |= MMC_CAP_WAIT_WHILE_BUSY;
 	}
 
+	/* Variants with mandatory busy timeout in HW needs R1B responses. */
+	if (variant->busy_timeout)
+		mmc->caps |= MMC_CAP_NEED_RSP_BUSY;
+
 	/* Prepare a CMD12 - needed to clear the DPSM on some variants. */
 	host->stop_abort.opcode = MMC_STOP_TRANSMISSION;
 	host->stop_abort.arg = 0;
 	host->stop_abort.flags = MMC_RSP_R1B | MMC_CMD_AC;
-
-	mmc->ops = &mmci_ops;
 
 	/* We support these PM capabilities. */
 	mmc->pm_caps |= MMC_PM_KEEP_POWER;
@@ -2161,7 +2256,9 @@ static int mmci_probe(struct amba_device *dev,
 	pm_runtime_set_autosuspend_delay(&dev->dev, 50);
 	pm_runtime_use_autosuspend(&dev->dev);
 
-	mmc_add_host(mmc);
+	ret = mmc_add_host(mmc);
+	if (ret)
+		goto clk_disable;
 
 	pm_runtime_put(&dev->dev);
 	return 0;
@@ -2173,7 +2270,7 @@ static int mmci_probe(struct amba_device *dev,
 	return ret;
 }
 
-static int mmci_remove(struct amba_device *dev)
+static void mmci_remove(struct amba_device *dev)
 {
 	struct mmc_host *mmc = amba_get_drvdata(dev);
 
@@ -2201,8 +2298,6 @@ static int mmci_remove(struct amba_device *dev)
 		clk_disable_unprepare(host->clk);
 		mmc_free_host(mmc);
 	}
-
-	return 0;
 }
 
 #ifdef CONFIG_PM
@@ -2334,6 +2429,16 @@ static const struct amba_id mmci_ids[] = {
 		.id     = 0x10153180,
 		.mask	= 0xf0ffffff,
 		.data	= &variant_stm32_sdmmc,
+	},
+	{
+		.id     = 0x00253180,
+		.mask	= 0xf0ffffff,
+		.data	= &variant_stm32_sdmmcv2,
+	},
+	{
+		.id     = 0x20253180,
+		.mask	= 0xf0ffffff,
+		.data	= &variant_stm32_sdmmcv2,
 	},
 	/* Qualcomm variants */
 	{

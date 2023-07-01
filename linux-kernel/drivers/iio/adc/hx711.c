@@ -86,9 +86,9 @@ struct hx711_data {
 	struct mutex		lock;
 	/*
 	 * triggered buffer
-	 * 2x32-bit channel + 64-bit timestamp
+	 * 2x32-bit channel + 64-bit naturally aligned timestamp
 	 */
-	u32			buffer[4];
+	u32			buffer[4] __aligned(8);
 	/*
 	 * delay after a rising edge on SCK until the data is ready DOUT
 	 * this is dependent on the hx711 where the datasheet tells a
@@ -551,7 +551,6 @@ static int hx711_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, indio_dev);
 
 	indio_dev->name = "hx711";
-	indio_dev->dev.parent = &pdev->dev;
 	indio_dev->info = &hx711_iio_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels = hx711_chan_spec;

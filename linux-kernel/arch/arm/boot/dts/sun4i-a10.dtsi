@@ -115,13 +115,12 @@
 			reg = <0x0>;
 			clocks = <&ccu CLK_CPU>;
 			clock-latency = <244144>; /* 8 32k periods */
-			operating-points = <
+			operating-points =
 				/* kHz	  uV */
-				1008000 1400000
-				912000	1350000
-				864000	1300000
-				624000	1250000
-				>;
+				<1008000 1400000>,
+				<912000	1350000>,
+				<864000	1300000>,
+				<624000	1250000>;
 			#cooling-cells = <2>;
 		};
 	};
@@ -143,7 +142,7 @@
 			trips {
 				cpu_alert0: cpu-alert0 {
 					/* milliCelsius */
-					temperature = <850000>;
+					temperature = <85000>;
 					hysteresis = <2000>;
 					type = "passive";
 				};
@@ -198,7 +197,7 @@
 		default-pool {
 			compatible = "shared-dma-pool";
 			size = <0x6000000>;
-			alloc-ranges = <0x4a000000 0x6000000>;
+			alloc-ranges = <0x40000000 0x10000000>;
 			reusable;
 			linux,cma-default;
 		};

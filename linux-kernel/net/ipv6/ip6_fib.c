@@ -15,6 +15,7 @@
 
 #define pr_fmt(fmt) "IPv6: " fmt
 
+#include <linux/bpf.h>
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/net.h>
@@ -32,6 +33,7 @@
 #include <net/lwtunnel.h>
 #include <net/fib_notifier.h>
 
+#include <net/ip_fib.h>
 #include <net/ip6_fib.h>
 #include <net/ip6_route.h>
 
@@ -89,13 +91,12 @@ static void fib6_walker_unlink(struct net *net, struct fib6_walker *w)
 
 static int fib6_new_sernum(struct net *net)
 {
-	int new, old;
+	int new, old = atomic_read(&net->ipv6.fib6_sernum);
 
 	do {
-		old = atomic_read(&net->ipv6.fib6_sernum);
 		new = old < INT_MAX ? old + 1 : 1;
-	} while (atomic_cmpxchg(&net->ipv6.fib6_sernum,
-				old, new) != old);
+	} while (!atomic_try_cmpxchg(&net->ipv6.fib6_sernum, &old, new));
+
 	return new;
 }
 
@@ -110,7 +111,7 @@ void fib6_update_sernum(struct net *net, struct fib6_info *f6i)
 	fn = rcu_dereference_protected(f6i->fib6_node,
 			lockdep_is_held(&f6i->fib6_table->tb6_lock));
 	if (fn)
-		fn->fn_sernum = fib6_new_sernum(net);
+		WRITE_ONCE(fn->fn_sernum, fib6_new_sernum(net));
 }
 
 /*
@@ -314,7 +315,8 @@ struct dst_entry *fib6_rule_lookup(struct net *net, struct flowi6 *fl6,
 {
 	struct rt6_info *rt;
 
-	rt = lookup(net, net->ipv6.fib6_main_tbl, fl6, skb, flags);
+	rt = pol_lookup_func(lookup,
+			net, net->ipv6.fib6_main_tbl, fl6, skb, flags);
 	if (rt->dst.error == -EAGAIN) {
 		ip6_rt_put_flags(rt, flags);
 		rt = net->ipv6.ip6_null_entry;
@@ -498,7 +500,7 @@ int fib6_tables_dump(struct net *net, struct notifier_block *nb,
 
 		hlist_for_each_entry_rcu(tb, head, tb6_hlist) {
 			err = fib6_table_dump(net, tb, w);
-			if (err < 0)
+			if (err)
 				goto out;
 		}
 	}
@@ -506,7 +508,8 @@ int fib6_tables_dump(struct net *net, struct notifier_block *nb,
 out:
 	kfree(w);
 
-	return err;
+	/* The tree traversal function should never return a positive value. */
+	return err > 0 ? -EINVAL : err;
 }
 
 static int fib6_dump_node(struct fib6_walker *w)
@@ -586,12 +589,13 @@ static int fib6_dump_table(struct fib6_table *table, struct sk_buff *skb,
 		spin_unlock_bh(&table->tb6_lock);
 		if (res > 0) {
 			cb->args[4] = 1;
-			cb->args[5] = w->root->fn_sernum;
+			cb->args[5] = READ_ONCE(w->root->fn_sernum);
 		}
 	} else {
-		if (cb->args[5] != w->root->fn_sernum) {
+		int sernum = READ_ONCE(w->root->fn_sernum);
+		if (cb->args[5] != sernum) {
 			/* Begin at the root if the tree changed */
-			cb->args[5] = w->root->fn_sernum;
+			cb->args[5] = sernum;
 			w->state = FWS_INIT;
 			w->node = w->root;
 			w->skip = w->count;
@@ -664,7 +668,7 @@ static int inet6_dump_fib(struct sk_buff *skb, struct netlink_callback *cb)
 	if (arg.filter.table_id) {
 		tb = fib6_get_table(net, arg.filter.table_id);
 		if (!tb) {
-			if (arg.filter.dump_all_families)
+			if (rtnl_msg_family(cb->nlh) != PF_INET6)
 				goto out;
 
 			NL_SET_ERR_MSG_MOD(cb->extack, "FIB table does not exist");
@@ -1024,6 +1028,8 @@ static void fib6_purge_rt(struct fib6_info *rt, struct fib6_node *fn,
 {
 	struct fib6_table *table = rt->fib6_table;
 
+	/* Flush all cached dst in exception table */
+	rt6_flush_exceptions(rt);
 	fib6_drop_pcpu_from(rt, table);
 
 	if (rt->nh && !list_empty(&rt->nh_list))
@@ -1102,8 +1108,7 @@ static int fib6_add_rt2node(struct fib6_node *fn, struct fib6_info *rt,
 					found++;
 					break;
 				}
-				if (rt_can_ecmp)
-					fallback_ins = fallback_ins ?: ins;
+				fallback_ins = fallback_ins ?: ins;
 				goto next_iter;
 			}
 
@@ -1146,7 +1151,9 @@ next_iter:
 	}
 
 	if (fallback_ins && !found) {
-		/* No ECMP-able route found, replace first non-ECMP one */
+		/* No matching route with same ecmp-able-ness found, replace
+		 * first matching route
+		 */
 		ins = fallback_ins;
 		iter = rcu_dereference_protected(*ins,
 				    lockdep_is_held(&rt->fib6_table->tb6_lock));
@@ -1335,10 +1342,10 @@ static void __fib6_update_sernum_upto_root(struct fib6_info *rt,
 	struct fib6_node *fn = rcu_dereference_protected(rt->fib6_node,
 				lockdep_is_held(&rt->fib6_table->tb6_lock));
 
-	/* paired with smp_rmb() in rt6_get_cookie_safe() */
+	/* paired with smp_rmb() in fib6_get_cookie_safe() */
 	smp_wmb();
 	while (fn) {
-		fn->fn_sernum = sernum;
+		WRITE_ONCE(fn->fn_sernum, sernum);
 		fn = rcu_dereference_protected(fn->parent,
 				lockdep_is_held(&rt->fib6_table->tb6_lock));
 	}
@@ -1372,7 +1379,6 @@ int fib6_add(struct fib6_node *root, struct fib6_info *rt,
 	int err = -ENOMEM;
 	int allow_create = 1;
 	int replace_required = 0;
-	int sernum = fib6_new_sernum(info->nl_net);
 
 	if (info->nlh) {
 		if (!(info->nlh->nlmsg_flags & NLM_F_CREATE))
@@ -1472,7 +1478,7 @@ int fib6_add(struct fib6_node *root, struct fib6_info *rt,
 	if (!err) {
 		if (rt->nh)
 			list_add(&rt->nh_list, &rt->nh->f6i_list);
-		__fib6_update_sernum_upto_root(rt, sernum);
+		__fib6_update_sernum_upto_root(rt, fib6_new_sernum(info->nl_net));
 		fib6_start_gc(info->nl_net, rt);
 	}
 
@@ -1810,10 +1816,14 @@ static struct fib6_node *fib6_repair_tree(struct net *net,
 
 		children = 0;
 		child = NULL;
-		if (fn_r)
-			child = fn_r, children |= 1;
-		if (fn_l)
-			child = fn_l, children |= 2;
+		if (fn_r) {
+			child = fn_r;
+			children |= 1;
+		}
+		if (fn_l) {
+			child = fn_l;
+			children |= 2;
+		}
 
 		if (children == 3 || FIB6_SUBTREE(fn)
 #ifdef CONFIG_IPV6_SUBTREES
@@ -1921,9 +1931,6 @@ static void fib6_del_route(struct fib6_table *table, struct fib6_node *fn,
 	net->ipv6.rt6_stats->fib_rt_entries--;
 	net->ipv6.rt6_stats->fib_discarded_routes++;
 
-	/* Flush all cached dst in exception table */
-	rt6_flush_exceptions(rt);
-
 	/* Reset round-robin state, if necessary */
 	if (rcu_access_pointer(fn->rr_ptr) == rt)
 		fn->rr_ptr = NULL;
@@ -1991,14 +1998,19 @@ static void fib6_del_route(struct fib6_table *table, struct fib6_node *fn,
 /* Need to own table->tb6_lock */
 int fib6_del(struct fib6_info *rt, struct nl_info *info)
 {
-	struct fib6_node *fn = rcu_dereference_protected(rt->fib6_node,
-				    lockdep_is_held(&rt->fib6_table->tb6_lock));
-	struct fib6_table *table = rt->fib6_table;
 	struct net *net = info->nl_net;
 	struct fib6_info __rcu **rtp;
 	struct fib6_info __rcu **rtp_next;
+	struct fib6_table *table;
+	struct fib6_node *fn;
 
-	if (!fn || rt == net->ipv6.fib6_null_entry)
+	if (rt == net->ipv6.fib6_null_entry)
+		return -ENOENT;
+
+	table = rt->fib6_table;
+	fn = rcu_dereference_protected(rt->fib6_node,
+				       lockdep_is_held(&table->tb6_lock));
+	if (!fn)
 		return -ENOENT;
 
 	WARN_ON(!(fn->fn_flags & RTN_RTINFO));
@@ -2067,8 +2079,8 @@ static int fib6_walk_continue(struct fib6_walker *w)
 				continue;
 			}
 			w->state = FWS_L;
+			fallthrough;
 #endif
-			/* fall through */
 		case FWS_L:
 			left = rcu_dereference_protected(fn->left, 1);
 			if (left) {
@@ -2077,7 +2089,7 @@ static int fib6_walk_continue(struct fib6_walker *w)
 				continue;
 			}
 			w->state = FWS_R;
-			/* fall through */
+			fallthrough;
 		case FWS_R:
 			right = rcu_dereference_protected(fn->right, 1);
 			if (right) {
@@ -2087,7 +2099,7 @@ static int fib6_walk_continue(struct fib6_walker *w)
 			}
 			w->state = FWS_C;
 			w->leaf = rcu_dereference_protected(fn->leaf, 1);
-			/* fall through */
+			fallthrough;
 		case FWS_C:
 			if (w->leaf && fn->fn_flags & RTN_RTINFO) {
 				int err;
@@ -2106,7 +2118,7 @@ static int fib6_walk_continue(struct fib6_walker *w)
 			}
 skip:
 			w->state = FWS_U;
-			/* fall through */
+			fallthrough;
 		case FWS_U:
 			if (fn == w->root)
 				return 0;
@@ -2162,8 +2174,8 @@ static int fib6_clean_node(struct fib6_walker *w)
 	};
 
 	if (c->sernum != FIB6_NO_SERNUM_CHANGE &&
-	    w->node->fn_sernum != c->sernum)
-		w->node->fn_sernum = c->sernum;
+	    READ_ONCE(w->node->fn_sernum) != c->sernum)
+		WRITE_ONCE(w->node->fn_sernum, c->sernum);
 
 	if (!c->func) {
 		WARN_ON_ONCE(c->sernum == FIB6_NO_SERNUM_CHANGE);
@@ -2344,6 +2356,10 @@ static int __net_init fib6_net_init(struct net *net)
 	if (err)
 		return err;
 
+	/* Default to 3-tuple */
+	net->ipv6.sysctl.multipath_hash_fields =
+		FIB_MULTIPATH_HASH_FIELD_DEFAULT_MASK;
+
 	spin_lock_init(&net->ipv6.fib6_gc_lock);
 	rwlock_init(&net->ipv6.fib6_walker_lock);
 	INIT_LIST_HEAD(&net->ipv6.fib6_walkers);
@@ -2351,7 +2367,7 @@ static int __net_init fib6_net_init(struct net *net)
 
 	net->ipv6.rt6_stats = kzalloc(sizeof(*net->ipv6.rt6_stats), GFP_KERNEL);
 	if (!net->ipv6.rt6_stats)
-		goto out_timer;
+		goto out_notifier;
 
 	/* Avoid false sharing : Use at least a full cache line */
 	size = max_t(size_t, size, L1_CACHE_BYTES);
@@ -2396,7 +2412,7 @@ out_fib_table_hash:
 	kfree(net->ipv6.fib_table_hash);
 out_rt6_stats:
 	kfree(net->ipv6.rt6_stats);
-out_timer:
+out_notifier:
 	fib6_notifier_exit(net);
 	return -ENOMEM;
 }
@@ -2433,8 +2449,8 @@ int __init fib6_init(void)
 	int ret = -ENOMEM;
 
 	fib6_node_kmem = kmem_cache_create("fib6_nodes",
-					   sizeof(struct fib6_node),
-					   0, SLAB_HWCACHE_ALIGN,
+					   sizeof(struct fib6_node), 0,
+					   SLAB_HWCACHE_ALIGN | SLAB_ACCOUNT,
 					   NULL);
 	if (!fib6_node_kmem)
 		goto out;
@@ -2466,7 +2482,7 @@ void fib6_gc_cleanup(void)
 }
 
 #ifdef CONFIG_PROC_FS
-static int ipv6_route_seq_show(struct seq_file *seq, void *v)
+static int ipv6_route_native_seq_show(struct seq_file *seq, void *v)
 {
 	struct fib6_info *rt = v;
 	struct ipv6_route_iter *iter = seq->private;
@@ -2475,7 +2491,7 @@ static int ipv6_route_seq_show(struct seq_file *seq, void *v)
 	const struct net_device *dev;
 
 	if (rt->nh)
-		fib6_nh = nexthop_fib6_nh(rt->nh);
+		fib6_nh = nexthop_fib6_nh_bh(rt->nh);
 
 	seq_printf(seq, "%pi6 %02x ", &rt->fib6_dst.addr, rt->fib6_dst.plen);
 
@@ -2527,7 +2543,7 @@ static void ipv6_route_seq_setup_walk(struct ipv6_route_iter *iter,
 	iter->w.state = FWS_INIT;
 	iter->w.node = iter->w.root;
 	iter->w.args = iter;
-	iter->sernum = iter->w.root->fn_sernum;
+	iter->sernum = READ_ONCE(iter->w.root->fn_sernum);
 	INIT_LIST_HEAD(&iter->w.lh);
 	fib6_walker_link(net, &iter->w);
 }
@@ -2555,8 +2571,10 @@ static struct fib6_table *ipv6_route_seq_next_table(struct fib6_table *tbl,
 
 static void ipv6_route_check_sernum(struct ipv6_route_iter *iter)
 {
-	if (iter->sernum != iter->w.root->fn_sernum) {
-		iter->sernum = iter->w.root->fn_sernum;
+	int sernum = READ_ONCE(iter->w.root->fn_sernum);
+
+	if (iter->sernum != sernum) {
+		iter->sernum = sernum;
 		iter->w.state = FWS_INIT;
 		iter->w.node = iter->w.root;
 		WARN_ON(iter->w.skip);
@@ -2611,8 +2629,10 @@ static void *ipv6_route_seq_start(struct seq_file *seq, loff_t *pos)
 	iter->skip = *pos;
 
 	if (iter->tbl) {
+		loff_t p = 0;
+
 		ipv6_route_seq_setup_walk(iter, net);
-		return ipv6_route_seq_next(seq, NULL, pos);
+		return ipv6_route_seq_next(seq, NULL, &p);
 	} else {
 		return NULL;
 	}
@@ -2624,7 +2644,7 @@ static bool ipv6_route_iter_active(struct ipv6_route_iter *iter)
 	return w->node && !(w->state == FWS_U && w->node == w->root);
 }
 
-static void ipv6_route_seq_stop(struct seq_file *seq, void *v)
+static void ipv6_route_native_seq_stop(struct seq_file *seq, void *v)
 	__releases(RCU_BH)
 {
 	struct net *net = seq_file_net(seq);
@@ -2635,6 +2655,62 @@ static void ipv6_route_seq_stop(struct seq_file *seq, void *v)
 
 	rcu_read_unlock_bh();
 }
+
+#if IS_BUILTIN(CONFIG_IPV6) && defined(CONFIG_BPF_SYSCALL)
+static int ipv6_route_prog_seq_show(struct bpf_prog *prog,
+				    struct bpf_iter_meta *meta,
+				    void *v)
+{
+	struct bpf_iter__ipv6_route ctx;
+
+	ctx.meta = meta;
+	ctx.rt = v;
+	return bpf_iter_run_prog(prog, &ctx);
+}
+
+static int ipv6_route_seq_show(struct seq_file *seq, void *v)
+{
+	struct ipv6_route_iter *iter = seq->private;
+	struct bpf_iter_meta meta;
+	struct bpf_prog *prog;
+	int ret;
+
+	meta.seq = seq;
+	prog = bpf_iter_get_info(&meta, false);
+	if (!prog)
+		return ipv6_route_native_seq_show(seq, v);
+
+	ret = ipv6_route_prog_seq_show(prog, &meta, v);
+	iter->w.leaf = NULL;
+
+	return ret;
+}
+
+static void ipv6_route_seq_stop(struct seq_file *seq, void *v)
+{
+	struct bpf_iter_meta meta;
+	struct bpf_prog *prog;
+
+	if (!v) {
+		meta.seq = seq;
+		prog = bpf_iter_get_info(&meta, true);
+		if (prog)
+			(void)ipv6_route_prog_seq_show(prog, &meta, v);
+	}
+
+	ipv6_route_native_seq_stop(seq, v);
+}
+#else
+static int ipv6_route_seq_show(struct seq_file *seq, void *v)
+{
+	return ipv6_route_native_seq_show(seq, v);
+}
+
+static void ipv6_route_seq_stop(struct seq_file *seq, void *v)
+{
+	ipv6_route_native_seq_stop(seq, v);
+}
+#endif
 
 const struct seq_operations ipv6_route_seq_ops = {
 	.start	= ipv6_route_seq_start,

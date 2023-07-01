@@ -30,6 +30,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
+#include <pthread.h>
 
 #include <tools/be_byteshift.h>
 #include <tools/le_byteshift.h>
@@ -52,6 +54,14 @@
 
 #ifndef EM_ARCV2
 #define EM_ARCV2	195
+#endif
+
+#ifndef EM_RISCV
+#define EM_RISCV	243
+#endif
+
+#ifndef EM_LOONGARCH
+#define EM_LOONGARCH	258
 #endif
 
 static uint32_t (*r)(const uint32_t *);
@@ -227,7 +237,7 @@ static void sort_relative_table(char *extab_image, int image_size)
 	}
 }
 
-static void x86_sort_relative_table(char *extab_image, int image_size)
+static void sort_relative_table_with_data(char *extab_image, int image_size)
 {
 	int i = 0;
 
@@ -236,7 +246,7 @@ static void x86_sort_relative_table(char *extab_image, int image_size)
 
 		w(r(loc) + i, loc);
 		w(r(loc + 1) + i + 4, loc + 1);
-		w(r(loc + 2) + i + 8, loc + 2);
+		/* Don't touch the fixup type or data */
 
 		i += sizeof(uint32_t) * 3;
 	}
@@ -249,7 +259,7 @@ static void x86_sort_relative_table(char *extab_image, int image_size)
 
 		w(r(loc) - i, loc);
 		w(r(loc + 1) - (i + 4), loc + 1);
-		w(r(loc + 2) - (i + 8), loc + 2);
+		/* Don't touch the fixup type or data */
 
 		i += sizeof(uint32_t) * 3;
 	}
@@ -293,11 +303,13 @@ static int do_file(char const *const fname, void *addr)
 
 	switch (r2(&ehdr->e_machine)) {
 	case EM_386:
-	case EM_X86_64:
-		custom_sort = x86_sort_relative_table;
-		break;
-	case EM_S390:
 	case EM_AARCH64:
+	case EM_LOONGARCH:
+	case EM_RISCV:
+	case EM_S390:
+	case EM_X86_64:
+		custom_sort = sort_relative_table_with_data;
+		break;
 	case EM_PARISC:
 	case EM_PPC:
 	case EM_PPC64:

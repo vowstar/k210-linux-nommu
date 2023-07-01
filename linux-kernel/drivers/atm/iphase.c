@@ -47,6 +47,7 @@
 #include <linux/errno.h>  
 #include <linux/atm.h>  
 #include <linux/atmdev.h>  
+#include <linux/ctype.h>
 #include <linux/sonet.h>  
 #include <linux/skbuff.h>  
 #include <linux/time.h>  
@@ -177,7 +178,6 @@ static void ia_hack_tcq(IADEV *dev) {
 
 static u16 get_desc (IADEV *dev, struct ia_vcc *iavcc) {
   u_short 		desc_num, i;
-  struct sk_buff        *skb;
   struct ia_vcc         *iavcc_r = NULL; 
   unsigned long delta;
   static unsigned long timer = 0;
@@ -201,8 +201,7 @@ static u16 get_desc (IADEV *dev, struct ia_vcc *iavcc) {
            else 
               dev->ffL.tcq_rd -= 2;
            *(u_short *)(dev->seg_ram + dev->ffL.tcq_rd) = i+1;
-           if (!(skb = dev->desc_tbl[i].txskb) || 
-                          !(iavcc_r = dev->desc_tbl[i].iavcc))
+           if (!dev->desc_tbl[i].txskb || !(iavcc_r = dev->desc_tbl[i].iavcc))
               printk("Fatal err, desc table vcc or skb is NULL\n");
            else 
               iavcc_r->vc_desc_cnt--;
@@ -680,7 +679,7 @@ static void ia_tx_poll (IADEV *iadev) {
           skb1 = skb_dequeue(&iavcc->txing_skb);
        }                                                        
        if (!skb1) {
-          IF_EVENT(printk("IA: Vci %d - skb not found requed\n",vcc->vci);)
+          IF_EVENT(printk("IA: Vci %d - skb not found requeued\n",vcc->vci);)
           ia_enque_head_rtn_q (&iadev->tx_return_q, rtne);
           break;
        }
@@ -740,7 +739,7 @@ static u16 ia_eeprom_get (IADEV *iadev, u32 addr)
         u32	t;
 	int	i;
 	/*
-	 * Read the first bit that was clocked with the falling edge of the
+	 * Read the first bit that was clocked with the falling edge of
 	 * the last command data clock
 	 */
 	NVRAM_CMD(IAREAD + addr);
@@ -996,10 +995,12 @@ static void xdump( u_char*  cp, int  length, char*  prefix )
         }
         pBuf += sprintf( pBuf, "  " );
         for(col = 0;count + col < length && col < 16; col++){
-            if (isprint((int)cp[count + col]))
-                pBuf += sprintf( pBuf, "%c", cp[count + col] );
-            else
-                pBuf += sprintf( pBuf, "." );
+		u_char c = cp[count + col];
+
+		if (isascii(c) && isprint(c))
+			pBuf += sprintf(pBuf, "%c", c);
+		else
+			pBuf += sprintf(pBuf, ".");
                 }
         printk("%s\n", prntBuf);
         count += col;
@@ -2880,20 +2881,6 @@ static int ia_ioctl(struct atm_dev *dev, unsigned int cmd, void __user *arg)
    return 0;  
 }  
   
-static int ia_getsockopt(struct atm_vcc *vcc, int level, int optname,   
-	void __user *optval, int optlen)  
-{  
-	IF_EVENT(printk(">ia_getsockopt\n");)  
-	return -EINVAL;  
-}  
-  
-static int ia_setsockopt(struct atm_vcc *vcc, int level, int optname,   
-	void __user *optval, unsigned int optlen)  
-{  
-	IF_EVENT(printk(">ia_setsockopt\n");)  
-	return -EINVAL;  
-}  
-  
 static int ia_pkt_tx (struct atm_vcc *vcc, struct sk_buff *skb) {
         IADEV *iadev;
         struct dle *wr_ptr;
@@ -3164,8 +3151,6 @@ static const struct atmdev_ops ops = {
 	.open		= ia_open,  
 	.close		= ia_close,  
 	.ioctl		= ia_ioctl,  
-	.getsockopt	= ia_getsockopt,  
-	.setsockopt	= ia_setsockopt,  
 	.send		= ia_send,  
 	.phy_put	= ia_phy_put,  
 	.phy_get	= ia_phy_get,  
@@ -3295,7 +3280,7 @@ static void __exit ia_module_exit(void)
 {
 	pci_unregister_driver(&ia_driver);
 
-        del_timer(&ia_timer);
+	del_timer_sync(&ia_timer);
 }
 
 module_init(ia_module_init);

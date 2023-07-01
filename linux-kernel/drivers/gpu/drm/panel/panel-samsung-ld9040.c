@@ -21,7 +21,6 @@
 
 #include <drm/drm_modes.h>
 #include <drm/drm_panel.h>
-#include <drm/drm_print.h>
 
 /* Manufacturer Command Set */
 #define MCS_MANPWR		0xb0
@@ -269,7 +268,7 @@ static int ld9040_get_modes(struct drm_panel *panel,
 
 	mode = drm_mode_create(connector->dev);
 	if (!mode) {
-		DRM_ERROR("failed to create a new display mode\n");
+		dev_err(panel->dev, "failed to create a new display mode\n");
 		return 0;
 	}
 
@@ -354,17 +353,17 @@ static int ld9040_probe(struct spi_device *spi)
 	drm_panel_init(&ctx->panel, dev, &ld9040_drm_funcs,
 		       DRM_MODE_CONNECTOR_DPI);
 
-	return drm_panel_add(&ctx->panel);
+	drm_panel_add(&ctx->panel);
+
+	return 0;
 }
 
-static int ld9040_remove(struct spi_device *spi)
+static void ld9040_remove(struct spi_device *spi)
 {
 	struct ld9040 *ctx = spi_get_drvdata(spi);
 
 	ld9040_power_off(ctx);
 	drm_panel_remove(&ctx->panel);
-
-	return 0;
 }
 
 static const struct of_device_id ld9040_of_match[] = {
@@ -373,9 +372,16 @@ static const struct of_device_id ld9040_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, ld9040_of_match);
 
+static const struct spi_device_id ld9040_ids[] = {
+	{ "ld9040", },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(spi, ld9040_ids);
+
 static struct spi_driver ld9040_driver = {
 	.probe = ld9040_probe,
 	.remove = ld9040_remove,
+	.id_table = ld9040_ids,
 	.driver = {
 		.name = "panel-samsung-ld9040",
 		.of_match_table = ld9040_of_match,

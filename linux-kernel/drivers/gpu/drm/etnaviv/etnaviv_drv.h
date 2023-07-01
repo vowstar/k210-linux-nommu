@@ -6,13 +6,15 @@
 #ifndef __ETNAVIV_DRV_H__
 #define __ETNAVIV_DRV_H__
 
+#include <linux/io.h>
 #include <linux/list.h>
 #include <linux/mm_types.h>
 #include <linux/sizes.h>
 #include <linux/time64.h>
 #include <linux/types.h>
+#include <linux/xarray.h>
 
-#include <drm/drm_fb_helper.h>
+#include <drm/drm_drv.h>
 #include <drm/drm_gem.h>
 #include <drm/etnaviv_drm.h>
 #include <drm/gpu_scheduler.h>
@@ -27,17 +29,21 @@ struct etnaviv_iommu_global;
 #define ETNAVIV_SOFTPIN_START_ADDRESS	SZ_4M /* must be >= SUBALLOC_SIZE */
 
 struct etnaviv_file_private {
+	int id;
 	struct etnaviv_iommu_context	*mmu;
 	struct drm_sched_entity		sched_entity[ETNA_MAX_PIPES];
 };
 
 struct etnaviv_drm_private {
 	int num_gpus;
-	struct device_dma_parameters dma_parms;
 	struct etnaviv_gpu *gpu[ETNA_MAX_PIPES];
+	gfp_t shm_gfp_mask;
 
 	struct etnaviv_cmdbuf_suballoc *cmdbuf_suballoc;
 	struct etnaviv_iommu_global *mmu_global;
+
+	struct xarray active_contexts;
+	u32 next_context_id;
 
 	/* list of GEM objects: */
 	struct mutex gem_lock;
@@ -47,14 +53,9 @@ struct etnaviv_drm_private {
 int etnaviv_ioctl_gem_submit(struct drm_device *dev, void *data,
 		struct drm_file *file);
 
-int etnaviv_gem_mmap(struct file *filp, struct vm_area_struct *vma);
-vm_fault_t etnaviv_gem_fault(struct vm_fault *vmf);
 int etnaviv_gem_mmap_offset(struct drm_gem_object *obj, u64 *offset);
 struct sg_table *etnaviv_gem_prime_get_sg_table(struct drm_gem_object *obj);
-void *etnaviv_gem_prime_vmap(struct drm_gem_object *obj);
-void etnaviv_gem_prime_vunmap(struct drm_gem_object *obj, void *vaddr);
-int etnaviv_gem_prime_mmap(struct drm_gem_object *obj,
-			   struct vm_area_struct *vma);
+int etnaviv_gem_prime_vmap(struct drm_gem_object *obj, struct iosys_map *map);
 struct drm_gem_object *etnaviv_gem_prime_import_sg_table(struct drm_device *dev,
 	struct dma_buf_attachment *attach, struct sg_table *sg);
 int etnaviv_gem_prime_pin(struct drm_gem_object *obj);

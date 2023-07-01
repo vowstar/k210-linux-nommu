@@ -5,7 +5,7 @@
  * Copyright 2006-2007	Jiri Benc <jbenc@suse.cz>
  * Copyright 2013-2014  Intel Mobile Communications GmbH
  * Copyright (C) 2017     Intel Deutschland GmbH
- * Copyright (C) 2018 - 2019 Intel Corporation
+ * Copyright (C) 2018-2022 Intel Corporation
  */
 
 #include <net/mac80211.h>
@@ -64,6 +64,9 @@ void ieee80211_configure_filter(struct ieee80211_local *local)
 	if (local->fif_pspoll)
 		new_flags |= FIF_PSPOLL;
 
+	if (local->rx_mcast_action_reg)
+		new_flags |= FIF_MCAST_ACTION;
+
 	spin_lock_bh(&local->filter_lock);
 	changed_flags = local->filter_flags ^ new_flags;
 
@@ -104,13 +107,15 @@ static u32 ieee80211_hw_conf_chan(struct ieee80211_local *local)
 		chandef.chan = local->tmp_channel;
 		chandef.width = NL80211_CHAN_WIDTH_20_NOHT;
 		chandef.center_freq1 = chandef.chan->center_freq;
+		chandef.freq1_offset = chandef.chan->freq_offset;
 	} else
 		chandef = local->_oper_chandef;
 
 	WARN(!cfg80211_chandef_valid(&chandef),
-	     "control:%d MHz width:%d center: %d/%d MHz",
-	     chandef.chan->center_freq, chandef.width,
-	     chandef.center_freq1, chandef.center_freq2);
+	     "control:%d.%03d MHz width:%d center: %d.%03d/%d MHz",
+	     chandef.chan->center_freq, chandef.chan->freq_offset,
+	     chandef.width, chandef.center_freq1, chandef.freq1_offset,
+	     chandef.center_freq2);
 
 	if (!cfg80211_chandef_identical(&chandef, &local->_oper_chandef))
 		local->hw.conf.flags |= IEEE80211_CONF_OFFCHANNEL;
@@ -142,9 +147,11 @@ static u32 ieee80211_hw_conf_chan(struct ieee80211_local *local)
 
 	rcu_read_lock();
 	list_for_each_entry_rcu(sdata, &local->interfaces, list) {
-		if (!rcu_access_pointer(sdata->vif.chanctx_conf))
+		if (!rcu_access_pointer(sdata->vif.bss_conf.chanctx_conf))
 			continue;
 		if (sdata->vif.type == NL80211_IFTYPE_AP_VLAN)
+			continue;
+		if (sdata->vif.bss_conf.txpower == INT_MIN)
 			continue;
 		power = min(power, sdata->vif.bss_conf.txpower);
 	}
@@ -168,7 +175,8 @@ int ieee80211_hw_config(struct ieee80211_local *local, u32 changed)
 		changed |= ieee80211_hw_conf_chan(local);
 	else
 		changed &= ~(IEEE80211_CONF_CHANGE_CHANNEL |
-			     IEEE80211_CONF_CHANGE_POWER);
+			     IEEE80211_CONF_CHANGE_POWER |
+			     IEEE80211_CONF_CHANGE_SMPS);
 
 	if (changed && local->open_count) {
 		ret = drv_config(local, changed);
@@ -192,15 +200,94 @@ int ieee80211_hw_config(struct ieee80211_local *local, u32 changed)
 	return ret;
 }
 
+#define BSS_CHANGED_VIF_CFG_FLAGS (BSS_CHANGED_ASSOC |\
+				   BSS_CHANGED_IDLE |\
+				   BSS_CHANGED_PS |\
+				   BSS_CHANGED_IBSS |\
+				   BSS_CHANGED_ARP_FILTER |\
+				   BSS_CHANGED_SSID)
+
 void ieee80211_bss_info_change_notify(struct ieee80211_sub_if_data *sdata,
-				      u32 changed)
+				      u64 changed)
 {
 	struct ieee80211_local *local = sdata->local;
+
+	might_sleep();
 
 	if (!changed || sdata->vif.type == NL80211_IFTYPE_AP_VLAN)
 		return;
 
-	drv_bss_info_changed(local, sdata, &sdata->vif.bss_conf, changed);
+	if (WARN_ON_ONCE(changed & (BSS_CHANGED_BEACON |
+				    BSS_CHANGED_BEACON_ENABLED) &&
+			 sdata->vif.type != NL80211_IFTYPE_AP &&
+			 sdata->vif.type != NL80211_IFTYPE_ADHOC &&
+			 sdata->vif.type != NL80211_IFTYPE_MESH_POINT &&
+			 sdata->vif.type != NL80211_IFTYPE_OCB))
+		return;
+
+	if (WARN_ON_ONCE(sdata->vif.type == NL80211_IFTYPE_P2P_DEVICE ||
+			 sdata->vif.type == NL80211_IFTYPE_NAN ||
+			 (sdata->vif.type == NL80211_IFTYPE_MONITOR &&
+			  !sdata->vif.bss_conf.mu_mimo_owner &&
+			  !(changed & BSS_CHANGED_TXPOWER))))
+		return;
+
+	if (!check_sdata_in_driver(sdata))
+		return;
+
+	if (changed & BSS_CHANGED_VIF_CFG_FLAGS) {
+		u64 ch = changed & BSS_CHANGED_VIF_CFG_FLAGS;
+
+		trace_drv_vif_cfg_changed(local, sdata, changed);
+		if (local->ops->vif_cfg_changed)
+			local->ops->vif_cfg_changed(&local->hw, &sdata->vif, ch);
+	}
+
+	if (changed & ~BSS_CHANGED_VIF_CFG_FLAGS) {
+		u64 ch = changed & ~BSS_CHANGED_VIF_CFG_FLAGS;
+
+		/* FIXME: should be for each link */
+		trace_drv_link_info_changed(local, sdata, &sdata->vif.bss_conf,
+					    changed);
+		if (local->ops->link_info_changed)
+			local->ops->link_info_changed(&local->hw, &sdata->vif,
+						      &sdata->vif.bss_conf, ch);
+	}
+
+	if (local->ops->bss_info_changed)
+		local->ops->bss_info_changed(&local->hw, &sdata->vif,
+					     &sdata->vif.bss_conf, changed);
+	trace_drv_return_void(local);
+}
+
+void ieee80211_vif_cfg_change_notify(struct ieee80211_sub_if_data *sdata,
+				     u64 changed)
+{
+	struct ieee80211_local *local = sdata->local;
+
+	WARN_ON_ONCE(changed & ~BSS_CHANGED_VIF_CFG_FLAGS);
+
+	if (!changed || sdata->vif.type == NL80211_IFTYPE_AP_VLAN)
+		return;
+
+	drv_vif_cfg_changed(local, sdata, changed);
+}
+
+void ieee80211_link_info_change_notify(struct ieee80211_sub_if_data *sdata,
+				       struct ieee80211_link_data *link,
+				       u64 changed)
+{
+	struct ieee80211_local *local = sdata->local;
+
+	WARN_ON_ONCE(changed & BSS_CHANGED_VIF_CFG_FLAGS);
+
+	if (!changed || sdata->vif.type == NL80211_IFTYPE_AP_VLAN)
+		return;
+
+	if (!check_sdata_in_driver(sdata))
+		return;
+
+	drv_link_info_changed(local, sdata, link->conf, link->link_id, changed);
 }
 
 u32 ieee80211_reset_erp_info(struct ieee80211_sub_if_data *sdata)
@@ -213,9 +300,9 @@ u32 ieee80211_reset_erp_info(struct ieee80211_sub_if_data *sdata)
 	       BSS_CHANGED_ERP_SLOT;
 }
 
-static void ieee80211_tasklet_handler(unsigned long data)
+static void ieee80211_tasklet_handler(struct tasklet_struct *t)
 {
-	struct ieee80211_local *local = (struct ieee80211_local *) data;
+	struct ieee80211_local *local = from_tasklet(local, t, tasklet);
 	struct sk_buff *skb;
 
 	while ((skb = skb_dequeue(&local->skb_queue)) ||
@@ -245,16 +332,20 @@ static void ieee80211_restart_work(struct work_struct *work)
 	struct ieee80211_local *local =
 		container_of(work, struct ieee80211_local, restart_work);
 	struct ieee80211_sub_if_data *sdata;
+	int ret;
 
 	/* wait for scan work complete */
 	flush_workqueue(local->workqueue);
 	flush_work(&local->sched_scan_stopped_work);
+	flush_work(&local->radar_detected_work);
+
+	rtnl_lock();
+	/* we might do interface manipulations, so need both */
+	wiphy_lock(local->hw.wiphy);
 
 	WARN(test_bit(SCAN_HW_SCANNING, &local->scanning),
 	     "%s called with hardware scan in progress\n", __func__);
 
-	flush_work(&local->radar_detected_work);
-	rtnl_lock();
 	list_for_each_entry(sdata, &local->interfaces, list) {
 		/*
 		 * XXX: there may be more work for other vif types and even
@@ -273,6 +364,13 @@ static void ieee80211_restart_work(struct work_struct *work)
 			 * Then we can have a race...
 			 */
 			cancel_work_sync(&sdata->u.mgd.csa_connection_drop_work);
+			if (sdata->vif.bss_conf.csa_active) {
+				sdata_lock(sdata);
+				ieee80211_sta_connection_lost(sdata,
+							      WLAN_REASON_UNSPECIFIED,
+							      false);
+				sdata_unlock(sdata);
+			}
 		}
 		flush_delayed_work(&sdata->dec_tailroom_needed_wk);
 	}
@@ -285,7 +383,12 @@ static void ieee80211_restart_work(struct work_struct *work)
 	/* wait for all packet processing to be done */
 	synchronize_net();
 
-	ieee80211_reconfig(local);
+	ret = ieee80211_reconfig(local);
+	wiphy_unlock(local->hw.wiphy);
+
+	if (ret)
+		cfg80211_shutdown_all_interfaces(local->hw.wiphy);
+
 	rtnl_unlock();
 }
 
@@ -326,7 +429,7 @@ static int ieee80211_ifa_changed(struct notifier_block *nb,
 	struct wireless_dev *wdev = ndev->ieee80211_ptr;
 	struct in_device *idev;
 	struct ieee80211_sub_if_data *sdata;
-	struct ieee80211_bss_conf *bss_conf;
+	struct ieee80211_vif_cfg *vif_cfg;
 	struct ieee80211_if_managed *ifmgd;
 	int c = 0;
 
@@ -338,7 +441,7 @@ static int ieee80211_ifa_changed(struct notifier_block *nb,
 		return NOTIFY_DONE;
 
 	sdata = IEEE80211_DEV_TO_SUB_IF(ndev);
-	bss_conf = &sdata->vif.bss_conf;
+	vif_cfg = &sdata->vif.cfg;
 
 	/* ARP filtering is only supported in managed mode */
 	if (sdata->vif.type != NL80211_IFTYPE_STATION)
@@ -351,21 +454,20 @@ static int ieee80211_ifa_changed(struct notifier_block *nb,
 	ifmgd = &sdata->u.mgd;
 	sdata_lock(sdata);
 
-	/* Copy the addresses to the bss_conf list */
+	/* Copy the addresses to the vif config list */
 	ifa = rtnl_dereference(idev->ifa_list);
 	while (ifa) {
 		if (c < IEEE80211_BSS_ARP_ADDR_LIST_LEN)
-			bss_conf->arp_addr_list[c] = ifa->ifa_address;
+			vif_cfg->arp_addr_list[c] = ifa->ifa_address;
 		ifa = rtnl_dereference(ifa->ifa_next);
 		c++;
 	}
 
-	bss_conf->arp_addr_cnt = c;
+	vif_cfg->arp_addr_cnt = c;
 
 	/* Configure driver only if associated (which also implies it is up) */
 	if (ifmgd->associated)
-		ieee80211_bss_info_change_notify(sdata,
-						 BSS_CHANGED_ARP_FILTER);
+		ieee80211_vif_cfg_change_notify(sdata, BSS_CHANGED_ARP_FILTER);
 
 	sdata_unlock(sdata);
 
@@ -416,7 +518,20 @@ ieee80211_default_mgmt_stypes[NUM_NL80211_IFTYPES] = {
 	},
 	[NL80211_IFTYPE_STATION] = {
 		.tx = 0xffff,
+		/*
+		 * To support Pre Association Security Negotiation (PASN) while
+		 * already associated to one AP, allow user space to register to
+		 * Rx authentication frames, so that the user space logic would
+		 * be able to receive/handle authentication frames from a
+		 * different AP as part of PASN.
+		 * It is expected that user space would intelligently register
+		 * for Rx authentication frames, i.e., only when PASN is used
+		 * and configure a match filter only for PASN authentication
+		 * algorithm, as otherwise the MLME functionality of mac80211
+		 * would be broken.
+		 */
 		.rx = BIT(IEEE80211_STYPE_ACTION >> 4) |
+			BIT(IEEE80211_STYPE_AUTH >> 4) |
 			BIT(IEEE80211_STYPE_PROBE_REQ >> 4),
 	},
 	[NL80211_IFTYPE_AP] = {
@@ -515,10 +630,14 @@ struct ieee80211_hw *ieee80211_alloc_hw_nm(size_t priv_data_len,
 
 	if (WARN_ON(!ops->tx || !ops->start || !ops->stop || !ops->config ||
 		    !ops->add_interface || !ops->remove_interface ||
-		    !ops->configure_filter))
+		    !ops->configure_filter || !ops->wake_tx_queue))
 		return NULL;
 
 	if (WARN_ON(ops->sta_state && (ops->sta_add || ops->sta_remove)))
+		return NULL;
+
+	if (WARN_ON(!!ops->link_info_changed != !!ops->vif_cfg_changed ||
+		    (ops->link_info_changed && ops->bss_info_changed)))
 		return NULL;
 
 	/* check all or no channel context operations exist */
@@ -561,7 +680,7 @@ struct ieee80211_hw *ieee80211_alloc_hw_nm(size_t priv_data_len,
 			WIPHY_FLAG_REPORTS_OBSS |
 			WIPHY_FLAG_OFFCHAN_TX;
 
-	if (ops->remain_on_channel)
+	if (!use_chanctx || ops->remain_on_channel)
 		wiphy->flags |= WIPHY_FLAG_HAS_REMAIN_ON_CHANNEL;
 
 	wiphy->features |= NL80211_FEATURE_SK_TX_STATUS |
@@ -574,6 +693,14 @@ struct ieee80211_hw *ieee80211_alloc_hw_nm(size_t priv_data_len,
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_FILS_STA);
 	wiphy_ext_feature_set(wiphy,
 			      NL80211_EXT_FEATURE_CONTROL_PORT_OVER_NL80211);
+	wiphy_ext_feature_set(wiphy,
+			      NL80211_EXT_FEATURE_CONTROL_PORT_NO_PREAUTH);
+	wiphy_ext_feature_set(wiphy,
+			      NL80211_EXT_FEATURE_CONTROL_PORT_OVER_NL80211_TX_STATUS);
+	wiphy_ext_feature_set(wiphy,
+			      NL80211_EXT_FEATURE_SCAN_FREQ_KHZ);
+	wiphy_ext_feature_set(wiphy,
+			      NL80211_EXT_FEATURE_POWERED_ADDR_CHANGE);
 
 	if (!ops->hw_scan) {
 		wiphy->features |= NL80211_FEATURE_LOW_PRIORITY_SCAN |
@@ -592,9 +719,7 @@ struct ieee80211_hw *ieee80211_alloc_hw_nm(size_t priv_data_len,
 	if (!ops->set_key)
 		wiphy->flags |= WIPHY_FLAG_IBSS_RSN;
 
-	if (ops->wake_tx_queue)
-		wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_TXQS);
-
+	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_TXQS);
 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_RRM);
 
 	wiphy->bss_priv_size = sizeof(struct ieee80211_bss);
@@ -670,11 +795,14 @@ struct ieee80211_hw *ieee80211_alloc_hw_nm(size_t priv_data_len,
 		local->aql_txq_limit_low[i] = IEEE80211_DEFAULT_AQL_TXQ_LIMIT_L;
 		local->aql_txq_limit_high[i] =
 			IEEE80211_DEFAULT_AQL_TXQ_LIMIT_H;
+		atomic_set(&local->aql_ac_pending_airtime[i], 0);
 	}
 
 	local->airtime_flags = AIRTIME_USE_TX | AIRTIME_USE_RX;
 	local->aql_threshold = IEEE80211_AQL_THRESHOLD;
 	atomic_set(&local->aql_total_pending_airtime, 0);
+
+	spin_lock_init(&local->handle_wake_tx_queue_lock);
 
 	INIT_LIST_HEAD(&local->chanctx_list);
 	mutex_init(&local->chanctx_mtx);
@@ -698,8 +826,6 @@ struct ieee80211_hw *ieee80211_alloc_hw_nm(size_t priv_data_len,
 	INIT_WORK(&local->sched_scan_stopped_work,
 		  ieee80211_sched_scan_stopped_work);
 
-	INIT_WORK(&local->tdls_chsw_work, ieee80211_tdls_chsw_work);
-
 	spin_lock_init(&local->ack_status_lock);
 	idr_init(&local->ack_status_frames);
 
@@ -707,20 +833,12 @@ struct ieee80211_hw *ieee80211_alloc_hw_nm(size_t priv_data_len,
 		skb_queue_head_init(&local->pending[i]);
 		atomic_set(&local->agg_queue_stop[i], 0);
 	}
-	tasklet_init(&local->tx_pending_tasklet, ieee80211_tx_pending,
-		     (unsigned long)local);
-
-	if (ops->wake_tx_queue)
-		tasklet_init(&local->wake_txqs_tasklet, ieee80211_wake_txqs,
-			     (unsigned long)local);
-
-	tasklet_init(&local->tasklet,
-		     ieee80211_tasklet_handler,
-		     (unsigned long) local);
+	tasklet_setup(&local->tx_pending_tasklet, ieee80211_tx_pending);
+	tasklet_setup(&local->wake_txqs_tasklet, ieee80211_wake_txqs);
+	tasklet_setup(&local->tasklet, ieee80211_tasklet_handler);
 
 	skb_queue_head_init(&local->skb_queue);
 	skb_queue_head_init(&local->skb_queue_unreliable);
-	skb_queue_head_init(&local->skb_queue_tdls_chsw);
 
 	ieee80211_alloc_led_names(local);
 
@@ -740,7 +858,7 @@ static int ieee80211_init_cipher_suites(struct ieee80211_local *local)
 {
 	bool have_wep = !fips_enabled; /* FIPS does not permit the use of RC4 */
 	bool have_mfp = ieee80211_hw_check(&local->hw, MFP_CAPABLE);
-	int n_suites = 0, r = 0, w = 0;
+	int r = 0, w = 0;
 	u32 *suites;
 	static const u32 cipher_suites[] = {
 		/* keep WEP first, it may be removed below */
@@ -786,10 +904,9 @@ static int ieee80211_init_cipher_suites(struct ieee80211_local *local)
 				continue;
 			suites[w++] = suite;
 		}
-	} else if (!local->hw.cipher_schemes) {
-		/* If the driver doesn't have cipher schemes, there's nothing
-		 * else to do other than assign the (software supported and
-		 * perhaps offloaded) cipher suites.
+	} else {
+		/* assign the (software supported and perhaps offloaded)
+		 * cipher suites
 		 */
 		local->hw.wiphy->cipher_suites = cipher_suites;
 		local->hw.wiphy->n_cipher_suites = ARRAY_SIZE(cipher_suites);
@@ -804,58 +921,6 @@ static int ieee80211_init_cipher_suites(struct ieee80211_local *local)
 
 		/* not dynamically allocated, so just return */
 		return 0;
-	} else {
-		const struct ieee80211_cipher_scheme *cs;
-
-		cs = local->hw.cipher_schemes;
-
-		/* Driver specifies cipher schemes only (but not cipher suites
-		 * including the schemes)
-		 *
-		 * We start counting ciphers defined by schemes, TKIP, CCMP,
-		 * CCMP-256, GCMP, and GCMP-256
-		 */
-		n_suites = local->hw.n_cipher_schemes + 5;
-
-		/* check if we have WEP40 and WEP104 */
-		if (have_wep)
-			n_suites += 2;
-
-		/* check if we have AES_CMAC, BIP-CMAC-256, BIP-GMAC-128,
-		 * BIP-GMAC-256
-		 */
-		if (have_mfp)
-			n_suites += 4;
-
-		suites = kmalloc_array(n_suites, sizeof(u32), GFP_KERNEL);
-		if (!suites)
-			return -ENOMEM;
-
-		suites[w++] = WLAN_CIPHER_SUITE_CCMP;
-		suites[w++] = WLAN_CIPHER_SUITE_CCMP_256;
-		suites[w++] = WLAN_CIPHER_SUITE_TKIP;
-		suites[w++] = WLAN_CIPHER_SUITE_GCMP;
-		suites[w++] = WLAN_CIPHER_SUITE_GCMP_256;
-
-		if (have_wep) {
-			suites[w++] = WLAN_CIPHER_SUITE_WEP40;
-			suites[w++] = WLAN_CIPHER_SUITE_WEP104;
-		}
-
-		if (have_mfp) {
-			suites[w++] = WLAN_CIPHER_SUITE_AES_CMAC;
-			suites[w++] = WLAN_CIPHER_SUITE_BIP_CMAC_256;
-			suites[w++] = WLAN_CIPHER_SUITE_BIP_GMAC_128;
-			suites[w++] = WLAN_CIPHER_SUITE_BIP_GMAC_256;
-		}
-
-		for (r = 0; r < local->hw.n_cipher_schemes; r++) {
-			suites[w++] = cs[r].cipher;
-			if (WARN_ON(cs[r].pn_len > IEEE80211_MAX_PN_LEN)) {
-				kfree(suites);
-				return -EINVAL;
-			}
-		}
 	}
 
 	local->hw.wiphy->cipher_suites = suites;
@@ -871,8 +936,7 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 	int result, i;
 	enum nl80211_band band;
 	int channels, max_bitrates;
-	bool supp_ht, supp_vht, supp_he;
-	netdev_features_t feature_whitelist;
+	bool supp_ht, supp_vht, supp_he, supp_eht;
 	struct cfg80211_chan_def dflt_chandef = {};
 
 	if (ieee80211_hw_check(hw, QUEUE_CONTROL) &&
@@ -895,6 +959,52 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 		    (!local->ops->start_nan || !local->ops->stop_nan)))
 		return -EINVAL;
 
+	if (hw->wiphy->flags & WIPHY_FLAG_SUPPORTS_MLO) {
+		/*
+		 * For drivers capable of doing MLO, assume modern driver
+		 * or firmware facilities, so software doesn't have to do
+		 * as much, e.g. monitoring beacons would be hard if we
+		 * might not even know which link is active at which time.
+		 */
+		if (WARN_ON(!local->use_chanctx))
+			return -EINVAL;
+
+		if (WARN_ON(!local->ops->link_info_changed))
+			return -EINVAL;
+
+		if (WARN_ON(!ieee80211_hw_check(hw, HAS_RATE_CONTROL)))
+			return -EINVAL;
+
+		if (WARN_ON(!ieee80211_hw_check(hw, AMPDU_AGGREGATION)))
+			return -EINVAL;
+
+		if (WARN_ON(ieee80211_hw_check(hw, HOST_BROADCAST_PS_BUFFERING)))
+			return -EINVAL;
+
+		if (WARN_ON(ieee80211_hw_check(hw, SUPPORTS_PS) &&
+			    (!ieee80211_hw_check(hw, SUPPORTS_DYNAMIC_PS) ||
+			     ieee80211_hw_check(hw, PS_NULLFUNC_STACK))))
+			return -EINVAL;
+
+		if (WARN_ON(!ieee80211_hw_check(hw, MFP_CAPABLE)))
+			return -EINVAL;
+
+		if (WARN_ON(!ieee80211_hw_check(hw, CONNECTION_MONITOR)))
+			return -EINVAL;
+
+		if (WARN_ON(ieee80211_hw_check(hw, NEED_DTIM_BEFORE_ASSOC)))
+			return -EINVAL;
+
+		if (WARN_ON(ieee80211_hw_check(hw, TIMING_BEACON_ONLY)))
+			return -EINVAL;
+
+		if (WARN_ON(!ieee80211_hw_check(hw, AP_LINK_PS)))
+			return -EINVAL;
+
+		if (WARN_ON(ieee80211_hw_check(hw, DEAUTH_NEED_MGD_TX_PREP)))
+			return -EINVAL;
+	}
+
 #ifdef CONFIG_PM
 	if (hw->wiphy->wowlan && (!local->ops->suspend || !local->ops->resume))
 		return -EINVAL;
@@ -910,14 +1020,6 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 				return -EINVAL;
 		}
 	} else {
-		/*
-		 * WDS is currently prohibited when channel contexts are used
-		 * because there's no clear definition of which channel WDS
-		 * type interfaces use
-		 */
-		if (local->hw.wiphy->interface_modes & BIT(NL80211_IFTYPE_WDS))
-			return -EINVAL;
-
 		/* DFS is not supported with multi-channel combinations yet */
 		for (i = 0; i < local->hw.wiphy->n_iface_combinations; i++) {
 			const struct ieee80211_iface_combination *comb;
@@ -931,10 +1033,7 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 	}
 
 	/* Only HW csum features are currently compatible with mac80211 */
-	feature_whitelist = NETIF_F_IP_CSUM | NETIF_F_IPV6_CSUM |
-			    NETIF_F_HW_CSUM | NETIF_F_SG | NETIF_F_HIGHDMA |
-			    NETIF_F_GSO_SOFTWARE | NETIF_F_RXCSUM;
-	if (WARN_ON(hw->netdev_features & ~feature_whitelist))
+	if (WARN_ON(hw->netdev_features & ~MAC80211_SUPPORTED_FEATURES))
 		return -EINVAL;
 
 	if (hw->max_report_rates == 0)
@@ -952,6 +1051,7 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 	supp_ht = false;
 	supp_vht = false;
 	supp_he = false;
+	supp_eht = false;
 	for (band = 0; band < NUM_NL80211_BANDS; band++) {
 		struct ieee80211_supported_band *sband;
 
@@ -960,8 +1060,19 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 			continue;
 
 		if (!dflt_chandef.chan) {
+			/*
+			 * Assign the first enabled channel to dflt_chandef
+			 * from the list of channels
+			 */
+			for (i = 0; i < sband->n_channels; i++)
+				if (!(sband->channels[i].flags &
+						IEEE80211_CHAN_DISABLED))
+					break;
+			/* if none found then use the first anyway */
+			if (i == sband->n_channels)
+				i = 0;
 			cfg80211_chandef_create(&dflt_chandef,
-						&sband->channels[0],
+						&sband->channels[i],
 						NL80211_CHAN_NO_HT);
 			/* init channel we're on */
 			if (!local->use_chanctx && !local->_oper_chandef.chan) {
@@ -973,13 +1084,38 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 
 		channels += sband->n_channels;
 
+		/*
+		 * Due to the way the aggregation code handles this and it
+		 * being an HT capability, we can't really support delayed
+		 * BA in MLO (yet).
+		 */
+		if (WARN_ON(sband->ht_cap.ht_supported &&
+			    (sband->ht_cap.cap & IEEE80211_HT_CAP_DELAY_BA) &&
+			    hw->wiphy->flags & WIPHY_FLAG_SUPPORTS_MLO))
+			return -EINVAL;
+
 		if (max_bitrates < sband->n_bitrates)
 			max_bitrates = sband->n_bitrates;
 		supp_ht = supp_ht || sband->ht_cap.ht_supported;
 		supp_vht = supp_vht || sband->vht_cap.vht_supported;
 
-		if (!supp_he)
-			supp_he = !!ieee80211_get_he_sta_cap(sband);
+		for (i = 0; i < sband->n_iftype_data; i++) {
+			const struct ieee80211_sband_iftype_data *iftd;
+
+			iftd = &sband->iftype_data[i];
+
+			supp_he = supp_he || iftd->he_cap.has_he;
+			supp_eht = supp_eht || iftd->eht_cap.has_eht;
+		}
+
+		/* HT, VHT, HE require QoS, thus >= 4 queues */
+		if (WARN_ON(local->hw.queues < IEEE80211_NUM_ACS &&
+			    (supp_ht || supp_vht || supp_he)))
+			return -EINVAL;
+
+		/* EHT requires HE support */
+		if (WARN_ON(supp_eht && !supp_he))
+			return -EINVAL;
 
 		if (!sband->ht_cap.ht_supported)
 			continue;
@@ -1026,6 +1162,8 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 	if (!local->int_scan_req)
 		return -ENOMEM;
 
+	eth_broadcast_addr(local->int_scan_req->bssid);
+
 	for (band = 0; band < NUM_NL80211_BANDS; band++) {
 		if (!local->hw.wiphy->bands[band])
 			continue;
@@ -1051,7 +1189,7 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 		local->hw.wiphy->signal_type = CFG80211_SIGNAL_TYPE_UNSPEC;
 		if (hw->max_signal <= 0) {
 			result = -EINVAL;
-			goto fail_wiphy_register;
+			goto fail_workqueue;
 		}
 	}
 
@@ -1064,6 +1202,10 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 		wiphy_ext_feature_set(local->hw.wiphy,
 				      NL80211_EXT_FEATURE_EXT_KEY_ID);
 	}
+
+	if (local->hw.wiphy->interface_modes & BIT(NL80211_IFTYPE_ADHOC))
+		wiphy_ext_feature_set(local->hw.wiphy,
+				      NL80211_EXT_FEATURE_DEL_IBSS_STA);
 
 	/*
 	 * Calculate scan IE length -- we need this to alloc
@@ -1080,17 +1222,20 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 		local->scan_ies_len +=
 			2 + sizeof(struct ieee80211_vht_cap);
 
-	/* HE cap element is variable in size - set len to allow max size */
 	/*
-	 * TODO: 1 is added at the end of the calculation to accommodate for
-	 *	the temporary placing of the HE capabilities IE under EXT.
-	 *	Remove it once it is placed in the final place.
-	 */
-	if (supp_he)
+	 * HE cap element is variable in size - set len to allow max size */
+	if (supp_he) {
 		local->scan_ies_len +=
-			2 + sizeof(struct ieee80211_he_cap_elem) +
+			3 + sizeof(struct ieee80211_he_cap_elem) +
 			sizeof(struct ieee80211_he_mcs_nss_supp) +
-			IEEE80211_HE_PPE_THRES_MAX_LEN + 1;
+			IEEE80211_HE_PPE_THRES_MAX_LEN;
+
+		if (supp_eht)
+			local->scan_ies_len +=
+				3 + sizeof(struct ieee80211_eht_cap_elem) +
+				sizeof(struct ieee80211_eht_mcs_nss_supp) +
+				IEEE80211_EHT_PPE_THRES_MAX_LEN;
+	}
 
 	if (!local->ops->hw_scan) {
 		/* For hw_scan, driver needs to set these up. */
@@ -1108,12 +1253,9 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 	if (local->hw.wiphy->max_scan_ie_len)
 		local->hw.wiphy->max_scan_ie_len -= local->scan_ies_len;
 
-	WARN_ON(!ieee80211_cs_list_valid(local->hw.cipher_schemes,
-					 local->hw.n_cipher_schemes));
-
 	result = ieee80211_init_cipher_suites(local);
 	if (result < 0)
-		goto fail_wiphy_register;
+		goto fail_workqueue;
 
 	if (!local->ops->remain_on_channel)
 		local->hw.wiphy->max_remain_on_channel_duration = 5000;
@@ -1137,11 +1279,7 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 				WLAN_EXT_CAPA3_MULTI_BSSID_SUPPORT;
 	}
 
-	local->hw.wiphy->max_num_csa_counters = IEEE80211_MAX_CSA_COUNTERS_NUM;
-
-	result = wiphy_register(local->hw.wiphy);
-	if (result < 0)
-		goto fail_wiphy_register;
+	local->hw.wiphy->max_num_csa_counters = IEEE80211_MAX_CNTDWN_COUNTERS_NUM;
 
 	/*
 	 * We use the number of queues for feature tests (QoS, HT) internally
@@ -1165,8 +1303,6 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 	local->tx_headroom = max_t(unsigned int , local->hw.extra_tx_headroom,
 				   IEEE80211_TX_STATUS_HEADROOM);
 
-	debugfs_hw_add(local);
-
 	/*
 	 * if the driver doesn't specify a max listen interval we
 	 * use 5 which should be a safe default
@@ -1184,10 +1320,7 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 	if (!local->hw.weight_multiplier)
 		local->hw.weight_multiplier = 1;
 
-	result = ieee80211_wep_init(local);
-	if (result < 0)
-		wiphy_debug(local->hw.wiphy, "Failed to initialize wep: %d\n",
-			    result);
+	ieee80211_wep_init(local);
 
 	local->hw.conf.flags = IEEE80211_CONF_IDLE;
 
@@ -1198,9 +1331,9 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 		goto fail_flows;
 
 	rtnl_lock();
-
 	result = ieee80211_init_rate_ctrl_alg(local,
 					      hw->rate_control_algorithm);
+	rtnl_unlock();
 	if (result < 0) {
 		wiphy_debug(local->hw.wiphy,
 			    "Failed to initialize rate control algorithm\n");
@@ -1254,6 +1387,16 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 		local->sband_allocated |= BIT(band);
 	}
 
+	result = wiphy_register(local->hw.wiphy);
+	if (result < 0)
+		goto fail_wiphy_register;
+
+	debugfs_hw_add(local);
+	rate_control_add_debugfs(local);
+
+	rtnl_lock();
+	wiphy_lock(hw->wiphy);
+
 	/* add one default STA interface if supported */
 	if (local->hw.wiphy->interface_modes & BIT(NL80211_IFTYPE_STATION) &&
 	    !ieee80211_hw_check(hw, NO_AUTO_VIF)) {
@@ -1266,6 +1409,7 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 				   "Failed to add default virtual iface\n");
 	}
 
+	wiphy_unlock(hw->wiphy);
 	rtnl_unlock();
 
 #ifdef CONFIG_INET
@@ -1293,19 +1437,21 @@ int ieee80211_register_hw(struct ieee80211_hw *hw)
 #if defined(CONFIG_INET) || defined(CONFIG_IPV6)
  fail_ifa:
 #endif
+	wiphy_unregister(local->hw.wiphy);
+ fail_wiphy_register:
 	rtnl_lock();
 	rate_control_deinitialize(local);
 	ieee80211_remove_interfaces(local);
- fail_rate:
 	rtnl_unlock();
+ fail_rate:
  fail_flows:
 	ieee80211_led_exit(local);
 	destroy_workqueue(local->workqueue);
  fail_workqueue:
-	wiphy_unregister(local->hw.wiphy);
- fail_wiphy_register:
-	if (local->wiphy_ciphers_allocated)
+	if (local->wiphy_ciphers_allocated) {
 		kfree(local->hw.wiphy->cipher_suites);
+		local->wiphy_ciphers_allocated = false;
+	}
 	kfree(local->int_scan_req);
 	return result;
 }
@@ -1339,7 +1485,6 @@ void ieee80211_unregister_hw(struct ieee80211_hw *hw)
 	cancel_delayed_work_sync(&local->roc_work);
 	cancel_work_sync(&local->restart_work);
 	cancel_work_sync(&local->reconfig_filter);
-	cancel_work_sync(&local->tdls_chsw_work);
 	flush_work(&local->sched_scan_stopped_work);
 	flush_work(&local->radar_detected_work);
 
@@ -1351,10 +1496,9 @@ void ieee80211_unregister_hw(struct ieee80211_hw *hw)
 		wiphy_warn(local->hw.wiphy, "skb_queue not empty\n");
 	skb_queue_purge(&local->skb_queue);
 	skb_queue_purge(&local->skb_queue_unreliable);
-	skb_queue_purge(&local->skb_queue_tdls_chsw);
 
-	destroy_workqueue(local->workqueue);
 	wiphy_unregister(local->hw.wiphy);
+	destroy_workqueue(local->workqueue);
 	ieee80211_led_exit(local);
 	kfree(local->int_scan_req);
 }
@@ -1375,8 +1519,10 @@ void ieee80211_free_hw(struct ieee80211_hw *hw)
 	mutex_destroy(&local->iflist_mtx);
 	mutex_destroy(&local->mtx);
 
-	if (local->wiphy_ciphers_allocated)
+	if (local->wiphy_ciphers_allocated) {
 		kfree(local->hw.wiphy->cipher_suites);
+		local->wiphy_ciphers_allocated = false;
+	}
 
 	idr_for_each(&local->ack_status_frames,
 		     ieee80211_free_ack_frame, NULL);

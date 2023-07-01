@@ -13,17 +13,13 @@ enum btrfs_feature_set {
 };
 
 char *btrfs_printable_features(enum btrfs_feature_set set, u64 flags);
-const char * const btrfs_feature_set_name(enum btrfs_feature_set set);
-int btrfs_sysfs_add_device_link(struct btrfs_fs_devices *fs_devices,
-		struct btrfs_device *one_device);
-int btrfs_sysfs_rm_device_link(struct btrfs_fs_devices *fs_devices,
-                struct btrfs_device *one_device);
+const char *btrfs_feature_set_name(enum btrfs_feature_set set);
+int btrfs_sysfs_add_device(struct btrfs_device *device);
+void btrfs_sysfs_remove_device(struct btrfs_device *device);
 int btrfs_sysfs_add_fsid(struct btrfs_fs_devices *fs_devs);
 void btrfs_sysfs_remove_fsid(struct btrfs_fs_devices *fs_devs);
-void btrfs_sysfs_update_sprout_fsid(struct btrfs_fs_devices *fs_devices,
-				    const u8 *fsid);
-void btrfs_sysfs_feature_update(struct btrfs_fs_info *fs_info,
-		u64 bit, enum btrfs_feature_set set);
+void btrfs_sysfs_update_sprout_fsid(struct btrfs_fs_devices *fs_devices);
+void btrfs_sysfs_feature_update(struct btrfs_fs_info *fs_info);
 void btrfs_kobject_uevent(struct block_device *bdev, enum kobject_action action);
 
 int __init btrfs_init_sysfs(void);
@@ -35,5 +31,12 @@ int btrfs_sysfs_add_space_info_type(struct btrfs_fs_info *fs_info,
 				    struct btrfs_space_info *space_info);
 void btrfs_sysfs_remove_space_info(struct btrfs_space_info *space_info);
 void btrfs_sysfs_update_devid(struct btrfs_device *device);
+
+int btrfs_sysfs_add_one_qgroup(struct btrfs_fs_info *fs_info,
+				struct btrfs_qgroup *qgroup);
+void btrfs_sysfs_del_qgroups(struct btrfs_fs_info *fs_info);
+int btrfs_sysfs_add_qgroups(struct btrfs_fs_info *fs_info);
+void btrfs_sysfs_del_one_qgroup(struct btrfs_fs_info *fs_info,
+				struct btrfs_qgroup *qgroup);
 
 #endif

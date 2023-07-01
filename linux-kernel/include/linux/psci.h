@@ -18,13 +18,8 @@ bool psci_tos_resident_on(int cpu);
 
 int psci_cpu_suspend_enter(u32 state);
 bool psci_power_state_is_valid(u32 state);
-int psci_set_osi_mode(void);
+int psci_set_osi_mode(bool enable);
 bool psci_has_osi_support(void);
-
-enum smccc_version {
-	SMCCC_VERSION_1_0,
-	SMCCC_VERSION_1_1,
-};
 
 struct psci_operations {
 	u32 (*get_version)(void);
@@ -35,11 +30,18 @@ struct psci_operations {
 	int (*affinity_info)(unsigned long target_affinity,
 			unsigned long lowest_affinity_level);
 	int (*migrate_info_type)(void);
-	enum arm_smccc_conduit conduit;
-	enum smccc_version smccc_version;
 };
 
 extern struct psci_operations psci_ops;
+
+struct psci_0_1_function_ids {
+	u32 cpu_suspend;
+	u32 cpu_on;
+	u32 cpu_off;
+	u32 migrate;
+};
+
+struct psci_0_1_function_ids get_psci_0_1_function_ids(void);
 
 #if defined(CONFIG_ARM_PSCI_FW)
 int __init psci_dt_init(void);

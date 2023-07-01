@@ -42,6 +42,7 @@ static const struct brcmf_feat_fwcap brcmf_fwcap_map[] = {
 	{ BRCMF_FEAT_MONITOR_FMT_RADIOTAP, "rtap" },
 	{ BRCMF_FEAT_DOT11H, "802.11h" },
 	{ BRCMF_FEAT_SAE, "sae" },
+	{ BRCMF_FEAT_FWAUTH, "idauth" },
 };
 
 #ifdef DEBUG
@@ -142,7 +143,7 @@ static void brcmf_feat_iovar_int_get(struct brcmf_if *ifp,
 	ifp->fwil_fwerr = true;
 
 	err = brcmf_fil_iovar_int_get(ifp, name, &data);
-	if (err == 0) {
+	if (err != -BRCMF_FW_UNSUPPORTED) {
 		brcmf_dbg(INFO, "enabling feature: %s\n", brcmf_feat_names[id]);
 		ifp->drvr->feat_flags |= BIT(id);
 	} else {
@@ -247,7 +248,9 @@ void brcmf_feat_attach(struct brcmf_pub *drvr)
 	brcmf_feat_firmware_capabilities(ifp);
 	memset(&gscan_cfg, 0, sizeof(gscan_cfg));
 	if (drvr->bus_if->chip != BRCM_CC_43430_CHIP_ID &&
-	    drvr->bus_if->chip != BRCM_CC_4345_CHIP_ID)
+	    drvr->bus_if->chip != BRCM_CC_4345_CHIP_ID &&
+	    drvr->bus_if->chip != BRCM_CC_43454_CHIP_ID &&
+	    drvr->bus_if->chip != CY_CC_43439_CHIP_ID)
 		brcmf_feat_iovar_data_set(ifp, BRCMF_FEAT_GSCAN,
 					  "pfn_gscan_cfg",
 					  &gscan_cfg, sizeof(gscan_cfg));
@@ -278,6 +281,7 @@ void brcmf_feat_attach(struct brcmf_pub *drvr)
 	brcmf_feat_iovar_int_get(ifp, BRCMF_FEAT_RSDB, "rsdb_mode");
 	brcmf_feat_iovar_int_get(ifp, BRCMF_FEAT_TDLS, "tdls_enable");
 	brcmf_feat_iovar_int_get(ifp, BRCMF_FEAT_MFP, "mfp");
+	brcmf_feat_iovar_int_get(ifp, BRCMF_FEAT_DUMP_OBSS, "dump_obss");
 
 	pfn_mac.version = BRCMF_PFN_MACADDR_CFG_VER;
 	err = brcmf_fil_iovar_data_get(ifp, "pfn_macaddr", &pfn_mac,
@@ -285,13 +289,14 @@ void brcmf_feat_attach(struct brcmf_pub *drvr)
 	if (!err)
 		ifp->drvr->feat_flags |= BIT(BRCMF_FEAT_SCAN_RANDOM_MAC);
 
+	brcmf_feat_iovar_int_get(ifp, BRCMF_FEAT_FWSUP, "sup_wpa");
+
 	if (drvr->settings->feature_disable) {
 		brcmf_dbg(INFO, "Features: 0x%02x, disable: 0x%02x\n",
 			  ifp->drvr->feat_flags,
 			  drvr->settings->feature_disable);
 		ifp->drvr->feat_flags &= ~drvr->settings->feature_disable;
 	}
-	brcmf_feat_iovar_int_get(ifp, BRCMF_FEAT_FWSUP, "sup_wpa");
 
 	brcmf_feat_firmware_overrides(drvr);
 

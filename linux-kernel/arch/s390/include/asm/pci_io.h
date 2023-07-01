@@ -8,14 +8,19 @@
 #include <linux/slab.h>
 #include <asm/pci_insn.h>
 
+/* I/O size constraints */
+#define ZPCI_MAX_READ_SIZE	8
+#define ZPCI_MAX_WRITE_SIZE	128
+
 /* I/O Map */
 #define ZPCI_IOMAP_SHIFT		48
-#define ZPCI_IOMAP_ADDR_BASE		0x8000000000000000UL
+#define ZPCI_IOMAP_ADDR_SHIFT		62
+#define ZPCI_IOMAP_ADDR_BASE		(1UL << ZPCI_IOMAP_ADDR_SHIFT)
 #define ZPCI_IOMAP_ADDR_OFF_MASK	((1UL << ZPCI_IOMAP_SHIFT) - 1)
 #define ZPCI_IOMAP_MAX_ENTRIES							\
-	((ULONG_MAX - ZPCI_IOMAP_ADDR_BASE + 1) / (1UL << ZPCI_IOMAP_SHIFT))
+	(1UL << (ZPCI_IOMAP_ADDR_SHIFT - ZPCI_IOMAP_SHIFT))
 #define ZPCI_IOMAP_ADDR_IDX_MASK						\
-	(~ZPCI_IOMAP_ADDR_OFF_MASK - ZPCI_IOMAP_ADDR_BASE)
+	((ZPCI_IOMAP_ADDR_BASE - 1) & ~ZPCI_IOMAP_ADDR_OFF_MASK)
 
 struct zpci_iomap_entry {
 	u32 fh;
@@ -140,7 +145,8 @@ static inline int zpci_memcpy_fromio(void *dst,
 
 	while (n > 0) {
 		size = zpci_get_max_write_size((u64 __force) src,
-					       (u64) dst, n, 8);
+					       (u64) dst, n,
+					       ZPCI_MAX_READ_SIZE);
 		rc = zpci_read_single(dst, src, size);
 		if (rc)
 			break;
@@ -161,7 +167,8 @@ static inline int zpci_memcpy_toio(volatile void __iomem *dst,
 
 	while (n > 0) {
 		size = zpci_get_max_write_size((u64 __force) dst,
-					       (u64) src, n, 128);
+					       (u64) src, n,
+					       ZPCI_MAX_WRITE_SIZE);
 		if (size > 8) /* main path */
 			rc = zpci_write_block(dst, src, size);
 		else

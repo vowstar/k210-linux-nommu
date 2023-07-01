@@ -4,6 +4,8 @@
 #include <linux/utsname.h>
 #include <linux/freezer.h>
 #include <linux/compiler.h>
+#include <linux/cpu.h>
+#include <linux/cpuidle.h>
 
 struct swsusp_info {
 	struct new_utsname	uts;
@@ -32,7 +34,7 @@ static inline int init_header_complete(struct swsusp_info *info)
 	return arch_hibernation_header_save(info, MAX_ARCH_HEADER_SIZE);
 }
 
-static inline char *check_image_kernel(struct swsusp_info *info)
+static inline const char *check_image_kernel(struct swsusp_info *info)
 {
 	return arch_hibernation_header_restore(info) ?
 			"architecture specific data" : NULL;
@@ -106,7 +108,7 @@ extern int create_basic_memory_bitmaps(void);
 extern void free_basic_memory_bitmaps(void);
 extern int hibernate_preallocate_memory(void);
 
-extern void clear_free_pages(void);
+extern void clear_or_poison_free_pages(void);
 
 /**
  *	Auxiliary structure used for reading the snapshot image data and
@@ -154,8 +156,8 @@ extern int snapshot_write_next(struct snapshot_handle *handle);
 extern void snapshot_write_finalize(struct snapshot_handle *handle);
 extern int snapshot_image_loaded(struct snapshot_handle *handle);
 
-/* If unset, the snapshot device cannot be open. */
-extern atomic_t snapshot_device_available;
+extern bool hibernate_acquire(void);
+extern void hibernate_release(void);
 
 extern sector_t alloc_swapdev_block(int swap);
 extern void free_all_swap_pages(int swap);
@@ -168,6 +170,7 @@ extern int swsusp_swap_in_use(void);
 #define SF_PLATFORM_MODE	1
 #define SF_NOCOMPRESS_MODE	2
 #define SF_CRC32_MODE	        4
+#define SF_HW_SIG		8
 
 /* kernel/power/hibernate.c */
 extern int swsusp_check(void);
@@ -210,8 +213,7 @@ static inline void suspend_test_finish(const char *label) {}
 
 #ifdef CONFIG_PM_SLEEP
 /* kernel/power/main.c */
-extern int __pm_notifier_call_chain(unsigned long val, int nr_to_call,
-				    int *nr_calls);
+extern int pm_notifier_call_chain_robust(unsigned long val_up, unsigned long val_down);
 extern int pm_notifier_call_chain(unsigned long val);
 #endif
 
@@ -311,3 +313,15 @@ extern int pm_wake_lock(const char *buf);
 extern int pm_wake_unlock(const char *buf);
 
 #endif /* !CONFIG_PM_WAKELOCKS */
+
+static inline int pm_sleep_disable_secondary_cpus(void)
+{
+	cpuidle_pause();
+	return suspend_disable_secondary_cpus();
+}
+
+static inline void pm_sleep_enable_secondary_cpus(void)
+{
+	suspend_enable_secondary_cpus();
+	cpuidle_resume();
+}

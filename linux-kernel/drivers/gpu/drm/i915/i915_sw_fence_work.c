@@ -16,17 +16,14 @@ static void fence_complete(struct dma_fence_work *f)
 static void fence_work(struct work_struct *work)
 {
 	struct dma_fence_work *f = container_of(work, typeof(*f), work);
-	int err;
 
-	err = f->ops->work(f);
-	if (err)
-		dma_fence_set_error(&f->dma, err);
+	f->ops->work(f);
 
 	fence_complete(f);
 	dma_fence_put(&f->dma);
 }
 
-static int __i915_sw_fence_call
+static int
 fence_notify(struct i915_sw_fence *fence, enum i915_sw_fence_notify state)
 {
 	struct dma_fence_work *f = container_of(fence, typeof(*f), chain);
@@ -38,7 +35,10 @@ fence_notify(struct i915_sw_fence *fence, enum i915_sw_fence_notify state)
 
 		if (!f->dma.error) {
 			dma_fence_get(&f->dma);
-			queue_work(system_unbound_wq, &f->work);
+			if (test_bit(DMA_FENCE_WORK_IMM, &f->dma.flags))
+				fence_work(&f->work);
+			else
+				queue_work(system_unbound_wq, &f->work);
 		} else {
 			fence_complete(f);
 		}

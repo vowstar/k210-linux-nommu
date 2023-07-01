@@ -22,18 +22,16 @@ static int bmc150_magn_spi_probe(struct spi_device *spi)
 
 	regmap = devm_regmap_init_spi(spi, &bmc150_magn_regmap_config);
 	if (IS_ERR(regmap)) {
-		dev_err(&spi->dev, "Failed to register spi regmap %d\n",
-			(int)PTR_ERR(regmap));
+		dev_err(&spi->dev, "Failed to register spi regmap: %pe\n",
+			regmap);
 		return PTR_ERR(regmap);
 	}
 	return bmc150_magn_probe(&spi->dev, regmap, spi->irq, id->name);
 }
 
-static int bmc150_magn_spi_remove(struct spi_device *spi)
+static void bmc150_magn_spi_remove(struct spi_device *spi)
 {
 	bmc150_magn_remove(&spi->dev);
-
-	return 0;
 }
 
 static const struct spi_device_id bmc150_magn_spi_id[] = {
@@ -66,3 +64,4 @@ module_spi_driver(bmc150_magn_spi_driver);
 MODULE_AUTHOR("Daniel Baluta <daniel.baluta@intel.com");
 MODULE_DESCRIPTION("BMC150 magnetometer SPI driver");
 MODULE_LICENSE("GPL v2");
+MODULE_IMPORT_NS(IIO_BMC150_MAGN);

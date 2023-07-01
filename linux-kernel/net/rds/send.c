@@ -272,7 +272,7 @@ restart:
 
 			/* Unfortunately, the way Infiniband deals with
 			 * RDMA to a bad MR key is by moving the entire
-			 * queue pair to error state. We cold possibly
+			 * queue pair to error state. We could possibly
 			 * recover from that, but right now we drop the
 			 * connection.
 			 * Therefore, we never retransmit messages with RDMA ops.
@@ -934,7 +934,7 @@ static int rds_rm_size(struct msghdr *msg, int num_sgs,
 
 		case RDS_CMSG_ZCOPY_COOKIE:
 			zcopy_cookie = true;
-			/* fall through */
+			fallthrough;
 
 		case RDS_CMSG_RDMA_DEST:
 		case RDS_CMSG_RDMA_MAP:
@@ -1114,7 +1114,7 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 	struct rds_conn_path *cpath;
 	struct in6_addr daddr;
 	__u32 scope_id = 0;
-	size_t total_payload_len = payload_len, rdma_payload_len = 0;
+	size_t rdma_payload_len = 0;
 	bool zcopy = ((msg->msg_flags & MSG_ZEROCOPY) &&
 		      sock_flag(rds_rs_to_sk(rs), SOCK_ZEROCOPY));
 	int num_sgs = DIV_ROUND_UP(payload_len, PAGE_SIZE);
@@ -1225,7 +1225,7 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 		}
 		/* If the socket is already bound to a link local address,
 		 * it can only send to peers on the same link.  But allow
-		 * communicating beween link local and non-link local address.
+		 * communicating between link local and non-link local address.
 		 */
 		if (scope_id != rs->rs_bound_scope_id) {
 			if (!scope_id) {
@@ -1243,7 +1243,6 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 	if (ret)
 		goto out;
 
-	total_payload_len += rdma_payload_len;
 	if (max_t(size_t, payload_len, rdma_payload_len) > RDS_MAX_MSG_SIZE) {
 		ret = -EMSGSIZE;
 		goto out;
@@ -1274,9 +1273,11 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 
 	/* Attach data to the rm */
 	if (payload_len) {
-		rm->data.op_sg = rds_message_alloc_sgs(rm, num_sgs, &ret);
-		if (!rm->data.op_sg)
+		rm->data.op_sg = rds_message_alloc_sgs(rm, num_sgs);
+		if (IS_ERR(rm->data.op_sg)) {
+			ret = PTR_ERR(rm->data.op_sg);
 			goto out;
+		}
 		ret = rds_message_copy_from_user(rm, &msg->msg_iter, zcopy);
 		if (ret)
 			goto out;
@@ -1338,7 +1339,8 @@ int rds_sendmsg(struct socket *sock, struct msghdr *msg, size_t payload_len)
 		goto out;
 	}
 
-	rds_conn_path_connect_if_down(cpath);
+	if (rds_conn_path_down(cpath))
+		rds_check_all_paths(conn);
 
 	ret = rds_cong_wait(conn->c_fcong, dport, nonblock, rs);
 	if (ret) {

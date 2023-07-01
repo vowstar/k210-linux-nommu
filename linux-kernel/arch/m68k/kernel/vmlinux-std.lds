@@ -19,7 +19,6 @@ SECTIONS
 	IRQENTRY_TEXT
 	SOFTIRQENTRY_TEXT
 	SCHED_TEXT
-	CPUIDLE_TEXT
 	LOCK_TEXT
 	*(.fixup)
 	*(.gnu.warning)
@@ -49,7 +48,6 @@ SECTIONS
 	*(.m68k_fixup)
 	__stop_fixup = .;
   }
-  NOTES
   .init_end : {
 	/* This ALIGN be in a section so that _end is at the end of the
 	   load segment. */
@@ -60,7 +58,7 @@ SECTIONS
   _end = . ;
 
   STABS_DEBUG
-  .comment 0 : { *(.comment) }
+  ELF_DETAILS
 
   /* Sections to be discarded */
   DISCARDS

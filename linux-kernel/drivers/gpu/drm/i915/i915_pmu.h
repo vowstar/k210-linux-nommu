@@ -10,10 +10,25 @@
 #include <linux/hrtimer.h>
 #include <linux/perf_event.h>
 #include <linux/spinlock_types.h>
-#include <drm/i915_drm.h>
+#include <uapi/drm/i915_drm.h>
 
 struct drm_i915_private;
 
+/**
+ * Non-engine events that we need to track enabled-disabled transition and
+ * current state.
+ */
+enum i915_pmu_tracked_events {
+	__I915_PMU_ACTUAL_FREQUENCY_ENABLED = 0,
+	__I915_PMU_REQUESTED_FREQUENCY_ENABLED,
+	__I915_PMU_RC6_RESIDENCY_ENABLED,
+	__I915_PMU_TRACKED_EVENT_COUNT, /* count marker */
+};
+
+/**
+ * Slots used from the sampling timer (non-engine events) with some extras for
+ * convenience.
+ */
 enum {
 	__I915_SAMPLE_FREQ_ACT = 0,
 	__I915_SAMPLE_FREQ_REQ,
@@ -28,8 +43,7 @@ enum {
  * It is also used to know to needed number of event reference counters.
  */
 #define I915_PMU_MASK_BITS \
-	((1 << I915_PMU_SAMPLE_BITS) + \
-	 (I915_PMU_LAST + 1 - __I915_PMU_OTHER(0)))
+	(I915_ENGINE_SAMPLE_COUNT + __I915_PMU_TRACKED_EVENT_COUNT)
 
 #define I915_ENGINE_SAMPLE_COUNT (I915_SAMPLE_SEMA + 1)
 
@@ -39,13 +53,20 @@ struct i915_pmu_sample {
 
 struct i915_pmu {
 	/**
-	 * @node: List node for CPU hotplug handling.
+	 * @cpuhp: Struct used for CPU hotplug handling.
 	 */
-	struct hlist_node node;
+	struct {
+		struct hlist_node node;
+		unsigned int cpu;
+	} cpuhp;
 	/**
 	 * @base: PMU base.
 	 */
 	struct pmu base;
+	/**
+	 * @closed: i915 is unregistering.
+	 */
+	bool closed;
 	/**
 	 * @name: Name as registered with perf core.
 	 */
@@ -59,18 +80,17 @@ struct i915_pmu {
 	 */
 	struct hrtimer timer;
 	/**
-	 * @enable: Bitmask of all currently enabled events.
+	 * @enable: Bitmask of specific enabled events.
 	 *
-	 * Bits are derived from uAPI event numbers in a way that low 16 bits
-	 * correspond to engine event _sample_ _type_ (I915_SAMPLE_QUEUED is
-	 * bit 0), and higher bits correspond to other events (for instance
-	 * I915_PMU_ACTUAL_FREQUENCY is bit 16 etc).
+	 * For some events we need to track their state and do some internal
+	 * house keeping.
 	 *
-	 * In other words, low 16 bits are not per engine but per engine
-	 * sampler type, while the upper bits are directly mapped to other
-	 * event types.
+	 * Each engine event sampler type and event listed in enum
+	 * i915_pmu_tracked_events gets a bit in this field.
+	 *
+	 * Low bits are engine samplers and other events continue from there.
 	 */
-	u64 enable;
+	u32 enable;
 
 	/**
 	 * @timer_last:
@@ -105,6 +125,18 @@ struct i915_pmu {
 	 */
 	ktime_t sleep_last;
 	/**
+	 * @irq_count: Number of interrupts
+	 *
+	 * Intentionally unsigned long to avoid atomics or heuristics on 32bit.
+	 * 4e9 interrupts are a lot and postprocessing can really deal with an
+	 * occasional wraparound easily. It's 32bit after all.
+	 */
+	unsigned long irq_count;
+	/**
+	 * @events_attr_group: Device events attribute group.
+	 */
+	struct attribute_group events_attr_group;
+	/**
 	 * @i915_attr: Memory block holding device attributes.
 	 */
 	void *i915_attr;
@@ -115,11 +147,15 @@ struct i915_pmu {
 };
 
 #ifdef CONFIG_PERF_EVENTS
+int i915_pmu_init(void);
+void i915_pmu_exit(void);
 void i915_pmu_register(struct drm_i915_private *i915);
 void i915_pmu_unregister(struct drm_i915_private *i915);
 void i915_pmu_gt_parked(struct drm_i915_private *i915);
 void i915_pmu_gt_unparked(struct drm_i915_private *i915);
 #else
+static inline int i915_pmu_init(void) { return 0; }
+static inline void i915_pmu_exit(void) {}
 static inline void i915_pmu_register(struct drm_i915_private *i915) {}
 static inline void i915_pmu_unregister(struct drm_i915_private *i915) {}
 static inline void i915_pmu_gt_parked(struct drm_i915_private *i915) {}

@@ -59,23 +59,26 @@
 	};
 
 	dvi-converter {
-		#address-cells = <1>;
-		#size-cells = <0>;
 		compatible = "ti,tfp410";
 
-		port@0 {
-			reg = <0>;
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
 
-			tfp410_in: endpoint {
-				remote-endpoint = <&display0_out>;
+			port@0 {
+				reg = <0>;
+
+				tfp410_in: endpoint {
+					remote-endpoint = <&display0_out>;
+				};
 			};
-		};
 
-		port@1 {
-			reg = <1>;
+			port@1 {
+				reg = <1>;
 
-			tfp410_out: endpoint {
-				remote-endpoint = <&dvi_connector_in>;
+				tfp410_out: endpoint {
+					remote-endpoint = <&dvi_connector_in>;
+				};
 			};
 		};
 	};
@@ -83,27 +86,27 @@
 	leds {
 		compatible = "gpio-leds";
 
-		pwr-r {
+		led-pwr-r {
 			gpios = <&gpio3 22 GPIO_ACTIVE_HIGH>;
 			default-state = "off";
 		};
 
-		pwr-g {
+		led-pwr-g {
 			gpios = <&gpio3 24 GPIO_ACTIVE_HIGH>;
 			default-state = "on";
 		};
 
-		pwr-b {
+		led-pwr-b {
 			gpios = <&gpio3 23 GPIO_ACTIVE_HIGH>;
 			default-state = "off";
 		};
 
-		sd1-b {
+		led-sd1-b {
 			linux,default-trigger = "mmc0";
 			gpios = <&gpio3 20 GPIO_ACTIVE_HIGH>;
 		};
 
-		sd2-b {
+		led-sd2-b {
 			linux,default-trigger = "mmc1";
 			gpios = <&gpio3 17 GPIO_ACTIVE_HIGH>;
 		};

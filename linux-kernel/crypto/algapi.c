@@ -6,6 +6,7 @@
  */
 
 #include <crypto/algapi.h>
+#include <crypto/internal/simd.h>
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/fips.h>
@@ -20,6 +21,11 @@
 #include "internal.h"
 
 static LIST_HEAD(crypto_template_list);
+
+#ifdef CONFIG_CRYPTO_MANAGER_EXTRA_TESTS
+DEFINE_PER_CPU(bool, crypto_simd_disabled_for_test);
+EXPORT_PER_CPU_SYMBOL_GPL(crypto_simd_disabled_for_test);
+#endif
 
 static inline void crypto_check_module_sig(struct module *mod)
 {
@@ -216,7 +222,87 @@ void crypto_remove_spawns(struct crypto_alg *alg, struct list_head *list,
 }
 EXPORT_SYMBOL_GPL(crypto_remove_spawns);
 
-static struct crypto_larval *__crypto_register_alg(struct crypto_alg *alg)
+static void crypto_alg_finish_registration(struct crypto_alg *alg,
+					   bool fulfill_requests,
+					   struct list_head *algs_to_put)
+{
+	struct crypto_alg *q;
+
+	list_for_each_entry(q, &crypto_alg_list, cra_list) {
+		if (q == alg)
+			continue;
+
+		if (crypto_is_moribund(q))
+			continue;
+
+		if (crypto_is_larval(q)) {
+			struct crypto_larval *larval = (void *)q;
+
+			/*
+			 * Check to see if either our generic name or
+			 * specific name can satisfy the name requested
+			 * by the larval entry q.
+			 */
+			if (strcmp(alg->cra_name, q->cra_name) &&
+			    strcmp(alg->cra_driver_name, q->cra_name))
+				continue;
+
+			if (larval->adult)
+				continue;
+			if ((q->cra_flags ^ alg->cra_flags) & larval->mask)
+				continue;
+
+			if (fulfill_requests && crypto_mod_get(alg))
+				larval->adult = alg;
+			else
+				larval->adult = ERR_PTR(-EAGAIN);
+
+			continue;
+		}
+
+		if (strcmp(alg->cra_name, q->cra_name))
+			continue;
+
+		if (strcmp(alg->cra_driver_name, q->cra_driver_name) &&
+		    q->cra_priority > alg->cra_priority)
+			continue;
+
+		crypto_remove_spawns(q, algs_to_put, alg);
+	}
+
+	crypto_notify(CRYPTO_MSG_ALG_LOADED, alg);
+}
+
+static struct crypto_larval *crypto_alloc_test_larval(struct crypto_alg *alg)
+{
+	struct crypto_larval *larval;
+
+	if (!IS_ENABLED(CONFIG_CRYPTO_MANAGER) ||
+	    IS_ENABLED(CONFIG_CRYPTO_MANAGER_DISABLE_TESTS) ||
+	    (alg->cra_flags & CRYPTO_ALG_INTERNAL))
+		return NULL; /* No self-test needed */
+
+	larval = crypto_larval_alloc(alg->cra_name,
+				     alg->cra_flags | CRYPTO_ALG_TESTED, 0);
+	if (IS_ERR(larval))
+		return larval;
+
+	larval->adult = crypto_mod_get(alg);
+	if (!larval->adult) {
+		kfree(larval);
+		return ERR_PTR(-ENOENT);
+	}
+
+	refcount_set(&larval->alg.cra_refcnt, 1);
+	memcpy(larval->alg.cra_driver_name, alg->cra_driver_name,
+	       CRYPTO_MAX_ALG_NAME);
+	larval->alg.cra_priority = alg->cra_priority;
+
+	return larval;
+}
+
+static struct crypto_larval *
+__crypto_register_alg(struct crypto_alg *alg, struct list_head *algs_to_put)
 {
 	struct crypto_alg *q;
 	struct crypto_larval *larval;
@@ -226,9 +312,6 @@ static struct crypto_larval *__crypto_register_alg(struct crypto_alg *alg)
 		goto err;
 
 	INIT_LIST_HEAD(&alg->cra_users);
-
-	/* No cheating! */
-	alg->cra_flags &= ~CRYPTO_ALG_TESTED;
 
 	ret = -EEXIST;
 
@@ -250,31 +333,27 @@ static struct crypto_larval *__crypto_register_alg(struct crypto_alg *alg)
 			goto err;
 	}
 
-	larval = crypto_larval_alloc(alg->cra_name,
-				     alg->cra_flags | CRYPTO_ALG_TESTED, 0);
+	larval = crypto_alloc_test_larval(alg);
 	if (IS_ERR(larval))
 		goto out;
 
-	ret = -ENOENT;
-	larval->adult = crypto_mod_get(alg);
-	if (!larval->adult)
-		goto free_larval;
-
-	refcount_set(&larval->alg.cra_refcnt, 1);
-	memcpy(larval->alg.cra_driver_name, alg->cra_driver_name,
-	       CRYPTO_MAX_ALG_NAME);
-	larval->alg.cra_priority = alg->cra_priority;
-
 	list_add(&alg->cra_list, &crypto_alg_list);
-	list_add(&larval->alg.cra_list, &crypto_alg_list);
 
 	crypto_stats_init(alg);
+
+	if (larval) {
+		/* No cheating! */
+		alg->cra_flags &= ~CRYPTO_ALG_TESTED;
+
+		list_add(&larval->alg.cra_list, &crypto_alg_list);
+	} else {
+		alg->cra_flags |= CRYPTO_ALG_TESTED;
+		crypto_alg_finish_registration(alg, true, algs_to_put);
+	}
 
 out:
 	return larval;
 
-free_larval:
-	kfree(larval);
 err:
 	larval = ERR_PTR(ret);
 	goto out;
@@ -305,12 +384,23 @@ void crypto_alg_tested(const char *name, int err)
 found:
 	q->cra_flags |= CRYPTO_ALG_DEAD;
 	alg = test->adult;
-	if (err || list_empty(&alg->cra_list))
+
+	if (list_empty(&alg->cra_list))
 		goto complete;
+
+	if (err == -ECANCELED)
+		alg->cra_flags |= CRYPTO_ALG_FIPS_INTERNAL;
+	else if (err)
+		goto complete;
+	else
+		alg->cra_flags &= ~CRYPTO_ALG_FIPS_INTERNAL;
 
 	alg->cra_flags |= CRYPTO_ALG_TESTED;
 
-	/* Only satisfy larval waiters if we are the best. */
+	/*
+	 * If a higher-priority implementation of the same algorithm is
+	 * currently being tested, then don't fulfill request larvals.
+	 */
 	best = true;
 	list_for_each_entry(q, &crypto_alg_list, cra_list) {
 		if (crypto_is_moribund(q) || !crypto_is_larval(q))
@@ -325,47 +415,7 @@ found:
 		}
 	}
 
-	list_for_each_entry(q, &crypto_alg_list, cra_list) {
-		if (q == alg)
-			continue;
-
-		if (crypto_is_moribund(q))
-			continue;
-
-		if (crypto_is_larval(q)) {
-			struct crypto_larval *larval = (void *)q;
-
-			/*
-			 * Check to see if either our generic name or
-			 * specific name can satisfy the name requested
-			 * by the larval entry q.
-			 */
-			if (strcmp(alg->cra_name, q->cra_name) &&
-			    strcmp(alg->cra_driver_name, q->cra_name))
-				continue;
-
-			if (larval->adult)
-				continue;
-			if ((q->cra_flags ^ alg->cra_flags) & larval->mask)
-				continue;
-
-			if (best && crypto_mod_get(alg))
-				larval->adult = alg;
-			else
-				larval->adult = ERR_PTR(-EAGAIN);
-
-			continue;
-		}
-
-		if (strcmp(alg->cra_name, q->cra_name))
-			continue;
-
-		if (strcmp(alg->cra_driver_name, q->cra_driver_name) &&
-		    q->cra_priority > alg->cra_priority)
-			continue;
-
-		crypto_remove_spawns(q, &list, alg);
-	}
+	crypto_alg_finish_registration(alg, best, &list);
 
 complete:
 	complete_all(&test->completion);
@@ -389,29 +439,11 @@ void crypto_remove_final(struct list_head *list)
 }
 EXPORT_SYMBOL_GPL(crypto_remove_final);
 
-static void crypto_wait_for_test(struct crypto_larval *larval)
-{
-	int err;
-
-	err = crypto_probing_notify(CRYPTO_MSG_ALG_REGISTER, larval->adult);
-	if (err != NOTIFY_STOP) {
-		if (WARN_ON(err != NOTIFY_DONE))
-			goto out;
-		crypto_alg_tested(larval->alg.cra_driver_name, 0);
-	}
-
-	err = wait_for_completion_killable(&larval->completion);
-	WARN_ON(err);
-	if (!err)
-		crypto_probing_notify(CRYPTO_MSG_ALG_LOADED, larval);
-
-out:
-	crypto_larval_kill(&larval->alg);
-}
-
 int crypto_register_alg(struct crypto_alg *alg)
 {
 	struct crypto_larval *larval;
+	LIST_HEAD(algs_to_put);
+	bool test_started = false;
 	int err;
 
 	alg->cra_flags &= ~CRYPTO_ALG_DEAD;
@@ -420,13 +452,18 @@ int crypto_register_alg(struct crypto_alg *alg)
 		return err;
 
 	down_write(&crypto_alg_sem);
-	larval = __crypto_register_alg(alg);
+	larval = __crypto_register_alg(alg, &algs_to_put);
+	if (!IS_ERR_OR_NULL(larval)) {
+		test_started = crypto_boot_test_finished();
+		larval->test_started = test_started;
+	}
 	up_write(&crypto_alg_sem);
 
 	if (IS_ERR(larval))
 		return PTR_ERR(larval);
-
-	crypto_wait_for_test(larval);
+	if (test_started)
+		crypto_wait_for_test(larval);
+	crypto_remove_final(&algs_to_put);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(crypto_register_alg);
@@ -602,6 +639,8 @@ int crypto_register_instance(struct crypto_template *tmpl,
 {
 	struct crypto_larval *larval;
 	struct crypto_spawn *spawn;
+	u32 fips_internal = 0;
+	LIST_HEAD(algs_to_put);
 	int err;
 
 	err = crypto_check_alg(&inst->alg);
@@ -624,14 +663,20 @@ int crypto_register_instance(struct crypto_template *tmpl,
 		spawn->inst = inst;
 		spawn->registered = true;
 
+		fips_internal |= spawn->alg->cra_flags;
+
 		crypto_mod_put(spawn->alg);
 
 		spawn = next;
 	}
 
-	larval = __crypto_register_alg(&inst->alg);
+	inst->alg.cra_flags |= (fips_internal & CRYPTO_ALG_FIPS_INTERNAL);
+
+	larval = __crypto_register_alg(&inst->alg, &algs_to_put);
 	if (IS_ERR(larval))
 		goto unlock;
+	else if (larval)
+		larval->test_started = true;
 
 	hlist_add_head(&inst->list, &tmpl->instances);
 	inst->tmpl = tmpl;
@@ -639,15 +684,12 @@ int crypto_register_instance(struct crypto_template *tmpl,
 unlock:
 	up_write(&crypto_alg_sem);
 
-	err = PTR_ERR(larval);
 	if (IS_ERR(larval))
-		goto err;
-
-	crypto_wait_for_test(larval);
-	err = 0;
-
-err:
-	return err;
+		return PTR_ERR(larval);
+	if (larval)
+		crypto_wait_for_test(larval);
+	crypto_remove_final(&algs_to_put);
+	return 0;
 }
 EXPORT_SYMBOL_GPL(crypto_register_instance);
 
@@ -679,7 +721,8 @@ int crypto_grab_spawn(struct crypto_spawn *spawn, struct crypto_instance *inst,
 	if (IS_ERR(name))
 		return PTR_ERR(name);
 
-	alg = crypto_find_alg(name, spawn->frontend, type, mask);
+	alg = crypto_find_alg(name, spawn->frontend,
+			      type | CRYPTO_ALG_FIPS_INTERNAL, mask);
 	if (IS_ERR(alg))
 		return PTR_ERR(alg);
 
@@ -690,6 +733,8 @@ int crypto_grab_spawn(struct crypto_spawn *spawn, struct crypto_instance *inst,
 		spawn->mask = mask;
 		spawn->next = inst->spawns;
 		inst->spawns = spawn;
+		inst->alg.cra_flags |=
+			(alg->cra_flags & CRYPTO_ALG_INHERITED_FLAGS);
 		err = 0;
 	}
 	up_write(&crypto_alg_sem);
@@ -716,17 +761,27 @@ EXPORT_SYMBOL_GPL(crypto_drop_spawn);
 
 static struct crypto_alg *crypto_spawn_alg(struct crypto_spawn *spawn)
 {
-	struct crypto_alg *alg;
+	struct crypto_alg *alg = ERR_PTR(-EAGAIN);
+	struct crypto_alg *target;
+	bool shoot = false;
 
 	down_read(&crypto_alg_sem);
-	alg = spawn->alg;
-	if (!spawn->dead && !crypto_mod_get(alg)) {
-		alg->cra_flags |= CRYPTO_ALG_DYING;
-		alg = NULL;
+	if (!spawn->dead) {
+		alg = spawn->alg;
+		if (!crypto_mod_get(alg)) {
+			target = crypto_alg_get(alg);
+			shoot = true;
+			alg = ERR_PTR(-EAGAIN);
+		}
 	}
 	up_read(&crypto_alg_sem);
 
-	return alg ?: ERR_PTR(-EAGAIN);
+	if (shoot) {
+		crypto_shoot_alg(target);
+		crypto_alg_put(target);
+	}
+
+	return alg;
 }
 
 struct crypto_tfm *crypto_spawn_tfm(struct crypto_spawn *spawn, u32 type,
@@ -806,7 +861,23 @@ struct crypto_attr_type *crypto_get_attr_type(struct rtattr **tb)
 }
 EXPORT_SYMBOL_GPL(crypto_get_attr_type);
 
-int crypto_check_attr_type(struct rtattr **tb, u32 type)
+/**
+ * crypto_check_attr_type() - check algorithm type and compute inherited mask
+ * @tb: the template parameters
+ * @type: the algorithm type the template would be instantiated as
+ * @mask_ret: (output) the mask that should be passed to crypto_grab_*()
+ *	      to restrict the flags of any inner algorithms
+ *
+ * Validate that the algorithm type the user requested is compatible with the
+ * one the template would actually be instantiated as.  E.g., if the user is
+ * doing crypto_alloc_shash("cbc(aes)", ...), this would return an error because
+ * the "cbc" template creates an "skcipher" algorithm, not an "shash" algorithm.
+ *
+ * Also compute the mask to use to restrict the flags of any inner algorithms.
+ *
+ * Return: 0 on success; -errno on failure
+ */
+int crypto_check_attr_type(struct rtattr **tb, u32 type, u32 *mask_ret)
 {
 	struct crypto_attr_type *algt;
 
@@ -817,6 +888,7 @@ int crypto_check_attr_type(struct rtattr **tb, u32 type)
 	if ((algt->type ^ type) & algt->mask)
 		return -EINVAL;
 
+	*mask_ret = crypto_algt_inherited_mask(algt);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(crypto_check_attr_type);
@@ -838,24 +910,6 @@ const char *crypto_attr_alg_name(struct rtattr *rta)
 	return alga->name;
 }
 EXPORT_SYMBOL_GPL(crypto_attr_alg_name);
-
-int crypto_attr_u32(struct rtattr *rta, u32 *num)
-{
-	struct crypto_attr_u32 *nu32;
-
-	if (!rta)
-		return -ENOENT;
-	if (RTA_PAYLOAD(rta) < sizeof(*nu32))
-		return -EINVAL;
-	if (rta->rta_type != CRYPTOA_U32)
-		return -EINVAL;
-
-	nu32 = RTA_DATA(rta);
-	*num = nu32->num;
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(crypto_attr_u32);
 
 int crypto_inst_setname(struct crypto_instance *inst, const char *name,
 			struct crypto_alg *alg)
@@ -903,6 +957,14 @@ out:
 	return err;
 }
 EXPORT_SYMBOL_GPL(crypto_enqueue_request);
+
+void crypto_enqueue_request_head(struct crypto_queue *queue,
+				 struct crypto_async_request *request)
+{
+	queue->qlen++;
+	list_add(&request->list, &queue->list);
+}
+EXPORT_SYMBOL_GPL(crypto_enqueue_request_head);
 
 struct crypto_async_request *crypto_dequeue_request(struct crypto_queue *queue)
 {
@@ -953,59 +1015,6 @@ void crypto_inc(u8 *a, unsigned int size)
 	crypto_inc_byte(a, size);
 }
 EXPORT_SYMBOL_GPL(crypto_inc);
-
-void __crypto_xor(u8 *dst, const u8 *src1, const u8 *src2, unsigned int len)
-{
-	int relalign = 0;
-
-	if (!IS_ENABLED(CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS)) {
-		int size = sizeof(unsigned long);
-		int d = (((unsigned long)dst ^ (unsigned long)src1) |
-			 ((unsigned long)dst ^ (unsigned long)src2)) &
-			(size - 1);
-
-		relalign = d ? 1 << __ffs(d) : size;
-
-		/*
-		 * If we care about alignment, process as many bytes as
-		 * needed to advance dst and src to values whose alignments
-		 * equal their relative alignment. This will allow us to
-		 * process the remainder of the input using optimal strides.
-		 */
-		while (((unsigned long)dst & (relalign - 1)) && len > 0) {
-			*dst++ = *src1++ ^ *src2++;
-			len--;
-		}
-	}
-
-	while (IS_ENABLED(CONFIG_64BIT) && len >= 8 && !(relalign & 7)) {
-		*(u64 *)dst = *(u64 *)src1 ^  *(u64 *)src2;
-		dst += 8;
-		src1 += 8;
-		src2 += 8;
-		len -= 8;
-	}
-
-	while (len >= 4 && !(relalign & 3)) {
-		*(u32 *)dst = *(u32 *)src1 ^ *(u32 *)src2;
-		dst += 4;
-		src1 += 4;
-		src2 += 4;
-		len -= 4;
-	}
-
-	while (len >= 2 && !(relalign & 1)) {
-		*(u16 *)dst = *(u16 *)src1 ^ *(u16 *)src2;
-		dst += 2;
-		src1 += 2;
-		src2 += 2;
-		len -= 2;
-	}
-
-	while (len--)
-		*dst++ = *src1++ ^ *src2++;
-}
-EXPORT_SYMBOL_GPL(__crypto_xor);
 
 unsigned int crypto_alg_extsize(struct crypto_alg *alg)
 {
@@ -1242,9 +1251,51 @@ void crypto_stats_skcipher_decrypt(unsigned int cryptlen, int ret,
 EXPORT_SYMBOL_GPL(crypto_stats_skcipher_decrypt);
 #endif
 
+static void __init crypto_start_tests(void)
+{
+	if (IS_ENABLED(CONFIG_CRYPTO_MANAGER_DISABLE_TESTS))
+		return;
+
+	for (;;) {
+		struct crypto_larval *larval = NULL;
+		struct crypto_alg *q;
+
+		down_write(&crypto_alg_sem);
+
+		list_for_each_entry(q, &crypto_alg_list, cra_list) {
+			struct crypto_larval *l;
+
+			if (!crypto_is_larval(q))
+				continue;
+
+			l = (void *)q;
+
+			if (!crypto_is_test_larval(l))
+				continue;
+
+			if (l->test_started)
+				continue;
+
+			l->test_started = true;
+			larval = l;
+			break;
+		}
+
+		up_write(&crypto_alg_sem);
+
+		if (!larval)
+			break;
+
+		crypto_wait_for_test(larval);
+	}
+
+	set_crypto_boot_test_finished();
+}
+
 static int __init crypto_algapi_init(void)
 {
 	crypto_init_proc();
+	crypto_start_tests();
 	return 0;
 }
 
@@ -1253,8 +1304,13 @@ static void __exit crypto_algapi_exit(void)
 	crypto_exit_proc();
 }
 
-module_init(crypto_algapi_init);
+/*
+ * We run this at late_initcall so that all the built-in algorithms
+ * have had a chance to register themselves first.
+ */
+late_initcall(crypto_algapi_init);
 module_exit(crypto_algapi_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Cryptographic algorithms API");
+MODULE_SOFTDEP("pre: cryptomgr");

@@ -441,7 +441,9 @@ int wil_cid_fill_sinfo(struct wil6210_vif *vif, int cid,
 	} __packed reply;
 	struct wil_net_stats *stats = &wil->sta[cid].stats;
 	int rc;
-	u8 txflag = RATE_INFO_FLAGS_DMG;
+	u8 tx_mcs, rx_mcs;
+	u8 tx_rate_flag = RATE_INFO_FLAGS_DMG;
+	u8 rx_rate_flag = RATE_INFO_FLAGS_DMG;
 
 	memset(&reply, 0, sizeof(reply));
 
@@ -451,13 +453,15 @@ int wil_cid_fill_sinfo(struct wil6210_vif *vif, int cid,
 	if (rc)
 		return rc;
 
+	tx_mcs = le16_to_cpu(reply.evt.bf_mcs);
+
 	wil_dbg_wmi(wil, "Link status for CID %d MID %d: {\n"
-		    "  MCS %d TSF 0x%016llx\n"
+		    "  MCS %s TSF 0x%016llx\n"
 		    "  BF status 0x%08x RSSI %d SQI %d%%\n"
 		    "  Tx Tpt %d goodput %d Rx goodput %d\n"
 		    "  Sectors(rx:tx) my %d:%d peer %d:%d\n"
 		    "  Tx mode %d}\n",
-		    cid, vif->mid, le16_to_cpu(reply.evt.bf_mcs),
+		    cid, vif->mid, WIL_EXTENDED_MCS_CHECK(tx_mcs),
 		    le64_to_cpu(reply.evt.tsf), reply.evt.status,
 		    reply.evt.rssi,
 		    reply.evt.sqi,
@@ -481,12 +485,30 @@ int wil_cid_fill_sinfo(struct wil6210_vif *vif, int cid,
 			BIT_ULL(NL80211_STA_INFO_RX_DROP_MISC) |
 			BIT_ULL(NL80211_STA_INFO_TX_FAILED);
 
-	if (wil->use_enhanced_dma_hw && reply.evt.tx_mode != WMI_TX_MODE_DMG)
-		txflag = RATE_INFO_FLAGS_EDMG;
+	if (wil->use_enhanced_dma_hw && reply.evt.tx_mode != WMI_TX_MODE_DMG) {
+		tx_rate_flag = RATE_INFO_FLAGS_EDMG;
+		rx_rate_flag = RATE_INFO_FLAGS_EDMG;
+	}
 
-	sinfo->txrate.flags = txflag;
-	sinfo->txrate.mcs = le16_to_cpu(reply.evt.bf_mcs);
-	sinfo->rxrate.mcs = stats->last_mcs_rx;
+	rx_mcs = stats->last_mcs_rx;
+
+	/* check extended MCS (12.1) and convert it into
+	 * base MCS (7) + EXTENDED_SC_DMG flag
+	 */
+	if (tx_mcs == WIL_EXTENDED_MCS_26) {
+		tx_rate_flag = RATE_INFO_FLAGS_EXTENDED_SC_DMG;
+		tx_mcs = WIL_BASE_MCS_FOR_EXTENDED_26;
+	}
+	if (rx_mcs == WIL_EXTENDED_MCS_26) {
+		rx_rate_flag = RATE_INFO_FLAGS_EXTENDED_SC_DMG;
+		rx_mcs = WIL_BASE_MCS_FOR_EXTENDED_26;
+	}
+
+	sinfo->txrate.flags = tx_rate_flag;
+	sinfo->rxrate.flags = rx_rate_flag;
+	sinfo->txrate.mcs = tx_mcs;
+	sinfo->rxrate.mcs = rx_mcs;
+
 	sinfo->txrate.n_bonded_ch =
 				  wil_tx_cb_mode_to_n_bonded(reply.evt.tx_mode);
 	sinfo->rxrate.n_bonded_ch =
@@ -701,11 +723,13 @@ wil_cfg80211_add_iface(struct wiphy *wiphy, const char *name,
 	ndev = vif_to_ndev(vif);
 	ether_addr_copy(ndev->perm_addr, ndev_main->perm_addr);
 	if (is_valid_ether_addr(params->macaddr)) {
-		ether_addr_copy(ndev->dev_addr, params->macaddr);
+		eth_hw_addr_set(ndev, params->macaddr);
 	} else {
-		ether_addr_copy(ndev->dev_addr, ndev_main->perm_addr);
-		ndev->dev_addr[0] = (ndev->dev_addr[0] ^ (1 << vif->mid)) |
-			0x2; /* locally administered */
+		u8 addr[ETH_ALEN];
+
+		ether_addr_copy(addr, ndev_main->perm_addr);
+		addr[0] = (addr[0] ^ (1 << vif->mid)) |	0x2; /* locally administered */
+		eth_hw_addr_set(ndev, addr);
 	}
 	wdev = vif_to_wdev(vif);
 	ether_addr_copy(wdev->address, ndev->dev_addr);
@@ -1596,7 +1620,7 @@ static void wil_del_rx_key(u8 key_index, enum wmi_key_usage key_usage,
 }
 
 static int wil_cfg80211_add_key(struct wiphy *wiphy,
-				struct net_device *ndev,
+				struct net_device *ndev, int link_id,
 				u8 key_index, bool pairwise,
 				const u8 *mac_addr,
 				struct key_params *params)
@@ -1629,10 +1653,9 @@ static int wil_cfg80211_add_key(struct wiphy *wiphy,
 				params->seq_len, params->seq);
 			return -EINVAL;
 		}
-	}
-
-	if (!IS_ERR(cs))
+	} else {
 		wil_del_rx_key(key_index, key_usage, cs);
+	}
 
 	if (params->seq && params->seq_len != IEEE80211_GCMP_PN_LEN) {
 		wil_err(wil,
@@ -1673,7 +1696,7 @@ static int wil_cfg80211_add_key(struct wiphy *wiphy,
 }
 
 static int wil_cfg80211_del_key(struct wiphy *wiphy,
-				struct net_device *ndev,
+				struct net_device *ndev, int link_id,
 				u8 key_index, bool pairwise,
 				const u8 *mac_addr)
 {
@@ -1700,7 +1723,7 @@ static int wil_cfg80211_del_key(struct wiphy *wiphy,
 
 /* Need to be present or wiphy_new() will WARN */
 static int wil_cfg80211_set_default_key(struct wiphy *wiphy,
-					struct net_device *ndev,
+					struct net_device *ndev, int link_id,
 					u8 key_index, bool unicast,
 					bool multicast)
 {
@@ -1739,7 +1762,7 @@ static int wil_cancel_remain_on_channel(struct wiphy *wiphy,
 	return wil_p2p_cancel_listen(vif, cookie);
 }
 
-/**
+/*
  * find a specific IE in a list of IEs
  * return a pointer to the beginning of IE in the list
  * or NULL if not found
@@ -1766,7 +1789,7 @@ static const u8 *_wil_cfg80211_find_ie(const u8 *ies, u16 ies_len, const u8 *ie,
 				       ies_len);
 }
 
-/**
+/*
  * merge the IEs in two lists into a single list.
  * do not include IEs from the second list which exist in the first list.
  * add only vendor specific IEs from second list to keep
@@ -2049,8 +2072,8 @@ void wil_cfg80211_ap_recovery(struct wil6210_priv *wil)
 		key_params.key = vif->gtk;
 		key_params.key_len = vif->gtk_len;
 		key_params.seq_len = IEEE80211_GCMP_PN_LEN;
-		rc = wil_cfg80211_add_key(wiphy, ndev, vif->gtk_index, false,
-					  NULL, &key_params);
+		rc = wil_cfg80211_add_key(wiphy, ndev, -1, vif->gtk_index,
+					  false, NULL, &key_params);
 		if (rc)
 			wil_err(wil, "vif %d recovery add key failed (%d)\n",
 				i, rc);
@@ -2075,8 +2098,8 @@ static int wil_cfg80211_change_beacon(struct wiphy *wiphy,
 			     bcon->tail_len))
 		privacy = 1;
 
-	memcpy(vif->ssid, wdev->ssid, wdev->ssid_len);
-	vif->ssid_len = wdev->ssid_len;
+	memcpy(vif->ssid, wdev->u.ap.ssid, wdev->u.ap.ssid_len);
+	vif->ssid_len = wdev->u.ap.ssid_len;
 
 	/* in case privacy has changed, need to restart the AP */
 	if (vif->privacy != privacy) {
@@ -2085,7 +2108,7 @@ static int wil_cfg80211_change_beacon(struct wiphy *wiphy,
 
 		rc = _wil_cfg80211_start_ap(wiphy, ndev, vif->ssid,
 					    vif->ssid_len, privacy,
-					    wdev->beacon_interval,
+					    wdev->links[0].ap.beacon_interval,
 					    vif->channel,
 					    vif->wmi_edmg_channel, bcon,
 					    vif->hidden_ssid,
@@ -2163,7 +2186,8 @@ static int wil_cfg80211_start_ap(struct wiphy *wiphy,
 }
 
 static int wil_cfg80211_stop_ap(struct wiphy *wiphy,
-				struct net_device *ndev)
+				struct net_device *ndev,
+				unsigned int link_id)
 {
 	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
 	struct wil6210_vif *vif = ndev_to_vif(ndev);

@@ -35,7 +35,7 @@ static u32 vbg_misc_device_requestor(struct inode *inode)
 			VMMDEV_REQUESTOR_CON_DONT_KNOW |
 			VMMDEV_REQUESTOR_TRUST_NOT_GIVEN;
 
-	if (from_kuid(current_user_ns(), current->cred->uid) == 0)
+	if (from_kuid(current_user_ns(), current_uid()) == 0)
 		requestor |= VMMDEV_REQUESTOR_USR_ROOT;
 	else
 		requestor |= VMMDEV_REQUESTOR_USR_USER;
@@ -131,7 +131,8 @@ static long vbg_misc_device_ioctl(struct file *filp, unsigned int req,
 	 * the need for a bounce-buffer and another copy later on.
 	 */
 	is_vmmdev_req = (req & ~IOCSIZE_MASK) == VBG_IOCTL_VMMDEV_REQUEST(0) ||
-			 req == VBG_IOCTL_VMMDEV_REQUEST_BIG;
+			 req == VBG_IOCTL_VMMDEV_REQUEST_BIG ||
+			 req == VBG_IOCTL_VMMDEV_REQUEST_BIG_ALT;
 
 	if (is_vmmdev_req)
 		buf = vbg_req_alloc(size, VBG_IOCTL_HDR_TYPE_DEFAULT,
@@ -201,13 +202,8 @@ static int vbg_input_open(struct input_dev *input)
 {
 	struct vbg_dev *gdev = input_get_drvdata(input);
 	u32 feat = VMMDEV_MOUSE_GUEST_CAN_ABSOLUTE | VMMDEV_MOUSE_NEW_PROTOCOL;
-	int ret;
 
-	ret = vbg_core_set_mouse_status(gdev, feat);
-	if (ret)
-		return ret;
-
-	return 0;
+	return vbg_core_set_mouse_status(gdev, feat);
 }
 
 /**
@@ -273,6 +269,13 @@ static ssize_t host_features_show(struct device *dev,
 
 static DEVICE_ATTR_RO(host_version);
 static DEVICE_ATTR_RO(host_features);
+
+static struct attribute *vbg_pci_attrs[] = {
+	&dev_attr_host_version.attr,
+	&dev_attr_host_features.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(vbg_pci);
 
 /**
  * Does the PCI detection and init of the device.
@@ -360,8 +363,8 @@ static int vbg_pci_probe(struct pci_dev *pci, const struct pci_device_id *id)
 		goto err_vbg_core_exit;
 	}
 
-	ret = devm_request_irq(dev, pci->irq, vbg_core_isr, IRQF_SHARED,
-			       DEVICE_NAME, gdev);
+	ret = request_irq(pci->irq, vbg_core_isr, IRQF_SHARED, DEVICE_NAME,
+			  gdev);
 	if (ret) {
 		vbg_err("vboxguest: Error requesting irq: %d\n", ret);
 		goto err_vbg_core_exit;
@@ -371,7 +374,7 @@ static int vbg_pci_probe(struct pci_dev *pci, const struct pci_device_id *id)
 	if (ret) {
 		vbg_err("vboxguest: Error misc_register %s failed: %d\n",
 			DEVICE_NAME, ret);
-		goto err_vbg_core_exit;
+		goto err_free_irq;
 	}
 
 	ret = misc_register(&gdev->misc_device_user);
@@ -394,12 +397,6 @@ static int vbg_pci_probe(struct pci_dev *pci, const struct pci_device_id *id)
 	}
 
 	pci_set_drvdata(pci, gdev);
-	device_create_file(dev, &dev_attr_host_version);
-	device_create_file(dev, &dev_attr_host_features);
-
-	vbg_info("vboxguest: misc device minor %d, IRQ %d, I/O port %x, MMIO at %pap (size %pap)\n",
-		 gdev->misc_device.minor, pci->irq, gdev->io_port,
-		 &mmio, &mmio_len);
 
 	return 0;
 
@@ -407,6 +404,8 @@ err_unregister_misc_device_user:
 	misc_deregister(&gdev->misc_device_user);
 err_unregister_misc_device:
 	misc_deregister(&gdev->misc_device);
+err_free_irq:
+	free_irq(pci->irq, gdev);
 err_vbg_core_exit:
 	vbg_core_exit(gdev);
 err_disable_pcidev:
@@ -423,8 +422,7 @@ static void vbg_pci_remove(struct pci_dev *pci)
 	vbg_gdev = NULL;
 	mutex_unlock(&vbg_gdev_mutex);
 
-	device_remove_file(gdev->dev, &dev_attr_host_features);
-	device_remove_file(gdev->dev, &dev_attr_host_version);
+	free_irq(pci->irq, gdev);
 	misc_deregister(&gdev->misc_device_user);
 	misc_deregister(&gdev->misc_device);
 	vbg_core_exit(gdev);
@@ -489,6 +487,7 @@ MODULE_DEVICE_TABLE(pci,  vbg_pci_ids);
 
 static struct pci_driver vbg_pci_driver = {
 	.name		= DEVICE_NAME,
+	.dev_groups	= vbg_pci_groups,
 	.id_table	= vbg_pci_ids,
 	.probe		= vbg_pci_probe,
 	.remove		= vbg_pci_remove,

@@ -8,6 +8,7 @@
 
 #include <dt-bindings/clock/at91.h>
 #include <dt-bindings/dma/at91.h>
+#include <dt-bindings/mfd/at91-usart.h>
 #include <dt-bindings/pinctrl/at91.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/gpio/gpio.h>
@@ -53,7 +54,7 @@
 		};
 	};
 
-	memory {
+	memory@20000000 {
 		device_type = "memory";
 		reg = <0x20000000 0x20000000>;
 	};
@@ -81,6 +82,9 @@
 	ns_sram: sram@210000 {
 		compatible = "mmio-sram";
 		reg = <0x00210000 0x10000>;
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges = <0 0x00210000 0x10000>;
 	};
 
 	ahb {
@@ -93,11 +97,19 @@
 			compatible = "mmio-sram";
 			no-memory-wc;
 			reg = <0x100000 0x2400>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges = <0 0x100000 0x2400>;
+		};
+
+		vdec0: vdec@300000 {
+			compatible = "microchip,sama5d4-vdec";
+			reg = <0x00300000 0x100000>;
+			interrupts = <19 IRQ_TYPE_LEVEL_HIGH 4>;
+			clocks = <&pmc PMC_TYPE_PERIPHERAL 19>;
 		};
 
 		usb0: gadget@400000 {
-			#address-cells = <1>;
-			#size-cells = <0>;
 			compatible = "atmel,sama5d3-udc";
 			reg = <0x00400000 0x100000
 			       0xfc02c000 0x4000>;
@@ -105,124 +117,6 @@
 			clocks = <&pmc PMC_TYPE_PERIPHERAL 47>, <&pmc PMC_TYPE_CORE PMC_UTMI>;
 			clock-names = "pclk", "hclk";
 			status = "disabled";
-
-			ep@0 {
-				reg = <0>;
-				atmel,fifo-size = <64>;
-				atmel,nb-banks = <1>;
-			};
-
-			ep@1 {
-				reg = <1>;
-				atmel,fifo-size = <1024>;
-				atmel,nb-banks = <3>;
-				atmel,can-dma;
-				atmel,can-isoc;
-			};
-
-			ep@2 {
-				reg = <2>;
-				atmel,fifo-size = <1024>;
-				atmel,nb-banks = <3>;
-				atmel,can-dma;
-				atmel,can-isoc;
-			};
-
-			ep@3 {
-				reg = <3>;
-				atmel,fifo-size = <1024>;
-				atmel,nb-banks = <2>;
-				atmel,can-dma;
-				atmel,can-isoc;
-			};
-
-			ep@4 {
-				reg = <4>;
-				atmel,fifo-size = <1024>;
-				atmel,nb-banks = <2>;
-				atmel,can-dma;
-				atmel,can-isoc;
-			};
-
-			ep@5 {
-				reg = <5>;
-				atmel,fifo-size = <1024>;
-				atmel,nb-banks = <2>;
-				atmel,can-dma;
-				atmel,can-isoc;
-			};
-
-			ep@6 {
-				reg = <6>;
-				atmel,fifo-size = <1024>;
-				atmel,nb-banks = <2>;
-				atmel,can-dma;
-				atmel,can-isoc;
-			};
-
-			ep@7 {
-				reg = <7>;
-				atmel,fifo-size = <1024>;
-				atmel,nb-banks = <2>;
-				atmel,can-dma;
-				atmel,can-isoc;
-			};
-
-			ep@8 {
-				reg = <8>;
-				atmel,fifo-size = <1024>;
-				atmel,nb-banks = <2>;
-				atmel,can-isoc;
-			};
-
-			ep@9 {
-				reg = <9>;
-				atmel,fifo-size = <1024>;
-				atmel,nb-banks = <2>;
-				atmel,can-isoc;
-			};
-
-			ep@10 {
-				reg = <10>;
-				atmel,fifo-size = <1024>;
-				atmel,nb-banks = <2>;
-				atmel,can-isoc;
-			};
-
-			ep@11 {
-				reg = <11>;
-				atmel,fifo-size = <1024>;
-				atmel,nb-banks = <2>;
-				atmel,can-isoc;
-			};
-
-			ep@12 {
-				reg = <12>;
-				atmel,fifo-size = <1024>;
-				atmel,nb-banks = <2>;
-				atmel,can-isoc;
-			};
-
-			ep@13 {
-				reg = <13>;
-				atmel,fifo-size = <1024>;
-				atmel,nb-banks = <2>;
-				atmel,can-isoc;
-			};
-
-			ep@14 {
-				reg = <14>;
-				atmel,fifo-size = <1024>;
-				atmel,nb-banks = <2>;
-				atmel,can-isoc;
-			};
-
-			ep@15 {
-				reg = <15>;
-				atmel,fifo-size = <1024>;
-				atmel,nb-banks = <2>;
-				atmel,can-isoc;
-			};
 		};
 
 		usb1: ohci@500000 {
@@ -385,6 +279,7 @@
 			uart0: serial@f8004000 {
 				compatible = "atmel,at91sam9260-usart";
 				reg = <0xf8004000 0x100>;
+				atmel,usart-mode = <AT91_USART_MODE_SERIAL>;
 				interrupts = <27 IRQ_TYPE_LEVEL_HIGH 5>;
 				dmas = <&dma0
 					(AT91_XDMAC_DT_MEM_IF(0) | AT91_XDMAC_DT_PER_IF(1)
@@ -458,8 +353,11 @@
 					(AT91_XDMAC_DT_MEM_IF(0) | AT91_XDMAC_DT_PER_IF(1)
 					| AT91_XDMAC_DT_PERID(3))>;
 				dma-names = "tx", "rx";
-				pinctrl-names = "default";
+				pinctrl-names = "default", "gpio";
 				pinctrl-0 = <&pinctrl_i2c0>;
+				pinctrl-1 = <&pinctrl_i2c0_gpio>;
+				sda-gpios = <&pioA 30 GPIO_ACTIVE_HIGH>;
+				scl-gpios = <&pioA 31 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 				#address-cells = <1>;
 				#size-cells = <0>;
 				clocks = <&pmc PMC_TYPE_PERIPHERAL 32>;
@@ -477,8 +375,11 @@
 					(AT91_XDMAC_DT_MEM_IF(0) | AT91_XDMAC_DT_PER_IF(1)
 					| AT91_XDMAC_DT_PERID(5))>;
 				dma-names = "tx", "rx";
-				pinctrl-names = "default";
+				pinctrl-names = "default", "gpio";
 				pinctrl-0 = <&pinctrl_i2c1>;
+				pinctrl-1 = <&pinctrl_i2c1_gpio>;
+				sda-gpios = <&pioE 29 GPIO_ACTIVE_HIGH>;
+				scl-gpios = <&pioE 30 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 				#address-cells = <1>;
 				#size-cells = <0>;
 				clocks = <&pmc PMC_TYPE_PERIPHERAL 33>;
@@ -519,8 +420,11 @@
 					(AT91_XDMAC_DT_MEM_IF(0) | AT91_XDMAC_DT_PER_IF(1)
 					| AT91_XDMAC_DT_PERID(7))>;
 				dma-names = "tx", "rx";
-				pinctrl-names = "default";
+				pinctrl-names = "default", "gpio";
 				pinctrl-0 = <&pinctrl_i2c2>;
+				pinctrl-1 = <&pinctrl_i2c2_gpio>;
+				sda-gpios = <&pioB 29 GPIO_ACTIVE_HIGH>;
+				scl-gpios = <&pioB 30 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 				#address-cells = <1>;
 				#size-cells = <0>;
 				clocks = <&pmc PMC_TYPE_PERIPHERAL 34>;
@@ -535,6 +439,7 @@
 			usart0: serial@f802c000 {
 				compatible = "atmel,at91sam9260-usart";
 				reg = <0xf802c000 0x100>;
+				atmel,usart-mode = <AT91_USART_MODE_SERIAL>;
 				interrupts = <6 IRQ_TYPE_LEVEL_HIGH 5>;
 				dmas = <&dma0
 					(AT91_XDMAC_DT_MEM_IF(0) | AT91_XDMAC_DT_PER_IF(1)
@@ -553,6 +458,7 @@
 			usart1: serial@f8030000 {
 				compatible = "atmel,at91sam9260-usart";
 				reg = <0xf8030000 0x100>;
+				atmel,usart-mode = <AT91_USART_MODE_SERIAL>;
 				interrupts = <7 IRQ_TYPE_LEVEL_HIGH 5>;
 				dmas = <&dma0
 					(AT91_XDMAC_DT_MEM_IF(0) | AT91_XDMAC_DT_PER_IF(1)
@@ -588,6 +494,7 @@
 			uart1: serial@fc004000 {
 				compatible = "atmel,at91sam9260-usart";
 				reg = <0xfc004000 0x100>;
+				atmel,usart-mode = <AT91_USART_MODE_SERIAL>;
 				interrupts = <28 IRQ_TYPE_LEVEL_HIGH 5>;
 				dmas = <&dma0
 					(AT91_XDMAC_DT_MEM_IF(0) | AT91_XDMAC_DT_PER_IF(1)
@@ -606,6 +513,7 @@
 			usart2: serial@fc008000 {
 				compatible = "atmel,at91sam9260-usart";
 				reg = <0xfc008000 0x100>;
+				atmel,usart-mode = <AT91_USART_MODE_SERIAL>;
 				interrupts = <29 IRQ_TYPE_LEVEL_HIGH 5>;
 				dmas = <&dma1
 					(AT91_XDMAC_DT_MEM_IF(0) | AT91_XDMAC_DT_PER_IF(1)
@@ -624,6 +532,7 @@
 			usart3: serial@fc00c000 {
 				compatible = "atmel,at91sam9260-usart";
 				reg = <0xfc00c000 0x100>;
+				atmel,usart-mode = <AT91_USART_MODE_SERIAL>;
 				interrupts = <30 IRQ_TYPE_LEVEL_HIGH 5>;
 				dmas = <&dma1
 					(AT91_XDMAC_DT_MEM_IF(0) | AT91_XDMAC_DT_PER_IF(1)
@@ -642,6 +551,7 @@
 			usart4: serial@fc010000 {
 				compatible = "atmel,at91sam9260-usart";
 				reg = <0xfc010000 0x100>;
+				atmel,usart-mode = <AT91_USART_MODE_SERIAL>;
 				interrupts = <31 IRQ_TYPE_LEVEL_HIGH 5>;
 				dmas = <&dma1
 					(AT91_XDMAC_DT_MEM_IF(0) | AT91_XDMAC_DT_PER_IF(1)
@@ -766,34 +676,12 @@
 				atmel,adc-startup-time = <40>;
 				atmel,adc-use-external-triggers;
 				atmel,adc-vref = <3000>;
-				atmel,adc-res = <8 10>;
 				atmel,adc-sample-hold-time = <11>;
-				atmel,adc-res-names = "lowres", "highres";
 				atmel,adc-ts-pressure-threshold = <10000>;
 				status = "disabled";
-
-				trigger0 {
-					trigger-name = "external-rising";
-					trigger-value = <0x1>;
-					trigger-external;
-				};
-				trigger1 {
-					trigger-name = "external-falling";
-					trigger-value = <0x2>;
-					trigger-external;
-				};
-				trigger2 {
-					trigger-name = "external-any";
-					trigger-value = <0x3>;
-					trigger-external;
-				};
-				trigger3 {
-					trigger-name = "continuous";
-					trigger-value = <0x6>;
-				};
 			};
 
-			aes@fc044000 {
+			aes: crypto@fc044000 {
 				compatible = "atmel,at91sam9g46-aes";
 				reg = <0xfc044000 0x100>;
 				interrupts = <12 IRQ_TYPE_LEVEL_HIGH 0>;
@@ -804,10 +692,9 @@
 				dma-names = "tx", "rx";
 				clocks = <&pmc PMC_TYPE_PERIPHERAL 12>;
 				clock-names = "aes_clk";
-				status = "okay";
 			};
 
-			tdes@fc04c000 {
+			tdes: crpyto@fc04c000 {
 				compatible = "atmel,at91sam9g46-tdes";
 				reg = <0xfc04c000 0x100>;
 				interrupts = <14 IRQ_TYPE_LEVEL_HIGH 0>;
@@ -818,10 +705,9 @@
 				dma-names = "tx", "rx";
 				clocks = <&pmc PMC_TYPE_PERIPHERAL 14>;
 				clock-names = "tdes_clk";
-				status = "okay";
 			};
 
-			sha@fc050000 {
+			sha: crypto@fc050000 {
 				compatible = "atmel,at91sam9g46-sha";
 				reg = <0xfc050000 0x100>;
 				interrupts = <15 IRQ_TYPE_LEVEL_HIGH 0>;
@@ -830,7 +716,6 @@
 				dma-names = "tx";
 				clocks = <&pmc PMC_TYPE_PERIPHERAL 15>;
 				clock-names = "sha_clk";
-				status = "okay";
 			};
 
 			hsmc: smc@fc05c000 {
@@ -849,7 +734,7 @@
 				};
 			};
 
-			reset_controller: rstc@fc068600 {
+			reset_controller: reset-controller@fc068600 {
 				compatible = "atmel,sama5d3-rstc", "atmel,at91sam9g45-rstc";
 				reg = <0xfc068600 0x10>;
 				clocks = <&clk32k>;
@@ -884,7 +769,7 @@
 			};
 
 			rtc@fc0686b0 {
-				compatible = "atmel,at91rm9200-rtc";
+				compatible = "atmel,sama5d4-rtc";
 				reg = <0xfc0686b0 0x30>;
 				interrupts = <1 IRQ_TYPE_LEVEL_HIGH 7>;
 				clocks = <&clk32k>;
@@ -893,6 +778,7 @@
 			dbgu: serial@fc069000 {
 				compatible = "atmel,at91sam9260-dbgu", "atmel,at91sam9260-usart";
 				reg = <0xfc069000 0x200>;
+				atmel,usart-mode = <AT91_USART_MODE_SERIAL>;
 				interrupts = <45 IRQ_TYPE_LEVEL_HIGH 7>;
 				pinctrl-names = "default";
 				pinctrl-0 = <&pinctrl_dbgu>;
@@ -914,7 +800,7 @@
 					0xffffffff 0x3ffcfe7c 0x1c010101	/* pioA */
 					0x7fffffff 0xfffccc3a 0x3f00cc3a	/* pioB */
 					0xffffffff 0x3ff83fff 0xff00ffff	/* pioC */
-					0x0003ff00 0x8002a800 0x00000000	/* pioD */
+					0xb003ff00 0x8002a800 0x00000000	/* pioD */
 					0xffffffff 0x7fffffff 0x76fff1bf	/* pioE */
 					>;
 
@@ -1122,6 +1008,12 @@
 							<AT91_PIOA 30 AT91_PERIPH_A AT91_PINCTRL_NONE
 							 AT91_PIOA 31 AT91_PERIPH_A AT91_PINCTRL_NONE>;
 					};
+
+					pinctrl_i2c0_gpio: i2c0-gpio {
+						atmel,pins =
+							<AT91_PIOA 30 AT91_PERIPH_GPIO AT91_PINCTRL_NONE
+							 AT91_PIOA 31 AT91_PERIPH_GPIO AT91_PINCTRL_NONE>;
+					};
 				};
 
 				i2c1 {
@@ -1130,6 +1022,12 @@
 							<AT91_PIOE 29 AT91_PERIPH_C AT91_PINCTRL_NONE	/* TWD1, conflicts with UART0 RX and DIBP */
 							 AT91_PIOE 30 AT91_PERIPH_C AT91_PINCTRL_NONE>;	/* TWCK1, conflicts with UART0 TX and DIBN */
 					};
+
+					pinctrl_i2c1_gpio: i2c1-gpio {
+						atmel,pins =
+							<AT91_PIOE 29 AT91_PERIPH_GPIO AT91_PINCTRL_NONE
+							 AT91_PIOE 30 AT91_PERIPH_GPIO AT91_PINCTRL_NONE>;
+					};
 				};
 
 				i2c2 {
@@ -1137,6 +1035,12 @@
 						atmel,pins =
 							<AT91_PIOB 29 AT91_PERIPH_A AT91_PINCTRL_NONE	/* TWD2, conflicts with RD0 and PWML1 */
 							 AT91_PIOB 30 AT91_PERIPH_A AT91_PINCTRL_NONE>; /* TWCK2, conflicts with RF0 */
+					};
+
+					pinctrl_i2c2_gpio: i2c2-gpio {
+						atmel,pins =
+							<AT91_PIOB 29 AT91_PERIPH_GPIO AT91_PINCTRL_NONE
+							 AT91_PIOB 30 AT91_PERIPH_GPIO AT91_PINCTRL_NONE>;
 					};
 				};
 

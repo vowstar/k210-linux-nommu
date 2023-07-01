@@ -1,67 +1,9 @@
-/******************************************************************************
- *
- * This file is provided under a dual BSD/GPLv2 license.  When using or
- * redistributing this file, you may do so under either license.
- *
- * GPL LICENSE SUMMARY
- *
- * Copyright(c) 2012 - 2014 Intel Corporation. All rights reserved.
- * Copyright(c) 2013 - 2015 Intel Mobile Communications GmbH
- * Copyright(c) 2015 - 2017 Intel Deutschland GmbH
- * Copyright(c) 2018 - 2019 Intel Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * The full GNU General Public License is included in this distribution
- * in the file called COPYING.
- *
- * Contact Information:
- *  Intel Linux Wireless <linuxwifi@intel.com>
- * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
- *
- * BSD LICENSE
- *
- * Copyright(c) 2012 - 2014 Intel Corporation. All rights reserved.
- * Copyright(c) 2013 - 2015 Intel Mobile Communications GmbH
- * Copyright(c) 2015 - 2017 Intel Deutschland GmbH
- * Copyright(c) 2018 - 2019 Intel Corporation
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- *  * Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *  * Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *  * Neither the name Intel Corporation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- *****************************************************************************/
-
+/* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
+/*
+ * Copyright (C) 2012-2014, 2018-2022 Intel Corporation
+ * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
+ * Copyright (C) 2015-2017 Intel Deutschland GmbH
+ */
 #ifndef __iwl_fw_api_rx_h__
 #define __iwl_fw_api_rx_h__
 
@@ -71,7 +13,6 @@
 #define IWL_RX_INFO_ENERGY_ANT_ABC_IDX 1
 #define IWL_RX_INFO_ENERGY_ANT_A_MSK 0x000000ff
 #define IWL_RX_INFO_ENERGY_ANT_B_MSK 0x0000ff00
-#define IWL_RX_INFO_ENERGY_ANT_C_MSK 0x00ff0000
 #define IWL_RX_INFO_ENERGY_ANT_A_POS 0
 #define IWL_RX_INFO_ENERGY_ANT_B_POS 8
 #define IWL_RX_INFO_ENERGY_ANT_C_POS 16
@@ -184,27 +125,23 @@ enum iwl_rx_phy_flags {
  * @RX_MPDU_RES_STATUS_OVERRUN_OK: there was no RXE overflow
  * @RX_MPDU_RES_STATUS_SRC_STA_FOUND: station was found
  * @RX_MPDU_RES_STATUS_KEY_VALID: key was valid
- * @RX_MPDU_RES_STATUS_KEY_PARAM_OK: key parameters were usable
  * @RX_MPDU_RES_STATUS_ICV_OK: ICV is fine, if not, the packet is destroyed
  * @RX_MPDU_RES_STATUS_MIC_OK: used for CCM alg only. TKIP MIC is checked
  *	in the driver.
  * @RX_MPDU_RES_STATUS_TTAK_OK: TTAK is fine
  * @RX_MPDU_RES_STATUS_MNG_FRAME_REPLAY_ERR:  valid for alg = CCM_CMAC or
- *	alg = CCM only. Checks replay attack for 11w frames. Relevant only if
- *	%RX_MPDU_RES_STATUS_ROBUST_MNG_FRAME is set.
+ *	alg = CCM only. Checks replay attack for 11w frames.
  * @RX_MPDU_RES_STATUS_SEC_NO_ENC: this frame is not encrypted
  * @RX_MPDU_RES_STATUS_SEC_WEP_ENC: this frame is encrypted using WEP
  * @RX_MPDU_RES_STATUS_SEC_CCM_ENC: this frame is encrypted using CCM
  * @RX_MPDU_RES_STATUS_SEC_TKIP_ENC: this frame is encrypted using TKIP
  * @RX_MPDU_RES_STATUS_SEC_EXT_ENC: this frame is encrypted using extension
  *	algorithm
- * @RX_MPDU_RES_STATUS_SEC_CCM_CMAC_ENC: this frame is encrypted using CCM_CMAC
+ * @RX_MPDU_RES_STATUS_SEC_CMAC_GMAC_ENC: this frame is protected using
+ *	CMAC or GMAC
  * @RX_MPDU_RES_STATUS_SEC_ENC_ERR: this frame couldn't be decrypted
  * @RX_MPDU_RES_STATUS_SEC_ENC_MSK: bitmask of the encryption algorithm
  * @RX_MPDU_RES_STATUS_DEC_DONE: this frame has been successfully decrypted
- * @RX_MPDU_RES_STATUS_EXT_IV_BIT_CMP: extended IV (set with TKIP)
- * @RX_MPDU_RES_STATUS_KEY_ID_CMP_BIT: key ID comparison done
- * @RX_MPDU_RES_STATUS_ROBUST_MNG_FRAME: this frame is an 11w management frame
  * @RX_MPDU_RES_STATUS_CSUM_DONE: checksum was done by the hw
  * @RX_MPDU_RES_STATUS_CSUM_OK: checksum found no errors
  * @RX_MPDU_RES_STATUS_STA_ID_MSK: station ID mask
@@ -215,7 +152,6 @@ enum iwl_mvm_rx_status {
 	RX_MPDU_RES_STATUS_OVERRUN_OK			= BIT(1),
 	RX_MPDU_RES_STATUS_SRC_STA_FOUND		= BIT(2),
 	RX_MPDU_RES_STATUS_KEY_VALID			= BIT(3),
-	RX_MPDU_RES_STATUS_KEY_PARAM_OK			= BIT(4),
 	RX_MPDU_RES_STATUS_ICV_OK			= BIT(5),
 	RX_MPDU_RES_STATUS_MIC_OK			= BIT(6),
 	RX_MPDU_RES_STATUS_TTAK_OK			= BIT(7),
@@ -225,13 +161,10 @@ enum iwl_mvm_rx_status {
 	RX_MPDU_RES_STATUS_SEC_CCM_ENC			= (2 << 8),
 	RX_MPDU_RES_STATUS_SEC_TKIP_ENC			= (3 << 8),
 	RX_MPDU_RES_STATUS_SEC_EXT_ENC			= (4 << 8),
-	RX_MPDU_RES_STATUS_SEC_CCM_CMAC_ENC		= (6 << 8),
+	RX_MPDU_RES_STATUS_SEC_CMAC_GMAC_ENC		= (6 << 8),
 	RX_MPDU_RES_STATUS_SEC_ENC_ERR			= (7 << 8),
 	RX_MPDU_RES_STATUS_SEC_ENC_MSK			= (7 << 8),
 	RX_MPDU_RES_STATUS_DEC_DONE			= BIT(11),
-	RX_MPDU_RES_STATUS_EXT_IV_BIT_CMP		= BIT(13),
-	RX_MPDU_RES_STATUS_KEY_ID_CMP_BIT		= BIT(14),
-	RX_MPDU_RES_STATUS_ROBUST_MNG_FRAME		= BIT(15),
 	RX_MPDU_RES_STATUS_CSUM_DONE			= BIT(16),
 	RX_MPDU_RES_STATUS_CSUM_OK			= BIT(17),
 	RX_MDPU_RES_STATUS_STA_ID_SHIFT			= 24,
@@ -293,10 +226,11 @@ enum iwl_rx_mpdu_status {
 	IWL_RX_MPDU_STATUS_OVERRUN_OK		= BIT(1),
 	IWL_RX_MPDU_STATUS_SRC_STA_FOUND	= BIT(2),
 	IWL_RX_MPDU_STATUS_KEY_VALID		= BIT(3),
-	IWL_RX_MPDU_STATUS_KEY_PARAM_OK		= BIT(4),
 	IWL_RX_MPDU_STATUS_ICV_OK		= BIT(5),
 	IWL_RX_MPDU_STATUS_MIC_OK		= BIT(6),
 	IWL_RX_MPDU_RES_STATUS_TTAK_OK		= BIT(7),
+	/* overlayed since IWL_UCODE_TLV_API_DEPRECATE_TTAK */
+	IWL_RX_MPDU_STATUS_REPLAY_ERROR		= BIT(7),
 	IWL_RX_MPDU_STATUS_SEC_MASK		= 0x7 << 8,
 	IWL_RX_MPDU_STATUS_SEC_UNKNOWN		= IWL_RX_MPDU_STATUS_SEC_MASK,
 	IWL_RX_MPDU_STATUS_SEC_NONE		= 0x0 << 8,
@@ -306,21 +240,11 @@ enum iwl_rx_mpdu_status {
 	IWL_RX_MPDU_STATUS_SEC_EXT_ENC		= 0x4 << 8,
 	IWL_RX_MPDU_STATUS_SEC_GCM		= 0x5 << 8,
 	IWL_RX_MPDU_STATUS_DECRYPTED		= BIT(11),
-	IWL_RX_MPDU_STATUS_WEP_MATCH		= BIT(12),
-	IWL_RX_MPDU_STATUS_EXT_IV_MATCH		= BIT(13),
-	IWL_RX_MPDU_STATUS_KEY_ID_MATCH		= BIT(14),
 	IWL_RX_MPDU_STATUS_ROBUST_MNG_FRAME	= BIT(15),
-};
 
-enum iwl_rx_mpdu_hash_filter {
-	IWL_RX_MPDU_HF_A1_HASH_MASK		= 0x3f,
-	IWL_RX_MPDU_HF_FILTER_STATUS_MASK	= 0xc0,
-};
+	IWL_RX_MPDU_STATUS_DUPLICATE		= BIT(22),
 
-enum iwl_rx_mpdu_sta_id_flags {
-	IWL_RX_MPDU_SIF_STA_ID_MASK		= 0x1f,
-	IWL_RX_MPDU_SIF_RRF_ABORT		= 0x20,
-	IWL_RX_MPDU_SIF_FILTER_STATUS_MASK	= 0xc0,
+	IWL_RX_MPDU_STATUS_STA_ID		= 0x1f000000,
 };
 
 #define IWL_RX_REORDER_DATA_INVALID_BAID 0x7f
@@ -349,7 +273,7 @@ enum iwl_rx_mpdu_mac_info {
 };
 
 /* TSF overload low dword */
-enum iwl_rx_phy_data0 {
+enum iwl_rx_phy_he_data0 {
 	/* info type: HE any */
 	IWL_RX_PHY_DATA0_HE_BEAM_CHNG				= 0x00000001,
 	IWL_RX_PHY_DATA0_HE_UPLINK				= 0x00000002,
@@ -365,6 +289,25 @@ enum iwl_rx_phy_data0 {
 	IWL_RX_PHY_DATA0_HE_DELIM_EOF				= 0x80000000,
 };
 
+/* TSF overload low dword */
+enum iwl_rx_phy_eht_data0 {
+	/* info type: EHT any */
+	/* 1 bits reserved */
+	IWL_RX_PHY_DATA0_EHT_UPLINK				= BIT(1),
+	IWL_RX_PHY_DATA0_EHT_BSS_COLOR_MASK			= 0x000000fc,
+	IWL_RX_PHY_DATA0_ETH_SPATIAL_REUSE_MASK			= 0x00000f00,
+	IWL_RX_PHY_DATA0_EHT_PS160				= BIT(12),
+	IWL_RX_PHY_DATA0_EHT_TXOP_DUR_MASK			= 0x000fe000,
+	IWL_RX_PHY_DATA0_EHT_LDPC_EXT_SYM			= BIT(20),
+	IWL_RX_PHY_DATA0_EHT_PRE_FEC_PAD_MASK			= 0x00600000,
+	IWL_RX_PHY_DATA0_EHT_PE_DISAMBIG			= BIT(23),
+	IWL_RX_PHY_DATA0_EHT_BW320_SLOT				= BIT(24),
+	IWL_RX_PHY_DATA0_EHT_SIGA_CRC_OK			= BIT(25),
+	IWL_RX_PHY_DATA0_EHT_PHY_VER				= 0x1c000000,
+	/* 2 bits reserved */
+	IWL_RX_PHY_DATA0_EHT_DELIM_EOF				= BIT(31),
+};
+
 enum iwl_rx_phy_info_type {
 	IWL_RX_PHY_INFO_TYPE_NONE				= 0,
 	IWL_RX_PHY_INFO_TYPE_CCK				= 1,
@@ -377,19 +320,26 @@ enum iwl_rx_phy_info_type {
 	IWL_RX_PHY_INFO_TYPE_HE_TB				= 8,
 	IWL_RX_PHY_INFO_TYPE_HE_MU_EXT				= 9,
 	IWL_RX_PHY_INFO_TYPE_HE_TB_EXT				= 10,
+	IWL_RX_PHY_INFO_TYPE_EHT_MU				= 11,
+	IWL_RX_PHY_INFO_TYPE_EHT_TB				= 12,
+	IWL_RX_PHY_INFO_TYPE_EHT_MU_EXT				= 13,
+	IWL_RX_PHY_INFO_TYPE_EHT_TB_EXT				= 14,
 };
 
 /* TSF overload high dword */
-enum iwl_rx_phy_data1 {
+enum iwl_rx_phy_common_data1 {
 	/*
 	 * check this first - if TSF overload is set,
 	 * see &enum iwl_rx_phy_info_type
 	 */
 	IWL_RX_PHY_DATA1_INFO_TYPE_MASK				= 0xf0000000,
 
-	/* info type: HT/VHT/HE any */
+	/* info type: HT/VHT/HE/EHT any */
 	IWL_RX_PHY_DATA1_LSIG_LEN_MASK				= 0x0fff0000,
+};
 
+/* TSF overload high dword For HE rates*/
+enum iwl_rx_phy_he_data1 {
 	/* info type: HE MU/MU-EXT */
 	IWL_RX_PHY_DATA1_HE_MU_SIGB_COMPRESSION			= 0x00000001,
 	IWL_RX_PHY_DATA1_HE_MU_SIBG_SYM_OR_USER_NUM_MASK	= 0x0000001e,
@@ -405,8 +355,23 @@ enum iwl_rx_phy_data1 {
 	IWL_RX_PHY_DATA1_HE_TB_LOW_SS_MASK			= 0x0000000e,
 };
 
+/* TSF overload high dword For EHT-MU/TB rates*/
+enum iwl_rx_phy_eht_data1 {
+	/* info type: EHT-MU */
+	IWL_RX_PHY_DATA1_EHT_MU_NUM_SIG_SYM_USIGA2	= 0x0000001f,
+	/* info type: EHT-TB */
+	IWL_RX_PHY_DATA1_EHT_TB_PILOT_TYPE		= BIT(0),
+	IWL_RX_PHY_DATA1_EHT_TB_LOW_SS			= 0x0000001e,
+
+	/* info type: EHT any */
+	/* number of EHT-LTF symbols 0 - 1 EHT-LTF, 1 - 2 EHT-LTFs, 2 - 4 EHT-LTFs,
+	 * 3 - 6 EHT-LTFs, 4 - 8 EHT-LTFs */
+	IWL_RX_PHY_DATA1_EHT_SIG_LTF_NUM		= 0x000000e0,
+	IWL_RX_PHY_DATA1_EHT_RU_ALLOC			= 0x0000ff00,
+};
+
 /* goes into Metadata DW 7 */
-enum iwl_rx_phy_data2 {
+enum iwl_rx_phy_he_data2 {
 	/* info type: HE MU-EXT */
 	/* the a1/a2/... is what the PHY/firmware calls the values */
 	IWL_RX_PHY_DATA2_HE_MU_EXT_CH1_RU0		= 0x000000ff, /* a1 */
@@ -422,7 +387,7 @@ enum iwl_rx_phy_data2 {
 };
 
 /* goes into Metadata DW 8 */
-enum iwl_rx_phy_data3 {
+enum iwl_rx_phy_he_data3 {
 	/* info type: HE MU-EXT */
 	IWL_RX_PHY_DATA3_HE_MU_EXT_CH1_RU1		= 0x000000ff, /* c1 */
 	IWL_RX_PHY_DATA3_HE_MU_EXT_CH1_RU3		= 0x0000ff00, /* c2 */
@@ -431,7 +396,7 @@ enum iwl_rx_phy_data3 {
 };
 
 /* goes into Metadata DW 4 high 16 bits */
-enum iwl_rx_phy_data4 {
+enum iwl_rx_phy_he_he_data4 {
 	/* info type: HE MU-EXT */
 	IWL_RX_PHY_DATA4_HE_MU_EXT_CH1_CTR_RU			= 0x0001,
 	IWL_RX_PHY_DATA4_HE_MU_EXT_CH2_CTR_RU			= 0x0002,
@@ -440,6 +405,51 @@ enum iwl_rx_phy_data4 {
 	IWL_RX_PHY_DATA4_HE_MU_EXT_SIGB_MCS_MASK		= 0x00f0,
 	IWL_RX_PHY_DATA4_HE_MU_EXT_SIGB_DCM			= 0x0100,
 	IWL_RX_PHY_DATA4_HE_MU_EXT_PREAMBLE_PUNC_TYPE_MASK	= 0x0600,
+};
+
+/* goes into Metadata DW 7 */
+enum iwl_rx_phy_eht_data2 {
+	/* info type: EHT-MU-EXT */
+	/* OFDM_RX_VECTOR_COMMON_RU_ALLOC_0_OUT */
+	IWL_RX_PHY_DATA2_EHT_MU_EXT_RU_ALLOC_A1	= 0x000001ff,
+	IWL_RX_PHY_DATA2_EHT_MU_EXT_RU_ALLOC_A2	= 0x0003fe00,
+	IWL_RX_PHY_DATA2_EHT_MU_EXT_RU_ALLOC_A3	= 0x01fc0000,
+
+	/* info type: EHT-TB-EXT */
+	IWL_RX_PHY_DATA2_EHT_TB_EXT_TRIG_SIGA1	= 0xffffffff,
+};
+
+/* goes into Metadata DW 8 */
+enum iwl_rx_phy_eht_data3 {
+	/* info type: EHT-MU-EXT */
+	/* OFDM_RX_VECTOR_COMMON_RU_ALLOC_1_OUT */
+	IWL_RX_PHY_DATA3_EHT_MU_EXT_RU_ALLOC_B1	= 0x000001ff,
+	IWL_RX_PHY_DATA3_EHT_MU_EXT_RU_ALLOC_B2	= 0x0003fe00,
+	IWL_RX_PHY_DATA3_EHT_MU_EXT_RU_ALLOC_B3	= 0x01fc0000,
+};
+
+/* goes into Metadata DW 4 */
+enum iwl_rx_phy_eht_data4 {
+	/* info type: EHT-MU-EXT */
+	/* OFDM_RX_VECTOR_COMMON_RU_ALLOC_2_OUT */
+	IWL_RX_PHY_DATA4_EHT_MU_EXT_RU_ALLOC_C1	= 0x000001ff,
+	IWL_RX_PHY_DATA4_EHT_MU_EXT_RU_ALLOC_C2	= 0x0003fe00,
+	IWL_RX_PHY_DATA4_EHT_MU_EXT_RU_ALLOC_C3	= 0x01fc0000,
+	IWL_RX_PHY_DATA4_EHT_MU_EXT_SIGB_MCS	= 0x18000000,
+};
+
+/* goes into Metadata DW 16 */
+enum iwl_rx_phy_data5 {
+	/* info type: EHT any */
+	IWL_RX_PHY_DATA5_EHT_TYPE_AND_COMP		= 0x00000003,
+	/* info type: EHT-TB */
+	IWL_RX_PHY_DATA5_EHT_TB_SPATIAL_REUSE1		= 0x0000003c,
+	IWL_RX_PHY_DATA5_EHT_TB_SPATIAL_REUSE2		= 0x000003c0,
+	/* info type: EHT-MU */
+	IWL_RX_PHY_DATA5_EHT_MU_PUNC_CH_CODE		= 0x0000007c,
+	IWL_RX_PHY_DATA5_EHT_MU_STA_ID_USR		= 0x0003ff80,
+	IWL_RX_PHY_DATA5_EHT_MU_NUM_USR_NON_OFDMA	= 0x001c0000,
+	IWL_RX_PHY_DATA5_EHT_MU_SPATIAL_CONF_USR_FIELD	= 0x0fe00000,
 };
 
 /**
@@ -516,12 +526,14 @@ struct iwl_rx_mpdu_desc_v1 {
 			/**
 			 * @phy_data1: valid only if
 			 * %IWL_RX_MPDU_PHY_TSF_OVERLOAD is set,
-			 * see &enum iwl_rx_phy_data1.
+			 * see &enum iwl_rx_phy_common_data1 or
+			 *     &enum iwl_rx_phy_he_data1 or
+			 *     &enum iwl_rx_phy_eht_data1.
 			 */
 			__le32 phy_data1;
 		};
 	};
-} __packed;
+} __packed; /* RX_MPDU_RES_START_API_S_VER_4 */
 
 /**
  * struct iwl_rx_mpdu_desc_v3 - RX MPDU descriptor
@@ -535,9 +547,9 @@ struct iwl_rx_mpdu_desc_v3 {
 		__le32 filter_match;
 
 		/**
-		 * @phy_data2: depends on info type (see @phy_data1)
+		 * @phy_data3: depends on info type (see @phy_data1)
 		 */
-		__le32 phy_data2;
+		__le32 phy_data3;
 	};
 
 	/* DW8 - carries rss_hash only when rpa_en == 1 */
@@ -548,9 +560,9 @@ struct iwl_rx_mpdu_desc_v3 {
 		__le32 rss_hash;
 
 		/**
-		 * @phy_data3: depends on info type (see @phy_data1)
+		 * @phy_data2: depends on info type (see @phy_data1)
 		 */
-		__le32 phy_data3;
+		__le32 phy_data2;
 	};
 	/* DW9 */
 	/**
@@ -562,7 +574,11 @@ struct iwl_rx_mpdu_desc_v3 {
 	/**
 	 * @raw_xsum: raw xsum value
 	 */
-	__le32 raw_xsum;
+	__be16 raw_xsum;
+	/**
+	 * @reserved_xsum: reserved high bits in the raw checksum
+	 */
+	__le16 reserved_xsum;
 	/* DW11 */
 	/**
 	 * @rate_n_flags: RX rate/flags encoding
@@ -612,12 +628,20 @@ struct iwl_rx_mpdu_desc_v3 {
 			__le32 phy_data1;
 		};
 	};
-	/* DW16 & DW17 */
+	/* DW16 */
+	/**
+	 * @phy_data5: valid only if
+	 * %IWL_RX_MPDU_PHY_TSF_OVERLOAD is set,
+	 * see &enum iwl_rx_phy_data5.
+	 */
+	__le32 phy_data5;
+	/* DW17 */
 	/**
 	 * @reserved: reserved
 	 */
-	__le32 reserved[2];
-} __packed; /* RX_MPDU_RES_START_API_S_VER_3 */
+	__le32 reserved[1];
+} __packed; /* RX_MPDU_RES_START_API_S_VER_3,
+	       RX_MPDU_RES_START_API_S_VER_5 */
 
 /**
  * struct iwl_rx_mpdu_desc - RX MPDU descriptor
@@ -670,15 +694,8 @@ struct iwl_rx_mpdu_desc {
 	/**
 	 * @status: &enum iwl_rx_mpdu_status
 	 */
-	__le16 status;
-	/**
-	 * @hash_filter: hash filter value
-	 */
-	u8 hash_filter;
-	/**
-	 * @sta_id_flags: &enum iwl_rx_mpdu_sta_id_flags
-	 */
-	u8 sta_id_flags;
+	__le32 status;
+
 	/* DW6 */
 	/**
 	 * @reorder_data: &enum iwl_rx_mpdu_reorder_data
@@ -689,7 +706,9 @@ struct iwl_rx_mpdu_desc {
 		struct iwl_rx_mpdu_desc_v1 v1;
 		struct iwl_rx_mpdu_desc_v3 v3;
 	};
-} __packed; /* RX_MPDU_RES_START_API_S_VER_3 */
+} __packed; /* RX_MPDU_RES_START_API_S_VER_3,
+	       RX_MPDU_RES_START_API_S_VER_4,
+	       RX_MPDU_RES_START_API_S_VER_5 */
 
 #define IWL_RX_DESC_SIZE_V1 offsetofend(struct iwl_rx_mpdu_desc, v1)
 
@@ -715,12 +734,14 @@ struct iwl_rx_mpdu_desc {
 #define RX_NO_DATA_INFO_ERR_UNSUPPORTED_RATE	2
 #define RX_NO_DATA_INFO_ERR_NO_DELIM		3
 #define RX_NO_DATA_INFO_ERR_BAD_MAC_HDR	4
+#define RX_NO_DATA_INFO_LOW_ENERGY		5
 
 #define RX_NO_DATA_FRAME_TIME_POS	0
 #define RX_NO_DATA_FRAME_TIME_MSK	(0xfffff << RX_NO_DATA_FRAME_TIME_POS)
 
 #define RX_NO_DATA_RX_VEC0_HE_NSTS_MSK	0x03800000
 #define RX_NO_DATA_RX_VEC0_VHT_NSTS_MSK	0x38000000
+#define RX_NO_DATA_RX_VEC2_EHT_NSTS_MSK	0x00f00000
 
 /**
  * struct iwl_rx_no_data - RX no data descriptor
@@ -730,7 +751,8 @@ struct iwl_rx_mpdu_desc {
  * @on_air_rise_time: GP2 during on air rise
  * @fr_time: frame time
  * @rate: rate/mcs of frame
- * @phy_info: &enum iwl_rx_phy_data0 and &enum iwl_rx_phy_info_type
+ * @phy_info: &enum iwl_rx_phy_he_data0 or &enum iwl_rx_phy_eht_data0
+ *	      based on &enum iwl_rx_phy_info_type
  * @rx_vec: DW-12:9 raw RX vectors from DSP according to modulation type.
  *	for VHT: OFDM_RX_VECTOR_SIGA1_OUT, OFDM_RX_VECTOR_SIGA2_OUT
  *	for HE: OFDM_RX_VECTOR_HE_SIGA1_OUT, OFDM_RX_VECTOR_HE_SIGA2_OUT
@@ -743,7 +765,35 @@ struct iwl_rx_no_data {
 	__le32 rate;
 	__le32 phy_info[2];
 	__le32 rx_vec[2];
-} __packed; /* RX_NO_DATA_NTFY_API_S_VER_1 */
+} __packed; /* RX_NO_DATA_NTFY_API_S_VER_1,
+	       RX_NO_DATA_NTFY_API_S_VER_2 */
+
+/**
+ * struct iwl_rx_no_data_ver_3 - RX no data descriptor
+ * @info: 7:0 frame type, 15:8 RX error type
+ * @rssi: 7:0 energy chain-A,
+ *	15:8 chain-B, measured at FINA time (FINA_ENERGY), 16:23 channel
+ * @on_air_rise_time: GP2 during on air rise
+ * @fr_time: frame time
+ * @rate: rate/mcs of frame
+ * @phy_info: &enum iwl_rx_phy_eht_data0 and &enum iwl_rx_phy_info_type
+ * @rx_vec: DW-12:9 raw RX vectors from DSP according to modulation type.
+ *	for VHT: OFDM_RX_VECTOR_SIGA1_OUT, OFDM_RX_VECTOR_SIGA2_OUT
+ *	for HE: OFDM_RX_VECTOR_HE_SIGA1_OUT, OFDM_RX_VECTOR_HE_SIGA2_OUT
+ *	for EHT: OFDM_RX_VECTOR_USIG_A1_OUT, OFDM_RX_VECTOR_USIG_A2_OUT,
+ *	OFDM_RX_VECTOR_EHT_OUT, OFDM_RX_VECTOR_EHT_USER_FIELD_OUT
+ */
+struct iwl_rx_no_data_ver_3 {
+	__le32 info;
+	__le32 rssi;
+	__le32 on_air_rise_time;
+	__le32 fr_time;
+	__le32 rate;
+	__le32 phy_info[2];
+	__le32 rx_vec[4];
+} __packed; /* RX_NO_DATA_NTFY_API_S_VER_1,
+	       RX_NO_DATA_NTFY_API_S_VER_2
+	       RX_NO_DATA_NTFY_API_S_VER_3 */
 
 struct iwl_frame_release {
 	u8 baid;
@@ -842,36 +892,6 @@ struct iwl_rxq_sync_notification {
 	__le32 count;
 	u8 payload[];
 } __packed; /* MULTI_QUEUE_DRV_SYNC_HDR_CMD_API_S_VER_1 */
-
-/**
- * enum iwl_mvm_rxq_notif_type - Internal message identifier
- *
- * @IWL_MVM_RXQ_EMPTY: empty sync notification
- * @IWL_MVM_RXQ_NOTIF_DEL_BA: notify RSS queues of delBA
- * @IWL_MVM_RXQ_NSSN_SYNC: notify all the RSS queues with the new NSSN
- */
-enum iwl_mvm_rxq_notif_type {
-	IWL_MVM_RXQ_EMPTY,
-	IWL_MVM_RXQ_NOTIF_DEL_BA,
-	IWL_MVM_RXQ_NSSN_SYNC,
-};
-
-/**
- * struct iwl_mvm_internal_rxq_notif - Internal representation of the data sent
- * in &iwl_rxq_sync_cmd. Should be DWORD aligned.
- * FW is agnostic to the payload, so there are no endianity requirements.
- *
- * @type: value from &iwl_mvm_rxq_notif_type
- * @sync: ctrl path is waiting for all notifications to be received
- * @cookie: internal cookie to identify old notifications
- * @data: payload
- */
-struct iwl_mvm_internal_rxq_notif {
-	u16 type;
-	u16 sync;
-	u32 cookie;
-	u8 data[];
-} __packed;
 
 /**
  * enum iwl_mvm_pm_event - type of station PM event

@@ -13,6 +13,7 @@
 
 #include <cpu/sh7723.h>
 
+#include <linux/dma-map-ops.h>
 #include <linux/clkdev.h>
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -559,7 +560,7 @@ static void __init ap325rxa_mv_mem_reserve(void)
 	if (!phys)
 		panic("Failed to allocate CEU memory\n");
 
-	memblock_free(phys, size);
+	memblock_phys_free(phys, size);
 	memblock_remove(phys, size);
 
 	ceu_dma_membase = phys;

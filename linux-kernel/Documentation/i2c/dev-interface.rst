@@ -148,7 +148,7 @@ You can do plain I2C transactions by using read(2) and write(2) calls.
 You do not need to pass the address byte; instead, set it through
 ioctl I2C_SLAVE before you try to access the device.
 
-You can do SMBus level transactions (see documentation file smbus-protocol
+You can do SMBus level transactions (see documentation file smbus-protocol.rst
 for details) through the following functions::
 
   __s32 i2c_smbus_write_quick(int file, __u8 value);
@@ -159,6 +159,8 @@ for details) through the following functions::
   __s32 i2c_smbus_read_word_data(int file, __u8 command);
   __s32 i2c_smbus_write_word_data(int file, __u8 command, __u16 value);
   __s32 i2c_smbus_process_call(int file, __u8 command, __u16 value);
+  __s32 i2c_smbus_block_process_call(int file, __u8 command, __u8 length,
+                                     __u8 *values);
   __s32 i2c_smbus_read_block_data(int file, __u8 command, __u8 *values);
   __s32 i2c_smbus_write_block_data(int file, __u8 command, __u8 length,
                                    __u8 *values);

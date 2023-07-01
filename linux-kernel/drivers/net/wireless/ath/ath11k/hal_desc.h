@@ -2,6 +2,8 @@
 /*
  * Copyright (c) 2018-2019 The Linux Foundation. All rights reserved.
  */
+#include "core.h"
+
 #ifndef ATH11K_HAL_DESC_H
 #define ATH11K_HAL_DESC_H
 
@@ -472,12 +474,13 @@ enum hal_tlv_tag {
 
 #define HAL_TLV_HDR_TAG		GENMASK(9, 1)
 #define HAL_TLV_HDR_LEN		GENMASK(25, 10)
+#define HAL_TLV_USR_ID		GENMASK(31, 26)
 
 #define HAL_TLV_ALIGN	4
 
 struct hal_tlv_hdr {
 	u32 tl;
-	u8 value[0];
+	u8 value[];
 } __packed;
 
 #define RX_MPDU_DESC_INFO0_MSDU_COUNT		GENMASK(7, 0)
@@ -493,6 +496,8 @@ struct hal_tlv_hdr {
 #define RX_MPDU_DESC_INFO0_DA_MCBC		BIT(28)
 #define RX_MPDU_DESC_INFO0_DA_IDX_TIMEOUT	BIT(29)
 #define RX_MPDU_DESC_INFO0_RAW_MPDU		BIT(30)
+
+#define RX_MPDU_DESC_META_DATA_PEER_ID		GENMASK(15, 0)
 
 struct rx_mpdu_desc {
 	u32 info0; /* %RX_MPDU_DESC_INFO */
@@ -602,7 +607,7 @@ struct rx_msdu_desc {
  *
  * msdu_continuation
  *		When set, this MSDU buffer was not able to hold the entire MSDU.
- *		The next buffer will therefor contain additional information
+ *		The next buffer will therefore contain additional information
  *		related to this MSDU.
  *
  * msdu_length
@@ -638,7 +643,7 @@ struct rx_msdu_desc {
  *
  * da_idx_timeout
  *		Indicates, an unsuccessful MAC destination address search due
- *		to the expiration of search timer fot this MSDU.
+ *		to the expiration of search timer for this MSDU.
  */
 
 enum hal_reo_dest_ring_buffer_type {
@@ -714,7 +719,7 @@ struct hal_reo_dest_ring {
  *
  * rx_msdu_info
  *		General information related to the MSDU that is passed
- *		on from RXDMA all the way to to the REO destination ring.
+ *		on from RXDMA all the way to the REO destination ring.
  *
  * queue_addr_lo
  *		Address (lower 32 bits) of the REO queue descriptor.
@@ -854,6 +859,25 @@ struct hal_reo_entrance_ring {
  *		this ring has looped around the ring.
  */
 
+#define HAL_SW_MON_RING_INFO0_RXDMA_PUSH_REASON	GENMASK(1, 0)
+#define HAL_SW_MON_RING_INFO0_RXDMA_ERROR_CODE	GENMASK(6, 2)
+#define HAL_SW_MON_RING_INFO0_MPDU_FRAG_NUMBER	GENMASK(10, 7)
+#define HAL_SW_MON_RING_INFO0_FRAMELESS_BAR	BIT(11)
+#define HAL_SW_MON_RING_INFO0_STATUS_BUF_CNT	GENMASK(15, 12)
+#define HAL_SW_MON_RING_INFO0_END_OF_PPDU	BIT(16)
+
+#define HAL_SW_MON_RING_INFO1_PHY_PPDU_ID	GENMASK(15, 0)
+#define HAL_SW_MON_RING_INFO1_RING_ID		GENMASK(27, 20)
+#define HAL_SW_MON_RING_INFO1_LOOPING_COUNT	GENMASK(31, 28)
+
+struct hal_sw_monitor_ring {
+	struct ath11k_buffer_addr buf_addr_info;
+	struct rx_mpdu_desc rx_mpdu_info;
+	struct ath11k_buffer_addr status_buf_addr_info;
+	u32 info0;
+	u32 info1;
+} __packed;
+
 #define HAL_REO_CMD_HDR_INFO0_CMD_NUMBER	GENMASK(15, 0)
 #define HAL_REO_CMD_HDR_INFO0_STATUS_REQUIRED	BIT(16)
 
@@ -947,16 +971,17 @@ struct hal_reo_flush_cache {
 #define HAL_TCL_DATA_CMD_INFO1_TO_FW		BIT(21)
 #define HAL_TCL_DATA_CMD_INFO1_PKT_OFFSET	GENMASK(31, 23)
 
-#define HAL_TCL_DATA_CMD_INFO2_BUF_TIMESTAMP	GENMASK(18, 0)
-#define HAL_TCL_DATA_CMD_INFO2_BUF_T_VALID	BIT(19)
-#define HAL_TCL_DATA_CMD_INFO2_MESH_ENABLE	BIT(20)
-#define HAL_TCL_DATA_CMD_INFO2_TID_OVERWRITE	BIT(21)
-#define HAL_TCL_DATA_CMD_INFO2_TID		GENMASK(25, 22)
-#define HAL_TCL_DATA_CMD_INFO2_LMAC_ID		GENMASK(27, 26)
+#define HAL_TCL_DATA_CMD_INFO2_BUF_TIMESTAMP		GENMASK(18, 0)
+#define HAL_TCL_DATA_CMD_INFO2_BUF_T_VALID		BIT(19)
+#define HAL_IPQ8074_TCL_DATA_CMD_INFO2_MESH_ENABLE	BIT(20)
+#define HAL_TCL_DATA_CMD_INFO2_TID_OVERWRITE		BIT(21)
+#define HAL_TCL_DATA_CMD_INFO2_TID			GENMASK(25, 22)
+#define HAL_TCL_DATA_CMD_INFO2_LMAC_ID			GENMASK(27, 26)
 
 #define HAL_TCL_DATA_CMD_INFO3_DSCP_TID_TABLE_IDX	GENMASK(5, 0)
 #define HAL_TCL_DATA_CMD_INFO3_SEARCH_INDEX		GENMASK(25, 6)
 #define HAL_TCL_DATA_CMD_INFO3_CACHE_SET_NUM		GENMASK(29, 26)
+#define HAL_QCN9074_TCL_DATA_CMD_INFO3_MESH_ENABLE	GENMASK(31, 30)
 
 #define HAL_TCL_DATA_CMD_INFO4_RING_ID			GENMASK(27, 20)
 #define HAL_TCL_DATA_CMD_INFO4_LOOPING_COUNT		GENMASK(31, 28)
@@ -1423,7 +1448,7 @@ struct hal_ce_srng_dest_desc {
 #define HAL_CE_DST_STATUS_DESC_FLAGS_GATHER		BIT(11)
 #define HAL_CE_DST_STATUS_DESC_FLAGS_LEN		GENMASK(31, 16)
 
-#define HAL_CE_DST_STATUS_DESC_META_INFO_DATA		GENMASK(7, 0)
+#define HAL_CE_DST_STATUS_DESC_META_INFO_DATA		GENMASK(15, 0)
 #define HAL_CE_DST_STATUS_DESC_META_INFO_RING_ID	GENMASK(27, 20)
 #define HAL_CE_DST_STATUS_DESC_META_INFO_LOOP_CNT	HAL_SRNG_DESC_LOOP_CNT
 
@@ -1653,7 +1678,7 @@ struct hal_wbm_release_ring {
  *	Producer: SW/TQM/RXDMA/REO/SWITCH
  *	Consumer: WBM/SW/FW
  *
- * HTT tx status is overlayed on wbm_release ring on 4-byte words 2, 3, 4 and 5
+ * HTT tx status is overlaid on wbm_release ring on 4-byte words 2, 3, 4 and 5
  * for software based completions.
  *
  * buf_addr_info
@@ -1944,7 +1969,7 @@ enum hal_rx_reo_queue_pn_size {
 
 #define HAL_RX_REO_QUEUE_INFO3_TIMEOUT_COUNT		GENMASK(9, 4)
 #define HAL_RX_REO_QUEUE_INFO3_FWD_DUE_TO_BAR_CNT	GENMASK(15, 10)
-#define HAL_RX_REO_QUEUE_INFO3_DUPLICATE_COUNT		GENMASK(31, 10)
+#define HAL_RX_REO_QUEUE_INFO3_DUPLICATE_COUNT		GENMASK(31, 16)
 
 #define HAL_RX_REO_QUEUE_INFO4_FRAME_IN_ORD_COUNT	GENMASK(23, 0)
 #define HAL_RX_REO_QUEUE_INFO4_BAR_RECVD_COUNT		GENMASK(31, 24)
@@ -1972,7 +1997,7 @@ struct hal_rx_reo_queue {
 	u32 processed_total_bytes;
 	u32 info5;
 	u32 rsvd[3];
-	struct hal_rx_reo_queue_ext ext_desc[0];
+	struct hal_rx_reo_queue_ext ext_desc[];
 } __packed;
 
 /* hal_rx_reo_queue
@@ -2134,7 +2159,7 @@ struct hal_reo_status_hdr {
  *		commands.
  *
  * execution_time (in us)
- *		The amount of time REO took to excecute the command. Note that
+ *		The amount of time REO took to execute the command. Note that
  *		this time does not include the duration of the command waiting
  *		in the command ring, before the execution started.
  *
@@ -2430,7 +2455,7 @@ struct hal_reo_flush_timeout_list_status {
 #define HAL_REO_DESC_THRESH_STATUS_INFO1_LINK_DESC_COUNTER0	GENMASK(23, 0)
 #define HAL_REO_DESC_THRESH_STATUS_INFO2_LINK_DESC_COUNTER1	GENMASK(23, 0)
 #define HAL_REO_DESC_THRESH_STATUS_INFO3_LINK_DESC_COUNTER2	GENMASK(23, 0)
-#define HAL_REO_DESC_THRESH_STATUS_INFO4_LINK_DESC_COUNTER_SUM	GENMASK(23, 0)
+#define HAL_REO_DESC_THRESH_STATUS_INFO4_LINK_DESC_COUNTER_SUM	GENMASK(25, 0)
 
 struct hal_reo_desc_thresh_reached_status {
 	struct hal_reo_status_hdr hdr;

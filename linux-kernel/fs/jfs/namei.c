@@ -59,8 +59,8 @@ static inline void free_ea_wmap(struct inode *inode)
  * RETURN:	Errors from subroutines
  *
  */
-static int jfs_create(struct inode *dip, struct dentry *dentry, umode_t mode,
-		bool excl)
+static int jfs_create(struct mnt_idmap *idmap, struct inode *dip,
+		      struct dentry *dentry, umode_t mode, bool excl)
 {
 	int rc = 0;
 	tid_t tid;		/* transaction id */
@@ -192,7 +192,8 @@ static int jfs_create(struct inode *dip, struct dentry *dentry, umode_t mode,
  * note:
  * EACCES: user needs search+write permission on the parent directory
  */
-static int jfs_mkdir(struct inode *dip, struct dentry *dentry, umode_t mode)
+static int jfs_mkdir(struct mnt_idmap *idmap, struct inode *dip,
+		     struct dentry *dentry, umode_t mode)
 {
 	int rc = 0;
 	tid_t tid;		/* transaction id */
@@ -868,8 +869,8 @@ static int jfs_link(struct dentry *old_dentry,
  * an intermediate result whose length exceeds PATH_MAX [XPG4.2]
 */
 
-static int jfs_symlink(struct inode *dip, struct dentry *dentry,
-		const char *name)
+static int jfs_symlink(struct mnt_idmap *idmap, struct inode *dip,
+		       struct dentry *dentry, const char *name)
 {
 	int rc;
 	tid_t tid;
@@ -945,7 +946,7 @@ static int jfs_symlink(struct inode *dip, struct dentry *dentry,
 	if (ssize <= IDATASIZE) {
 		ip->i_op = &jfs_fast_symlink_inode_operations;
 
-		ip->i_link = JFS_IP(ip)->i_inline;
+		ip->i_link = JFS_IP(ip)->i_inline_all;
 		memcpy(ip->i_link, name, ssize);
 		ip->i_size = ssize - 1;
 
@@ -1058,9 +1059,9 @@ static int jfs_symlink(struct inode *dip, struct dentry *dentry,
  *
  * FUNCTION:	rename a file or directory
  */
-static int jfs_rename(struct inode *old_dir, struct dentry *old_dentry,
-		      struct inode *new_dir, struct dentry *new_dentry,
-		      unsigned int flags)
+static int jfs_rename(struct mnt_idmap *idmap, struct inode *old_dir,
+		      struct dentry *old_dentry, struct inode *new_dir,
+		      struct dentry *new_dentry, unsigned int flags)
 {
 	struct btstack btstack;
 	ino_t ino;
@@ -1344,8 +1345,8 @@ static int jfs_rename(struct inode *old_dir, struct dentry *old_dentry,
  *
  * FUNCTION:	Create a special file (device)
  */
-static int jfs_mknod(struct inode *dir, struct dentry *dentry,
-		umode_t mode, dev_t rdev)
+static int jfs_mknod(struct mnt_idmap *idmap, struct inode *dir,
+		     struct dentry *dentry, umode_t mode, dev_t rdev)
 {
 	struct jfs_inode_info *jfs_ip;
 	struct btstack btstack;
@@ -1521,8 +1522,10 @@ const struct inode_operations jfs_dir_inode_operations = {
 	.rename		= jfs_rename,
 	.listxattr	= jfs_listxattr,
 	.setattr	= jfs_setattr,
+	.fileattr_get	= jfs_fileattr_get,
+	.fileattr_set	= jfs_fileattr_set,
 #ifdef CONFIG_JFS_POSIX_ACL
-	.get_acl	= jfs_get_acl,
+	.get_inode_acl	= jfs_get_acl,
 	.set_acl	= jfs_set_acl,
 #endif
 };
@@ -1532,9 +1535,7 @@ const struct file_operations jfs_dir_operations = {
 	.iterate	= jfs_readdir,
 	.fsync		= jfs_fsync,
 	.unlocked_ioctl = jfs_ioctl,
-#ifdef CONFIG_COMPAT
-	.compat_ioctl	= jfs_compat_ioctl,
-#endif
+	.compat_ioctl	= compat_ptr_ioctl,
 	.llseek		= generic_file_llseek,
 };
 

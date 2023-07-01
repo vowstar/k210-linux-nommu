@@ -20,15 +20,17 @@ allOf:
 properties:
   qca,clk-out-frequency:
     description: Clock output frequency in Hertz.
-    allOf:
-      - $ref: /schemas/types.yaml#/definitions/uint32
-      - enum: [ 25000000, 50000000, 62500000, 125000000 ]
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [25000000, 50000000, 62500000, 125000000]
 
   qca,clk-out-strength:
     description: Clock output driver strength.
-    allOf:
-      - $ref: /schemas/types.yaml#/definitions/uint32
-      - enum: [ 0, 1, 2 ]
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [0, 1, 2]
+
+  qca,disable-smarteee:
+    description: Disable Atheros SmartEEE feature.
+    type: boolean
 
   qca,keep-pll-enabled:
     description: |
@@ -37,6 +39,26 @@ properties:
 
       Only supported on the AR8031.
     type: boolean
+
+  qca,disable-hibernation-mode:
+    description: |
+      Disable Atheros AR803X PHYs hibernation mode. If present, indicates
+      that the hardware of PHY will not enter power saving mode when the
+      cable is disconnected. And the RX_CLK always keeps outputting a
+      valid clock.
+    type: boolean
+
+  qca,smarteee-tw-us-100m:
+    description: EEE Tw parameter for 100M links.
+    $ref: /schemas/types.yaml#/definitions/uint32
+    minimum: 1
+    maximum: 255
+
+  qca,smarteee-tw-us-1g:
+    description: EEE Tw parameter for gigabit links.
+    $ref: /schemas/types.yaml#/definitions/uint32
+    minimum: 1
+    maximum: 255
 
   vddio-supply:
     description: |
@@ -52,17 +74,16 @@ properties:
     type: object
     description:
       Initial data for the VDDIO regulator. Set this to 1.5V or 1.8V.
-    allOf:
-      - $ref: /schemas/regulator/regulator.yaml
+    $ref: /schemas/regulator/regulator.yaml
 
   vddh-regulator:
     type: object
     description:
       Dummy subnode to model the external connection of the PHY VDDH
       regulator to VDDIO.
-    allOf:
-      - $ref: /schemas/regulator/regulator.yaml
+    $ref: /schemas/regulator/regulator.yaml
 
+unevaluatedProperties: false
 
 examples:
   - |

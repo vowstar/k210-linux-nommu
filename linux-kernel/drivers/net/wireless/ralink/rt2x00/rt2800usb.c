@@ -630,6 +630,7 @@ static int rt2800usb_probe_hw(struct rt2x00_dev *rt2x00dev)
 
 static const struct ieee80211_ops rt2800usb_mac80211_ops = {
 	.tx			= rt2x00mac_tx,
+	.wake_tx_queue		= ieee80211_handle_wake_tx_queue,
 	.start			= rt2x00mac_start,
 	.stop			= rt2x00mac_stop,
 	.add_interface		= rt2x00mac_add_interface,
@@ -746,7 +747,6 @@ static void rt2800usb_queue_init(struct data_queue *queue)
 		break;
 
 	case QID_ATIM:
-		/* fallthrough */
 	default:
 		BUG();
 		break;
@@ -989,6 +989,7 @@ static const struct usb_device_id rt2800usb_device_table[] = {
 	{ USB_DEVICE(0x177f, 0x0313) },
 	{ USB_DEVICE(0x177f, 0x0323) },
 	{ USB_DEVICE(0x177f, 0x0324) },
+	{ USB_DEVICE(0x177f, 0x1163) },
 	/* U-Media */
 	{ USB_DEVICE(0x157e, 0x300e) },
 	{ USB_DEVICE(0x157e, 0x3013) },
@@ -1101,7 +1102,6 @@ static const struct usb_device_id rt2800usb_device_table[] = {
 #ifdef CONFIG_RT2800USB_RT53XX
 	/* Arcadyan */
 	{ USB_DEVICE(0x043e, 0x7a12) },
-	{ USB_DEVICE(0x043e, 0x7a32) },
 	/* ASUS */
 	{ USB_DEVICE(0x0b05, 0x17e8) },
 	/* Azurewave */
@@ -1248,7 +1248,6 @@ static const struct usb_device_id rt2800usb_device_table[] = {
 MODULE_AUTHOR(DRV_PROJECT);
 MODULE_VERSION(DRV_VERSION);
 MODULE_DESCRIPTION("Ralink RT2800 USB Wireless LAN driver.");
-MODULE_SUPPORTED_DEVICE("Ralink RT2870 USB chipset based cards");
 MODULE_DEVICE_TABLE(usb, rt2800usb_device_table);
 MODULE_FIRMWARE(FIRMWARE_RT2870);
 MODULE_LICENSE("GPL");

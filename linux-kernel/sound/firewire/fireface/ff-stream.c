@@ -7,7 +7,7 @@
 
 #include "ff.h"
 
-#define CALLBACK_TIMEOUT_MS	200
+#define READY_TIMEOUT_MS	200
 
 int snd_ff_stream_get_multiplier_mode(enum cip_sfc sfc,
 				      enum snd_ff_stream_mode *mode)
@@ -184,7 +184,6 @@ int snd_ff_stream_start_duplex(struct snd_ff *ff, unsigned int rate)
 	 */
 	if (!amdtp_stream_running(&ff->rx_stream)) {
 		int spd = fw_parent_device(ff->unit)->max_speed;
-		unsigned int ir_delay_cycle;
 
 		err = ff->spec->protocol->begin_session(ff, rate);
 		if (err < 0)
@@ -200,21 +199,15 @@ int snd_ff_stream_start_duplex(struct snd_ff *ff, unsigned int rate)
 		if (err < 0)
 			goto error;
 
-		// The device postpones start of transmission mostly for several
-		// cycles after receiving packets firstly.
-		if (ff->spec->protocol == &snd_ff_protocol_ff800)
-			ir_delay_cycle = 800;	// = 100 msec
-		else
-			ir_delay_cycle = 16;	// = 2 msec
-
-		err = amdtp_domain_start(&ff->domain, ir_delay_cycle);
+		// NOTE: The device doesn't transfer packets unless receiving any packet. The
+		// sequence of tx packets includes cycle skip corresponding to empty packet or
+		// NODATA packet in IEC 61883-1/6. The sequence of the number of data blocks per
+		// packet is important for media clock recovery.
+		err = amdtp_domain_start(&ff->domain, 0, true, true);
 		if (err < 0)
 			goto error;
 
-		if (!amdtp_stream_wait_callback(&ff->rx_stream,
-						CALLBACK_TIMEOUT_MS) ||
-		    !amdtp_stream_wait_callback(&ff->tx_stream,
-						CALLBACK_TIMEOUT_MS)) {
+		if (!amdtp_domain_wait_ready(&ff->domain, READY_TIMEOUT_MS)) {
 			err = -ETIMEDOUT;
 			goto error;
 		}

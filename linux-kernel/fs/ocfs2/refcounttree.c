@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* -*- mode: c; c-basic-offset: 8; -*-
- * vim: noexpandtab sw=8 ts=8 sts=0:
- *
+/*
  * refcounttree.c
  *
  * Copyright (C) 2009 Oracle.  All rights reserved.
@@ -154,6 +152,7 @@ ocfs2_refcount_cache_get_super(struct ocfs2_caching_info *ci)
 }
 
 static void ocfs2_refcount_cache_lock(struct ocfs2_caching_info *ci)
+__acquires(&rf->rf_lock)
 {
 	struct ocfs2_refcount_tree *rf = cache_info_to_refcount(ci);
 
@@ -161,6 +160,7 @@ static void ocfs2_refcount_cache_lock(struct ocfs2_caching_info *ci)
 }
 
 static void ocfs2_refcount_cache_unlock(struct ocfs2_caching_info *ci)
+__releases(&rf->rf_lock)
 {
 	struct ocfs2_refcount_tree *rf = cache_info_to_refcount(ci);
 
@@ -976,7 +976,7 @@ static int ocfs2_get_refcount_cpos_end(struct ocfs2_caching_info *ci,
 		return 0;
 	}
 
-	if (!eb || (eb && !eb->h_next_leaf_blk)) {
+	if (!eb || !eb->h_next_leaf_blk) {
 		/*
 		 * We are the last extent rec, so any high cpos should
 		 * be stored in this leaf refcount block.
@@ -1061,7 +1061,7 @@ static int ocfs2_get_refcount_rec(struct ocfs2_caching_info *ci,
 				  struct buffer_head **ret_bh)
 {
 	int ret = 0, i, found;
-	u32 low_cpos, uninitialized_var(cpos_end);
+	u32 low_cpos, cpos_end;
 	struct ocfs2_extent_list *el;
 	struct ocfs2_extent_rec *rec = NULL;
 	struct ocfs2_extent_block *eb = NULL;
@@ -2614,7 +2614,7 @@ static inline unsigned int ocfs2_cow_align_length(struct super_block *sb,
 }
 
 /*
- * Calculate out the start and number of virtual clusters we need to to CoW.
+ * Calculate out the start and number of virtual clusters we need to CoW.
  *
  * cpos is vitual start cluster position we want to do CoW in a
  * file and write_len is the cluster length.
@@ -2961,12 +2961,14 @@ retry:
 		}
 
 		if (!PageUptodate(page)) {
-			ret = block_read_full_page(page, ocfs2_get_block);
+			struct folio *folio = page_folio(page);
+
+			ret = block_read_full_folio(folio, ocfs2_get_block);
 			if (ret) {
 				mlog_errno(ret);
 				goto unlock;
 			}
-			lock_page(page);
+			folio_lock(folio);
 		}
 
 		if (page_has_buffers(page)) {
@@ -3144,48 +3146,18 @@ int ocfs2_cow_sync_writeback(struct super_block *sb,
 			     struct inode *inode,
 			     u32 cpos, u32 num_clusters)
 {
-	int ret = 0;
-	loff_t offset, end, map_end;
-	pgoff_t page_index;
-	struct page *page;
+	int ret;
+	loff_t start, end;
 
 	if (ocfs2_should_order_data(inode))
 		return 0;
 
-	offset = ((loff_t)cpos) << OCFS2_SB(sb)->s_clustersize_bits;
-	end = offset + (num_clusters << OCFS2_SB(sb)->s_clustersize_bits);
+	start = ((loff_t)cpos) << OCFS2_SB(sb)->s_clustersize_bits;
+	end = start + (num_clusters << OCFS2_SB(sb)->s_clustersize_bits) - 1;
 
-	ret = filemap_fdatawrite_range(inode->i_mapping,
-				       offset, end - 1);
-	if (ret < 0) {
+	ret = filemap_write_and_wait_range(inode->i_mapping, start, end);
+	if (ret < 0)
 		mlog_errno(ret);
-		return ret;
-	}
-
-	while (offset < end) {
-		page_index = offset >> PAGE_SHIFT;
-		map_end = ((loff_t)page_index + 1) << PAGE_SHIFT;
-		if (map_end > end)
-			map_end = end;
-
-		page = find_or_create_page(inode->i_mapping,
-					   page_index, GFP_NOFS);
-		BUG_ON(!page);
-
-		wait_on_page_writeback(page);
-		if (PageError(page)) {
-			ret = -EIO;
-			mlog_errno(ret);
-		} else
-			mark_page_accessed(page);
-
-		unlock_page(page);
-		put_page(page);
-		page = NULL;
-		offset = map_end;
-		if (ret)
-			break;
-	}
 
 	return ret;
 }
@@ -4344,7 +4316,7 @@ static inline int ocfs2_may_create(struct inode *dir, struct dentry *child)
 		return -EEXIST;
 	if (IS_DEADDIR(dir))
 		return -ENOENT;
-	return inode_permission(dir, MAY_WRITE | MAY_EXEC);
+	return inode_permission(&nop_mnt_idmap, dir, MAY_WRITE | MAY_EXEC);
 }
 
 /**
@@ -4398,7 +4370,7 @@ static int ocfs2_vfs_reflink(struct dentry *old_dentry, struct inode *dir,
 	 * file.
 	 */
 	if (!preserve) {
-		error = inode_permission(inode, MAY_READ);
+		error = inode_permission(&nop_mnt_idmap, inode, MAY_READ);
 		if (error)
 			return error;
 	}

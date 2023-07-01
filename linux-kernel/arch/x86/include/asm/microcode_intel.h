@@ -14,12 +14,13 @@ struct microcode_header_intel {
 	unsigned int            pf;
 	unsigned int            datasize;
 	unsigned int            totalsize;
-	unsigned int            reserved[3];
+	unsigned int            metasize;
+	unsigned int            reserved[2];
 };
 
 struct microcode_intel {
 	struct microcode_header_intel hdr;
-	unsigned int            bits[0];
+	unsigned int            bits[];
 };
 
 /* microcode format is extended from prescott processors */
@@ -33,7 +34,7 @@ struct extended_sigtable {
 	unsigned int            count;
 	unsigned int            cksum;
 	unsigned int            reserved[3];
-	struct extended_signature sigs[0];
+	struct extended_signature sigs[];
 };
 
 #define DEFAULT_UCODE_DATASIZE	(2000)
@@ -41,6 +42,8 @@ struct extended_sigtable {
 #define DEFAULT_UCODE_TOTALSIZE (DEFAULT_UCODE_DATASIZE + MC_HEADER_SIZE)
 #define EXT_HEADER_SIZE		(sizeof(struct extended_sigtable))
 #define EXT_SIGNATURE_SIZE	(sizeof(struct extended_signature))
+#define MC_HEADER_TYPE_MICROCODE	1
+#define MC_HEADER_TYPE_IFS		2
 
 #define get_totalsize(mc) \
 	(((struct microcode_intel *)mc)->hdr.datasize ? \

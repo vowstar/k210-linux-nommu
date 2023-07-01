@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * HDMI interface DSS driver for TI's OMAP4 family of SoCs.
- * Copyright (C) 2010-2011 Texas Instruments Incorporated - http://www.ti.com/
+ * Copyright (C) 2010-2011 Texas Instruments Incorporated - https://www.ti.com/
  * Authors: Yong Zhi
  *	Mythri pk <mythripk@ti.com>
  */
@@ -19,7 +19,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/clk.h>
-#include <linux/gpio.h>
+#include <linux/of.h>
 #include <linux/regulator/consumer.h>
 #include <linux/component.h>
 #include <video/omapfb_dss.h>
@@ -38,9 +38,8 @@ static int hdmi_runtime_get(void)
 
 	DSSDBG("hdmi_runtime_get\n");
 
-	r = pm_runtime_get_sync(&hdmi.pdev->dev);
-	WARN_ON(r < 0);
-	if (r < 0)
+	r = pm_runtime_resume_and_get(&hdmi.pdev->dev);
+	if (WARN_ON(r < 0))
 		return r;
 
 	return 0;
@@ -455,10 +454,8 @@ static void hdmi_disconnect(struct omap_dss_device *dssdev,
 static int hdmi_read_edid(struct omap_dss_device *dssdev,
 		u8 *edid, int len)
 {
-	bool need_enable;
+	bool need_enable = !hdmi.core_enabled;
 	int r;
-
-	need_enable = hdmi.core_enabled == false;
 
 	if (need_enable) {
 		r = hdmi_core_enable(dssdev);
@@ -673,7 +670,7 @@ static int hdmi4_bind(struct device *dev, struct device *master, void *data)
 	int irq;
 
 	hdmi.pdev = pdev;
-	dev_set_drvdata(&pdev->dev, &hdmi);
+	platform_set_drvdata(pdev, &hdmi);
 
 	mutex_init(&hdmi.lock);
 	spin_lock_init(&hdmi.audio_playing_lock);

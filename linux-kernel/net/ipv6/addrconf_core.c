@@ -185,9 +185,23 @@ static int eafnosupport_fib6_nh_init(struct net *net, struct fib6_nh *fib6_nh,
 	return -EAFNOSUPPORT;
 }
 
-static int eafnosupport_ip6_del_rt(struct net *net, struct fib6_info *rt)
+static int eafnosupport_ip6_del_rt(struct net *net, struct fib6_info *rt,
+				   bool skip_notify)
 {
 	return -EAFNOSUPPORT;
+}
+
+static int eafnosupport_ipv6_fragment(struct net *net, struct sock *sk, struct sk_buff *skb,
+				      int (*output)(struct net *, struct sock *, struct sk_buff *))
+{
+	kfree_skb(skb);
+	return -EAFNOSUPPORT;
+}
+
+static struct net_device *eafnosupport_ipv6_dev_find(struct net *net, const struct in6_addr *addr,
+						     struct net_device *dev)
+{
+	return ERR_PTR(-EAFNOSUPPORT);
 }
 
 const struct ipv6_stub *ipv6_stub __read_mostly = &(struct ipv6_stub) {
@@ -200,6 +214,8 @@ const struct ipv6_stub *ipv6_stub __read_mostly = &(struct ipv6_stub) {
 	.ip6_mtu_from_fib6 = eafnosupport_ip6_mtu_from_fib6,
 	.fib6_nh_init	   = eafnosupport_fib6_nh_init,
 	.ip6_del_rt	   = eafnosupport_ip6_del_rt,
+	.ipv6_fragment	   = eafnosupport_ipv6_fragment,
+	.ipv6_dev_find     = eafnosupport_ipv6_dev_find,
 };
 EXPORT_SYMBOL_GPL(ipv6_stub);
 
@@ -241,13 +257,13 @@ void in6_dev_finish_destroy(struct inet6_dev *idev)
 	struct net_device *dev = idev->dev;
 
 	WARN_ON(!list_empty(&idev->addr_list));
-	WARN_ON(idev->mc_list);
+	WARN_ON(rcu_access_pointer(idev->mc_list));
 	WARN_ON(timer_pending(&idev->rs_timer));
 
 #ifdef NET_REFCNT_DEBUG
 	pr_debug("%s: %s\n", __func__, dev ? dev->name : "NIL");
 #endif
-	dev_put(dev);
+	netdev_put(dev, &idev->dev_tracker);
 	if (!idev->dead) {
 		pr_warn("Freeing alive inet6 device %p\n", idev);
 		return;

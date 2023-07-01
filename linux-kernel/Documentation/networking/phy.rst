@@ -80,8 +80,8 @@ values of phy_interface_t must be understood from the perspective of the PHY
 device itself, leading to the following:
 
 * PHY_INTERFACE_MODE_RGMII: the PHY is not responsible for inserting any
-  internal delay by itself, it assumes that either the Ethernet MAC (if capable
-  or the PCB traces) insert the correct 1.5-2ns delay
+  internal delay by itself, it assumes that either the Ethernet MAC (if capable)
+  or the PCB traces insert the correct 1.5-2ns delay
 
 * PHY_INTERFACE_MODE_RGMII_TXID: the PHY should insert an internal delay
   for the transmit data lines (TXD[3:0]) processed by the PHY device
@@ -104,7 +104,7 @@ Whenever possible, use the PHY side RGMII delay for these reasons:
 
 * PHY device drivers in PHYLIB being reusable by nature, being able to
   configure correctly a specified delay enables more designs with similar delay
-  requirements to be operate correctly
+  requirements to be operated correctly
 
 For cases where the PHY is not capable of providing this delay, but the
 Ethernet MAC driver is capable of doing so, the correct phy_interface_t value
@@ -120,7 +120,7 @@ required delays, as defined per the RGMII standard, several options may be
 available:
 
 * Some SoCs may offer a pin pad/mux/controller capable of configuring a given
-  set of pins'strength, delays, and voltage; and it may be a suitable
+  set of pins' strength, delays, and voltage; and it may be a suitable
   option to insert the expected 2ns RGMII delay.
 
 * Modifying the PCB design to include a fixed delay (e.g: using a specifically
@@ -216,7 +216,7 @@ put into an unsupported state.
 Lastly, once the controller is ready to handle network traffic, you call
 phy_start(phydev).  This tells the PAL that you are ready, and configures the
 PHY to connect to the network. If the MAC interrupt of your network driver
-also handles PHY status changes, just set phydev->irq to PHY_IGNORE_INTERRUPT
+also handles PHY status changes, just set phydev->irq to PHY_MAC_INTERRUPT
 before you call phy_start and use phy_mac_interrupt() from the network
 driver. If you don't want to use interrupts, set phydev->irq to PHY_POLL.
 phy_start() enables the PHY interrupts (if applicable) and starts the
@@ -237,6 +237,11 @@ negotiation results.
 
 Some of the interface modes are described below:
 
+``PHY_INTERFACE_MODE_SMII``
+    This is serial MII, clocked at 125MHz, supporting 100M and 10M speeds.
+    Some details can be found in
+    https://opencores.org/ocsvn/smii/smii/trunk/doc/SMII.pdf
+
 ``PHY_INTERFACE_MODE_1000BASEX``
     This defines the 1000BASE-X single-lane serdes link as defined by the
     802.3 standard section 36.  The link operates at a fixed bit rate of
@@ -247,8 +252,8 @@ Some of the interface modes are described below:
     speeds (see below.)
 
 ``PHY_INTERFACE_MODE_2500BASEX``
-    This defines a variant of 1000BASE-X which is clocked 2.5 times faster,
-    than the 802.3 standard giving a fixed bit rate of 3.125Gbaud.
+    This defines a variant of 1000BASE-X which is clocked 2.5 times as fast
+    as the 802.3 standard, giving a fixed bit rate of 3.125Gbaud.
 
 ``PHY_INTERFACE_MODE_SGMII``
     This is used for Cisco SGMII, which is a modification of 1000BASE-X
@@ -266,6 +271,12 @@ Some of the interface modes are described below:
     word will not be correctly interpreted, which may cause mismatches in
     duplex, pause or other settings.  This is dependent on the MAC and/or
     PHY behaviour.
+
+``PHY_INTERFACE_MODE_5GBASER``
+    This is the IEEE 802.3 Clause 129 defined 5GBASE-R protocol. It is
+    identical to the 10GBASE-R protocol defined in Clause 49, with the
+    exception that it operates at half the frequency. Please refer to the
+    IEEE standard for the definition.
 
 ``PHY_INTERFACE_MODE_10GBASER``
     This is the IEEE 802.3 Clause 49 defined 10GBASE-R protocol used with
@@ -285,6 +296,32 @@ Some of the interface modes are described below:
 
     Note: due to legacy usage, some 10GBASE-R usage incorrectly makes
     use of this definition.
+
+``PHY_INTERFACE_MODE_25GBASER``
+    This is the IEEE 802.3 PCS Clause 107 defined 25GBASE-R protocol.
+    The PCS is identical to 10GBASE-R, i.e. 64B/66B encoded
+    running 2.5 as fast, giving a fixed bit rate of 25.78125 Gbaud.
+    Please refer to the IEEE standard for further information.
+
+``PHY_INTERFACE_MODE_100BASEX``
+    This defines IEEE 802.3 Clause 24.  The link operates at a fixed data
+    rate of 125Mpbs using a 4B/5B encoding scheme, resulting in an underlying
+    data rate of 100Mpbs.
+
+``PHY_INTERFACE_MODE_QUSGMII``
+    This defines the Cisco the Quad USGMII mode, which is the Quad variant of
+    the USGMII (Universal SGMII) link. It's very similar to QSGMII, but uses
+    a Packet Control Header (PCH) instead of the 7 bytes preamble to carry not
+    only the port id, but also so-called "extensions". The only documented
+    extension so-far in the specification is the inclusion of timestamps, for
+    PTP-enabled PHYs. This mode isn't compatible with QSGMII, but offers the
+    same capabilities in terms of link speed and negotiation.
+
+``PHY_INTERFACE_MODE_1000BASEKX``
+    This is 1000BASE-X as defined by IEEE 802.3 Clause 36 with Clause 73
+    autonegotiation. Generally, it will be used with a Clause 70 PMD. To
+    contrast with the 1000BASE-X phy mode used for Clause 38 and 39 PMDs, this
+    interface mode has different autonegotiation and only supports full duplex.
 
 Pause frames / flow control
 ===========================
@@ -487,8 +524,9 @@ phy_register_fixup_for_id()::
 The stubs set one of the two matching criteria, and set the other one to
 match anything.
 
-When phy_register_fixup() or \*_for_uid()/\*_for_id() is called at module,
-unregister fixup and free allocate memory are required.
+When phy_register_fixup() or \*_for_uid()/\*_for_id() is called at module load
+time, the module needs to unregister the fixup and free allocated memory when
+it's unloaded.
 
 Call one of following function before unloading module::
 

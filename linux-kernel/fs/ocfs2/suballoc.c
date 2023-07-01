@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* -*- mode: c; c-basic-offset: 8; -*-
- * vim: noexpandtab sw=8 ts=8 sts=0:
- *
+/*
  * suballoc.c
  *
  * metadata alloc and free
@@ -879,9 +877,9 @@ static void __ocfs2_set_steal_slot(struct ocfs2_super *osb, int slot, int type)
 {
 	spin_lock(&osb->osb_lock);
 	if (type == INODE_ALLOC_SYSTEM_INODE)
-		osb->s_inode_steal_slot = slot;
+		osb->s_inode_steal_slot = (u16)slot;
 	else if (type == EXTENT_ALLOC_SYSTEM_INODE)
-		osb->s_meta_steal_slot = slot;
+		osb->s_meta_steal_slot = (u16)slot;
 	spin_unlock(&osb->osb_lock);
 }
 
@@ -1258,10 +1256,10 @@ static int ocfs2_test_bg_bit_allocatable(struct buffer_head *bg_bh,
 	if (ocfs2_test_bit(nr, (unsigned long *)bg->bg_bitmap))
 		return 0;
 
-	if (!buffer_jbd(bg_bh))
+	jh = jbd2_journal_grab_journal_head(bg_bh);
+	if (!jh)
 		return 1;
 
-	jh = bh2jh(bg_bh);
 	spin_lock(&jh->b_state_lock);
 	bg = (struct ocfs2_group_desc *) jh->b_committed_data;
 	if (bg)
@@ -1269,6 +1267,7 @@ static int ocfs2_test_bg_bit_allocatable(struct buffer_head *bg_bh,
 	else
 		ret = 1;
 	spin_unlock(&jh->b_state_lock);
+	jbd2_journal_put_journal_head(jh);
 
 	return ret;
 }
@@ -2509,9 +2508,6 @@ static int _ocfs2_free_suballoc_bits(handle_t *handle,
 
 bail:
 	brelse(group_bh);
-
-	if (status)
-		mlog_errno(status);
 	return status;
 }
 
@@ -2582,8 +2578,6 @@ static int _ocfs2_free_clusters(handle_t *handle,
 					 num_clusters);
 
 out:
-	if (status)
-		mlog_errno(status);
 	return status;
 }
 
@@ -2830,9 +2824,12 @@ int ocfs2_test_inode_bit(struct ocfs2_super *osb, u64 blkno, int *res)
 		goto bail;
 	}
 
-	inode_alloc_inode =
-		ocfs2_get_system_file_inode(osb, INODE_ALLOC_SYSTEM_INODE,
-					    suballoc_slot);
+	if (suballoc_slot == (u16)OCFS2_INVALID_SLOT)
+		inode_alloc_inode = ocfs2_get_system_file_inode(osb,
+			GLOBAL_INODE_ALLOC_SYSTEM_INODE, suballoc_slot);
+	else
+		inode_alloc_inode = ocfs2_get_system_file_inode(osb,
+			INODE_ALLOC_SYSTEM_INODE, suballoc_slot);
 	if (!inode_alloc_inode) {
 		/* the error code could be inaccurate, but we are not able to
 		 * get the correct one. */

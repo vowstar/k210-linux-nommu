@@ -331,8 +331,7 @@ static void bu21029_stop_chip(struct input_dev *dev)
 	regulator_disable(bu21029->vdd);
 }
 
-static int bu21029_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+static int bu21029_probe(struct i2c_client *client)
 {
 	struct bu21029_ts_data *bu21029;
 	struct input_dev *in_dev;
@@ -401,10 +400,10 @@ static int bu21029_probe(struct i2c_client *client,
 
 	input_set_drvdata(in_dev, bu21029);
 
-	irq_set_status_flags(client->irq, IRQ_NOAUTOEN);
 	error = devm_request_threaded_irq(&client->dev, client->irq,
 					  NULL, bu21029_touch_soft_irq,
-					  IRQF_ONESHOT, DRIVER_NAME, bu21029);
+					  IRQF_ONESHOT | IRQF_NO_AUTOEN,
+					  DRIVER_NAME, bu21029);
 	if (error) {
 		dev_err(&client->dev,
 			"unable to request touch irq: %d\n", error);
@@ -423,14 +422,14 @@ static int bu21029_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int __maybe_unused bu21029_suspend(struct device *dev)
+static int bu21029_suspend(struct device *dev)
 {
 	struct i2c_client *i2c = to_i2c_client(dev);
 	struct bu21029_ts_data *bu21029 = i2c_get_clientdata(i2c);
 
 	if (!device_may_wakeup(dev)) {
 		mutex_lock(&bu21029->in_dev->mutex);
-		if (bu21029->in_dev->users)
+		if (input_device_enabled(bu21029->in_dev))
 			bu21029_stop_chip(bu21029->in_dev);
 		mutex_unlock(&bu21029->in_dev->mutex);
 	}
@@ -438,21 +437,21 @@ static int __maybe_unused bu21029_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused bu21029_resume(struct device *dev)
+static int bu21029_resume(struct device *dev)
 {
 	struct i2c_client *i2c = to_i2c_client(dev);
 	struct bu21029_ts_data *bu21029 = i2c_get_clientdata(i2c);
 
 	if (!device_may_wakeup(dev)) {
 		mutex_lock(&bu21029->in_dev->mutex);
-		if (bu21029->in_dev->users)
+		if (input_device_enabled(bu21029->in_dev))
 			bu21029_start_chip(bu21029->in_dev);
 		mutex_unlock(&bu21029->in_dev->mutex);
 	}
 
 	return 0;
 }
-static SIMPLE_DEV_PM_OPS(bu21029_pm_ops, bu21029_suspend, bu21029_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(bu21029_pm_ops, bu21029_suspend, bu21029_resume);
 
 static const struct i2c_device_id bu21029_ids[] = {
 	{ DRIVER_NAME, 0 },
@@ -472,10 +471,10 @@ static struct i2c_driver bu21029_driver = {
 	.driver	= {
 		.name		= DRIVER_NAME,
 		.of_match_table	= of_match_ptr(bu21029_of_ids),
-		.pm		= &bu21029_pm_ops,
+		.pm		= pm_sleep_ptr(&bu21029_pm_ops),
 	},
 	.id_table	= bu21029_ids,
-	.probe		= bu21029_probe,
+	.probe_new	= bu21029_probe,
 };
 module_i2c_driver(bu21029_driver);
 

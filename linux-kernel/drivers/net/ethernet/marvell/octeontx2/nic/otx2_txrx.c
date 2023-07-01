@@ -1,23 +1,60 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Marvell OcteonTx2 RVU Ethernet driver
+/* Marvell RVU Ethernet driver
  *
- * Copyright (C) 2020 Marvell International Ltd.
+ * Copyright (C) 2020 Marvell.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/etherdevice.h>
 #include <net/ip.h>
 #include <net/tso.h>
+#include <linux/bpf.h>
+#include <linux/bpf_trace.h>
+#include <net/ip6_checksum.h>
 
 #include "otx2_reg.h"
 #include "otx2_common.h"
 #include "otx2_struct.h"
 #include "otx2_txrx.h"
+#include "otx2_ptp.h"
+#include "cn10k.h"
 
 #define CQE_ADDR(CQ, idx) ((CQ)->cqe_base + ((CQ)->cqe_size * (idx)))
+#define PTP_PORT	        0x13F
+/* PTPv2 header Original Timestamp starts at byte offset 34 and
+ * contains 6 byte seconds field and 4 byte nano seconds field.
+ */
+#define PTP_SYNC_SEC_OFFSET	34
+
+static bool otx2_xdp_rcv_pkt_handler(struct otx2_nic *pfvf,
+				     struct bpf_prog *prog,
+				     struct nix_cqe_rx_s *cqe,
+				     struct otx2_cq_queue *cq);
+
+static int otx2_nix_cq_op_status(struct otx2_nic *pfvf,
+				 struct otx2_cq_queue *cq)
+{
+	u64 incr = (u64)(cq->cq_idx) << 32;
+	u64 status;
+
+	status = otx2_atomic64_fetch_add(incr, pfvf->cq_op_addr);
+
+	if (unlikely(status & BIT_ULL(CQ_OP_STAT_OP_ERR) ||
+		     status & BIT_ULL(CQ_OP_STAT_CQ_ERR))) {
+		dev_err(pfvf->dev, "CQ stopped due to error");
+		return -EINVAL;
+	}
+
+	cq->cq_tail = status & 0xFFFFF;
+	cq->cq_head = (status >> 20) & 0xFFFFF;
+	if (cq->cq_tail < cq->cq_head)
+		cq->pend_cqe = (cq->cqe_cnt - cq->cq_head) +
+				cq->cq_tail;
+	else
+		cq->pend_cqe = cq->cq_tail - cq->cq_head;
+
+	return 0;
+}
 
 static struct nix_cqe_hdr_s *otx2_get_next_cqe(struct otx2_cq_queue *cq)
 {
@@ -74,6 +111,24 @@ static void otx2_dma_unmap_skb_frags(struct otx2_nic *pfvf, struct sg_list *sg)
 	sg->num_segs = 0;
 }
 
+static void otx2_xdp_snd_pkt_handler(struct otx2_nic *pfvf,
+				     struct otx2_snd_queue *sq,
+				 struct nix_cqe_tx_s *cqe)
+{
+	struct nix_send_comp_s *snd_comp = &cqe->comp;
+	struct sg_list *sg;
+	struct page *page;
+	u64 pa;
+
+	sg = &sq->sg[snd_comp->sqe_id];
+
+	pa = otx2_iova_to_phys(pfvf->iommu_domain, sg->dma_addr[0]);
+	otx2_dma_unmap_page(pfvf, sg->dma_addr[0],
+			    sg->size[0], DMA_TO_DEVICE);
+	page = virt_to_page(phys_to_virt(pa));
+	put_page(page);
+}
+
 static void otx2_snd_pkt_handler(struct otx2_nic *pfvf,
 				 struct otx2_cq_queue *cq,
 				 struct otx2_snd_queue *sq,
@@ -81,8 +136,11 @@ static void otx2_snd_pkt_handler(struct otx2_nic *pfvf,
 				 int budget, int *tx_pkts, int *tx_bytes)
 {
 	struct nix_send_comp_s *snd_comp = &cqe->comp;
+	struct skb_shared_hwtstamps ts;
 	struct sk_buff *skb = NULL;
+	u64 timestamp, tsns;
 	struct sg_list *sg;
+	int err;
 
 	if (unlikely(snd_comp->status) && netif_msg_tx_err(pfvf))
 		net_err_ratelimited("%s: TX%d: Error in send CQ status:%x\n",
@@ -94,6 +152,19 @@ static void otx2_snd_pkt_handler(struct otx2_nic *pfvf,
 	if (unlikely(!skb))
 		return;
 
+	if (skb_shinfo(skb)->tx_flags & SKBTX_IN_PROGRESS) {
+		timestamp = ((u64 *)sq->timestamps->base)[snd_comp->sqe_id];
+		if (timestamp != 1) {
+			timestamp = pfvf->ptp->convert_tx_ptp_tstmp(timestamp);
+			err = otx2_ptp_tstamp2time(pfvf, timestamp, &tsns);
+			if (!err) {
+				memset(&ts, 0, sizeof(ts));
+				ts.hwtstamp = ns_to_ktime(tsns);
+				skb_tstamp_tx(skb, &ts);
+			}
+		}
+	}
+
 	*tx_bytes += skb->len;
 	(*tx_pkts)++;
 	otx2_dma_unmap_skb_frags(pfvf, sg);
@@ -101,19 +172,63 @@ static void otx2_snd_pkt_handler(struct otx2_nic *pfvf,
 	sg->skb = (u64)NULL;
 }
 
-static void otx2_skb_add_frag(struct otx2_nic *pfvf, struct sk_buff *skb,
-			      u64 iova, int len)
+static void otx2_set_rxtstamp(struct otx2_nic *pfvf,
+			      struct sk_buff *skb, void *data)
+{
+	u64 timestamp, tsns;
+	int err;
+
+	if (!(pfvf->flags & OTX2_FLAG_RX_TSTAMP_ENABLED))
+		return;
+
+	timestamp = pfvf->ptp->convert_rx_ptp_tstmp(*(u64 *)data);
+	/* The first 8 bytes is the timestamp */
+	err = otx2_ptp_tstamp2time(pfvf, timestamp, &tsns);
+	if (err)
+		return;
+
+	skb_hwtstamps(skb)->hwtstamp = ns_to_ktime(tsns);
+}
+
+static bool otx2_skb_add_frag(struct otx2_nic *pfvf, struct sk_buff *skb,
+			      u64 iova, int len, struct nix_rx_parse_s *parse,
+			      int qidx)
 {
 	struct page *page;
+	int off = 0;
 	void *va;
 
 	va = phys_to_virt(otx2_iova_to_phys(pfvf->iommu_domain, iova));
-	page = virt_to_page(va);
-	skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, page,
-			va - page_address(page), len, pfvf->rbsize);
 
-	otx2_dma_unmap_page(pfvf, iova - OTX2_HEAD_ROOM,
-			    pfvf->rbsize, DMA_FROM_DEVICE);
+	if (likely(!skb_shinfo(skb)->nr_frags)) {
+		/* Check if data starts at some nonzero offset
+		 * from the start of the buffer.  For now the
+		 * only possible offset is 8 bytes in the case
+		 * where packet is prepended by a timestamp.
+		 */
+		if (parse->laptr) {
+			otx2_set_rxtstamp(pfvf, skb, va);
+			off = OTX2_HW_TIMESTAMP_LEN;
+		}
+	}
+
+	page = virt_to_page(va);
+	if (likely(skb_shinfo(skb)->nr_frags < MAX_SKB_FRAGS)) {
+		skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, page,
+				va - page_address(page) + off,
+				len - off, pfvf->rbsize);
+
+		otx2_dma_unmap_page(pfvf, iova - OTX2_HEAD_ROOM,
+				    pfvf->rbsize, DMA_FROM_DEVICE);
+		return true;
+	}
+
+	/* If more than MAX_SKB_FRAGS fragments are received then
+	 * give back those buffer pointers to hardware for reuse.
+	 */
+	pfvf->hw_ops->aura_freeptr(pfvf, qidx, iova & ~0x07ULL);
+
+	return false;
 }
 
 static void otx2_set_rxhash(struct otx2_nic *pfvf,
@@ -136,6 +251,26 @@ static void otx2_set_rxhash(struct otx2_nic *pfvf,
 		hash = cqe->hdr.flow_tag;
 	}
 	skb_set_hash(skb, hash, hash_type);
+}
+
+static void otx2_free_rcv_seg(struct otx2_nic *pfvf, struct nix_cqe_rx_s *cqe,
+			      int qidx)
+{
+	struct nix_rx_sg_s *sg = &cqe->sg;
+	void *end, *start;
+	u64 *seg_addr;
+	int seg;
+
+	start = (void *)sg;
+	end = start + ((cqe->parse.desc_sizem1 + 1) * 16);
+	while (start < end) {
+		sg = (struct nix_rx_sg_s *)start;
+		seg_addr = &sg->seg_addr;
+		for (seg = 0; seg < sg->segs; seg++, seg_addr++)
+			pfvf->hw_ops->aura_freeptr(pfvf, qidx,
+						   *seg_addr & ~0x07ULL);
+		start += sizeof(*sg);
+	}
 }
 
 static bool otx2_check_rcv_errors(struct otx2_nic *pfvf,
@@ -193,12 +328,12 @@ static bool otx2_check_rcv_errors(struct otx2_nic *pfvf,
 	}
 
 	/* If RXALL is enabled pass on packets to stack. */
-	if (cqe->sg.segs && (pfvf->netdev->features & NETIF_F_RXALL))
+	if (pfvf->netdev->features & NETIF_F_RXALL)
 		return false;
 
 	/* Free buffer back to pool */
 	if (cqe->sg.segs)
-		otx2_aura_freeptr(pfvf, qidx, cqe->sg.seg_addr & ~0x07ULL);
+		otx2_free_rcv_seg(pfvf, cqe, qidx);
 	return true;
 }
 
@@ -208,20 +343,39 @@ static void otx2_rcv_pkt_handler(struct otx2_nic *pfvf,
 				 struct nix_cqe_rx_s *cqe)
 {
 	struct nix_rx_parse_s *parse = &cqe->parse;
+	struct nix_rx_sg_s *sg = &cqe->sg;
 	struct sk_buff *skb = NULL;
+	void *end, *start;
+	u64 *seg_addr;
+	u16 *seg_size;
+	int seg;
 
 	if (unlikely(parse->errlev || parse->errcode)) {
 		if (otx2_check_rcv_errors(pfvf, cqe, cq->cq_idx))
 			return;
 	}
 
+	if (pfvf->xdp_prog)
+		if (otx2_xdp_rcv_pkt_handler(pfvf, pfvf->xdp_prog, cqe, cq))
+			return;
+
 	skb = napi_get_frags(napi);
 	if (unlikely(!skb))
 		return;
 
-	otx2_skb_add_frag(pfvf, skb, cqe->sg.seg_addr, cqe->sg.seg_size);
-	cq->pool_ptrs++;
-
+	start = (void *)sg;
+	end = start + ((cqe->parse.desc_sizem1 + 1) * 16);
+	while (start < end) {
+		sg = (struct nix_rx_sg_s *)start;
+		seg_addr = &sg->seg_addr;
+		seg_size = (void *)sg;
+		for (seg = 0; seg < sg->segs; seg++, seg_addr++) {
+			if (otx2_skb_add_frag(pfvf, skb, *seg_addr,
+					      seg_size[seg], parse, cq->cq_idx))
+				cq->pool_ptrs++;
+		}
+		start += sizeof(*sg);
+	}
 	otx2_set_rxhash(pfvf, cqe, skb);
 
 	skb_record_rx_queue(skb, cq->cq_idx);
@@ -237,9 +391,15 @@ static int otx2_rx_napi_handler(struct otx2_nic *pfvf,
 {
 	struct nix_cqe_rx_s *cqe;
 	int processed_cqe = 0;
-	s64 bufptr;
 
-	while (likely(processed_cqe < budget)) {
+	if (cq->pend_cqe >= budget)
+		goto process_cqe;
+
+	if (otx2_nix_cq_op_status(pfvf, cq) || !cq->pend_cqe)
+		return 0;
+
+process_cqe:
+	while (likely(processed_cqe < budget) && cq->pend_cqe) {
 		cqe = (struct nix_cqe_rx_s *)CQE_ADDR(cq, cq->cq_head);
 		if (cqe->hdr.cqe_type == NIX_XQE_TYPE_INVALID ||
 		    !cqe->sg.seg_addr) {
@@ -255,58 +415,68 @@ static int otx2_rx_napi_handler(struct otx2_nic *pfvf,
 		cqe->hdr.cqe_type = NIX_XQE_TYPE_INVALID;
 		cqe->sg.seg_addr = 0x00;
 		processed_cqe++;
+		cq->pend_cqe--;
 	}
 
 	/* Free CQEs to HW */
 	otx2_write64(pfvf, NIX_LF_CQ_OP_DOOR,
 		     ((u64)cq->cq_idx << 32) | processed_cqe);
 
-	if (unlikely(!cq->pool_ptrs))
-		return 0;
+	return processed_cqe;
+}
 
-	/* Refill pool with new buffers */
+void otx2_refill_pool_ptrs(void *dev, struct otx2_cq_queue *cq)
+{
+	struct otx2_nic *pfvf = dev;
+	dma_addr_t bufptr;
+
 	while (cq->pool_ptrs) {
-		bufptr = otx2_alloc_rbuf(pfvf, cq->rbpool, GFP_ATOMIC);
-		if (unlikely(bufptr <= 0)) {
-			struct refill_work *work;
-			struct delayed_work *dwork;
-
-			work = &pfvf->refill_wrk[cq->cq_idx];
-			dwork = &work->pool_refill_work;
-			/* Schedule a task if no other task is running */
-			if (!cq->refill_task_sched) {
-				cq->refill_task_sched = true;
-				schedule_delayed_work(dwork,
-						      msecs_to_jiffies(100));
-			}
+		if (otx2_alloc_buffer(pfvf, cq, &bufptr))
 			break;
-		}
 		otx2_aura_freeptr(pfvf, cq->cq_idx, bufptr + OTX2_HEAD_ROOM);
 		cq->pool_ptrs--;
 	}
-
-	return processed_cqe;
 }
 
 static int otx2_tx_napi_handler(struct otx2_nic *pfvf,
 				struct otx2_cq_queue *cq, int budget)
 {
-	int tx_pkts = 0, tx_bytes = 0;
+	int tx_pkts = 0, tx_bytes = 0, qidx;
+	struct otx2_snd_queue *sq;
 	struct nix_cqe_tx_s *cqe;
 	int processed_cqe = 0;
 
-	while (likely(processed_cqe < budget)) {
+	if (cq->pend_cqe >= budget)
+		goto process_cqe;
+
+	if (otx2_nix_cq_op_status(pfvf, cq) || !cq->pend_cqe)
+		return 0;
+
+process_cqe:
+	qidx = cq->cq_idx - pfvf->hw.rx_queues;
+	sq = &pfvf->qset.sq[qidx];
+
+	while (likely(processed_cqe < budget) && cq->pend_cqe) {
 		cqe = (struct nix_cqe_tx_s *)otx2_get_next_cqe(cq);
 		if (unlikely(!cqe)) {
 			if (!processed_cqe)
 				return 0;
 			break;
 		}
-		otx2_snd_pkt_handler(pfvf, cq, &pfvf->qset.sq[cq->cint_idx],
-				     cqe, budget, &tx_pkts, &tx_bytes);
+
+		if (cq->cq_type == CQ_XDP) {
+			otx2_xdp_snd_pkt_handler(pfvf, sq, cqe);
+		} else {
+			otx2_snd_pkt_handler(pfvf, cq, sq, cqe, budget,
+					     &tx_pkts, &tx_bytes);
+		}
 
 		cqe->hdr.cqe_type = NIX_XQE_TYPE_INVALID;
 		processed_cqe++;
+		cq->pend_cqe--;
+
+		sq->cons_head++;
+		sq->cons_head &= (sq->sqe_cnt - 1);
 	}
 
 	/* Free CQEs to HW */
@@ -327,8 +497,21 @@ static int otx2_tx_napi_handler(struct otx2_nic *pfvf,
 	return 0;
 }
 
+static void otx2_adjust_adaptive_coalese(struct otx2_nic *pfvf, struct otx2_cq_poll *cq_poll)
+{
+	struct dim_sample dim_sample;
+	u64 rx_frames, rx_bytes;
+
+	rx_frames = OTX2_GET_RX_STATS(RX_BCAST) + OTX2_GET_RX_STATS(RX_MCAST) +
+		OTX2_GET_RX_STATS(RX_UCAST);
+	rx_bytes = OTX2_GET_RX_STATS(RX_OCTS);
+	dim_update_sample(pfvf->napi_events, rx_frames, rx_bytes, &dim_sample);
+	net_dim(&cq_poll->dim, dim_sample);
+}
+
 int otx2_napi_handler(struct napi_struct *napi, int budget)
 {
+	struct otx2_cq_queue *rx_cq = NULL;
 	struct otx2_cq_poll *cq_poll;
 	int workdone = 0, cq_idx, i;
 	struct otx2_cq_queue *cq;
@@ -339,17 +522,13 @@ int otx2_napi_handler(struct napi_struct *napi, int budget)
 	pfvf = (struct otx2_nic *)cq_poll->dev;
 	qset = &pfvf->qset;
 
-	for (i = CQS_PER_CINT - 1; i >= 0; i--) {
+	for (i = 0; i < CQS_PER_CINT; i++) {
 		cq_idx = cq_poll->cq_ids[i];
 		if (unlikely(cq_idx == CINT_INVALID_CQ))
 			continue;
 		cq = &qset->cq[cq_idx];
 		if (cq->cq_type == CQ_RX) {
-			/* If the RQ refill WQ task is running, skip napi
-			 * scheduler for this queue.
-			 */
-			if (cq->refill_task_sched)
-				continue;
+			rx_cq = cq;
 			workdone += otx2_rx_napi_handler(pfvf, napi,
 							 cq, budget);
 		} else {
@@ -357,6 +536,8 @@ int otx2_napi_handler(struct napi_struct *napi, int budget)
 		}
 	}
 
+	if (rx_cq && rx_cq->pool_ptrs)
+		pfvf->hw_ops->refill_pool_ptrs(pfvf, rx_cq);
 	/* Clear the IRQ */
 	otx2_write64(pfvf, NIX_LF_CINTX_INT(cq_poll->cint_idx), BIT_ULL(0));
 
@@ -365,6 +546,17 @@ int otx2_napi_handler(struct napi_struct *napi, int budget)
 		if (pfvf->flags & OTX2_FLAG_INTF_DOWN)
 			return workdone;
 
+		/* Check for adaptive interrupt coalesce */
+		if (workdone != 0 &&
+		    ((pfvf->flags & OTX2_FLAG_ADPTV_INT_COAL_ENABLED) ==
+		     OTX2_FLAG_ADPTV_INT_COAL_ENABLED)) {
+			/* Adjust irq coalese using net_dim */
+			otx2_adjust_adaptive_coalese(pfvf, cq_poll);
+			/* Update irq coalescing */
+			for (i = 0; i < pfvf->hw.cint_cnt; i++)
+				otx2_config_irq_coalescing(pfvf, i);
+		}
+
 		/* Re-enable interrupts */
 		otx2_write64(pfvf, NIX_LF_CINTX_ENA_W1S(cq_poll->cint_idx),
 			     BIT_ULL(0));
@@ -372,7 +564,8 @@ int otx2_napi_handler(struct napi_struct *napi, int budget)
 	return workdone;
 }
 
-static void otx2_sqe_flush(struct otx2_snd_queue *sq, int size)
+void otx2_sqe_flush(void *dev, struct otx2_snd_queue *sq,
+		    int size, int qidx)
 {
 	u64 status;
 
@@ -444,7 +637,7 @@ static void otx2_sqe_add_ext(struct otx2_nic *pfvf, struct otx2_snd_queue *sq,
 	ext->subdc = NIX_SUBDC_EXT;
 	if (skb_shinfo(skb)->gso_size) {
 		ext->lso = 1;
-		ext->lso_sb = skb_transport_offset(skb) + tcp_hdrlen(skb);
+		ext->lso_sb = skb_tcp_all_headers(skb);
 		ext->lso_mps = skb_shinfo(skb)->gso_size;
 
 		/* Only TSOv4 and TSOv6 GSO offloads are supported */
@@ -457,13 +650,74 @@ static void otx2_sqe_add_ext(struct otx2_nic *pfvf, struct otx2_snd_queue *sq,
 			 */
 			ip_hdr(skb)->tot_len =
 				htons(ext->lso_sb - skb_network_offset(skb));
-		} else {
+		} else if (skb_shinfo(skb)->gso_type & SKB_GSO_TCPV6) {
 			ext->lso_format = pfvf->hw.lso_tsov6_idx;
+
 			ipv6_hdr(skb)->payload_len =
 				htons(ext->lso_sb - skb_network_offset(skb));
+		} else if (skb_shinfo(skb)->gso_type & SKB_GSO_UDP_L4) {
+			__be16 l3_proto = vlan_get_protocol(skb);
+			struct udphdr *udph = udp_hdr(skb);
+			u16 iplen;
+
+			ext->lso_sb = skb_transport_offset(skb) +
+					sizeof(struct udphdr);
+
+			/* HW adds payload size to length fields in IP and
+			 * UDP headers while segmentation, hence adjust the
+			 * lengths to just header sizes.
+			 */
+			iplen = htons(ext->lso_sb - skb_network_offset(skb));
+			if (l3_proto == htons(ETH_P_IP)) {
+				ip_hdr(skb)->tot_len = iplen;
+				ext->lso_format = pfvf->hw.lso_udpv4_idx;
+			} else {
+				ipv6_hdr(skb)->payload_len = iplen;
+				ext->lso_format = pfvf->hw.lso_udpv6_idx;
+			}
+
+			udph->len = htons(sizeof(struct udphdr));
+		}
+	} else if (skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP) {
+		ext->tstmp = 1;
+	}
+
+#define OTX2_VLAN_PTR_OFFSET     (ETH_HLEN - ETH_TLEN)
+	if (skb_vlan_tag_present(skb)) {
+		if (skb->vlan_proto == htons(ETH_P_8021Q)) {
+			ext->vlan1_ins_ena = 1;
+			ext->vlan1_ins_ptr = OTX2_VLAN_PTR_OFFSET;
+			ext->vlan1_ins_tci = skb_vlan_tag_get(skb);
+		} else if (skb->vlan_proto == htons(ETH_P_8021AD)) {
+			ext->vlan0_ins_ena = 1;
+			ext->vlan0_ins_ptr = OTX2_VLAN_PTR_OFFSET;
+			ext->vlan0_ins_tci = skb_vlan_tag_get(skb);
 		}
 	}
+
 	*offset += sizeof(*ext);
+}
+
+static void otx2_sqe_add_mem(struct otx2_snd_queue *sq, int *offset,
+			     int alg, u64 iova, int ptp_offset,
+			     u64 base_ns, bool udp_csum_crt)
+{
+	struct nix_sqe_mem_s *mem;
+
+	mem = (struct nix_sqe_mem_s *)(sq->sqe_base + *offset);
+	mem->subdc = NIX_SUBDC_MEM;
+	mem->alg = alg;
+	mem->wmem = 1; /* wait for the memory operation */
+	mem->addr = iova;
+
+	if (ptp_offset) {
+		mem->start_offset = ptp_offset;
+		mem->udp_csum_crt = !!udp_csum_crt;
+		mem->base_ns = base_ns;
+		mem->step_type = 1;
+	}
+
+	*offset += sizeof(*mem);
 }
 
 /* Add SQE header subdescriptor structure */
@@ -504,6 +758,7 @@ static void otx2_sqe_add_hdr(struct otx2_nic *pfvf, struct otx2_snd_queue *sq,
 			sqe_hdr->ol3type = NIX_SENDL3TYPE_IP4_CKSUM;
 		} else if (skb->protocol == htons(ETH_P_IPV6)) {
 			proto = ipv6_hdr(skb)->nexthdr;
+			sqe_hdr->ol3type = NIX_SENDL3TYPE_IP6;
 		}
 
 		if (proto == IPPROTO_TCP)
@@ -599,12 +854,13 @@ static void otx2_sq_append_tso(struct otx2_nic *pfvf, struct otx2_snd_queue *sq,
 			       struct sk_buff *skb, u16 qidx)
 {
 	struct netdev_queue *txq = netdev_get_tx_queue(pfvf->netdev, qidx);
-	int hdr_len = skb_transport_offset(skb) + tcp_hdrlen(skb);
-	int tcp_data, seg_len, pkt_len, offset;
+	int hdr_len, tcp_data, seg_len, pkt_len, offset;
 	struct nix_sqe_hdr_s *sqe_hdr;
 	int first_sqe = sq->head;
 	struct sg_list list;
 	struct tso_t tso;
+
+	hdr_len = tso_start(skb, &tso);
 
 	/* Map SKB's fragments to DMA.
 	 * It's done here to avoid mapping for every TSO segment's packet.
@@ -616,7 +872,6 @@ static void otx2_sq_append_tso(struct otx2_nic *pfvf, struct otx2_snd_queue *sq,
 
 	netdev_tx_sent_queue(txq, skb->len);
 
-	tso_start(skb, &tso);
 	tcp_data = skb->len - hdr_len;
 	while (tcp_data > 0) {
 		char *hdr;
@@ -676,7 +931,7 @@ static void otx2_sq_append_tso(struct otx2_nic *pfvf, struct otx2_snd_queue *sq,
 		sqe_hdr->sizem1 = (offset / 16) - 1;
 
 		/* Flush SQE to HW */
-		otx2_sqe_flush(sq, offset);
+		pfvf->hw_ops->sqe_flush(pfvf, sq, offset, qidx);
 	}
 }
 
@@ -685,17 +940,19 @@ static bool is_hw_tso_supported(struct otx2_nic *pfvf,
 {
 	int payload_len, last_seg_size;
 
-	if (!pfvf->hw.hw_tso)
+	if (test_bit(HW_TSO, &pfvf->hw.cap_flag))
+		return true;
+
+	/* On 96xx A0, HW TSO not supported */
+	if (!is_96xx_B0(pfvf->pdev))
 		return false;
 
 	/* HW has an issue due to which when the payload of the last LSO
 	 * segment is shorter than 16 bytes, some header fields may not
 	 * be correctly modified, hence don't offload such TSO segments.
 	 */
-	if (!is_96xx_B0(pfvf->pdev))
-		return true;
 
-	payload_len = skb->len - (skb_transport_offset(skb) + tcp_hdrlen(skb));
+	payload_len = skb->len - skb_tcp_all_headers(skb);
 	last_seg_size = payload_len % skb_shinfo(skb)->gso_size;
 	if (last_seg_size && last_seg_size < 16)
 		return false;
@@ -716,22 +973,160 @@ static int otx2_get_sqe_count(struct otx2_nic *pfvf, struct sk_buff *skb)
 	return skb_shinfo(skb)->gso_segs;
 }
 
+static bool otx2_validate_network_transport(struct sk_buff *skb)
+{
+	if ((ip_hdr(skb)->protocol == IPPROTO_UDP) ||
+	    (ipv6_hdr(skb)->nexthdr == IPPROTO_UDP)) {
+		struct udphdr *udph = udp_hdr(skb);
+
+		if (udph->source == htons(PTP_PORT) &&
+		    udph->dest == htons(PTP_PORT))
+			return true;
+	}
+
+	return false;
+}
+
+static bool otx2_ptp_is_sync(struct sk_buff *skb, int *offset, bool *udp_csum_crt)
+{
+	struct ethhdr *eth = (struct ethhdr *)(skb->data);
+	u16 nix_offload_hlen = 0, inner_vhlen = 0;
+	bool udp_hdr_present = false, is_sync;
+	u8 *data = skb->data, *msgtype;
+	__be16 proto = eth->h_proto;
+	int network_depth = 0;
+
+	/* NIX is programmed to offload outer  VLAN header
+	 * in case of single vlan protocol field holds Network header ETH_IP/V6
+	 * in case of stacked vlan protocol field holds Inner vlan (8100)
+	 */
+	if (skb->dev->features & NETIF_F_HW_VLAN_CTAG_TX &&
+	    skb->dev->features & NETIF_F_HW_VLAN_STAG_TX) {
+		if (skb->vlan_proto == htons(ETH_P_8021AD)) {
+			/* Get vlan protocol */
+			proto = __vlan_get_protocol(skb, eth->h_proto, NULL);
+			/* SKB APIs like skb_transport_offset does not include
+			 * offloaded vlan header length. Need to explicitly add
+			 * the length
+			 */
+			nix_offload_hlen = VLAN_HLEN;
+			inner_vhlen = VLAN_HLEN;
+		} else if (skb->vlan_proto == htons(ETH_P_8021Q)) {
+			nix_offload_hlen = VLAN_HLEN;
+		}
+	} else if (eth_type_vlan(eth->h_proto)) {
+		proto = __vlan_get_protocol(skb, eth->h_proto, &network_depth);
+	}
+
+	switch (ntohs(proto)) {
+	case ETH_P_1588:
+		if (network_depth)
+			*offset = network_depth;
+		else
+			*offset = ETH_HLEN + nix_offload_hlen +
+				  inner_vhlen;
+		break;
+	case ETH_P_IP:
+	case ETH_P_IPV6:
+		if (!otx2_validate_network_transport(skb))
+			return false;
+
+		*offset = nix_offload_hlen + skb_transport_offset(skb) +
+			  sizeof(struct udphdr);
+		udp_hdr_present = true;
+
+	}
+
+	msgtype = data + *offset;
+	/* Check PTP messageId is SYNC or not */
+	is_sync = !(*msgtype & 0xf);
+	if (is_sync)
+		*udp_csum_crt = udp_hdr_present;
+	else
+		*offset = 0;
+
+	return is_sync;
+}
+
+static void otx2_set_txtstamp(struct otx2_nic *pfvf, struct sk_buff *skb,
+			      struct otx2_snd_queue *sq, int *offset)
+{
+	struct ethhdr	*eth = (struct ethhdr *)(skb->data);
+	struct ptpv2_tstamp *origin_tstamp;
+	bool udp_csum_crt = false;
+	unsigned int udphoff;
+	struct timespec64 ts;
+	int ptp_offset = 0;
+	__wsum skb_csum;
+	u64 iova;
+
+	if (unlikely(!skb_shinfo(skb)->gso_size &&
+		     (skb_shinfo(skb)->tx_flags & SKBTX_HW_TSTAMP))) {
+		if (unlikely(pfvf->flags & OTX2_FLAG_PTP_ONESTEP_SYNC &&
+			     otx2_ptp_is_sync(skb, &ptp_offset, &udp_csum_crt))) {
+			origin_tstamp = (struct ptpv2_tstamp *)
+					((u8 *)skb->data + ptp_offset +
+					 PTP_SYNC_SEC_OFFSET);
+			ts = ns_to_timespec64(pfvf->ptp->tstamp);
+			origin_tstamp->seconds_msb = htons((ts.tv_sec >> 32) & 0xffff);
+			origin_tstamp->seconds_lsb = htonl(ts.tv_sec & 0xffffffff);
+			origin_tstamp->nanoseconds = htonl(ts.tv_nsec);
+			/* Point to correction field in PTP packet */
+			ptp_offset += 8;
+
+			/* When user disables hw checksum, stack calculates the csum,
+			 * but it does not cover ptp timestamp which is added later.
+			 * Recalculate the checksum manually considering the timestamp.
+			 */
+			if (udp_csum_crt) {
+				struct udphdr *uh = udp_hdr(skb);
+
+				if (skb->ip_summed != CHECKSUM_PARTIAL && uh->check != 0) {
+					udphoff = skb_transport_offset(skb);
+					uh->check = 0;
+					skb_csum = skb_checksum(skb, udphoff, skb->len - udphoff,
+								0);
+					if (ntohs(eth->h_proto) == ETH_P_IPV6)
+						uh->check = csum_ipv6_magic(&ipv6_hdr(skb)->saddr,
+									    &ipv6_hdr(skb)->daddr,
+									    skb->len - udphoff,
+									    ipv6_hdr(skb)->nexthdr,
+									    skb_csum);
+					else
+						uh->check = csum_tcpudp_magic(ip_hdr(skb)->saddr,
+									      ip_hdr(skb)->daddr,
+									      skb->len - udphoff,
+									      IPPROTO_UDP,
+									      skb_csum);
+				}
+			}
+		} else {
+			skb_shinfo(skb)->tx_flags |= SKBTX_IN_PROGRESS;
+		}
+		iova = sq->timestamps->iova + (sq->head * sizeof(u64));
+		otx2_sqe_add_mem(sq, offset, NIX_SENDMEMALG_E_SETTSTMP, iova,
+				 ptp_offset, pfvf->ptp->base_ns, udp_csum_crt);
+	} else {
+		skb_tx_timestamp(skb);
+	}
+}
+
 bool otx2_sq_append_skb(struct net_device *netdev, struct otx2_snd_queue *sq,
 			struct sk_buff *skb, u16 qidx)
 {
 	struct netdev_queue *txq = netdev_get_tx_queue(netdev, qidx);
 	struct otx2_nic *pfvf = netdev_priv(netdev);
-	int offset, num_segs, free_sqe;
+	int offset, num_segs, free_desc;
 	struct nix_sqe_hdr_s *sqe_hdr;
 
-	/* Check if there is room for new SQE.
-	 * 'Num of SQBs freed to SQ's pool - SQ's Aura count'
-	 * will give free SQE count.
+	/* Check if there is enough room between producer
+	 * and consumer index.
 	 */
-	free_sqe = (sq->num_sqbs - *sq->aura_fc_addr) * sq->sqe_per_sqb;
+	free_desc = (sq->cons_head - sq->head - 1 + sq->sqe_cnt) & (sq->sqe_cnt - 1);
+	if (free_desc < sq->sqe_thresh)
+		return false;
 
-	if (free_sqe < sq->sqe_thresh ||
-	    free_sqe < otx2_get_sqe_count(pfvf, skb))
+	if (free_desc < otx2_get_sqe_count(pfvf, skb))
 		return false;
 
 	num_segs = skb_shinfo(skb)->nr_frags + 1;
@@ -748,6 +1143,9 @@ bool otx2_sq_append_skb(struct net_device *netdev, struct otx2_snd_queue *sq,
 	}
 
 	if (skb_shinfo(skb)->gso_size && !is_hw_tso_supported(pfvf, skb)) {
+		/* Insert vlan tag before giving pkt to tso */
+		if (skb_vlan_tag_present(skb))
+			skb = __vlan_hwaccel_push_inside(skb);
 		otx2_sq_append_tso(pfvf, sq, skb, qidx);
 		return true;
 	}
@@ -769,15 +1167,18 @@ bool otx2_sq_append_skb(struct net_device *netdev, struct otx2_snd_queue *sq,
 		return false;
 	}
 
+	otx2_set_txtstamp(pfvf, skb, sq, &offset);
+
 	sqe_hdr->sizem1 = (offset / 16) - 1;
 
 	netdev_tx_sent_queue(txq, skb->len);
 
 	/* Flush SQE to HW */
-	otx2_sqe_flush(sq, offset);
+	pfvf->hw_ops->sqe_flush(pfvf, sq, offset, qidx);
 
 	return true;
 }
+EXPORT_SYMBOL(otx2_sq_append_skb);
 
 void otx2_cleanup_rx_cqes(struct otx2_nic *pfvf, struct otx2_cq_queue *cq)
 {
@@ -785,14 +1186,27 @@ void otx2_cleanup_rx_cqes(struct otx2_nic *pfvf, struct otx2_cq_queue *cq)
 	int processed_cqe = 0;
 	u64 iova, pa;
 
-	while ((cqe = (struct nix_cqe_rx_s *)otx2_get_next_cqe(cq))) {
-		if (!cqe->sg.subdc)
+	if (pfvf->xdp_prog)
+		xdp_rxq_info_unreg(&cq->xdp_rxq);
+
+	if (otx2_nix_cq_op_status(pfvf, cq) || !cq->pend_cqe)
+		return;
+
+	while (cq->pend_cqe) {
+		cqe = (struct nix_cqe_rx_s *)otx2_get_next_cqe(cq);
+		processed_cqe++;
+		cq->pend_cqe--;
+
+		if (!cqe)
 			continue;
+		if (cqe->sg.segs > 1) {
+			otx2_free_rcv_seg(pfvf, cqe, cq->cq_idx);
+			continue;
+		}
 		iova = cqe->sg.seg_addr - OTX2_HEAD_ROOM;
 		pa = otx2_iova_to_phys(pfvf->iommu_domain, iova);
 		otx2_dma_unmap_page(pfvf, iova, pfvf->rbsize, DMA_FROM_DEVICE);
 		put_page(virt_to_page(phys_to_virt(pa)));
-		processed_cqe++;
 	}
 
 	/* Free CQEs to HW */
@@ -810,7 +1224,16 @@ void otx2_cleanup_tx_cqes(struct otx2_nic *pfvf, struct otx2_cq_queue *cq)
 
 	sq = &pfvf->qset.sq[cq->cint_idx];
 
-	while ((cqe = (struct nix_cqe_tx_s *)otx2_get_next_cqe(cq))) {
+	if (otx2_nix_cq_op_status(pfvf, cq) || !cq->pend_cqe)
+		return;
+
+	while (cq->pend_cqe) {
+		cqe = (struct nix_cqe_tx_s *)otx2_get_next_cqe(cq);
+		processed_cqe++;
+		cq->pend_cqe--;
+
+		if (!cqe)
+			continue;
 		sg = &sq->sg[cqe->comp.sqe_id];
 		skb = (struct sk_buff *)sg->skb;
 		if (skb) {
@@ -818,7 +1241,6 @@ void otx2_cleanup_tx_cqes(struct otx2_nic *pfvf, struct otx2_cq_queue *cq)
 			dev_kfree_skb_any(skb);
 			sg->skb = (u64)NULL;
 		}
-		processed_cqe++;
 	}
 
 	/* Free CQEs to HW */
@@ -831,18 +1253,131 @@ int otx2_rxtx_enable(struct otx2_nic *pfvf, bool enable)
 	struct msg_req *msg;
 	int err;
 
-	otx2_mbox_lock(&pfvf->mbox);
+	mutex_lock(&pfvf->mbox.lock);
 	if (enable)
 		msg = otx2_mbox_alloc_msg_nix_lf_start_rx(&pfvf->mbox);
 	else
 		msg = otx2_mbox_alloc_msg_nix_lf_stop_rx(&pfvf->mbox);
 
 	if (!msg) {
-		otx2_mbox_unlock(&pfvf->mbox);
+		mutex_unlock(&pfvf->mbox.lock);
 		return -ENOMEM;
 	}
 
 	err = otx2_sync_mbox_msg(&pfvf->mbox);
-	otx2_mbox_unlock(&pfvf->mbox);
+	mutex_unlock(&pfvf->mbox.lock);
 	return err;
+}
+
+static void otx2_xdp_sqe_add_sg(struct otx2_snd_queue *sq, u64 dma_addr,
+				int len, int *offset)
+{
+	struct nix_sqe_sg_s *sg = NULL;
+	u64 *iova = NULL;
+
+	sg = (struct nix_sqe_sg_s *)(sq->sqe_base + *offset);
+	sg->ld_type = NIX_SEND_LDTYPE_LDD;
+	sg->subdc = NIX_SUBDC_SG;
+	sg->segs = 1;
+	sg->seg1_size = len;
+	iova = (void *)sg + sizeof(*sg);
+	*iova = dma_addr;
+	*offset += sizeof(*sg) + sizeof(u64);
+
+	sq->sg[sq->head].dma_addr[0] = dma_addr;
+	sq->sg[sq->head].size[0] = len;
+	sq->sg[sq->head].num_segs = 1;
+}
+
+bool otx2_xdp_sq_append_pkt(struct otx2_nic *pfvf, u64 iova, int len, u16 qidx)
+{
+	struct nix_sqe_hdr_s *sqe_hdr;
+	struct otx2_snd_queue *sq;
+	int offset, free_sqe;
+
+	sq = &pfvf->qset.sq[qidx];
+	free_sqe = (sq->num_sqbs - *sq->aura_fc_addr) * sq->sqe_per_sqb;
+	if (free_sqe < sq->sqe_thresh)
+		return false;
+
+	memset(sq->sqe_base + 8, 0, sq->sqe_size - 8);
+
+	sqe_hdr = (struct nix_sqe_hdr_s *)(sq->sqe_base);
+
+	if (!sqe_hdr->total) {
+		sqe_hdr->aura = sq->aura_id;
+		sqe_hdr->df = 1;
+		sqe_hdr->sq = qidx;
+		sqe_hdr->pnc = 1;
+	}
+	sqe_hdr->total = len;
+	sqe_hdr->sqe_id = sq->head;
+
+	offset = sizeof(*sqe_hdr);
+
+	otx2_xdp_sqe_add_sg(sq, iova, len, &offset);
+	sqe_hdr->sizem1 = (offset / 16) - 1;
+	pfvf->hw_ops->sqe_flush(pfvf, sq, offset, qidx);
+
+	return true;
+}
+
+static bool otx2_xdp_rcv_pkt_handler(struct otx2_nic *pfvf,
+				     struct bpf_prog *prog,
+				     struct nix_cqe_rx_s *cqe,
+				     struct otx2_cq_queue *cq)
+{
+	unsigned char *hard_start, *data;
+	int qidx = cq->cq_idx;
+	struct xdp_buff xdp;
+	struct page *page;
+	u64 iova, pa;
+	u32 act;
+	int err;
+
+	iova = cqe->sg.seg_addr - OTX2_HEAD_ROOM;
+	pa = otx2_iova_to_phys(pfvf->iommu_domain, iova);
+	page = virt_to_page(phys_to_virt(pa));
+
+	xdp_init_buff(&xdp, pfvf->rbsize, &cq->xdp_rxq);
+
+	data = (unsigned char *)phys_to_virt(pa);
+	hard_start = page_address(page);
+	xdp_prepare_buff(&xdp, hard_start, data - hard_start,
+			 cqe->sg.seg_size, false);
+
+	act = bpf_prog_run_xdp(prog, &xdp);
+
+	switch (act) {
+	case XDP_PASS:
+		break;
+	case XDP_TX:
+		qidx += pfvf->hw.tx_queues;
+		cq->pool_ptrs++;
+		return otx2_xdp_sq_append_pkt(pfvf, iova,
+					      cqe->sg.seg_size, qidx);
+	case XDP_REDIRECT:
+		cq->pool_ptrs++;
+		err = xdp_do_redirect(pfvf->netdev, &xdp, prog);
+
+		otx2_dma_unmap_page(pfvf, iova, pfvf->rbsize,
+				    DMA_FROM_DEVICE);
+		if (!err)
+			return true;
+		put_page(page);
+		break;
+	default:
+		bpf_warn_invalid_xdp_action(pfvf->netdev, prog, act);
+		break;
+	case XDP_ABORTED:
+		trace_xdp_exception(pfvf->netdev, prog, act);
+		break;
+	case XDP_DROP:
+		otx2_dma_unmap_page(pfvf, iova, pfvf->rbsize,
+				    DMA_FROM_DEVICE);
+		put_page(page);
+		cq->pool_ptrs++;
+		return true;
+	}
+	return false;
 }

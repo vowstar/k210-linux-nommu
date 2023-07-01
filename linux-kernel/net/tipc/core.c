@@ -60,6 +60,7 @@ static int __net_init tipc_init_net(struct net *net)
 	tn->trial_addr = 0;
 	tn->addr_trial_end = 0;
 	tn->capabilities = TIPC_NODE_CAPABILITIES;
+	INIT_WORK(&tn->work, tipc_net_finalize_work);
 	memset(tn->node_id, 0, sizeof(tn->node_id));
 	memset(tn->node_id_string, 0, sizeof(tn->node_id_string));
 	tn->mon_threshold = TIPC_DEF_MON_THRESHOLD;
@@ -79,8 +80,6 @@ static int __net_init tipc_init_net(struct net *net)
 	err = tipc_nametbl_init(net);
 	if (err)
 		goto out_nametbl;
-
-	INIT_LIST_HEAD(&tn->dist_queue);
 
 	err = tipc_bcast_init(net);
 	if (err)
@@ -107,14 +106,20 @@ out_crypto:
 
 static void __net_exit tipc_exit_net(struct net *net)
 {
+	struct tipc_net *tn = tipc_net(net);
+
 	tipc_detach_loopback(net);
 	tipc_net_stop(net);
+	/* Make sure the tipc_net_finalize_work() finished */
+	cancel_work_sync(&tn->work);
 	tipc_bcast_stop(net);
 	tipc_nametbl_stop(net);
 	tipc_sk_rht_destroy(net);
 #ifdef CONFIG_TIPC_CRYPTO
 	tipc_crypto_stop(&tipc_net(net)->crypto_tx);
 #endif
+	while (atomic_read(&tn->wq_count))
+		cond_resched();
 }
 
 static void __net_exit tipc_pernet_pre_exit(struct net *net)

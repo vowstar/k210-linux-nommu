@@ -106,6 +106,7 @@ void snd_pcm_playback_silence(struct snd_pcm_substream *substream, snd_pcm_ufram
 		frames -= transfer;
 		ofs = 0;
 	}
+	snd_pcm_dma_buffer_sync(substream, SNDRV_DMA_SYNC_DEVICE);
 }
 
 #ifdef CONFIG_SND_DEBUG
@@ -185,7 +186,7 @@ int snd_pcm_update_state(struct snd_pcm_substream *substream,
 	avail = snd_pcm_avail(substream);
 	if (avail > runtime->avail_max)
 		runtime->avail_max = avail;
-	if (runtime->status->state == SNDRV_PCM_STATE_DRAINING) {
+	if (runtime->state == SNDRV_PCM_STATE_DRAINING) {
 		if (avail >= runtime->buffer_size) {
 			snd_pcm_drain_done(substream);
 			return -EPIPE;
@@ -433,6 +434,7 @@ static int snd_pcm_update_hw_ptr0(struct snd_pcm_substream *substream,
 
  no_delta_check:
 	if (runtime->status->hw_ptr == new_hw_ptr) {
+		runtime->hw_ptr_jiffies = curr_jiffies;
 		update_audio_tstamp(substream, &curr_tstamp, &audio_tstamp);
 		return 0;
 	}
@@ -489,7 +491,7 @@ void snd_pcm_set_ops(struct snd_pcm *pcm, int direction,
 EXPORT_SYMBOL(snd_pcm_set_ops);
 
 /**
- * snd_pcm_sync - set the PCM sync id
+ * snd_pcm_set_sync - set the PCM sync id
  * @substream: the pcm substream
  *
  * Sets the PCM sync identifier for the card.
@@ -1128,8 +1130,8 @@ int snd_pcm_hw_rule_add(struct snd_pcm_runtime *runtime, unsigned int cond,
 	if (constrs->rules_num >= constrs->rules_all) {
 		struct snd_pcm_hw_rule *new;
 		unsigned int new_rules = constrs->rules_all + 16;
-		new = krealloc(constrs->rules, new_rules * sizeof(*c),
-			       GFP_KERNEL);
+		new = krealloc_array(constrs->rules, new_rules,
+				     sizeof(*c), GFP_KERNEL);
 		if (!new) {
 			va_end(args);
 			return -ENOMEM;
@@ -1745,7 +1747,7 @@ static int snd_pcm_lib_ioctl_fifo_size(struct snd_pcm_substream *substream,
 		channels = params_channels(params);
 		frame_size = snd_pcm_format_size(format, channels);
 		if (frame_size > 0)
-			params->fifo_size /= (unsigned)frame_size;
+			params->fifo_size /= frame_size;
 	}
 	return 0;
 }
@@ -1777,27 +1779,38 @@ int snd_pcm_lib_ioctl(struct snd_pcm_substream *substream,
 EXPORT_SYMBOL(snd_pcm_lib_ioctl);
 
 /**
- * snd_pcm_period_elapsed - update the pcm status for the next period
- * @substream: the pcm substream instance
+ * snd_pcm_period_elapsed_under_stream_lock() - update the status of runtime for the next period
+ *						under acquired lock of PCM substream.
+ * @substream: the instance of pcm substream.
  *
- * This function is called from the interrupt handler when the
- * PCM has processed the period size.  It will update the current
- * pointer, wake up sleepers, etc.
+ * This function is called when the batch of audio data frames as the same size as the period of
+ * buffer is already processed in audio data transmission.
  *
- * Even if more than one periods have elapsed since the last call, you
- * have to call this only once.
+ * The call of function updates the status of runtime with the latest position of audio data
+ * transmission, checks overrun and underrun over buffer, awaken user processes from waiting for
+ * available audio data frames, sampling audio timestamp, and performs stop or drain the PCM
+ * substream according to configured threshold.
+ *
+ * The function is intended to use for the case that PCM driver operates audio data frames under
+ * acquired lock of PCM substream; e.g. in callback of any operation of &snd_pcm_ops in process
+ * context. In any interrupt context, it's preferrable to use ``snd_pcm_period_elapsed()`` instead
+ * since lock of PCM substream should be acquired in advance.
+ *
+ * Developer should pay enough attention that some callbacks in &snd_pcm_ops are done by the call of
+ * function:
+ *
+ * - .pointer - to retrieve current position of audio data transmission by frame count or XRUN state.
+ * - .trigger - with SNDRV_PCM_TRIGGER_STOP at XRUN or DRAINING state.
+ * - .get_time_info - to retrieve audio time stamp if needed.
+ *
+ * Even if more than one periods have elapsed since the last call, you have to call this only once.
  */
-void snd_pcm_period_elapsed(struct snd_pcm_substream *substream)
+void snd_pcm_period_elapsed_under_stream_lock(struct snd_pcm_substream *substream)
 {
 	struct snd_pcm_runtime *runtime;
-	unsigned long flags;
 
-	if (snd_BUG_ON(!substream))
-		return;
-
-	snd_pcm_stream_lock_irqsave(substream, flags);
 	if (PCM_RUNTIME_CHECK(substream))
-		goto _unlock;
+		return;
 	runtime = substream->runtime;
 
 	if (!snd_pcm_running(substream) ||
@@ -1809,8 +1822,31 @@ void snd_pcm_period_elapsed(struct snd_pcm_substream *substream)
 		snd_timer_interrupt(substream->timer, 1);
 #endif
  _end:
-	kill_fasync(&runtime->fasync, SIGIO, POLL_IN);
- _unlock:
+	snd_kill_fasync(runtime->fasync, SIGIO, POLL_IN);
+}
+EXPORT_SYMBOL(snd_pcm_period_elapsed_under_stream_lock);
+
+/**
+ * snd_pcm_period_elapsed() - update the status of runtime for the next period by acquiring lock of
+ *			      PCM substream.
+ * @substream: the instance of PCM substream.
+ *
+ * This function is mostly similar to ``snd_pcm_period_elapsed_under_stream_lock()`` except for
+ * acquiring lock of PCM substream voluntarily.
+ *
+ * It's typically called by any type of IRQ handler when hardware IRQ occurs to notify event that
+ * the batch of audio data frames as the same size as the period of buffer is already processed in
+ * audio data transmission.
+ */
+void snd_pcm_period_elapsed(struct snd_pcm_substream *substream)
+{
+	unsigned long flags;
+
+	if (snd_BUG_ON(!substream))
+		return;
+
+	snd_pcm_stream_lock_irqsave(substream, flags);
+	snd_pcm_period_elapsed_under_stream_lock(substream);
 	snd_pcm_stream_unlock_irqrestore(substream, flags);
 }
 EXPORT_SYMBOL(snd_pcm_period_elapsed);
@@ -1875,7 +1911,7 @@ static int wait_for_avail(struct snd_pcm_substream *substream,
 
 		snd_pcm_stream_lock_irq(substream);
 		set_current_state(TASK_INTERRUPTIBLE);
-		switch (runtime->status->state) {
+		switch (runtime->state) {
 		case SNDRV_PCM_STATE_SUSPENDED:
 			err = -ESTRPIPE;
 			goto _endloop;
@@ -2063,14 +2099,14 @@ static int pcm_sanity_check(struct snd_pcm_substream *substream)
 	runtime = substream->runtime;
 	if (snd_BUG_ON(!substream->ops->copy_user && !runtime->dma_area))
 		return -EINVAL;
-	if (runtime->status->state == SNDRV_PCM_STATE_OPEN)
+	if (runtime->state == SNDRV_PCM_STATE_OPEN)
 		return -EBADFD;
 	return 0;
 }
 
 static int pcm_accessible_state(struct snd_pcm_runtime *runtime)
 {
-	switch (runtime->status->state) {
+	switch (runtime->state) {
 	case SNDRV_PCM_STATE_PREPARED:
 	case SNDRV_PCM_STATE_RUNNING:
 	case SNDRV_PCM_STATE_PAUSED:
@@ -2092,16 +2128,35 @@ int pcm_lib_apply_appl_ptr(struct snd_pcm_substream *substream,
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	snd_pcm_uframes_t old_appl_ptr = runtime->control->appl_ptr;
+	snd_pcm_sframes_t diff;
 	int ret;
 
 	if (old_appl_ptr == appl_ptr)
 		return 0;
+
+	if (appl_ptr >= runtime->boundary)
+		return -EINVAL;
+	/*
+	 * check if a rewind is requested by the application
+	 */
+	if (substream->runtime->info & SNDRV_PCM_INFO_NO_REWINDS) {
+		diff = appl_ptr - old_appl_ptr;
+		if (diff >= 0) {
+			if (diff > runtime->buffer_size)
+				return -EINVAL;
+		} else {
+			if (runtime->boundary + diff > runtime->buffer_size)
+				return -EINVAL;
+		}
+	}
 
 	runtime->control->appl_ptr = appl_ptr;
 	if (substream->ops->ack) {
 		ret = substream->ops->ack(substream);
 		if (ret < 0) {
 			runtime->control->appl_ptr = old_appl_ptr;
+			if (ret == -EPIPE)
+				__snd_pcm_xrun(substream);
 			return ret;
 		}
 	}
@@ -2172,7 +2227,7 @@ snd_pcm_sframes_t __snd_pcm_lib_xfer(struct snd_pcm_substream *substream,
 		goto _end_unlock;
 
 	runtime->twake = runtime->control->avail_min ? : 1;
-	if (runtime->status->state == SNDRV_PCM_STATE_RUNNING)
+	if (runtime->state == SNDRV_PCM_STATE_RUNNING)
 		snd_pcm_update_hw_ptr(substream);
 
 	/*
@@ -2180,7 +2235,7 @@ snd_pcm_sframes_t __snd_pcm_lib_xfer(struct snd_pcm_substream *substream,
 	 * thread may start capture
 	 */
 	if (!is_playback &&
-	    runtime->status->state == SNDRV_PCM_STATE_PREPARED &&
+	    runtime->state == SNDRV_PCM_STATE_PREPARED &&
 	    size >= runtime->start_threshold) {
 		err = snd_pcm_start(substream);
 		if (err < 0)
@@ -2194,7 +2249,7 @@ snd_pcm_sframes_t __snd_pcm_lib_xfer(struct snd_pcm_substream *substream,
 		snd_pcm_uframes_t cont;
 		if (!avail) {
 			if (!is_playback &&
-			    runtime->status->state == SNDRV_PCM_STATE_DRAINING) {
+			    runtime->state == SNDRV_PCM_STATE_DRAINING) {
 				snd_pcm_stop(substream, SNDRV_PCM_STATE_SETUP);
 				goto _end_unlock;
 			}
@@ -2220,10 +2275,19 @@ snd_pcm_sframes_t __snd_pcm_lib_xfer(struct snd_pcm_substream *substream,
 			err = -EINVAL;
 			goto _end_unlock;
 		}
+		if (!atomic_inc_unless_negative(&runtime->buffer_accessing)) {
+			err = -EBUSY;
+			goto _end_unlock;
+		}
 		snd_pcm_stream_unlock_irq(substream);
+		if (!is_playback)
+			snd_pcm_dma_buffer_sync(substream, SNDRV_DMA_SYNC_CPU);
 		err = writer(substream, appl_ofs, data, offset, frames,
 			     transfer);
+		if (is_playback)
+			snd_pcm_dma_buffer_sync(substream, SNDRV_DMA_SYNC_DEVICE);
 		snd_pcm_stream_lock_irq(substream);
+		atomic_dec(&runtime->buffer_accessing);
 		if (err < 0)
 			goto _end_unlock;
 		err = pcm_accessible_state(runtime);
@@ -2241,7 +2305,7 @@ snd_pcm_sframes_t __snd_pcm_lib_xfer(struct snd_pcm_substream *substream,
 		xfer += frames;
 		avail -= frames;
 		if (is_playback &&
-		    runtime->status->state == SNDRV_PCM_STATE_PREPARED &&
+		    runtime->state == SNDRV_PCM_STATE_PREPARED &&
 		    snd_pcm_playback_hw_avail(runtime) >= (snd_pcm_sframes_t)runtime->start_threshold) {
 			err = snd_pcm_start(substream);
 			if (err < 0)

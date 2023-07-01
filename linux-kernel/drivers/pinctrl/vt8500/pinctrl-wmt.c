@@ -486,8 +486,10 @@ static int wmt_gpio_get_direction(struct gpio_chip *chip, unsigned offset)
 	u32 val;
 
 	val = readl_relaxed(data->base + reg_dir);
-	/* Return 0 == output, 1 == input */
-	return !(val & BIT(bit));
+	if (val & BIT(bit))
+		return GPIO_LINE_DIRECTION_OUT;
+
+	return GPIO_LINE_DIRECTION_IN;
 }
 
 static int wmt_gpio_get_value(struct gpio_chip *chip, unsigned offset)
@@ -563,7 +565,6 @@ int wmt_pinctrl_probe(struct platform_device *pdev,
 
 	data->gpio_chip = wmt_gpio_chip;
 	data->gpio_chip.parent = &pdev->dev;
-	data->gpio_chip.of_node = pdev->dev.of_node;
 	data->gpio_chip.ngpio = data->nbanks * 32;
 
 	platform_set_drvdata(pdev, data);

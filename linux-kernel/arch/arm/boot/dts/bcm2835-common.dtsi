@@ -62,6 +62,7 @@
 			#reset-cells = <1>;
 			reg = <0x7e100000 0x114>,
 			      <0x7e00a000 0x24>;
+			reg-names = "pm", "asb";
 			clocks = <&clocks BCM2835_CLOCK_V3D>,
 				 <&clocks BCM2835_CLOCK_PERI_IMAGE>,
 				 <&clocks BCM2835_CLOCK_H264>,
@@ -106,6 +107,14 @@
 			status = "okay";
 		};
 
+		vec: vec@7e806000 {
+			compatible = "brcm,bcm2835-vec";
+			reg = <0x7e806000 0x1000>;
+			clocks = <&clocks BCM2835_CLOCK_VEC>;
+			interrupts = <2 27>;
+			status = "disabled";
+		};
+
 		pixelvalve@7e807000 {
 			compatible = "brcm,bcm2835-pixelvalve2";
 			reg = <0x7e807000 0x100>;
@@ -130,7 +139,6 @@
 			compatible = "brcm,bcm2835-v3d";
 			reg = <0x7ec00000 0x1000>;
 			interrupts = <1 10>;
-			power-domains = <&pm BCM2835_POWER_DOMAIN_GRAFX_V3D>;
 		};
 
 		vc4: gpu {
@@ -144,41 +152,41 @@
 };
 
 &gpio {
-	i2c_slave_gpio18: i2c_slave_gpio18 {
+	i2c_slave_gpio18: i2c-slave-gpio18 {
 		brcm,pins = <18 19 20 21>;
 		brcm,function = <BCM2835_FSEL_ALT3>;
 	};
 
-	jtag_gpio4: jtag_gpio4 {
+	jtag_gpio4: jtag-gpio4 {
 		brcm,pins = <4 5 6 12 13>;
 		brcm,function = <BCM2835_FSEL_ALT5>;
 	};
 
-	pwm0_gpio12: pwm0_gpio12 {
+	pwm0_gpio12: pwm0-gpio12 {
 		brcm,pins = <12>;
 		brcm,function = <BCM2835_FSEL_ALT0>;
 	};
-	pwm0_gpio18: pwm0_gpio18 {
+	pwm0_gpio18: pwm0-gpio18 {
 		brcm,pins = <18>;
 		brcm,function = <BCM2835_FSEL_ALT5>;
 	};
-	pwm0_gpio40: pwm0_gpio40 {
+	pwm0_gpio40: pwm0-gpio40 {
 		brcm,pins = <40>;
 		brcm,function = <BCM2835_FSEL_ALT0>;
 	};
-	pwm1_gpio13: pwm1_gpio13 {
+	pwm1_gpio13: pwm1-gpio13 {
 		brcm,pins = <13>;
 		brcm,function = <BCM2835_FSEL_ALT0>;
 	};
-	pwm1_gpio19: pwm1_gpio19 {
+	pwm1_gpio19: pwm1-gpio19 {
 		brcm,pins = <19>;
 		brcm,function = <BCM2835_FSEL_ALT5>;
 	};
-	pwm1_gpio41: pwm1_gpio41 {
+	pwm1_gpio41: pwm1-gpio41 {
 		brcm,pins = <41>;
 		brcm,function = <BCM2835_FSEL_ALT0>;
 	};
-	pwm1_gpio45: pwm1_gpio45 {
+	pwm1_gpio45: pwm1-gpio45 {
 		brcm,pins = <45>;
 		brcm,function = <BCM2835_FSEL_ALT0>;
 	};

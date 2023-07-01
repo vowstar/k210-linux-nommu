@@ -9,6 +9,7 @@
  * PPC64 updates by Dave Engebretsen (engebret@us.ibm.com)
  */
 
+#include <linux/linkage.h>
 #include <linux/sys.h>
 #include <asm/unistd.h>
 #include <asm/errno.h>
@@ -26,28 +27,6 @@
 #include <asm/feature-fixups.h>
 
 	.text
-
-_GLOBAL(call_do_softirq)
-	mflr	r0
-	std	r0,16(r1)
-	stdu	r1,THREAD_SIZE-STACK_FRAME_OVERHEAD(r3)
-	mr	r1,r3
-	bl	__do_softirq
-	ld	r1,0(r1)
-	ld	r0,16(r1)
-	mtlr	r0
-	blr
-
-_GLOBAL(call_do_irq)
-	mflr	r0
-	std	r0,16(r1)
-	stdu	r1,THREAD_SIZE-STACK_FRAME_OVERHEAD(r4)
-	mr	r1,r4
-	bl	__do_irq
-	ld	r1,0(r1)
-	ld	r0,16(r1)
-	mtlr	r0
-	blr
 
 _GLOBAL(__bswapdi2)
 EXPORT_SYMBOL(__bswapdi2)
@@ -277,7 +256,7 @@ _GLOBAL(scom970_write)
  * Physical (hardware) cpu id should be in r3.
  */
 _GLOBAL(kexec_wait)
-	bl	1f
+	bcl	20,31,$+4
 1:	mflr	r5
 	addi	r5,r5,kexec_flag-1b
 
@@ -308,7 +287,7 @@ kexec_flag:
 
 
 #ifdef CONFIG_KEXEC_CORE
-#ifdef CONFIG_PPC_BOOK3E
+#ifdef CONFIG_PPC_BOOK3E_64
 /*
  * BOOK3E has no real MMU mode, so we have to setup the initial TLB
  * for a core to identity map v:0 to p:0.  This current implementation
@@ -365,7 +344,6 @@ _GLOBAL(kexec_smp_wait)
 
 	li	r4,KEXEC_STATE_REAL_MODE
 	stb	r4,PACAKEXECSTATE(r13)
-	SYNC
 
 	b	kexec_wait
 
@@ -376,8 +354,8 @@ _GLOBAL(kexec_smp_wait)
  *
  * don't overwrite r3 here, it is live for kexec_wait above.
  */
-real_mode:	/* assume normal blr return */
-#ifdef CONFIG_PPC_BOOK3E
+SYM_FUNC_START_LOCAL(real_mode)	/* assume normal blr return */
+#ifdef CONFIG_PPC_BOOK3E_64
 	/* Create an identity mapping. */
 	b	kexec_create_tlb
 #else
@@ -393,6 +371,7 @@ real_mode:	/* assume normal blr return */
 	mtspr	SPRN_SRR0,r11
 	rfid
 #endif
+SYM_FUNC_END(real_mode)
 
 /*
  * kexec_sequence(newstack, start, image, control, clear_all(),
@@ -407,25 +386,11 @@ _GLOBAL(kexec_sequence)
 	std	r0,16(r1)
 
 	/* switch stacks to newstack -- &kexec_stack.stack */
-	stdu	r1,THREAD_SIZE-STACK_FRAME_OVERHEAD(r3)
+	stdu	r1,THREAD_SIZE-STACK_FRAME_MIN_SIZE(r3)
 	mr	r1,r3
 
 	li	r0,0
 	std	r0,16(r1)
-
-BEGIN_FTR_SECTION
-	/*
-	 * This is the best time to turn AMR/IAMR off.
-	 * key 0 is used in radix for supervisor<->user
-	 * protection, but on hash key 0 is reserved
-	 * ideally we want to enter with a clean state.
-	 * NOTE, we rely on r0 being 0 from above.
-	 */
-	mtspr	SPRN_IAMR,r0
-BEGIN_FTR_SECTION_NESTED(42)
-	mtspr	SPRN_AMOR,r0
-END_FTR_SECTION_NESTED_IFSET(CPU_FTR_HVMODE, 42)
-END_FTR_SECTION_IFSET(CPU_FTR_ARCH_300)
 
 	/* save regs for local vars on new stack.
 	 * yes, we won't go back, but ...
@@ -438,7 +403,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_ARCH_300)
 	std	r26,-48(r1)
 	std	r25,-56(r1)
 
-	stdu	r1,-STACK_FRAME_OVERHEAD-64(r1)
+	stdu	r1,-STACK_FRAME_MIN_SIZE-64(r1)
 
 	/* save args into preserved regs */
 	mr	r31,r3			/* newstack (both) */
@@ -450,7 +415,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_ARCH_300)
 	lhz	r25,PACAHWCPUID(r13)	/* get our phys cpu from paca */
 
 	/* disable interrupts, we are overwriting kernel data next */
-#ifdef CONFIG_PPC_BOOK3E
+#ifdef CONFIG_PPC_BOOK3E_64
 	wrteei	0
 #else
 	mfmsr	r3
@@ -491,7 +456,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_ARCH_300)
 	beq	1f
 
 	/* clear out hardware hash page table and tlb */
-#ifdef PPC64_ELF_ABI_v1
+#ifdef CONFIG_PPC64_ELF_ABI_V1
 	ld	r12,0(r27)		/* deref function descriptor */
 #else
 	mr	r12,r27

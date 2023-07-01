@@ -10,6 +10,7 @@ enum devm_ioremap_type {
 	DEVM_IOREMAP = 0,
 	DEVM_IOREMAP_UC,
 	DEVM_IOREMAP_WC,
+	DEVM_IOREMAP_NP,
 };
 
 void devm_ioremap_release(struct device *dev, void *res)
@@ -28,7 +29,8 @@ static void __iomem *__devm_ioremap(struct device *dev, resource_size_t offset,
 {
 	void __iomem **ptr, *addr = NULL;
 
-	ptr = devres_alloc(devm_ioremap_release, sizeof(*ptr), GFP_KERNEL);
+	ptr = devres_alloc_node(devm_ioremap_release, sizeof(*ptr), GFP_KERNEL,
+				dev_to_node(dev));
 	if (!ptr)
 		return NULL;
 
@@ -41,6 +43,9 @@ static void __iomem *__devm_ioremap(struct device *dev, resource_size_t offset,
 		break;
 	case DEVM_IOREMAP_WC:
 		addr = ioremap_wc(offset, size);
+		break;
+	case DEVM_IOREMAP_NP:
+		addr = ioremap_np(offset, size);
 		break;
 	}
 
@@ -119,6 +124,7 @@ __devm_ioremap_resource(struct device *dev, const struct resource *res,
 {
 	resource_size_t size;
 	void __iomem *dest_ptr;
+	char *pretty_name;
 
 	BUG_ON(!dev);
 
@@ -127,9 +133,22 @@ __devm_ioremap_resource(struct device *dev, const struct resource *res,
 		return IOMEM_ERR_PTR(-EINVAL);
 	}
 
+	if (type == DEVM_IOREMAP && res->flags & IORESOURCE_MEM_NONPOSTED)
+		type = DEVM_IOREMAP_NP;
+
 	size = resource_size(res);
 
-	if (!devm_request_mem_region(dev, res->start, size, dev_name(dev))) {
+	if (res->name)
+		pretty_name = devm_kasprintf(dev, GFP_KERNEL, "%s %s",
+					     dev_name(dev), res->name);
+	else
+		pretty_name = devm_kstrdup(dev, dev_name(dev), GFP_KERNEL);
+	if (!pretty_name) {
+		dev_err(dev, "can't generate pretty name for resource %pR\n", res);
+		return IOMEM_ERR_PTR(-ENOMEM);
+	}
+
+	if (!devm_request_mem_region(dev, res->start, size, pretty_name)) {
 		dev_err(dev, "can't request region for resource %pR\n", res);
 		return IOMEM_ERR_PTR(-EBUSY);
 	}
@@ -153,13 +172,15 @@ __devm_ioremap_resource(struct device *dev, const struct resource *res,
  * region and ioremaps it. All operations are managed and will be undone
  * on driver detach.
  *
- * Returns a pointer to the remapped memory or an ERR_PTR() encoded error code
- * on failure. Usage example:
+ * Usage example:
  *
  *	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
  *	base = devm_ioremap_resource(&pdev->dev, res);
  *	if (IS_ERR(base))
  *		return PTR_ERR(base);
+ *
+ * Return: a pointer to the remapped memory or an ERR_PTR() encoded error code
+ * on failure.
  */
 void __iomem *devm_ioremap_resource(struct device *dev,
 				    const struct resource *res)
@@ -174,8 +195,8 @@ EXPORT_SYMBOL(devm_ioremap_resource);
  * @dev: generic device to handle the resource for
  * @res: resource to be handled
  *
- * Returns a pointer to the remapped memory or an ERR_PTR() encoded error code
- * on failure. Usage example:
+ * Return: a pointer to the remapped memory or an ERR_PTR() encoded error code
+ * on failure.
  */
 void __iomem *devm_ioremap_resource_wc(struct device *dev,
 				       const struct resource *res)
@@ -198,12 +219,20 @@ void __iomem *devm_ioremap_resource_wc(struct device *dev,
  * @node:       The device-tree node where the resource resides
  * @index:	index of the MMIO range in the "reg" property
  * @size:	Returns the size of the resource (pass NULL if not needed)
- * Returns a pointer to the requested and mapped memory or an ERR_PTR() encoded
- * error code on failure. Usage example:
+ *
+ * Usage example:
  *
  *	base = devm_of_iomap(&pdev->dev, node, 0, NULL);
  *	if (IS_ERR(base))
  *		return PTR_ERR(base);
+ *
+ * Please Note: This is not a one-to-one replacement for of_iomap() because the
+ * of_iomap() function does not track whether the region is already mapped.  If
+ * two drivers try to map the same memory, the of_iomap() function will succeed
+ * but the devm_of_iomap() function will return -EBUSY.
+ *
+ * Return: a pointer to the requested and mapped memory or an ERR_PTR() encoded
+ * error code on failure.
  */
 void __iomem *devm_of_iomap(struct device *dev, struct device_node *node, int index,
 			    resource_size_t *size)
@@ -241,13 +270,16 @@ static int devm_ioport_map_match(struct device *dev, void *res,
  *
  * Managed ioport_map().  Map is automatically unmapped on driver
  * detach.
+ *
+ * Return: a pointer to the remapped memory or NULL on failure.
  */
 void __iomem *devm_ioport_map(struct device *dev, unsigned long port,
 			       unsigned int nr)
 {
 	void __iomem **ptr, *addr;
 
-	ptr = devres_alloc(devm_ioport_map_release, sizeof(*ptr), GFP_KERNEL);
+	ptr = devres_alloc_node(devm_ioport_map_release, sizeof(*ptr), GFP_KERNEL,
+				dev_to_node(dev));
 	if (!ptr)
 		return NULL;
 
@@ -310,7 +342,7 @@ static void pcim_iomap_release(struct device *gendev, void *res)
  * detach.
  *
  * This function might sleep when the table is first allocated but can
- * be safely called without context and guaranteed to succed once
+ * be safely called without context and guaranteed to succeed once
  * allocated.
  */
 void __iomem * const *pcim_iomap_table(struct pci_dev *pdev)
@@ -321,7 +353,8 @@ void __iomem * const *pcim_iomap_table(struct pci_dev *pdev)
 	if (dr)
 		return dr->table;
 
-	new_dr = devres_alloc(pcim_iomap_release, sizeof(*new_dr), GFP_KERNEL);
+	new_dr = devres_alloc_node(pcim_iomap_release, sizeof(*new_dr), GFP_KERNEL,
+				   dev_to_node(&pdev->dev));
 	if (!new_dr)
 		return NULL;
 	dr = devres_get(&pdev->dev, new_dr, NULL, NULL);
@@ -483,3 +516,87 @@ void pcim_iounmap_regions(struct pci_dev *pdev, int mask)
 }
 EXPORT_SYMBOL(pcim_iounmap_regions);
 #endif /* CONFIG_PCI */
+
+static void devm_arch_phys_ac_add_release(struct device *dev, void *res)
+{
+	arch_phys_wc_del(*((int *)res));
+}
+
+/**
+ * devm_arch_phys_wc_add - Managed arch_phys_wc_add()
+ * @dev: Managed device
+ * @base: Memory base address
+ * @size: Size of memory range
+ *
+ * Adds a WC MTRR using arch_phys_wc_add() and sets up a release callback.
+ * See arch_phys_wc_add() for more information.
+ */
+int devm_arch_phys_wc_add(struct device *dev, unsigned long base, unsigned long size)
+{
+	int *mtrr;
+	int ret;
+
+	mtrr = devres_alloc_node(devm_arch_phys_ac_add_release, sizeof(*mtrr), GFP_KERNEL,
+				 dev_to_node(dev));
+	if (!mtrr)
+		return -ENOMEM;
+
+	ret = arch_phys_wc_add(base, size);
+	if (ret < 0) {
+		devres_free(mtrr);
+		return ret;
+	}
+
+	*mtrr = ret;
+	devres_add(dev, mtrr);
+
+	return ret;
+}
+EXPORT_SYMBOL(devm_arch_phys_wc_add);
+
+struct arch_io_reserve_memtype_wc_devres {
+	resource_size_t start;
+	resource_size_t size;
+};
+
+static void devm_arch_io_free_memtype_wc_release(struct device *dev, void *res)
+{
+	const struct arch_io_reserve_memtype_wc_devres *this = res;
+
+	arch_io_free_memtype_wc(this->start, this->size);
+}
+
+/**
+ * devm_arch_io_reserve_memtype_wc - Managed arch_io_reserve_memtype_wc()
+ * @dev: Managed device
+ * @start: Memory base address
+ * @size: Size of memory range
+ *
+ * Reserves a memory range with WC caching using arch_io_reserve_memtype_wc()
+ * and sets up a release callback See arch_io_reserve_memtype_wc() for more
+ * information.
+ */
+int devm_arch_io_reserve_memtype_wc(struct device *dev, resource_size_t start,
+				    resource_size_t size)
+{
+	struct arch_io_reserve_memtype_wc_devres *dr;
+	int ret;
+
+	dr = devres_alloc_node(devm_arch_io_free_memtype_wc_release, sizeof(*dr), GFP_KERNEL,
+			       dev_to_node(dev));
+	if (!dr)
+		return -ENOMEM;
+
+	ret = arch_io_reserve_memtype_wc(start, size);
+	if (ret < 0) {
+		devres_free(dr);
+		return ret;
+	}
+
+	dr->start = start;
+	dr->size = size;
+	devres_add(dev, dr);
+
+	return ret;
+}
+EXPORT_SYMBOL(devm_arch_io_reserve_memtype_wc);

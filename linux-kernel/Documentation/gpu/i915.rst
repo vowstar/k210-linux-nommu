@@ -118,6 +118,12 @@ Atomic Plane Helpers
 .. kernel-doc:: drivers/gpu/drm/i915/display/intel_atomic_plane.c
    :internal:
 
+Asynchronous Page Flip
+----------------------
+
+.. kernel-doc:: drivers/gpu/drm/i915/display/intel_display.c
+   :doc: asynchronous flip implementation
+
 Output Probing
 --------------
 
@@ -177,26 +183,11 @@ Frame Buffer Compression (FBC)
 Display Refresh Rate Switching (DRRS)
 -------------------------------------
 
-.. kernel-doc:: drivers/gpu/drm/i915/display/intel_dp.c
+.. kernel-doc:: drivers/gpu/drm/i915/display/intel_drrs.c
    :doc: Display Refresh Rate Switching (DRRS)
 
-.. kernel-doc:: drivers/gpu/drm/i915/display/intel_dp.c
-   :functions: intel_dp_set_drrs_state
-
-.. kernel-doc:: drivers/gpu/drm/i915/display/intel_dp.c
-   :functions: intel_edp_drrs_enable
-
-.. kernel-doc:: drivers/gpu/drm/i915/display/intel_dp.c
-   :functions: intel_edp_drrs_disable
-
-.. kernel-doc:: drivers/gpu/drm/i915/display/intel_dp.c
-   :functions: intel_edp_drrs_invalidate
-
-.. kernel-doc:: drivers/gpu/drm/i915/display/intel_dp.c
-   :functions: intel_edp_drrs_flush
-
-.. kernel-doc:: drivers/gpu/drm/i915/display/intel_dp.c
-   :functions: intel_dp_drrs_init
+.. kernel-doc:: drivers/gpu/drm/i915/display/intel_drrs.c
+   :internal:
 
 DPIO
 ----
@@ -204,13 +195,13 @@ DPIO
 .. kernel-doc:: drivers/gpu/drm/i915/display/intel_dpio_phy.c
    :doc: DPIO
 
-CSR firmware support for DMC
-----------------------------
+DMC Firmware Support
+--------------------
 
-.. kernel-doc:: drivers/gpu/drm/i915/intel_csr.c
-   :doc: csr support for dmc
+.. kernel-doc:: drivers/gpu/drm/i915/display/intel_dmc.c
+   :doc: DMC Firmware Support
 
-.. kernel-doc:: drivers/gpu/drm/i915/intel_csr.c
+.. kernel-doc:: drivers/gpu/drm/i915/display/intel_dmc.c
    :internal:
 
 Video BIOS Table (VBT)
@@ -253,6 +244,18 @@ Display State Buffer
    :doc: DSB
 
 .. kernel-doc:: drivers/gpu/drm/i915/display/intel_dsb.c
+   :internal:
+
+GT Programming
+==============
+
+Multicast/Replicated (MCR) Registers
+------------------------------------
+
+.. kernel-doc:: drivers/gpu/drm/i915/gt/intel_gt_mcr.c
+   :doc: GT Multicast/Replicated (MCR) Register Support
+
+.. kernel-doc:: drivers/gpu/drm/i915/gt/intel_gt_mcr.c
    :internal:
 
 Memory Management and Command Submission
@@ -329,10 +332,56 @@ for execution also include a list of all locations within buffers that
 refer to GPU-addresses so that the kernel can edit the buffer correctly.
 This process is dubbed relocation.
 
+Locking Guidelines
+------------------
+
+.. note::
+   This is a description of how the locking should be after
+   refactoring is done. Does not necessarily reflect what the locking
+   looks like while WIP.
+
+#. All locking rules and interface contracts with cross-driver interfaces
+   (dma-buf, dma_fence) need to be followed.
+
+#. No struct_mutex anywhere in the code
+
+#. dma_resv will be the outermost lock (when needed) and ww_acquire_ctx
+   is to be hoisted at highest level and passed down within i915_gem_ctx
+   in the call chain
+
+#. While holding lru/memory manager (buddy, drm_mm, whatever) locks
+   system memory allocations are not allowed
+
+	* Enforce this by priming lockdep (with fs_reclaim). If we
+	  allocate memory while holding these looks we get a rehash
+	  of the shrinker vs. struct_mutex saga, and that would be
+	  real bad.
+
+#. Do not nest different lru/memory manager locks within each other.
+   Take them in turn to update memory allocations, relying on the object’s
+   dma_resv ww_mutex to serialize against other operations.
+
+#. The suggestion for lru/memory managers locks is that they are small
+   enough to be spinlocks.
+
+#. All features need to come with exhaustive kernel selftests and/or
+   IGT tests when appropriate
+
+#. All LMEM uAPI paths need to be fully restartable (_interruptible()
+   for all locks/waits/sleeps)
+
+	* Error handling validation through signal injection.
+	  Still the best strategy we have for validating GEM uAPI
+          corner cases.
+	  Must be excessively used in the IGT, and we need to check
+	  that we really have full path coverage of all error cases.
+
+	* -EDEADLK handling with ww_mutex
+
 GEM BO Management Implementation Details
 ----------------------------------------
 
-.. kernel-doc:: drivers/gpu/drm/i915/i915_vma.h
+.. kernel-doc:: drivers/gpu/drm/i915/i915_vma_types.h
    :doc: Virtual Memory Address
 
 Buffer Object Eviction
@@ -370,19 +419,26 @@ Batchbuffer Parsing
 User Batchbuffer Execution
 --------------------------
 
+.. kernel-doc:: drivers/gpu/drm/i915/gem/i915_gem_context_types.h
+
 .. kernel-doc:: drivers/gpu/drm/i915/gem/i915_gem_execbuffer.c
    :doc: User command execution
+
+Scheduling
+----------
+.. kernel-doc:: drivers/gpu/drm/i915/i915_scheduler_types.h
+   :functions: i915_sched_engine
 
 Logical Rings, Logical Ring Contexts and Execlists
 --------------------------------------------------
 
-.. kernel-doc:: drivers/gpu/drm/i915/gt/intel_lrc.c
+.. kernel-doc:: drivers/gpu/drm/i915/gt/intel_execlists_submission.c
    :doc: Logical Rings, Logical Ring Contexts and Execlists
 
 Global GTT views
 ----------------
 
-.. kernel-doc:: drivers/gpu/drm/i915/i915_gem_gtt.c
+.. kernel-doc:: drivers/gpu/drm/i915/i915_vma_types.h
    :doc: Global GTT views
 
 .. kernel-doc:: drivers/gpu/drm/i915/i915_gem_gtt.c
@@ -391,19 +447,19 @@ Global GTT views
 GTT Fences and Swizzling
 ------------------------
 
-.. kernel-doc:: drivers/gpu/drm/i915/i915_gem_fence_reg.c
+.. kernel-doc:: drivers/gpu/drm/i915/gt/intel_ggtt_fencing.c
    :internal:
 
 Global GTT Fence Handling
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. kernel-doc:: drivers/gpu/drm/i915/i915_gem_fence_reg.c
+.. kernel-doc:: drivers/gpu/drm/i915/gt/intel_ggtt_fencing.c
    :doc: fence register handling
 
 Hardware Tiling and Swizzling Details
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. kernel-doc:: drivers/gpu/drm/i915/i915_gem_fence_reg.c
+.. kernel-doc:: drivers/gpu/drm/i915/gt/intel_ggtt_fencing.c
    :doc: tiling swizzling details
 
 Object Tiling IOCTLs
@@ -414,6 +470,14 @@ Object Tiling IOCTLs
 
 .. kernel-doc:: drivers/gpu/drm/i915/gem/i915_gem_tiling.c
    :doc: buffer object tiling
+
+Protected Objects
+-----------------
+
+.. kernel-doc:: drivers/gpu/drm/i915/pxp/intel_pxp.c
+   :doc: PXP
+
+.. kernel-doc:: drivers/gpu/drm/i915/pxp/intel_pxp_types.h
 
 Microcontrollers
 ================
@@ -430,7 +494,7 @@ WOPCM
 WOPCM Layout
 ~~~~~~~~~~~~
 
-.. kernel-doc:: drivers/gpu/drm/i915/intel_wopcm.c
+.. kernel-doc:: drivers/gpu/drm/i915/gt/intel_wopcm.c
    :doc: WOPCM Layout
 
 GuC
@@ -438,6 +502,8 @@ GuC
 
 .. kernel-doc:: drivers/gpu/drm/i915/gt/uc/intel_guc.c
    :doc: GuC
+
+.. kernel-doc:: drivers/gpu/drm/i915/gt/uc/intel_guc.h
 
 GuC Firmware Layout
 ~~~~~~~~~~~~~~~~~~~
@@ -466,6 +532,15 @@ GuC-based command submission
 .. kernel-doc:: drivers/gpu/drm/i915/gt/uc/intel_guc_submission.c
    :doc: GuC-based command submission
 
+GuC ABI
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. kernel-doc:: drivers/gpu/drm/i915/gt/uc/abi/guc_messages_abi.h
+.. kernel-doc:: drivers/gpu/drm/i915/gt/uc/abi/guc_communication_mmio_abi.h
+.. kernel-doc:: drivers/gpu/drm/i915/gt/uc/abi/guc_communication_ctb_abi.h
+.. kernel-doc:: drivers/gpu/drm/i915/gt/uc/abi/guc_actions_abi.h
+.. kernel-doc:: drivers/gpu/drm/i915/gt/uc/abi/guc_klvs_abi.h
+
 HuC
 ---
 .. kernel-doc:: drivers/gpu/drm/i915/gt/uc/intel_huc.c
@@ -485,7 +560,7 @@ The HuC FW layout is the same as the GuC one, see `GuC Firmware Layout`_
 
 DMC
 ---
-See `CSR firmware support for DMC`_
+See `DMC Firmware Support`_
 
 Tracing
 =======
@@ -590,15 +665,36 @@ i915 Perf Observation Architecture Stream
 .. kernel-doc:: drivers/gpu/drm/i915/i915_perf.c
    :functions: i915_oa_poll_wait
 
-All i915 Perf Internals
------------------------
+Other i915 Perf Internals
+-------------------------
 
-This section simply includes all currently documented i915 perf internals, in
-no particular order, but may include some more minor utilities or platform
+This section simply includes all other currently documented i915 perf internals,
+in no particular order, but may include some more minor utilities or platform
 specific details than found in the more high-level sections.
 
 .. kernel-doc:: drivers/gpu/drm/i915/i915_perf.c
    :internal:
+   :no-identifiers:
+       i915_perf_init
+       i915_perf_fini
+       i915_perf_register
+       i915_perf_unregister
+       i915_perf_open_ioctl
+       i915_perf_release
+       i915_perf_add_config_ioctl
+       i915_perf_remove_config_ioctl
+       read_properties_unlocked
+       i915_perf_open_ioctl_locked
+       i915_perf_destroy_locked
+       i915_perf_read i915_perf_ioctl
+       i915_perf_enable_locked
+       i915_perf_disable_locked
+       i915_perf_poll i915_perf_poll_locked
+       i915_oa_stream_init i915_oa_read
+       i915_oa_stream_enable
+       i915_oa_stream_disable
+       i915_oa_wait_unlocked
+       i915_oa_poll_wait
 
 Style
 =====
@@ -613,3 +709,31 @@ The style guide for ``i915_reg.h``.
 
 .. kernel-doc:: drivers/gpu/drm/i915/i915_reg.h
    :doc: The i915 register macro definition style guide
+
+.. _i915-usage-stats:
+
+i915 DRM client usage stats implementation
+==========================================
+
+The drm/i915 driver implements the DRM client usage stats specification as
+documented in :ref:`drm-client-usage-stats`.
+
+Example of the output showing the implemented key value pairs and entirety of
+the currently possible format options:
+
+::
+
+      pos:    0
+      flags:  0100002
+      mnt_id: 21
+      drm-driver: i915
+      drm-pdev:   0000:00:02.0
+      drm-client-id:      7
+      drm-engine-render:  9288864723 ns
+      drm-engine-copy:    2035071108 ns
+      drm-engine-video:   0 ns
+      drm-engine-capacity-video:   2
+      drm-engine-video-enhance:   0 ns
+
+Possible `drm-engine-` key names are: `render`, `copy`, `video` and
+`video-enhance`.

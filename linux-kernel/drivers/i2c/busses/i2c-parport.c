@@ -267,6 +267,16 @@ static void i2c_parport_attach(struct parport *port)
 	int i;
 	struct pardev_cb i2c_parport_cb;
 
+	if (type < 0) {
+		pr_warn("adapter type unspecified\n");
+		return;
+	}
+
+	if (type >= ARRAY_SIZE(adapter_parm)) {
+		pr_warn("invalid type (%d)\n", type);
+		return;
+	}
+
 	for (i = 0; i < MAX_DEVICE; i++) {
 		if (parport[i] == -1)
 			continue;
@@ -298,7 +308,7 @@ static void i2c_parport_attach(struct parport *port)
 	/* Fill the rest of the structure */
 	adapter->adapter.owner = THIS_MODULE;
 	adapter->adapter.class = I2C_CLASS_HWMON;
-	strlcpy(adapter->adapter.name, "Parallel port adapter",
+	strscpy(adapter->adapter.name, "Parallel port adapter",
 		sizeof(adapter->adapter.name));
 	adapter->algo_data = parport_algo_data;
 	/* Slow down if we can't sense SCL */
@@ -333,13 +343,17 @@ static void i2c_parport_attach(struct parport *port)
 
 	/* Setup SMBus alert if supported */
 	if (adapter_parm[type].smbus_alert) {
-		adapter->ara = i2c_setup_smbus_alert(&adapter->adapter,
-						     &adapter->alert_data);
-		if (adapter->ara)
+		struct i2c_client *ara;
+
+		ara = i2c_new_smbus_alert_device(&adapter->adapter,
+						 &adapter->alert_data);
+		if (!IS_ERR(ara)) {
+			adapter->ara = ara;
 			parport_enable_irq(port);
-		else
+		} else {
 			dev_warn(&adapter->pdev->dev,
 				 "Failed to register ARA client\n");
+		}
 	}
 
 	/* Add the new adapter to the list */
@@ -388,32 +402,8 @@ static struct parport_driver i2c_parport_driver = {
 	.detach = i2c_parport_detach,
 	.devmodel = true,
 };
-
-/* ----- Module loading, unloading and information ------------------------ */
-
-static int __init i2c_parport_init(void)
-{
-	if (type < 0) {
-		pr_warn("adapter type unspecified\n");
-		return -ENODEV;
-	}
-
-	if (type >= ARRAY_SIZE(adapter_parm)) {
-		pr_warn("invalid type (%d)\n", type);
-		return -ENODEV;
-	}
-
-	return parport_register_driver(&i2c_parport_driver);
-}
-
-static void __exit i2c_parport_exit(void)
-{
-	parport_unregister_driver(&i2c_parport_driver);
-}
+module_parport_driver(i2c_parport_driver);
 
 MODULE_AUTHOR("Jean Delvare <jdelvare@suse.de>");
 MODULE_DESCRIPTION("I2C bus over parallel port");
 MODULE_LICENSE("GPL");
-
-module_init(i2c_parport_init);
-module_exit(i2c_parport_exit);

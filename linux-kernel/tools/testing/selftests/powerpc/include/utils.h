@@ -12,6 +12,7 @@
 #include <stdbool.h>
 #include <linux/auxvec.h>
 #include <linux/perf_event.h>
+#include <asm/cputable.h>
 #include "reg.h"
 
 /* Avoid headaches with PRI?64 - just use %ll? always */
@@ -32,15 +33,45 @@ void *get_auxv_entry(int type);
 
 int pick_online_cpu(void);
 
-int read_debugfs_file(char *debugfs_file, int *result);
-int write_debugfs_file(char *debugfs_file, int result);
+int parse_intmax(const char *buffer, size_t count, intmax_t *result, int base);
+int parse_uintmax(const char *buffer, size_t count, uintmax_t *result, int base);
+int parse_int(const char *buffer, size_t count, int *result, int base);
+int parse_uint(const char *buffer, size_t count, unsigned int *result, int base);
+int parse_long(const char *buffer, size_t count, long *result, int base);
+int parse_ulong(const char *buffer, size_t count, unsigned long *result, int base);
+
+int read_file(const char *path, char *buf, size_t count, size_t *len);
+int write_file(const char *path, const char *buf, size_t count);
+int read_file_alloc(const char *path, char **buf, size_t *len);
+int read_long(const char *path, long *result, int base);
+int write_long(const char *path, long result, int base);
+int read_ulong(const char *path, unsigned long *result, int base);
+int write_ulong(const char *path, unsigned long result, int base);
+int read_debugfs_file(const char *debugfs_file, char *buf, size_t count);
+int write_debugfs_file(const char *debugfs_file, const char *buf, size_t count);
+int read_debugfs_int(const char *debugfs_file, int *result);
+int write_debugfs_int(const char *debugfs_file, int result);
 int read_sysfs_file(char *debugfs_file, char *result, size_t result_size);
-void set_dscr(unsigned long val);
 int perf_event_open_counter(unsigned int type,
 			    unsigned long config, int group_fd);
 int perf_event_enable(int fd);
 int perf_event_disable(int fd);
 int perf_event_reset(int fd);
+
+struct perf_event_read {
+	__u64 nr;
+	__u64 l1d_misses;
+};
+
+#if !defined(__GLIBC_PREREQ) || !__GLIBC_PREREQ(2, 30)
+#include <unistd.h>
+#include <sys/syscall.h>
+
+static inline pid_t gettid(void)
+{
+	return syscall(SYS_gettid);
+}
+#endif
 
 static inline bool have_hwcap(unsigned long ftr)
 {
@@ -59,7 +90,18 @@ static inline bool have_hwcap2(unsigned long ftr2)
 }
 #endif
 
+static inline char *auxv_base_platform(void)
+{
+	return ((char *)get_auxv_entry(AT_BASE_PLATFORM));
+}
+
+static inline char *auxv_platform(void)
+{
+	return ((char *)get_auxv_entry(AT_PLATFORM));
+}
+
 bool is_ppc64le(void);
+int using_hash_mmu(bool *using_hash);
 
 /* Yes, this is evil */
 #define FAIL_IF(x)						\
@@ -68,6 +110,15 @@ do {								\
 		fprintf(stderr,					\
 		"[FAIL] Test FAILED on line %d\n", __LINE__);	\
 		return 1;					\
+	}							\
+} while (0)
+
+#define FAIL_IF_EXIT(x)						\
+do {								\
+	if ((x)) {						\
+		fprintf(stderr,					\
+		"[FAIL] Test FAILED on line %d\n", __LINE__);	\
+		_exit(1);					\
 	}							\
 } while (0)
 
@@ -96,9 +147,23 @@ do {								\
 #define _str(s) #s
 #define str(s) _str(s)
 
+#define sigsafe_err(msg)	({ \
+		ssize_t nbytes __attribute__((unused)); \
+		nbytes = write(STDERR_FILENO, msg, strlen(msg)); })
+
 /* POWER9 feature */
 #ifndef PPC_FEATURE2_ARCH_3_00
 #define PPC_FEATURE2_ARCH_3_00 0x00800000
+#endif
+
+/* POWER10 feature */
+#ifndef PPC_FEATURE2_ARCH_3_1
+#define PPC_FEATURE2_ARCH_3_1 0x00040000
+#endif
+
+/* POWER10 features */
+#ifndef PPC_FEATURE2_MMA
+#define PPC_FEATURE2_MMA 0x00020000
 #endif
 
 #if defined(__powerpc64__)

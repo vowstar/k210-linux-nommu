@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- *  Copyright (C) 2019 Texas Instruments Incorporated - http://www.ti.com
+ *  Copyright (C) 2019 Texas Instruments Incorporated - https://www.ti.com
  *  Author: Peter Ujfalusi <peter.ujfalusi@ti.com>
  */
 
@@ -102,7 +102,6 @@ static const struct drm_display_mode default_mode_osd101t2587 = {
 	.vsync_start = 1200 + 24,
 	.vsync_end = 1200 + 24 + 6,
 	.vtotal = 1200 + 24 + 6 + 48,
-	.vrefresh = 60,
 	.flags = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC,
 };
 
@@ -117,7 +116,7 @@ static int osd101t2587_panel_get_modes(struct drm_panel *panel,
 		dev_err(panel->dev, "failed to add mode %ux%ux@%u\n",
 			osd101t2587->default_mode->hdisplay,
 			osd101t2587->default_mode->vdisplay,
-			osd101t2587->default_mode->vrefresh);
+			drm_mode_vrefresh(osd101t2587->default_mode));
 		return -ENOMEM;
 	}
 
@@ -165,7 +164,9 @@ static int osd101t2587_panel_add(struct osd101t2587_panel *osd101t2587)
 	if (ret)
 		return ret;
 
-	return drm_panel_add(&osd101t2587->base);
+	drm_panel_add(&osd101t2587->base);
+
+	return 0;
 }
 
 static int osd101t2587_panel_probe(struct mipi_dsi_device *dsi)
@@ -183,7 +184,7 @@ static int osd101t2587_panel_probe(struct mipi_dsi_device *dsi)
 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO |
 			  MIPI_DSI_MODE_VIDEO_BURST |
 			  MIPI_DSI_MODE_VIDEO_SYNC_PULSE |
-			  MIPI_DSI_MODE_EOT_PACKET;
+			  MIPI_DSI_MODE_NO_EOT_PACKET;
 
 	osd101t2587 = devm_kzalloc(&dsi->dev, sizeof(*osd101t2587), GFP_KERNEL);
 	if (!osd101t2587)
@@ -205,7 +206,7 @@ static int osd101t2587_panel_probe(struct mipi_dsi_device *dsi)
 	return ret;
 }
 
-static int osd101t2587_panel_remove(struct mipi_dsi_device *dsi)
+static void osd101t2587_panel_remove(struct mipi_dsi_device *dsi)
 {
 	struct osd101t2587_panel *osd101t2587 = mipi_dsi_get_drvdata(dsi);
 	int ret;
@@ -220,8 +221,6 @@ static int osd101t2587_panel_remove(struct mipi_dsi_device *dsi)
 	ret = mipi_dsi_detach(dsi);
 	if (ret < 0)
 		dev_err(&dsi->dev, "failed to detach from DSI host: %d\n", ret);
-
-	return ret;
 }
 
 static void osd101t2587_panel_shutdown(struct mipi_dsi_device *dsi)

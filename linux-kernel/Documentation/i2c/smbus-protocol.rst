@@ -27,8 +27,8 @@ a different protocol operation entirely.
 Each transaction type corresponds to a functionality flag. Before calling a
 transaction function, a device driver should always check (just once) for
 the corresponding functionality flag to ensure that the underlying I2C
-adapter supports the transaction in question. See :doc:`functionality` for
-the details.
+adapter supports the transaction in question. See
+Documentation/i2c/functionality.rst for the details.
 
 
 Key to symbols
@@ -36,15 +36,17 @@ Key to symbols
 
 =============== =============================================================
 S               Start condition
+Sr              Repeated start condition, used to switch from write to
+                read mode.
 P               Stop condition
 Rd/Wr (1 bit)   Read/Write bit. Rd equals 1, Wr equals 0.
 A, NA (1 bit)   Acknowledge (ACK) and Not Acknowledge (NACK) bit
-Addr  (7 bits)  I2C 7 bit address. Note that this can be expanded as usual to
+Addr  (7 bits)  I2C 7 bit address. Note that this can be expanded to
                 get a 10 bit I2C address.
 Comm  (8 bits)  Command byte, a data byte which often selects a register on
                 the device.
-Data  (8 bits)  A plain data byte. Sometimes, I write DataLow, DataHigh
-                for 16 bit data.
+Data  (8 bits)  A plain data byte. DataLow and DataHigh represent the low and
+                high byte of a 16 bit word.
 Count (8 bits)  A data byte containing the length of a block operation.
 
 [..]            Data sent by I2C device, as opposed to data sent by the host
@@ -57,7 +59,7 @@ SMBus Quick Command
 
 This sends a single bit to the device, at the place of the Rd/Wr bit::
 
-  A Addr Rd/Wr [A] P
+  S Addr Rd/Wr [A] P
 
 Functionality flag: I2C_FUNC_SMBUS_QUICK
 
@@ -100,7 +102,7 @@ Implemented by i2c_smbus_read_byte_data()
 This reads a single byte from a device, from a designated register.
 The register is specified through the Comm byte::
 
-  S Addr Wr [A] Comm [A] S Addr Rd [A] [Data] NA P
+  S Addr Wr [A] Comm [A] Sr Addr Rd [A] [Data] NA P
 
 Functionality flag: I2C_FUNC_SMBUS_READ_BYTE_DATA
 
@@ -114,7 +116,7 @@ This operation is very like Read Byte; again, data is read from a
 device, from a designated register that is specified through the Comm
 byte. But this time, the data is a complete word (16 bits)::
 
-  S Addr Wr [A] Comm [A] S Addr Rd [A] [DataLow] A [DataHigh] NA P
+  S Addr Wr [A] Comm [A] Sr Addr Rd [A] [DataLow] A [DataHigh] NA P
 
 Functionality flag: I2C_FUNC_SMBUS_READ_WORD_DATA
 
@@ -164,7 +166,7 @@ This command selects a device register (through the Comm byte), sends
 16 bits of data to it, and reads 16 bits of data in return::
 
   S Addr Wr [A] Comm [A] DataLow [A] DataHigh [A]
-                               S Addr Rd [A] [DataLow] A [DataHigh] NA P
+                              Sr Addr Rd [A] [DataLow] A [DataHigh] NA P
 
 Functionality flag: I2C_FUNC_SMBUS_PROC_CALL
 
@@ -181,7 +183,7 @@ of data is specified by the device in the Count byte.
 ::
 
   S Addr Wr [A] Comm [A]
-             S Addr Rd [A] [Count] A [Data] A [Data] A ... A [Data] NA P
+            Sr Addr Rd [A] [Count] A [Data] A [Data] A ... A [Data] NA P
 
 Functionality flag: I2C_FUNC_SMBUS_READ_BLOCK_DATA
 
@@ -212,7 +214,7 @@ This command selects a device register (through the Comm byte), sends
 1 to 31 bytes of data to it, and reads 1 to 31 bytes of data in return::
 
   S Addr Wr [A] Comm [A] Count [A] Data [A] ...
-                               S Addr Rd [A] [Count] A [Data] ... A P
+                              Sr Addr Rd [A] [Count] A [Data] ... A P
 
 Functionality flag: I2C_FUNC_SMBUS_BLOCK_PROC_CALL
 
@@ -236,7 +238,7 @@ This is implemented in the following way in the Linux kernel:
 * I2C bus drivers trigger SMBus Host Notify by a call to
   i2c_handle_smbus_host_notify().
 * I2C drivers for devices which can trigger SMBus Host Notify will have
-  client->irq assigned to a Host Notify IRQ if noone else specified an other.
+  client->irq assigned to a Host Notify IRQ if no one else specified another.
 
 There is currently no way to retrieve the data parameter from the client.
 
@@ -274,7 +276,7 @@ to know which slave triggered the interrupt.
 This is implemented the following way in the Linux kernel:
 
 * I2C bus drivers which support SMBus alert should call
-  i2c_setup_smbus_alert() to setup SMBus alert support.
+  i2c_new_smbus_alert_device() to install SMBus alert support.
 * I2C drivers for devices which can trigger SMBus alerts should implement
   the optional alert() callback.
 
@@ -300,7 +302,7 @@ This command reads a block of bytes from a device, from a
 designated register that is specified through the Comm byte::
 
   S Addr Wr [A] Comm [A]
-             S Addr Rd [A] [Data] A [Data] A ... A [Data] NA P
+            Sr Addr Rd [A] [Data] A [Data] A ... A [Data] NA P
 
 Functionality flag: I2C_FUNC_SMBUS_READ_I2C_BLOCK
 

@@ -17,6 +17,7 @@
 #include <linux/of.h>
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
+#include <linux/kstrtox.h>
 #include <linux/regmap.h>
 
 /* Register map */
@@ -265,24 +266,23 @@ static irqreturn_t rv3029_handle_irq(int irq, void *dev_id)
 {
 	struct device *dev = dev_id;
 	struct rv3029_data *rv3029 = dev_get_drvdata(dev);
-	struct mutex *lock = &rv3029->rtc->ops_lock;
 	unsigned int flags, controls;
 	unsigned long events = 0;
 	int ret;
 
-	mutex_lock(lock);
+	rtc_lock(rv3029->rtc);
 
 	ret = regmap_read(rv3029->regmap, RV3029_IRQ_CTRL, &controls);
 	if (ret) {
 		dev_warn(dev, "Read IRQ Control Register error %d\n", ret);
-		mutex_unlock(lock);
+		rtc_unlock(rv3029->rtc);
 		return IRQ_NONE;
 	}
 
 	ret = regmap_read(rv3029->regmap, RV3029_IRQ_FLAGS, &flags);
 	if (ret) {
 		dev_warn(dev, "Read IRQ Flags Register error %d\n", ret);
-		mutex_unlock(lock);
+		rtc_unlock(rv3029->rtc);
 		return IRQ_NONE;
 	}
 
@@ -297,7 +297,7 @@ static irqreturn_t rv3029_handle_irq(int irq, void *dev_id)
 		regmap_write(rv3029->regmap, RV3029_IRQ_FLAGS, flags);
 		regmap_write(rv3029->regmap, RV3029_IRQ_CTRL, controls);
 	}
-	mutex_unlock(lock);
+	rtc_unlock(rv3029->rtc);
 
 	return IRQ_HANDLED;
 }
@@ -694,10 +694,13 @@ static void rv3029_hwmon_register(struct device *dev, const char *name)
 
 #endif /* CONFIG_RTC_DRV_RV3029_HWMON */
 
-static struct rtc_class_ops rv3029_rtc_ops = {
+static const struct rtc_class_ops rv3029_rtc_ops = {
 	.read_time	= rv3029_read_time,
 	.set_time	= rv3029_set_time,
 	.ioctl		= rv3029_ioctl,
+	.read_alarm	= rv3029_read_alarm,
+	.set_alarm	= rv3029_set_alarm,
+	.alarm_irq_enable = rv3029_alarm_irq_enable,
 };
 
 static int rv3029_probe(struct device *dev, struct regmap *regmap, int irq,
@@ -732,30 +735,33 @@ static int rv3029_probe(struct device *dev, struct regmap *regmap, int irq,
 		return PTR_ERR(rv3029->rtc);
 
 	if (rv3029->irq > 0) {
+		unsigned long irqflags = IRQF_TRIGGER_LOW;
+
+		if (dev_fwnode(dev))
+			irqflags = 0;
+
 		rc = devm_request_threaded_irq(dev, rv3029->irq,
 					       NULL, rv3029_handle_irq,
-					       IRQF_TRIGGER_LOW | IRQF_ONESHOT,
+					       irqflags | IRQF_ONESHOT,
 					       "rv3029", dev);
 		if (rc) {
 			dev_warn(dev, "unable to request IRQ, alarms disabled\n");
 			rv3029->irq = 0;
-		} else {
-			rv3029_rtc_ops.read_alarm = rv3029_read_alarm;
-			rv3029_rtc_ops.set_alarm = rv3029_set_alarm;
-			rv3029_rtc_ops.alarm_irq_enable = rv3029_alarm_irq_enable;
 		}
 	}
+	if (!rv3029->irq)
+		clear_bit(RTC_FEATURE_ALARM, rv3029->rtc->features);
 
 	rv3029->rtc->ops = &rv3029_rtc_ops;
 	rv3029->rtc->range_min = RTC_TIMESTAMP_BEGIN_2000;
 	rv3029->rtc->range_max = RTC_TIMESTAMP_END_2079;
 
-	rc = rtc_register_device(rv3029->rtc);
+	rc = devm_rtc_register_device(rv3029->rtc);
 	if (rc)
 		return rc;
 
 	nvmem_cfg.priv = rv3029->regmap;
-	rtc_nvmem_register(rv3029->rtc, &nvmem_cfg);
+	devm_rtc_nvmem_register(rv3029->rtc, &nvmem_cfg);
 
 	return 0;
 }
@@ -784,8 +790,7 @@ static const struct regmap_config config = {
 
 #if IS_ENABLED(CONFIG_I2C)
 
-static int rv3029_i2c_probe(struct i2c_client *client,
-			    const struct i2c_device_id *id)
+static int rv3029_i2c_probe(struct i2c_client *client)
 {
 	struct regmap *regmap;
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_I2C_BLOCK |
@@ -808,7 +813,7 @@ static const struct i2c_device_id rv3029_id[] = {
 };
 MODULE_DEVICE_TABLE(i2c, rv3029_id);
 
-static const struct of_device_id rv3029_of_match[] = {
+static const __maybe_unused struct of_device_id rv3029_of_match[] = {
 	{ .compatible = "microcrystal,rv3029" },
 	{ }
 };
@@ -819,7 +824,7 @@ static struct i2c_driver rv3029_driver = {
 		.name = "rv3029",
 		.of_match_table = of_match_ptr(rv3029_of_match),
 	},
-	.probe		= rv3029_i2c_probe,
+	.probe_new	= rv3029_i2c_probe,
 	.id_table	= rv3029_id,
 };
 

@@ -33,6 +33,7 @@
 #include <linux/atomic.h>
 #include <linux/cgroup.h>
 #include <linux/slab.h>
+#include <linux/sched/task.h>
 
 #define PIDS_MAX (PID_MAX_LIMIT + 1ULL)
 #define PIDS_MAX_STR "max"
@@ -46,6 +47,7 @@ struct pids_cgroup {
 	 */
 	atomic64_t			counter;
 	atomic64_t			limit;
+	int64_t				watermark;
 
 	/* Handle for "pids.events" */
 	struct cgroup_file		events_file;
@@ -82,6 +84,16 @@ pids_css_alloc(struct cgroup_subsys_state *parent)
 static void pids_css_free(struct cgroup_subsys_state *css)
 {
 	kfree(css_pids(css));
+}
+
+static void pids_update_watermark(struct pids_cgroup *p, int64_t nr_pids)
+{
+	/*
+	 * This is racy, but we don't need perfectly accurate tallying of
+	 * the watermark, and this lets us avoid extra atomic overhead.
+	 */
+	if (nr_pids > READ_ONCE(p->watermark))
+		WRITE_ONCE(p->watermark, nr_pids);
 }
 
 /**
@@ -127,8 +139,11 @@ static void pids_charge(struct pids_cgroup *pids, int num)
 {
 	struct pids_cgroup *p;
 
-	for (p = pids; parent_pids(p); p = parent_pids(p))
-		atomic64_add(num, &p->counter);
+	for (p = pids; parent_pids(p); p = parent_pids(p)) {
+		int64_t new = atomic64_add_return(num, &p->counter);
+
+		pids_update_watermark(p, new);
+	}
 }
 
 /**
@@ -155,6 +170,12 @@ static int pids_try_charge(struct pids_cgroup *pids, int num)
 		 */
 		if (new > limit)
 			goto revert;
+
+		/*
+		 * Not technically accurate if we go over limit somewhere up
+		 * the hierarchy, but that's tolerable for the watermark.
+		 */
+		pids_update_watermark(p, new);
 	}
 
 	return 0;
@@ -214,13 +235,16 @@ static void pids_cancel_attach(struct cgroup_taskset *tset)
  * task_css_check(true) in pids_can_fork() and pids_cancel_fork() relies
  * on cgroup_threadgroup_change_begin() held by the copy_process().
  */
-static int pids_can_fork(struct task_struct *task)
+static int pids_can_fork(struct task_struct *task, struct css_set *cset)
 {
 	struct cgroup_subsys_state *css;
 	struct pids_cgroup *pids;
 	int err;
 
-	css = task_css_check(current, pids_cgrp_id, true);
+	if (cset)
+		css = cset->subsys[pids_cgrp_id];
+	else
+		css = task_css_check(current, pids_cgrp_id, true);
 	pids = css_pids(css);
 	err = pids_try_charge(pids, 1);
 	if (err) {
@@ -235,12 +259,15 @@ static int pids_can_fork(struct task_struct *task)
 	return err;
 }
 
-static void pids_cancel_fork(struct task_struct *task)
+static void pids_cancel_fork(struct task_struct *task, struct css_set *cset)
 {
 	struct cgroup_subsys_state *css;
 	struct pids_cgroup *pids;
 
-	css = task_css_check(current, pids_cgrp_id, true);
+	if (cset)
+		css = cset->subsys[pids_cgrp_id];
+	else
+		css = task_css_check(current, pids_cgrp_id, true);
 	pids = css_pids(css);
 	pids_uncharge(pids, 1);
 }
@@ -304,6 +331,14 @@ static s64 pids_current_read(struct cgroup_subsys_state *css,
 	return atomic64_read(&pids->counter);
 }
 
+static s64 pids_peak_read(struct cgroup_subsys_state *css,
+			  struct cftype *cft)
+{
+	struct pids_cgroup *pids = css_pids(css);
+
+	return READ_ONCE(pids->watermark);
+}
+
 static int pids_events_show(struct seq_file *sf, void *v)
 {
 	struct pids_cgroup *pids = css_pids(seq_css(sf));
@@ -323,6 +358,11 @@ static struct cftype pids_files[] = {
 		.name = "current",
 		.read_s64 = pids_current_read,
 		.flags = CFTYPE_NOT_ON_ROOT,
+	},
+	{
+		.name = "peak",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.read_s64 = pids_peak_read,
 	},
 	{
 		.name = "events",

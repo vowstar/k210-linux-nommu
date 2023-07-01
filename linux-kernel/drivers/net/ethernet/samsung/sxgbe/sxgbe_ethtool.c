@@ -175,8 +175,8 @@ static int sxgbe_set_eee(struct net_device *dev,
 static void sxgbe_getdrvinfo(struct net_device *dev,
 			     struct ethtool_drvinfo *info)
 {
-	strlcpy(info->driver, KBUILD_MODNAME, sizeof(info->driver));
-	strlcpy(info->version, DRV_VERSION, sizeof(info->version));
+	strscpy(info->driver, KBUILD_MODNAME, sizeof(info->driver));
+	strscpy(info->version, DRV_VERSION, sizeof(info->version));
 }
 
 static u32 sxgbe_getmsglevel(struct net_device *dev)
@@ -274,7 +274,9 @@ static u32 sxgbe_usec2riwt(u32 usec, struct sxgbe_priv_data *priv)
 }
 
 static int sxgbe_get_coalesce(struct net_device *dev,
-			      struct ethtool_coalesce *ec)
+			      struct ethtool_coalesce *ec,
+			      struct kernel_ethtool_coalesce *kernel_coal,
+			      struct netlink_ext_ack *extack)
 {
 	struct sxgbe_priv_data *priv = netdev_priv(dev);
 
@@ -285,7 +287,9 @@ static int sxgbe_get_coalesce(struct net_device *dev,
 }
 
 static int sxgbe_set_coalesce(struct net_device *dev,
-			      struct ethtool_coalesce *ec)
+			      struct ethtool_coalesce *ec,
+			      struct kernel_ethtool_coalesce *kernel_coal,
+			      struct netlink_ext_ack *extack)
 {
 	struct sxgbe_priv_data *priv = netdev_priv(dev);
 	unsigned int rx_riwt;
@@ -316,7 +320,7 @@ static int sxgbe_get_rss_hash_opts(struct sxgbe_priv_data *priv,
 	case TCP_V4_FLOW:
 	case UDP_V4_FLOW:
 		cmd->data |= RXH_L4_B_0_1 | RXH_L4_B_2_3;
-		/* Fall through */
+		fallthrough;
 	case SCTP_V4_FLOW:
 	case AH_ESP_V4_FLOW:
 	case AH_V4_FLOW:
@@ -327,7 +331,7 @@ static int sxgbe_get_rss_hash_opts(struct sxgbe_priv_data *priv,
 	case TCP_V6_FLOW:
 	case UDP_V6_FLOW:
 		cmd->data |= RXH_L4_B_0_1 | RXH_L4_B_2_3;
-		/* Fall through */
+		fallthrough;
 	case SCTP_V6_FLOW:
 	case AH_ESP_V6_FLOW:
 	case AH_V6_FLOW:
@@ -476,6 +480,7 @@ static int sxgbe_get_regs_len(struct net_device *dev)
 }
 
 static const struct ethtool_ops sxgbe_ethtool_ops = {
+	.supported_coalesce_params = ETHTOOL_COALESCE_RX_USECS,
 	.get_drvinfo = sxgbe_getdrvinfo,
 	.get_msglevel = sxgbe_getmsglevel,
 	.set_msglevel = sxgbe_setmsglevel,

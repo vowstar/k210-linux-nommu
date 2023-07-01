@@ -9,6 +9,7 @@
 #include "i915_drv.h"
 #include "i915_perf.h"
 #include "i915_query.h"
+#include "gt/intel_engine_user.h"
 #include <uapi/drm/i915_drm.h>
 
 static int copy_query_item(void *query_hdr, size_t query_sz,
@@ -25,42 +26,34 @@ static int copy_query_item(void *query_hdr, size_t query_sz,
 			   query_sz))
 		return -EFAULT;
 
-	if (!access_ok(u64_to_user_ptr(query_item->data_ptr),
-		       total_length))
-		return -EFAULT;
-
 	return 0;
 }
 
-static int query_topology_info(struct drm_i915_private *dev_priv,
-			       struct drm_i915_query_item *query_item)
+static int fill_topology_info(const struct sseu_dev_info *sseu,
+			      struct drm_i915_query_item *query_item,
+			      intel_sseu_ss_mask_t subslice_mask)
 {
-	const struct sseu_dev_info *sseu = &RUNTIME_INFO(dev_priv)->sseu;
 	struct drm_i915_query_topology_info topo;
 	u32 slice_length, subslice_length, eu_length, total_length;
+	int ss_stride = GEN_SSEU_STRIDE(sseu->max_subslices);
+	int eu_stride = GEN_SSEU_STRIDE(sseu->max_eus_per_subslice);
 	int ret;
 
-	if (query_item->flags != 0)
-		return -EINVAL;
+	BUILD_BUG_ON(sizeof(u8) != sizeof(sseu->slice_mask));
 
 	if (sseu->max_slices == 0)
 		return -ENODEV;
 
-	BUILD_BUG_ON(sizeof(u8) != sizeof(sseu->slice_mask));
-
 	slice_length = sizeof(sseu->slice_mask);
-	subslice_length = sseu->max_slices * sseu->ss_stride;
-	eu_length = sseu->max_slices * sseu->max_subslices * sseu->eu_stride;
+	subslice_length = sseu->max_slices * ss_stride;
+	eu_length = sseu->max_slices * sseu->max_subslices * eu_stride;
 	total_length = sizeof(topo) + slice_length + subslice_length +
 		       eu_length;
 
-	ret = copy_query_item(&topo, sizeof(topo), total_length,
-			      query_item);
+	ret = copy_query_item(&topo, sizeof(topo), total_length, query_item);
+
 	if (ret != 0)
 		return ret;
-
-	if (topo.flags != 0)
-		return -EINVAL;
 
 	memset(&topo, 0, sizeof(topo));
 	topo.max_slices = sseu->max_slices;
@@ -68,30 +61,67 @@ static int query_topology_info(struct drm_i915_private *dev_priv,
 	topo.max_eus_per_subslice = sseu->max_eus_per_subslice;
 
 	topo.subslice_offset = slice_length;
-	topo.subslice_stride = sseu->ss_stride;
+	topo.subslice_stride = ss_stride;
 	topo.eu_offset = slice_length + subslice_length;
-	topo.eu_stride = sseu->eu_stride;
+	topo.eu_stride = eu_stride;
 
-	if (__copy_to_user(u64_to_user_ptr(query_item->data_ptr),
-			   &topo, sizeof(topo)))
+	if (copy_to_user(u64_to_user_ptr(query_item->data_ptr),
+			 &topo, sizeof(topo)))
 		return -EFAULT;
 
-	if (__copy_to_user(u64_to_user_ptr(query_item->data_ptr + sizeof(topo)),
-			   &sseu->slice_mask, slice_length))
+	if (copy_to_user(u64_to_user_ptr(query_item->data_ptr + sizeof(topo)),
+			 &sseu->slice_mask, slice_length))
 		return -EFAULT;
 
-	if (__copy_to_user(u64_to_user_ptr(query_item->data_ptr +
-					   sizeof(topo) + slice_length),
-			   sseu->subslice_mask, subslice_length))
+	if (intel_sseu_copy_ssmask_to_user(u64_to_user_ptr(query_item->data_ptr +
+							   sizeof(topo) + slice_length),
+					   sseu))
 		return -EFAULT;
 
-	if (__copy_to_user(u64_to_user_ptr(query_item->data_ptr +
-					   sizeof(topo) +
-					   slice_length + subslice_length),
-			   sseu->eu_mask, eu_length))
+	if (intel_sseu_copy_eumask_to_user(u64_to_user_ptr(query_item->data_ptr +
+							   sizeof(topo) +
+							   slice_length + subslice_length),
+					   sseu))
 		return -EFAULT;
 
 	return total_length;
+}
+
+static int query_topology_info(struct drm_i915_private *dev_priv,
+			       struct drm_i915_query_item *query_item)
+{
+	const struct sseu_dev_info *sseu = &to_gt(dev_priv)->info.sseu;
+
+	if (query_item->flags != 0)
+		return -EINVAL;
+
+	return fill_topology_info(sseu, query_item, sseu->subslice_mask);
+}
+
+static int query_geometry_subslices(struct drm_i915_private *i915,
+				    struct drm_i915_query_item *query_item)
+{
+	const struct sseu_dev_info *sseu;
+	struct intel_engine_cs *engine;
+	struct i915_engine_class_instance classinstance;
+
+	if (GRAPHICS_VER_FULL(i915) < IP_VER(12, 50))
+		return -ENODEV;
+
+	classinstance = *((struct i915_engine_class_instance *)&query_item->flags);
+
+	engine = intel_engine_lookup_user(i915, (u8)classinstance.engine_class,
+					  (u8)classinstance.engine_instance);
+
+	if (!engine)
+		return -EINVAL;
+
+	if (engine->class != RENDER_CLASS)
+		return -EINVAL;
+
+	sseu = &engine->gt->info.sseu;
+
+	return fill_topology_info(sseu, query_item, sseu->geometry_subslice_mask);
 }
 
 static int
@@ -113,8 +143,7 @@ query_engine_info(struct drm_i915_private *i915,
 	for_each_uabi_engine(engine, i915)
 		num_uabi_engines++;
 
-	len = sizeof(struct drm_i915_query_engine_info) +
-	      num_uabi_engines * sizeof(struct drm_i915_engine_info);
+	len = struct_size(query_ptr, engines, num_uabi_engines);
 
 	ret = copy_query_item(&query, sizeof(query), len, query_item);
 	if (ret != 0)
@@ -129,16 +158,18 @@ query_engine_info(struct drm_i915_private *i915,
 	for_each_uabi_engine(engine, i915) {
 		info.engine.engine_class = engine->uabi_class;
 		info.engine.engine_instance = engine->uabi_instance;
+		info.flags = I915_ENGINE_INFO_HAS_LOGICAL_INSTANCE;
 		info.capabilities = engine->uabi_capabilities;
+		info.logical_instance = ilog2(engine->logical_mask);
 
-		if (__copy_to_user(info_ptr, &info, sizeof(info)))
+		if (copy_to_user(info_ptr, &info, sizeof(info)))
 			return -EFAULT;
 
 		query.num_engines++;
 		info_ptr++;
 	}
 
-	if (__copy_to_user(query_ptr, &query, sizeof(query)))
+	if (copy_to_user(query_ptr, &query, sizeof(query)))
 		return -EFAULT;
 
 	return len;
@@ -158,10 +189,6 @@ static int can_copy_perf_config_registers_or_number(u32 user_n_regs,
 	if (user_n_regs < kernel_n_regs)
 		return -EINVAL;
 
-	if (!access_ok(u64_to_user_ptr(user_regs_ptr),
-		       2 * sizeof(u32) * kernel_n_regs))
-		return -EFAULT;
-
 	return 0;
 }
 
@@ -170,6 +197,7 @@ static int copy_perf_config_registers_or_number(const struct i915_oa_reg *kernel
 						u64 user_regs_ptr,
 						u32 *user_n_regs)
 {
+	u32 __user *p = u64_to_user_ptr(user_regs_ptr);
 	u32 r;
 
 	if (*user_n_regs == 0) {
@@ -179,25 +207,19 @@ static int copy_perf_config_registers_or_number(const struct i915_oa_reg *kernel
 
 	*user_n_regs = kernel_n_regs;
 
-	for (r = 0; r < kernel_n_regs; r++) {
-		u32 __user *user_reg_ptr =
-			u64_to_user_ptr(user_regs_ptr + sizeof(u32) * r * 2);
-		u32 __user *user_val_ptr =
-			u64_to_user_ptr(user_regs_ptr + sizeof(u32) * r * 2 +
-					sizeof(u32));
-		int ret;
+	if (!user_write_access_begin(p, 2 * sizeof(u32) * kernel_n_regs))
+		return -EFAULT;
 
-		ret = __put_user(i915_mmio_reg_offset(kernel_regs[r].addr),
-				 user_reg_ptr);
-		if (ret)
-			return -EFAULT;
-
-		ret = __put_user(kernel_regs[r].value, user_val_ptr);
-		if (ret)
-			return -EFAULT;
+	for (r = 0; r < kernel_n_regs; r++, p += 2) {
+		unsafe_put_user(i915_mmio_reg_offset(kernel_regs[r].addr),
+				p, Efault);
+		unsafe_put_user(kernel_regs[r].value, p + 1, Efault);
 	}
-
+	user_write_access_end();
 	return 0;
+Efault:
+	user_write_access_end();
+	return -EFAULT;
 }
 
 static int query_perf_config_data(struct drm_i915_private *i915,
@@ -228,15 +250,13 @@ static int query_perf_config_data(struct drm_i915_private *i915,
 		return total_size;
 
 	if (query_item->length < total_size) {
-		DRM_DEBUG("Invalid query config data item size=%u expected=%u\n",
-			  query_item->length, total_size);
+		drm_dbg(&i915->drm,
+			"Invalid query config data item size=%u expected=%u\n",
+			query_item->length, total_size);
 		return -EINVAL;
 	}
 
-	if (!access_ok(user_query_config_ptr, total_size))
-		return -EFAULT;
-
-	if (__get_user(flags, &user_query_config_ptr->flags))
+	if (get_user(flags, &user_query_config_ptr->flags))
 		return -EFAULT;
 
 	if (flags != 0)
@@ -249,7 +269,7 @@ static int query_perf_config_data(struct drm_i915_private *i915,
 		BUILD_BUG_ON(sizeof(user_query_config_ptr->uuid) >= sizeof(uuid));
 
 		memset(&uuid, 0, sizeof(uuid));
-		if (__copy_from_user(uuid, user_query_config_ptr->uuid,
+		if (copy_from_user(uuid, user_query_config_ptr->uuid,
 				     sizeof(user_query_config_ptr->uuid)))
 			return -EFAULT;
 
@@ -263,7 +283,7 @@ static int query_perf_config_data(struct drm_i915_private *i915,
 		}
 		rcu_read_unlock();
 	} else {
-		if (__get_user(config_id, &user_query_config_ptr->config))
+		if (get_user(config_id, &user_query_config_ptr->config))
 			return -EFAULT;
 
 		oa_config = i915_perf_get_oa_config(perf, config_id);
@@ -271,8 +291,7 @@ static int query_perf_config_data(struct drm_i915_private *i915,
 	if (!oa_config)
 		return -ENOENT;
 
-	if (__copy_from_user(&user_config, user_config_ptr,
-			     sizeof(user_config))) {
+	if (copy_from_user(&user_config, user_config_ptr, sizeof(user_config))) {
 		ret = -EFAULT;
 		goto out;
 	}
@@ -318,8 +337,7 @@ static int query_perf_config_data(struct drm_i915_private *i915,
 
 	memcpy(user_config.uuid, oa_config->uuid, sizeof(user_config.uuid));
 
-	if (__copy_to_user(user_config_ptr, &user_config,
-			   sizeof(user_config))) {
+	if (copy_to_user(user_config_ptr, &user_config, sizeof(user_config))) {
 		ret = -EFAULT;
 		goto out;
 	}
@@ -401,9 +419,10 @@ static int query_perf_config_list(struct drm_i915_private *i915,
 	} while (n_configs > alloc);
 
 	if (query_item->length < sizeof_perf_config_list(n_configs)) {
-		DRM_DEBUG("Invalid query config list item size=%u expected=%zu\n",
-			  query_item->length,
-			  sizeof_perf_config_list(n_configs));
+		drm_dbg(&i915->drm,
+			"Invalid query config list item size=%u expected=%zu\n",
+			query_item->length,
+			sizeof_perf_config_list(n_configs));
 		kfree(oa_config_ids);
 		return -EINVAL;
 	}
@@ -438,11 +457,108 @@ static int query_perf_config(struct drm_i915_private *i915,
 	}
 }
 
+static int query_memregion_info(struct drm_i915_private *i915,
+				struct drm_i915_query_item *query_item)
+{
+	struct drm_i915_query_memory_regions __user *query_ptr =
+		u64_to_user_ptr(query_item->data_ptr);
+	struct drm_i915_memory_region_info __user *info_ptr =
+		&query_ptr->regions[0];
+	struct drm_i915_memory_region_info info = { };
+	struct drm_i915_query_memory_regions query;
+	struct intel_memory_region *mr;
+	u32 total_length;
+	int ret, id, i;
+
+	if (query_item->flags != 0)
+		return -EINVAL;
+
+	total_length = sizeof(query);
+	for_each_memory_region(mr, i915, id) {
+		if (mr->private)
+			continue;
+
+		total_length += sizeof(info);
+	}
+
+	ret = copy_query_item(&query, sizeof(query), total_length, query_item);
+	if (ret != 0)
+		return ret;
+
+	if (query.num_regions)
+		return -EINVAL;
+
+	for (i = 0; i < ARRAY_SIZE(query.rsvd); i++) {
+		if (query.rsvd[i])
+			return -EINVAL;
+	}
+
+	for_each_memory_region(mr, i915, id) {
+		if (mr->private)
+			continue;
+
+		info.region.memory_class = mr->type;
+		info.region.memory_instance = mr->instance;
+		info.probed_size = mr->total;
+
+		if (mr->type == INTEL_MEMORY_LOCAL)
+			info.probed_cpu_visible_size = mr->io_size;
+		else
+			info.probed_cpu_visible_size = mr->total;
+
+		if (perfmon_capable()) {
+			intel_memory_region_avail(mr,
+						  &info.unallocated_size,
+						  &info.unallocated_cpu_visible_size);
+		} else {
+			info.unallocated_size = info.probed_size;
+			info.unallocated_cpu_visible_size =
+				info.probed_cpu_visible_size;
+		}
+
+		if (__copy_to_user(info_ptr, &info, sizeof(info)))
+			return -EFAULT;
+
+		query.num_regions++;
+		info_ptr++;
+	}
+
+	if (__copy_to_user(query_ptr, &query, sizeof(query)))
+		return -EFAULT;
+
+	return total_length;
+}
+
+static int query_hwconfig_blob(struct drm_i915_private *i915,
+			       struct drm_i915_query_item *query_item)
+{
+	struct intel_gt *gt = to_gt(i915);
+	struct intel_hwconfig *hwconfig = &gt->info.hwconfig;
+
+	if (!hwconfig->size || !hwconfig->ptr)
+		return -ENODEV;
+
+	if (query_item->length == 0)
+		return hwconfig->size;
+
+	if (query_item->length < hwconfig->size)
+		return -EINVAL;
+
+	if (copy_to_user(u64_to_user_ptr(query_item->data_ptr),
+			 hwconfig->ptr, hwconfig->size))
+		return -EFAULT;
+
+	return hwconfig->size;
+}
+
 static int (* const i915_query_funcs[])(struct drm_i915_private *dev_priv,
 					struct drm_i915_query_item *query_item) = {
 	query_topology_info,
 	query_engine_info,
 	query_perf_config,
+	query_memregion_info,
+	query_hwconfig_blob,
+	query_geometry_subslices,
 };
 
 int i915_query_ioctl(struct drm_device *dev, void *data, struct drm_file *file)

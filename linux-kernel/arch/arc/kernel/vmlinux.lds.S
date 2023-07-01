@@ -57,7 +57,6 @@ SECTIONS
 	.init.ramfs : { INIT_RAM_FS }
 
 	. = ALIGN(PAGE_SIZE);
-	_stext = .;
 
 	HEAD_TEXT_SECTION
 	INIT_TEXT_SECTION(L1_CACHE_BYTES)
@@ -83,11 +82,13 @@ SECTIONS
 
 	.text : {
 		_text = .;
+		_stext = .;
 		TEXT_TEXT
 		SCHED_TEXT
-		CPUIDLE_TEXT
 		LOCK_TEXT
 		KPROBES_TEXT
+		IRQENTRY_TEXT
+		SOFTIRQENTRY_TEXT
 		*(.fixup)
 		*(.gnu.warning)
 	}
@@ -122,6 +123,7 @@ SECTIONS
 	_end = . ;
 
 	STABS_DEBUG
+	ELF_DETAILS
 	DISCARDS
 
 	.arcextmap 0 : {

@@ -12,9 +12,9 @@
 #include <linux/export.h>
 #include <linux/init.h>
 #include <linux/gfp.h>
+#include <linux/of.h>
 
 #include <asm/io.h>
-#include <asm/prom.h>
 #include <asm/pci-bridge.h>
 #include <asm/ppc-pci.h>
 #include <asm/firmware.h>
@@ -124,9 +124,28 @@ struct pci_dn *pci_get_pdn(struct pci_dev *pdev)
 	return NULL;
 }
 
+#ifdef CONFIG_EEH
+static struct eeh_dev *eeh_dev_init(struct pci_dn *pdn)
+{
+	struct eeh_dev *edev;
+
+	/* Allocate EEH device */
+	edev = kzalloc(sizeof(*edev), GFP_KERNEL);
+	if (!edev)
+		return NULL;
+
+	/* Associate EEH device with OF node */
+	pdn->edev = edev;
+	edev->pdn = pdn;
+	edev->bdfn = (pdn->busno << 8) | pdn->devfn;
+	edev->controller = pdn->phb;
+
+	return edev;
+}
+#endif /* CONFIG_EEH */
+
 #ifdef CONFIG_PCI_IOV
 static struct pci_dn *add_one_sriov_vf_pdn(struct pci_dn *parent,
-					   int vf_index,
 					   int busno, int devfn)
 {
 	struct pci_dn *pdn;
@@ -143,7 +162,6 @@ static struct pci_dn *add_one_sriov_vf_pdn(struct pci_dn *parent,
 	pdn->parent = parent;
 	pdn->busno = busno;
 	pdn->devfn = devfn;
-	pdn->vf_index = vf_index;
 	pdn->pe_number = IODA_INVALID_PE;
 	INIT_LIST_HEAD(&pdn->child_list);
 	INIT_LIST_HEAD(&pdn->list);
@@ -174,7 +192,7 @@ struct pci_dn *add_sriov_vf_pdns(struct pci_dev *pdev)
 	for (i = 0; i < pci_sriov_get_totalvfs(pdev); i++) {
 		struct eeh_dev *edev __maybe_unused;
 
-		pdn = add_one_sriov_vf_pdn(parent, i,
+		pdn = add_one_sriov_vf_pdn(parent,
 					   pci_iov_virtfn_bus(pdev, i),
 					   pci_iov_virtfn_devfn(pdev, i));
 		if (!pdn) {
@@ -187,7 +205,10 @@ struct pci_dn *add_sriov_vf_pdns(struct pci_dev *pdev)
 		/* Create the EEH device for the VF */
 		edev = eeh_dev_init(pdn);
 		BUG_ON(!edev);
+
+		/* FIXME: these should probably be populated by the EEH probe */
 		edev->physfn = pdev;
+		edev->vf_index = i;
 #endif /* CONFIG_EEH */
 	}
 	return pci_get_pdn(pdev);
@@ -238,11 +259,11 @@ void remove_sriov_vf_pdns(struct pci_dev *pdev)
 			if (edev) {
 				/*
 				 * We allocate pci_dn's for the totalvfs count,
-				 * but only only the vfs that were activated
+				 * but only the vfs that were activated
 				 * have a configured PE.
 				 */
 				if (edev->pe)
-					eeh_rmv_from_parent_pe(edev);
+					eeh_pe_tree_remove(edev);
 
 				pdn->edev = NULL;
 				kfree(edev);
@@ -309,6 +330,7 @@ struct pci_dn *pci_add_device_node_info(struct pci_controller *hose,
 	INIT_LIST_HEAD(&pdn->list);
 	parent = of_get_parent(dn);
 	pdn->parent = parent ? PCI_DN(parent) : NULL;
+	of_node_put(parent);
 	if (pdn->parent)
 		list_add_tail(&pdn->list, &pdn->parent->child_list);
 
@@ -422,46 +444,6 @@ void *pci_traverse_device_nodes(struct device_node *start,
 }
 EXPORT_SYMBOL_GPL(pci_traverse_device_nodes);
 
-static struct pci_dn *pci_dn_next_one(struct pci_dn *root,
-				      struct pci_dn *pdn)
-{
-	struct list_head *next = pdn->child_list.next;
-
-	if (next != &pdn->child_list)
-		return list_entry(next, struct pci_dn, list);
-
-	while (1) {
-		if (pdn == root)
-			return NULL;
-
-		next = pdn->list.next;
-		if (next != &pdn->parent->child_list)
-			break;
-
-		pdn = pdn->parent;
-	}
-
-	return list_entry(next, struct pci_dn, list);
-}
-
-void *traverse_pci_dn(struct pci_dn *root,
-		      void *(*fn)(struct pci_dn *, void *),
-		      void *data)
-{
-	struct pci_dn *pdn = root;
-	void *ret;
-
-	/* Only scan the child nodes */
-	for (pdn = pci_dn_next_one(root, pdn); pdn;
-	     pdn = pci_dn_next_one(root, pdn)) {
-		ret = fn(pdn, data);
-		if (ret)
-			return ret;
-	}
-
-	return NULL;
-}
-
 static void *add_pdn(struct device_node *dn, void *data)
 {
 	struct pci_controller *hose = data;
@@ -499,28 +481,6 @@ void pci_devs_phb_init_dynamic(struct pci_controller *phb)
 	/* Update dn->phb ptrs for new phb and children devices */
 	pci_traverse_device_nodes(dn, add_pdn, phb);
 }
-
-/** 
- * pci_devs_phb_init - Initialize phbs and pci devs under them.
- * 
- * This routine walks over all phb's (pci-host bridges) on the
- * system, and sets up assorted pci-related structures 
- * (including pci info in the device node structs) for each
- * pci device found underneath.  This routine runs once,
- * early in the boot sequence.
- */
-static int __init pci_devs_phb_init(void)
-{
-	struct pci_controller *phb, *tmp;
-
-	/* This must be done first so the device nodes have valid pci info! */
-	list_for_each_entry_safe(phb, tmp, &hose_list, list_node)
-		pci_devs_phb_init_dynamic(phb);
-
-	return 0;
-}
-
-core_initcall(pci_devs_phb_init);
 
 static void pci_dev_pdn_setup(struct pci_dev *pdev)
 {

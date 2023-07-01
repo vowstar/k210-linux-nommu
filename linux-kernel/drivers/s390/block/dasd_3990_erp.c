@@ -201,7 +201,7 @@ dasd_3990_erp_DCTL(struct dasd_ccw_req * erp, char modifier)
 	struct ccw1 *ccw;
 	struct dasd_ccw_req *dctl_cqr;
 
-	dctl_cqr = dasd_alloc_erp_request((char *) &erp->magic, 1,
+	dctl_cqr = dasd_alloc_erp_request(erp->magic, 1,
 					  sizeof(struct DCTL_data),
 					  device);
 	if (IS_ERR(dctl_cqr)) {
@@ -220,7 +220,7 @@ dasd_3990_erp_DCTL(struct dasd_ccw_req * erp, char modifier)
 	memset(ccw, 0, sizeof(struct ccw1));
 	ccw->cmd_code = CCW_CMD_DCTL;
 	ccw->count = 4;
-	ccw->cda = (__u32)(addr_t) DCTL_data;
+	ccw->cda = (__u32)virt_to_phys(DCTL_data);
 	dctl_cqr->flags = erp->flags;
 	dctl_cqr->function = dasd_3990_erp_DCTL;
 	dctl_cqr->refers = erp;
@@ -1050,6 +1050,11 @@ dasd_3990_erp_com_rej(struct dasd_ccw_req * erp, char *sense)
 		dev_err(&device->cdev->dev, "An I/O request was rejected"
 			" because writing is inhibited\n");
 		erp = dasd_3990_erp_cleanup(erp, DASD_CQR_FAILED);
+	} else if (sense[7] & SNS7_INVALID_ON_SEC) {
+		dev_err(&device->cdev->dev, "An I/O request was rejected on a copy pair secondary device\n");
+		/* suppress dump of sense data for this error */
+		set_bit(DASD_CQR_SUPPRESS_CR, &erp->refers->flags);
+		erp = dasd_3990_erp_cleanup(erp, DASD_CQR_FAILED);
 	} else {
 		/* fatal error -  set status to FAILED
 		   internal error 09 - Command Reject */
@@ -1652,7 +1657,7 @@ dasd_3990_erp_action_1B_32(struct dasd_ccw_req * default_erp, char *sense)
 	}
 
 	/* Build new ERP request including DE/LO */
-	erp = dasd_alloc_erp_request((char *) &cqr->magic,
+	erp = dasd_alloc_erp_request(cqr->magic,
 				     2 + 1,/* DE/LO + TIC */
 				     sizeof(struct DE_eckd_data) +
 				     sizeof(struct LO_eckd_data), device);
@@ -1709,7 +1714,7 @@ dasd_3990_erp_action_1B_32(struct dasd_ccw_req * default_erp, char *sense)
 	ccw->cmd_code = DASD_ECKD_CCW_DEFINE_EXTENT;
 	ccw->flags = CCW_FLAG_CC;
 	ccw->count = 16;
-	ccw->cda = (__u32)(addr_t) DE_data;
+	ccw->cda = (__u32)virt_to_phys(DE_data);
 
 	/* create LO ccw */
 	ccw++;
@@ -1717,7 +1722,7 @@ dasd_3990_erp_action_1B_32(struct dasd_ccw_req * default_erp, char *sense)
 	ccw->cmd_code = DASD_ECKD_CCW_LOCATE_RECORD;
 	ccw->flags = CCW_FLAG_CC;
 	ccw->count = 16;
-	ccw->cda = (__u32)(addr_t) LO_data;
+	ccw->cda = (__u32)virt_to_phys(LO_data);
 
 	/* TIC to the failed ccw */
 	ccw++;
@@ -1987,7 +1992,7 @@ dasd_3990_erp_compound_code(struct dasd_ccw_req * erp, char *sense)
  * DASD_3990_ERP_COMPOUND_CONFIG
  *
  * DESCRIPTION
- *   Handles the compound ERP action for configruation
+ *   Handles the compound ERP action for configuration
  *   dependent error.
  *   Note: duplex handling is not implemented (yet).
  *
@@ -2388,7 +2393,7 @@ static struct dasd_ccw_req *dasd_3990_erp_add_erp(struct dasd_ccw_req *cqr)
 	}
 
 	/* allocate additional request block */
-	erp = dasd_alloc_erp_request((char *) &cqr->magic,
+	erp = dasd_alloc_erp_request(cqr->magic,
 				     cplength, datasize, device);
 	if (IS_ERR(erp)) {
                 if (cqr->retries <= 0) {
@@ -2414,7 +2419,7 @@ static struct dasd_ccw_req *dasd_3990_erp_add_erp(struct dasd_ccw_req *cqr)
 		tcw = erp->cpaddr;
 		tsb = (struct tsb *) &tcw[1];
 		*tcw = *((struct tcw *)cqr->cpaddr);
-		tcw->tsb = (long)tsb;
+		tcw->tsb = virt_to_phys(tsb);
 	} else if (ccw->cmd_code == DASD_ECKD_CCW_PSF) {
 		/* PSF cannot be chained from NOOP/TIC */
 		erp->cpaddr = cqr->cpaddr;
@@ -2425,7 +2430,7 @@ static struct dasd_ccw_req *dasd_3990_erp_add_erp(struct dasd_ccw_req *cqr)
 		ccw->flags = CCW_FLAG_CC;
 		ccw++;
 		ccw->cmd_code = CCW_CMD_TIC;
-		ccw->cda      = (long)(cqr->cpaddr);
+		ccw->cda      = (__u32)virt_to_phys(cqr->cpaddr);
 	}
 
 	erp->flags = cqr->flags;

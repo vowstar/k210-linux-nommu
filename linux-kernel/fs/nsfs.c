@@ -21,6 +21,7 @@ static long ns_ioctl(struct file *filp, unsigned int ioctl,
 static const struct file_operations ns_file_operations = {
 	.llseek		= no_llseek,
 	.unlocked_ioctl = ns_ioctl,
+	.compat_ioctl   = compat_ptr_ioctl,
 };
 
 static char *ns_dname(struct dentry *dentry, char *buffer, int buflen)
@@ -28,7 +29,7 @@ static char *ns_dname(struct dentry *dentry, char *buffer, int buflen)
 	struct inode *inode = d_inode(dentry);
 	const struct proc_ns_operations *ns_ops = dentry->d_fsdata;
 
-	return dynamic_dname(dentry, buffer, buflen, "%s:[%lu]",
+	return dynamic_dname(buffer, buflen, "%s:[%lu]",
 		ns_ops->name, inode->i_ino);
 }
 
@@ -229,6 +230,11 @@ int ns_get_name(char *buf, size_t size, struct task_struct *task,
 	return res;
 }
 
+bool proc_ns_file(const struct file *file)
+{
+	return file->f_op == &ns_file_operations;
+}
+
 struct file *proc_ns_fget(int fd)
 {
 	struct file *file;
@@ -246,6 +252,20 @@ out_invalid:
 	fput(file);
 	return ERR_PTR(-EINVAL);
 }
+
+/**
+ * ns_match() - Returns true if current namespace matches dev/ino provided.
+ * @ns: current namespace
+ * @dev: dev_t from nsfs that will be matched against current nsfs
+ * @ino: ino_t from nsfs that will be matched against current nsfs
+ *
+ * Return: true if dev and ino matches the current nsfs.
+ */
+bool ns_match(const struct ns_common *ns, dev_t dev, ino_t ino)
+{
+	return (ns->inum == ino) && (nsfs_mnt->mnt_sb->s_dev == dev);
+}
+
 
 static int nsfs_show_path(struct seq_file *seq, struct dentry *dentry)
 {

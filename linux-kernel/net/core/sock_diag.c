@@ -1,5 +1,6 @@
 /* License: GPL */
 
+#include <linux/filter.h>
 #include <linux/mutex.h>
 #include <linux/socket.h>
 #include <linux/skbuff.h>
@@ -11,7 +12,7 @@
 #include <linux/tcp.h>
 #include <linux/workqueue.h>
 #include <linux/nospec.h>
-
+#include <linux/cookie.h>
 #include <linux/inet_diag.h>
 #include <linux/sock_diag.h>
 
@@ -19,18 +20,22 @@ static const struct sock_diag_handler *sock_diag_handlers[AF_MAX];
 static int (*inet_rcv_compat)(struct sk_buff *skb, struct nlmsghdr *nlh);
 static DEFINE_MUTEX(sock_diag_table_mutex);
 static struct workqueue_struct *broadcast_wq;
-static atomic64_t cookie_gen;
 
-u64 sock_gen_cookie(struct sock *sk)
+DEFINE_COOKIE(sock_cookie);
+
+u64 __sock_gen_cookie(struct sock *sk)
 {
-	while (1) {
-		u64 res = atomic64_read(&sk->sk_cookie);
+	u64 res = atomic64_read(&sk->sk_cookie);
 
-		if (res)
-			return res;
-		res = atomic64_inc_return(&cookie_gen);
-		atomic64_cmpxchg(&sk->sk_cookie, 0, res);
+	if (!res) {
+		u64 new = gen_cookie_next(&sock_cookie);
+
+		atomic64_cmpxchg(&sk->sk_cookie, res, new);
+
+		/* Another thread might have changed sk_cookie before us. */
+		res = atomic64_read(&sk->sk_cookie);
 	}
+	return res;
 }
 
 int sock_diag_check_cookie(struct sock *sk, const __u32 *cookie)

@@ -108,27 +108,39 @@
 	HUBBUB_SF(DCN_VM_FB_OFFSET, FB_OFFSET, mask_sh), \
 	HUBBUB_SF(DCN_VM_AGP_BOT, AGP_BOT, mask_sh), \
 	HUBBUB_SF(DCN_VM_AGP_TOP, AGP_TOP, mask_sh), \
-	HUBBUB_SF(DCN_VM_AGP_BASE, AGP_BASE, mask_sh)
+	HUBBUB_SF(DCN_VM_AGP_BASE, AGP_BASE, mask_sh), \
+	HUBBUB_SF(DCN_VM_FAULT_ADDR_MSB, DCN_VM_FAULT_ADDR_MSB, mask_sh), \
+	HUBBUB_SF(DCN_VM_FAULT_ADDR_LSB, DCN_VM_FAULT_ADDR_LSB, mask_sh), \
+	HUBBUB_SF(DCN_VM_FAULT_CNTL, DCN_VM_ERROR_STATUS_CLEAR, mask_sh), \
+	HUBBUB_SF(DCN_VM_FAULT_CNTL, DCN_VM_ERROR_STATUS_MODE, mask_sh), \
+	HUBBUB_SF(DCN_VM_FAULT_CNTL, DCN_VM_ERROR_INTERRUPT_ENABLE, mask_sh), \
+	HUBBUB_SF(DCN_VM_FAULT_CNTL, DCN_VM_RANGE_FAULT_DISABLE, mask_sh), \
+	HUBBUB_SF(DCN_VM_FAULT_CNTL, DCN_VM_PRQ_FAULT_DISABLE, mask_sh), \
+	HUBBUB_SF(DCN_VM_FAULT_STATUS, DCN_VM_ERROR_STATUS, mask_sh), \
+	HUBBUB_SF(DCN_VM_FAULT_STATUS, DCN_VM_ERROR_VMID, mask_sh), \
+	HUBBUB_SF(DCN_VM_FAULT_STATUS, DCN_VM_ERROR_TABLE_LEVEL, mask_sh), \
+	HUBBUB_SF(DCN_VM_FAULT_STATUS, DCN_VM_ERROR_PIPE, mask_sh), \
+	HUBBUB_SF(DCN_VM_FAULT_STATUS, DCN_VM_ERROR_INTERRUPT_STATUS, mask_sh)
 
 void dcn21_dchvm_init(struct hubbub *hubbub);
 int hubbub21_init_dchub(struct hubbub *hubbub,
 		struct dcn_hubbub_phys_addr_config *pa_config);
-void hubbub21_program_watermarks(
+bool hubbub21_program_watermarks(
 		struct hubbub *hubbub,
 		struct dcn_watermark_set *watermarks,
 		unsigned int refclk_mhz,
 		bool safe_to_lower);
-void hubbub21_program_urgent_watermarks(
+bool hubbub21_program_urgent_watermarks(
 		struct hubbub *hubbub,
 		struct dcn_watermark_set *watermarks,
 		unsigned int refclk_mhz,
 		bool safe_to_lower);
-void hubbub21_program_stutter_watermarks(
+bool hubbub21_program_stutter_watermarks(
 		struct hubbub *hubbub,
 		struct dcn_watermark_set *watermarks,
 		unsigned int refclk_mhz,
 		bool safe_to_lower);
-void hubbub21_program_pstate_watermarks(
+bool hubbub21_program_pstate_watermarks(
 		struct hubbub *hubbub,
 		struct dcn_watermark_set *watermarks,
 		unsigned int refclk_mhz,

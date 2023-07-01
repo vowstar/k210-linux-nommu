@@ -55,7 +55,6 @@
 #include <linux/notifier.h>
 #include <linux/cpu.h>
 #include <linux/mutex.h>
-#include <linux/async.h>
 #include <asm/unaligned.h>
 
 #include <scsi/scsi.h>
@@ -85,28 +84,6 @@ unsigned int scsi_logging_level;
 #if defined(CONFIG_SCSI_LOGGING)
 EXPORT_SYMBOL(scsi_logging_level);
 #endif
-
-/*
- * Domain for asynchronous system resume operations.  It is marked 'exclusive'
- * to avoid being included in the async_synchronize_full() that is invoked by
- * dpm_resume().
- */
-ASYNC_DOMAIN_EXCLUSIVE(scsi_sd_pm_domain);
-EXPORT_SYMBOL(scsi_sd_pm_domain);
-
-/**
- * scsi_put_command - Free a scsi command block
- * @cmd: command block to free
- *
- * Returns:	Nothing.
- *
- * Notes:	The command must not belong to any lists.
- */
-void scsi_put_command(struct scsi_cmnd *cmd)
-{
-	scsi_del_cmd_from_list(cmd);
-	BUG_ON(delayed_work_pending(&cmd->abort_work));
-}
 
 #ifdef CONFIG_SCSI_LOGGING
 void scsi_log_send(struct scsi_cmnd *cmd)
@@ -158,7 +135,7 @@ void scsi_log_completion(struct scsi_cmnd *cmd, int disposition)
 		    (level > 1)) {
 			scsi_print_result(cmd, "Done", disposition);
 			scsi_print_command(cmd);
-			if (status_byte(cmd->result) == CHECK_CONDITION)
+			if (scsi_status_is_check_condition(cmd->result))
 				scsi_print_sense(cmd);
 			if (level > 3)
 				scmd_printk(KERN_INFO, cmd,
@@ -199,19 +176,12 @@ void scsi_finish_command(struct scsi_cmnd *cmd)
 	if (atomic_read(&sdev->device_blocked))
 		atomic_set(&sdev->device_blocked, 0);
 
-	/*
-	 * If we have valid sense information, then some kind of recovery
-	 * must have taken place.  Make a note of this.
-	 */
-	if (SCSI_SENSE_VALID(cmd))
-		cmd->result |= (DRIVER_SENSE << 24);
-
 	SCSI_LOG_MLCOMPLETE(4, sdev_printk(KERN_INFO, sdev,
 				"Notifying upper driver of completion "
 				"(result %x)\n", cmd->result));
 
 	good_bytes = scsi_bufflen(cmd);
-	if (!blk_rq_is_passthrough(cmd->request)) {
+	if (!blk_rq_is_passthrough(scsi_cmd_to_rq(cmd))) {
 		int old_good_bytes = good_bytes;
 		drv = scsi_cmd_to_driver(cmd);
 		if (drv->done)
@@ -228,6 +198,15 @@ void scsi_finish_command(struct scsi_cmnd *cmd)
 	scsi_io_completion(cmd, good_bytes);
 }
 
+
+/*
+ * 4096 is big enough for saturating fast SCSI LUNs.
+ */
+int scsi_device_max_queue_depth(struct scsi_device *sdev)
+{
+	return min_t(int, sdev->host->can_queue, 4096);
+}
+
 /**
  * scsi_change_queue_depth - change a device's queue depth
  * @sdev: SCSI Device in question
@@ -237,6 +216,8 @@ void scsi_finish_command(struct scsi_cmnd *cmd)
  */
 int scsi_change_queue_depth(struct scsi_device *sdev, int depth)
 {
+	depth = min_t(int, depth, scsi_device_max_queue_depth(sdev));
+
 	if (depth > 0) {
 		sdev->queue_depth = depth;
 		wmb();
@@ -244,6 +225,8 @@ int scsi_change_queue_depth(struct scsi_device *sdev, int depth)
 
 	if (sdev->request_queue)
 		blk_set_queue_depth(sdev->request_queue, depth);
+
+	sbitmap_resize(&sdev->budget_map, sdev->queue_depth);
 
 	return sdev->queue_depth;
 }
@@ -326,16 +309,51 @@ static int scsi_vpd_inquiry(struct scsi_device *sdev, unsigned char *buffer,
 	 * I'm not convinced we need to try quite this hard to get VPD, but
 	 * all the existing users tried this hard.
 	 */
-	result = scsi_execute_req(sdev, cmd, DMA_FROM_DEVICE, buffer,
-				  len, NULL, 30 * HZ, 3, NULL);
+	result = scsi_execute_cmd(sdev, cmd, REQ_OP_DRV_IN, buffer, len,
+				  30 * HZ, 3, NULL);
 	if (result)
 		return -EIO;
 
-	/* Sanity check that we got the page back that we asked for */
+	/*
+	 * Sanity check that we got the page back that we asked for and that
+	 * the page size is not 0.
+	 */
 	if (buffer[1] != page)
 		return -EIO;
 
-	return get_unaligned_be16(&buffer[2]) + 4;
+	result = get_unaligned_be16(&buffer[2]);
+	if (!result)
+		return -EIO;
+
+	return result + 4;
+}
+
+static int scsi_get_vpd_size(struct scsi_device *sdev, u8 page)
+{
+	unsigned char vpd_header[SCSI_VPD_HEADER_SIZE] __aligned(4);
+	int result;
+
+	if (sdev->no_vpd_size)
+		return SCSI_DEFAULT_VPD_LEN;
+
+	/*
+	 * Fetch the VPD page header to find out how big the page
+	 * is. This is done to prevent problems on legacy devices
+	 * which can not handle allocation lengths as large as
+	 * potentially requested by the caller.
+	 */
+	result = scsi_vpd_inquiry(sdev, vpd_header, page, sizeof(vpd_header));
+	if (result < 0)
+		return 0;
+
+	if (result < SCSI_VPD_HEADER_SIZE) {
+		dev_warn_once(&sdev->sdev_gendev,
+			      "%s: short VPD page 0x%02x length: %d bytes\n",
+			      __func__, page, result);
+		return 0;
+	}
+
+	return result;
 }
 
 /**
@@ -347,47 +365,38 @@ static int scsi_vpd_inquiry(struct scsi_device *sdev, unsigned char *buffer,
  *
  * SCSI devices may optionally supply Vital Product Data.  Each 'page'
  * of VPD is defined in the appropriate SCSI document (eg SPC, SBC).
- * If the device supports this VPD page, this routine returns a pointer
- * to a buffer containing the data from that page.  The caller is
- * responsible for calling kfree() on this pointer when it is no longer
- * needed.  If we cannot retrieve the VPD page this routine returns %NULL.
+ * If the device supports this VPD page, this routine fills @buf
+ * with the data from that page and return 0. If the VPD page is not
+ * supported or its content cannot be retrieved, -EINVAL is returned.
  */
 int scsi_get_vpd_page(struct scsi_device *sdev, u8 page, unsigned char *buf,
 		      int buf_len)
 {
-	int i, result;
+	int result, vpd_len;
 
-	if (sdev->skip_vpd_pages)
-		goto fail;
+	if (!scsi_device_supports_vpd(sdev))
+		return -EINVAL;
 
-	/* Ask for all the pages supported by this device */
-	result = scsi_vpd_inquiry(sdev, buf, 0, buf_len);
-	if (result < 4)
-		goto fail;
+	vpd_len = scsi_get_vpd_size(sdev, page);
+	if (vpd_len <= 0)
+		return -EINVAL;
 
-	/* If the user actually wanted this page, we can skip the rest */
-	if (page == 0)
-		return 0;
+	vpd_len = min(vpd_len, buf_len);
 
-	for (i = 4; i < min(result, buf_len); i++)
-		if (buf[i] == page)
-			goto found;
-
-	if (i < result && i >= buf_len)
-		/* ran off the end of the buffer, give us benefit of doubt */
-		goto found;
-	/* The device claims it doesn't support the requested page */
-	goto fail;
-
- found:
-	result = scsi_vpd_inquiry(sdev, buf, page, buf_len);
+	/*
+	 * Fetch the actual page. Since the appropriate size was reported
+	 * by the device it is now safe to ask for something bigger.
+	 */
+	memset(buf, 0, buf_len);
+	result = scsi_vpd_inquiry(sdev, buf, page, vpd_len);
 	if (result < 0)
-		goto fail;
+		return -EINVAL;
+	else if (result > vpd_len)
+		dev_warn_once(&sdev->sdev_gendev,
+			      "%s: VPD page 0x%02x result %d > %d bytes\n",
+			      __func__, page, result, vpd_len);
 
 	return 0;
-
- fail:
-	return -EINVAL;
 }
 EXPORT_SYMBOL_GPL(scsi_get_vpd_page);
 
@@ -401,9 +410,17 @@ EXPORT_SYMBOL_GPL(scsi_get_vpd_page);
 static struct scsi_vpd *scsi_get_vpd_buf(struct scsi_device *sdev, u8 page)
 {
 	struct scsi_vpd *vpd_buf;
-	int vpd_len = SCSI_VPD_PG_LEN, result;
+	int vpd_len, result;
+
+	vpd_len = scsi_get_vpd_size(sdev, page);
+	if (vpd_len <= 0)
+		return NULL;
 
 retry_pg:
+	/*
+	 * Fetch the actual page. Since the appropriate size was reported
+	 * by the device it is now safe to ask for something bigger.
+	 */
 	vpd_buf = kmalloc(sizeof(*vpd_buf) + vpd_len, GFP_KERNEL);
 	if (!vpd_buf)
 		return NULL;
@@ -414,6 +431,9 @@ retry_pg:
 		return NULL;
 	}
 	if (result > vpd_len) {
+		dev_warn_once(&sdev->sdev_gendev,
+			      "%s: VPD page 0x%02x result %d > %d bytes\n",
+			      __func__, page, result, vpd_len);
 		vpd_len = result;
 		kfree(vpd_buf);
 		goto retry_pg;
@@ -473,6 +493,12 @@ void scsi_attach_vpd(struct scsi_device *sdev)
 			scsi_update_vpd_page(sdev, 0x83, &sdev->vpd_pg83);
 		if (vpd_buf->data[i] == 0x89)
 			scsi_update_vpd_page(sdev, 0x89, &sdev->vpd_pg89);
+		if (vpd_buf->data[i] == 0xb0)
+			scsi_update_vpd_page(sdev, 0xb0, &sdev->vpd_pgb0);
+		if (vpd_buf->data[i] == 0xb1)
+			scsi_update_vpd_page(sdev, 0xb1, &sdev->vpd_pgb1);
+		if (vpd_buf->data[i] == 0xb2)
+			scsi_update_vpd_page(sdev, 0xb2, &sdev->vpd_pgb2);
 	}
 	kfree(vpd_buf);
 }
@@ -493,22 +519,35 @@ int scsi_report_opcode(struct scsi_device *sdev, unsigned char *buffer,
 {
 	unsigned char cmd[16];
 	struct scsi_sense_hdr sshdr;
-	int result;
+	int result, request_len;
+	const struct scsi_exec_args exec_args = {
+		.sshdr = &sshdr,
+	};
 
 	if (sdev->no_report_opcodes || sdev->scsi_level < SCSI_SPC_3)
 		return -EINVAL;
+
+	/* RSOC header + size of command we are asking about */
+	request_len = 4 + COMMAND_SIZE(opcode);
+	if (request_len > len) {
+		dev_warn_once(&sdev->sdev_gendev,
+			      "%s: len %u bytes, opcode 0x%02x needs %u\n",
+			      __func__, len, opcode, request_len);
+		return -EINVAL;
+	}
 
 	memset(cmd, 0, 16);
 	cmd[0] = MAINTENANCE_IN;
 	cmd[1] = MI_REPORT_SUPPORTED_OPERATION_CODES;
 	cmd[2] = 1;		/* One command format */
 	cmd[3] = opcode;
-	put_unaligned_be32(len, &cmd[6]);
+	put_unaligned_be32(request_len, &cmd[6]);
 	memset(buffer, 0, len);
 
-	result = scsi_execute_req(sdev, cmd, DMA_FROM_DEVICE, buffer, len,
-				  &sshdr, 30 * HZ, 3, NULL);
-
+	result = scsi_execute_cmd(sdev, cmd, REQ_OP_DRV_IN, buffer,
+				  request_len, 30 * HZ, 3, &exec_args);
+	if (result < 0)
+		return result;
 	if (result && scsi_sense_valid(&sshdr) &&
 	    sshdr.sense_key == ILLEGAL_REQUEST &&
 	    (sshdr.asc == 0x20 || sshdr.asc == 0x24) && sshdr.ascq == 0x00)
@@ -536,14 +575,14 @@ int scsi_device_get(struct scsi_device *sdev)
 {
 	if (sdev->sdev_state == SDEV_DEL || sdev->sdev_state == SDEV_CANCEL)
 		goto fail;
-	if (!get_device(&sdev->sdev_gendev))
-		goto fail;
 	if (!try_module_get(sdev->host->hostt->module))
-		goto fail_put_device;
+		goto fail;
+	if (!get_device(&sdev->sdev_gendev))
+		goto fail_put_module;
 	return 0;
 
-fail_put_device:
-	put_device(&sdev->sdev_gendev);
+fail_put_module:
+	module_put(sdev->host->hostt->module);
 fail:
 	return -ENXIO;
 }
@@ -559,8 +598,10 @@ EXPORT_SYMBOL(scsi_device_get);
  */
 void scsi_device_put(struct scsi_device *sdev)
 {
-	module_put(sdev->host->hostt->module);
+	struct module *mod = sdev->host->hostt->module;
+
 	put_device(&sdev->sdev_gendev);
+	module_put(mod);
 }
 EXPORT_SYMBOL(scsi_device_put);
 
@@ -764,17 +805,10 @@ MODULE_LICENSE("GPL");
 module_param(scsi_logging_level, int, S_IRUGO|S_IWUSR);
 MODULE_PARM_DESC(scsi_logging_level, "a bit mask of logging levels");
 
-/* This should go away in the future, it doesn't do anything anymore */
-bool scsi_use_blk_mq = true;
-module_param_named(use_blk_mq, scsi_use_blk_mq, bool, S_IWUSR | S_IRUGO);
-
 static int __init init_scsi(void)
 {
 	int error;
 
-	error = scsi_init_queue();
-	if (error)
-		return error;
 	error = scsi_init_procfs();
 	if (error)
 		goto cleanup_queue;

@@ -15,7 +15,7 @@
 
 #include "acp3x.h"
 
-#define DRV_NAME "acp3x-i2s"
+#define DRV_NAME "acp3x_i2s_playcap"
 
 static int acp3x_i2s_set_fmt(struct snd_soc_dai *cpu_dai,
 					unsigned int fmt)
@@ -42,7 +42,7 @@ static int acp3x_i2s_set_tdm_slot(struct snd_soc_dai *cpu_dai,
 		u32 tx_mask, u32 rx_mask, int slots, int slot_width)
 {
 	struct i2s_dev_data *adata;
-	u32 val, reg_val, frmt_reg, frm_len;
+	u32 frm_len;
 	u16 slot_len;
 
 	adata = snd_soc_dai_get_drvdata(cpu_dai);
@@ -64,36 +64,7 @@ static int acp3x_i2s_set_tdm_slot(struct snd_soc_dai *cpu_dai,
 	default:
 		return -EINVAL;
 	}
-
-	/* Enable I2S/BT channels TDM, respective TX/RX frame lengths.*/
-
 	frm_len = FRM_LEN | (slots << 15) | (slot_len << 18);
-	if (adata->substream_type == SNDRV_PCM_STREAM_PLAYBACK) {
-		switch (adata->i2s_instance) {
-		case I2S_BT_INSTANCE:
-			reg_val = mmACP_BTTDM_ITER;
-			frmt_reg = mmACP_BTTDM_TXFRMT;
-			break;
-		case I2S_SP_INSTANCE:
-		default:
-			reg_val = mmACP_I2STDM_ITER;
-			frmt_reg = mmACP_I2STDM_TXFRMT;
-		}
-	} else {
-		switch (adata->i2s_instance) {
-		case I2S_BT_INSTANCE:
-			reg_val = mmACP_BTTDM_IRER;
-			frmt_reg = mmACP_BTTDM_RXFRMT;
-			break;
-		case I2S_SP_INSTANCE:
-		default:
-			reg_val = mmACP_I2STDM_IRER;
-			frmt_reg = mmACP_I2STDM_RXFRMT;
-		}
-	}
-	val = rv_readl(adata->acp3x_base + reg_val);
-	rv_writel(val | 0x2, adata->acp3x_base + reg_val);
-	rv_writel(frm_len, adata->acp3x_base + frmt_reg);
 	adata->tdm_fmt = frm_len;
 	return 0;
 }
@@ -105,12 +76,14 @@ static int acp3x_i2s_hwparams(struct snd_pcm_substream *substream,
 	struct snd_soc_pcm_runtime *prtd;
 	struct snd_soc_card *card;
 	struct acp3x_platform_info *pinfo;
+	struct i2s_dev_data *adata;
 	u32 val;
-	u32 reg_val;
+	u32 reg_val, frmt_reg;
 
-	prtd = substream->private_data;
+	prtd = asoc_substream_to_rtd(substream);
 	rtd = substream->runtime->private_data;
 	card = prtd->card;
+	adata = snd_soc_dai_get_drvdata(dai);
 	pinfo = snd_soc_card_get_drvdata(card);
 	if (pinfo) {
 		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
@@ -141,22 +114,32 @@ static int acp3x_i2s_hwparams(struct snd_pcm_substream *substream,
 		switch (rtd->i2s_instance) {
 		case I2S_BT_INSTANCE:
 			reg_val = mmACP_BTTDM_ITER;
+			frmt_reg = mmACP_BTTDM_TXFRMT;
 			break;
 		case I2S_SP_INSTANCE:
 		default:
 			reg_val = mmACP_I2STDM_ITER;
+			frmt_reg = mmACP_I2STDM_TXFRMT;
 		}
 	} else {
 		switch (rtd->i2s_instance) {
 		case I2S_BT_INSTANCE:
 			reg_val = mmACP_BTTDM_IRER;
+			frmt_reg = mmACP_BTTDM_RXFRMT;
 			break;
 		case I2S_SP_INSTANCE:
 		default:
 			reg_val = mmACP_I2STDM_IRER;
+			frmt_reg = mmACP_I2STDM_RXFRMT;
 		}
 	}
+	if (adata->tdm_mode) {
+		val = rv_readl(rtd->acp3x_base + reg_val);
+		rv_writel(val | 0x2, rtd->acp3x_base + reg_val);
+		rv_writel(adata->tdm_fmt, rtd->acp3x_base + frmt_reg);
+	}
 	val = rv_readl(rtd->acp3x_base + reg_val);
+	val &= ~ACP3x_ITER_IRER_SAMP_LEN_MASK;
 	val = val | (rtd->xfer_resolution  << 3);
 	rv_writel(val, rtd->acp3x_base + reg_val);
 	return 0;
@@ -166,23 +149,14 @@ static int acp3x_i2s_trigger(struct snd_pcm_substream *substream,
 				int cmd, struct snd_soc_dai *dai)
 {
 	struct i2s_stream_instance *rtd;
-	struct snd_soc_pcm_runtime *prtd;
-	struct snd_soc_card *card;
-	struct acp3x_platform_info *pinfo;
 	u32 ret, val, period_bytes, reg_val, ier_val, water_val;
+	u32 buf_size, buf_reg;
 
-	prtd = substream->private_data;
 	rtd = substream->runtime->private_data;
-	card = prtd->card;
-	pinfo = snd_soc_card_get_drvdata(card);
-	if (pinfo) {
-		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-			rtd->i2s_instance = pinfo->play_i2s_instance;
-		else
-			rtd->i2s_instance = pinfo->cap_i2s_instance;
-	}
 	period_bytes = frames_to_bytes(substream->runtime,
 			substream->runtime->period_size);
+	buf_size = frames_to_bytes(substream->runtime,
+			substream->runtime->buffer_size);
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
@@ -196,6 +170,7 @@ static int acp3x_i2s_trigger(struct snd_pcm_substream *substream,
 					mmACP_BT_TX_INTR_WATERMARK_SIZE;
 				reg_val = mmACP_BTTDM_ITER;
 				ier_val = mmACP_BTTDM_IER;
+				buf_reg = mmACP_BT_TX_RINGBUFSIZE;
 				break;
 			case I2S_SP_INSTANCE:
 			default:
@@ -203,6 +178,7 @@ static int acp3x_i2s_trigger(struct snd_pcm_substream *substream,
 					mmACP_I2S_TX_INTR_WATERMARK_SIZE;
 				reg_val = mmACP_I2STDM_ITER;
 				ier_val = mmACP_I2STDM_IER;
+				buf_reg = mmACP_I2S_TX_RINGBUFSIZE;
 			}
 		} else {
 			switch (rtd->i2s_instance) {
@@ -211,6 +187,7 @@ static int acp3x_i2s_trigger(struct snd_pcm_substream *substream,
 					mmACP_BT_RX_INTR_WATERMARK_SIZE;
 				reg_val = mmACP_BTTDM_IRER;
 				ier_val = mmACP_BTTDM_IER;
+				buf_reg = mmACP_BT_RX_RINGBUFSIZE;
 				break;
 			case I2S_SP_INSTANCE:
 			default:
@@ -218,9 +195,11 @@ static int acp3x_i2s_trigger(struct snd_pcm_substream *substream,
 					mmACP_I2S_RX_INTR_WATERMARK_SIZE;
 				reg_val = mmACP_I2STDM_IRER;
 				ier_val = mmACP_I2STDM_IER;
+				buf_reg = mmACP_I2S_RX_RINGBUFSIZE;
 			}
 		}
 		rv_writel(period_bytes, rtd->acp3x_base + water_val);
+		rv_writel(buf_size, rtd->acp3x_base + buf_reg);
 		val = rv_readl(rtd->acp3x_base + reg_val);
 		val = val | BIT(0);
 		rv_writel(val, rtd->acp3x_base + reg_val);
@@ -270,7 +249,7 @@ static int acp3x_i2s_trigger(struct snd_pcm_substream *substream,
 	return ret;
 }
 
-static struct snd_soc_dai_ops acp3x_i2s_dai_ops = {
+static const struct snd_soc_dai_ops acp3x_i2s_dai_ops = {
 	.hw_params = acp3x_i2s_hwparams,
 	.trigger = acp3x_i2s_trigger,
 	.set_fmt = acp3x_i2s_set_fmt,
@@ -278,15 +257,15 @@ static struct snd_soc_dai_ops acp3x_i2s_dai_ops = {
 };
 
 static const struct snd_soc_component_driver acp3x_dai_component = {
-	.name           = "acp3x-i2s",
+	.name			= DRV_NAME,
+	.legacy_dai_naming	= 1,
 };
 
 static struct snd_soc_dai_driver acp3x_i2s_dai = {
 	.playback = {
 		.rates = SNDRV_PCM_RATE_8000_96000,
 		.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S8 |
-			SNDRV_PCM_FMTBIT_U8 | SNDRV_PCM_FMTBIT_S24_LE |
-			SNDRV_PCM_FMTBIT_S32_LE,
+			SNDRV_PCM_FMTBIT_U8 | SNDRV_PCM_FMTBIT_S32_LE,
 		.channels_min = 2,
 		.channels_max = 8,
 		.rate_min = 8000,
@@ -295,8 +274,7 @@ static struct snd_soc_dai_driver acp3x_i2s_dai = {
 	.capture = {
 		.rates = SNDRV_PCM_RATE_8000_48000,
 		.formats = SNDRV_PCM_FMTBIT_S16_LE | SNDRV_PCM_FMTBIT_S8 |
-			SNDRV_PCM_FMTBIT_U8 | SNDRV_PCM_FMTBIT_S24_LE |
-			SNDRV_PCM_FMTBIT_S32_LE,
+			SNDRV_PCM_FMTBIT_U8 | SNDRV_PCM_FMTBIT_S32_LE,
 		.channels_min = 2,
 		.channels_max = 2,
 		.rate_min = 8000,
@@ -337,16 +315,8 @@ static int acp3x_dai_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int acp3x_dai_remove(struct platform_device *pdev)
-{
-	/* As we use devm_ memory alloc there is nothing TBD here */
-
-	return 0;
-}
-
 static struct platform_driver acp3x_dai_driver = {
 	.probe = acp3x_dai_probe,
-	.remove = acp3x_dai_remove,
 	.driver = {
 		.name = "acp3x_i2s_playcap",
 	},
@@ -357,4 +327,4 @@ module_platform_driver(acp3x_dai_driver);
 MODULE_AUTHOR("Vishnuvardhanrao.Ravulapati@amd.com");
 MODULE_DESCRIPTION("AMD ACP 3.x PCM Driver");
 MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("platform:" DRV_NAME);
+MODULE_ALIAS("platform:"DRV_NAME);

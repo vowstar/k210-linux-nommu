@@ -16,13 +16,14 @@
 #include <linux/device.h>
 #include <linux/etherdevice.h>
 #include <linux/platform_device.h>
+#include <linux/of_address.h>
+#include <linux/of_irq.h>
 #include <linux/of_net.h>
 #include <asm/tsi108.h>
 
 #include <linux/atomic.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/prom.h>
 #include <mm/mmu_decl.h>
 
 #undef DEBUG
@@ -51,13 +52,12 @@ phys_addr_t get_csrbase(void)
 	}
 	return tsi108_csr_base;
 }
+EXPORT_SYMBOL(get_csrbase);
 
 u32 get_vir_csrbase(void)
 {
 	return (u32) (ioremap(get_csrbase(), 0x10000));
 }
-
-EXPORT_SYMBOL(get_csrbase);
 EXPORT_SYMBOL(get_vir_csrbase);
 
 static int __init tsi108_eth_of_init(void)
@@ -73,7 +73,6 @@ static int __init tsi108_eth_of_init(void)
 		struct device_node *phy, *mdio;
 		hw_info tsi_eth_data;
 		const unsigned int *phy_id;
-		const void *mac_addr;
 		const phandle *ph;
 
 		memset(r, 0, sizeof(r));
@@ -101,9 +100,7 @@ static int __init tsi108_eth_of_init(void)
 			goto err;
 		}
 
-		mac_addr = of_get_mac_address(np);
-		if (!IS_ERR(mac_addr))
-			ether_addr_copy(tsi_eth_data.mac_addr, mac_addr);
+		of_get_mac_address(np, tsi_eth_data.mac_addr);
 
 		ph = of_get_property(np, "mdio-handle", NULL);
 		mdio = of_find_node_by_phandle(*ph);

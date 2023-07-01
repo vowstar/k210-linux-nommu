@@ -22,7 +22,6 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/of_device.h>
-#include <linux/of_gpio.h>
 #include <linux/of_irq.h>
 #include <linux/regmap.h>
 #include <linux/spi/spi.h>
@@ -143,12 +142,12 @@ static void bcm2835aux_debugfs_remove(struct bcm2835aux_spi *bs)
 }
 #endif /* CONFIG_DEBUG_FS */
 
-static inline u32 bcm2835aux_rd(struct bcm2835aux_spi *bs, unsigned reg)
+static inline u32 bcm2835aux_rd(struct bcm2835aux_spi *bs, unsigned int reg)
 {
 	return readl(bs->regs + reg);
 }
 
-static inline void bcm2835aux_wr(struct bcm2835aux_spi *bs, unsigned reg,
+static inline void bcm2835aux_wr(struct bcm2835aux_spi *bs, unsigned int reg,
 				 u32 val)
 {
 	writel(val, bs->regs + reg);
@@ -164,10 +163,10 @@ static inline void bcm2835aux_rd_fifo(struct bcm2835aux_spi *bs)
 		switch (count) {
 		case 3:
 			*bs->rx_buf++ = (data >> 16) & 0xff;
-			/* fallthrough */
+			fallthrough;
 		case 2:
 			*bs->rx_buf++ = (data >> 8) & 0xff;
-			/* fallthrough */
+			fallthrough;
 		case 1:
 			*bs->rx_buf++ = (data >> 0) & 0xff;
 			/* fallthrough - no default */
@@ -254,7 +253,7 @@ static irqreturn_t bcm2835aux_spi_interrupt(int irq, void *dev_id)
 	/* and if rx_len is 0 then disable interrupts and wake up completion */
 	if (!bs->rx_len) {
 		bcm2835aux_wr(bs, BCM2835_AUX_SPI_CNTL1, bs->cntl[1]);
-		complete(&master->xfer_completion);
+		spi_finalize_current_transfer(master);
 	}
 
 	return IRQ_HANDLED;
@@ -345,7 +344,7 @@ static int bcm2835aux_spi_transfer_one(struct spi_master *master,
 				       struct spi_transfer *tfr)
 {
 	struct bcm2835aux_spi *bs = spi_master_get_devdata(master);
-	unsigned long spi_hz, clk_hz, speed, spi_used_hz;
+	unsigned long spi_hz, clk_hz, speed;
 	unsigned long hz_per_byte, byte_limit;
 
 	/* calculate the registers to handle
@@ -374,7 +373,7 @@ static int bcm2835aux_spi_transfer_one(struct spi_master *master,
 	/* set the new speed */
 	bs->cntl[0] |= speed << BCM2835_AUX_SPI_CNTL0_SPEED_SHIFT;
 
-	spi_used_hz = clk_hz / (2 * (speed + 1));
+	tfr->effective_speed_hz = clk_hz / (2 * (speed + 1));
 
 	/* set transmit buffers and length */
 	bs->tx_buf = tfr->tx_buf;
@@ -384,14 +383,14 @@ static int bcm2835aux_spi_transfer_one(struct spi_master *master,
 	bs->pending = 0;
 
 	/* Calculate the estimated time in us the transfer runs.  Note that
-	 * there are are 2 idle clocks cycles after each chunk getting
+	 * there are 2 idle clocks cycles after each chunk getting
 	 * transferred - in our case the chunk size is 3 bytes, so we
 	 * approximate this by 9 cycles/byte.  This is used to find the number
 	 * of Hz per byte per polling limit.  E.g., we can transfer 1 byte in
 	 * 30 µs per 300,000 Hz of bus clock.
 	 */
 	hz_per_byte = polling_limit_us ? (9 * 1000000) / polling_limit_us : 0;
-	byte_limit = hz_per_byte ? spi_used_hz / hz_per_byte : 1;
+	byte_limit = hz_per_byte ? tfr->effective_speed_hz / hz_per_byte : 1;
 
 	/* run in polling mode for short transfers */
 	if (tfr->len < byte_limit)
@@ -445,25 +444,12 @@ static void bcm2835aux_spi_handle_err(struct spi_master *master,
 
 static int bcm2835aux_spi_setup(struct spi_device *spi)
 {
-	int ret;
-
 	/* sanity check for native cs */
 	if (spi->mode & SPI_NO_CS)
 		return 0;
-	if (gpio_is_valid(spi->cs_gpio)) {
-		/* with gpio-cs set the GPIO to the correct level
-		 * and as output (in case the dt has the gpio not configured
-		 * as output but native cs)
-		 */
-		ret = gpio_direction_output(spi->cs_gpio,
-					    (spi->mode & SPI_CS_HIGH) ? 0 : 1);
-		if (ret)
-			dev_err(&spi->dev,
-				"could not set gpio %i as output: %i\n",
-				spi->cs_gpio, ret);
 
-		return ret;
-	}
+	if (spi->cs_gpiod)
+		return 0;
 
 	/* for dt-backwards compatibility: only support native on CS0
 	 * known things not supported with broken native CS:
@@ -494,7 +480,7 @@ static int bcm2835aux_spi_probe(struct platform_device *pdev)
 	unsigned long clk_hz;
 	int err;
 
-	master = spi_alloc_master(&pdev->dev, sizeof(*bs));
+	master = devm_spi_alloc_master(&pdev->dev, sizeof(*bs));
 	if (!master)
 		return -ENOMEM;
 
@@ -519,34 +505,31 @@ static int bcm2835aux_spi_probe(struct platform_device *pdev)
 	master->prepare_message = bcm2835aux_spi_prepare_message;
 	master->unprepare_message = bcm2835aux_spi_unprepare_message;
 	master->dev.of_node = pdev->dev.of_node;
+	master->use_gpio_descriptors = true;
 
 	bs = spi_master_get_devdata(master);
 
 	/* the main area */
 	bs->regs = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(bs->regs)) {
-		err = PTR_ERR(bs->regs);
-		goto out_master_put;
-	}
+	if (IS_ERR(bs->regs))
+		return PTR_ERR(bs->regs);
 
 	bs->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(bs->clk)) {
 		err = PTR_ERR(bs->clk);
 		dev_err(&pdev->dev, "could not get clk: %d\n", err);
-		goto out_master_put;
+		return err;
 	}
 
 	bs->irq = platform_get_irq(pdev, 0);
-	if (bs->irq <= 0) {
-		err = bs->irq ? bs->irq : -ENODEV;
-		goto out_master_put;
-	}
+	if (bs->irq <= 0)
+		return bs->irq ? bs->irq : -ENODEV;
 
 	/* this also enables the HW block */
 	err = clk_prepare_enable(bs->clk);
 	if (err) {
 		dev_err(&pdev->dev, "could not prepare clock: %d\n", err);
-		goto out_master_put;
+		return err;
 	}
 
 	/* just checking if the clock returns a sane value */
@@ -569,7 +552,7 @@ static int bcm2835aux_spi_probe(struct platform_device *pdev)
 		goto out_clk_disable;
 	}
 
-	err = devm_spi_register_master(&pdev->dev, master);
+	err = spi_register_master(master);
 	if (err) {
 		dev_err(&pdev->dev, "could not register SPI master: %d\n", err);
 		goto out_clk_disable;
@@ -581,8 +564,6 @@ static int bcm2835aux_spi_probe(struct platform_device *pdev)
 
 out_clk_disable:
 	clk_disable_unprepare(bs->clk);
-out_master_put:
-	spi_master_put(master);
 	return err;
 }
 
@@ -592,6 +573,8 @@ static int bcm2835aux_spi_remove(struct platform_device *pdev)
 	struct bcm2835aux_spi *bs = spi_master_get_devdata(master);
 
 	bcm2835aux_debugfs_remove(bs);
+
+	spi_unregister_master(master);
 
 	bcm2835aux_spi_reset_hw(bs);
 

@@ -45,12 +45,11 @@
 #include <asm/cache.h>
 #include <asm/current.h>
 #include <asm/delay.h>
+#include <asm/efi.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/mca.h>
 #include <asm/page.h>
-#include <asm/pgalloc.h>
-#include <asm/pgtable.h>
 #include <asm/processor.h>
 #include <asm/ptrace.h>
 #include <asm/sal.h>
@@ -357,10 +356,6 @@ smp_callin (void)
 	extern void ia64_init_itm(void);
 	extern volatile int time_keeper_id;
 
-#ifdef CONFIG_PERFMON
-	extern void pfm_init_percpu(void);
-#endif
-
 	cpuid = smp_processor_id();
 	phys_id = hard_smp_processor_id();
 	itc_master = time_keeper_id;
@@ -390,10 +385,6 @@ smp_callin (void)
 	smp_setup_percpu_timer();
 
 	ia64_mca_cmc_vector_setup();	/* Setup vector on AP */
-
-#ifdef CONFIG_PERFMON
-	pfm_init_percpu();
-#endif
 
 	local_irq_enable();
 
@@ -450,7 +441,6 @@ start_secondary (void *unused)
 #endif
 	efi_map_pal_code();
 	cpu_init();
-	preempt_disable();
 	smp_callin();
 
 	cpu_startup_entry(CPUHP_AP_ONLINE_IDLE);
@@ -586,16 +576,12 @@ clear_cpu_sibling_map(int cpu)
 static void
 remove_siblinginfo(int cpu)
 {
-	int last = 0;
-
 	if (cpu_data(cpu)->threads_per_core == 1 &&
 	    cpu_data(cpu)->cores_per_socket == 1) {
 		cpumask_clear_cpu(cpu, &cpu_core_map[cpu]);
 		cpumask_clear_cpu(cpu, &per_cpu(cpu_sibling_map, cpu));
 		return;
 	}
-
-	last = (cpumask_weight(&cpu_core_map[cpu]) == 1 ? 1 : 0);
 
 	/* remove it from all sibling map's */
 	clear_cpu_sibling_map(cpu);

@@ -18,10 +18,19 @@ place where this information is gathered.
 
    no_new_privs
    seccomp_filter
+   landlock
    unshare
    spec_ctrl
    accelerators/ocxl
+   ebpf/index
    ioctl/index
+   iommu
+   iommufd
+   media/index
+   netlink/index
+   sysfs-platform_profile
+   vduse
+   futex2
 
 .. only::  subproject and html
 

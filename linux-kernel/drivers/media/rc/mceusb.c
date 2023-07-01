@@ -701,11 +701,18 @@ static void mceusb_dev_printdata(struct mceusb_dev *ir, u8 *buf, int buf_len,
 				data[0], data[1]);
 			break;
 		case MCE_RSP_EQIRCFS:
+			if (!data[0] && !data[1]) {
+				dev_dbg(dev, "%s: no carrier", inout);
+				break;
+			}
+			// prescaler should make sense
+			if (data[0] > 8)
+				break;
 			period = DIV_ROUND_CLOSEST((1U << data[0] * 2) *
 						   (data[1] + 1), 10);
 			if (!period)
 				break;
-			carrier = (1000 * 1000) / period;
+			carrier = USEC_PER_SEC / period;
 			dev_dbg(dev, "%s carrier of %u Hz (period %uus)",
 				 inout, carrier, period);
 			break;
@@ -1070,7 +1077,7 @@ static int mceusb_set_timeout(struct rc_dev *dev, unsigned int timeout)
 	struct mceusb_dev *ir = dev->priv;
 	unsigned int units;
 
-	units = DIV_ROUND_CLOSEST(timeout, US_TO_NS(MCE_TIME_UNIT));
+	units = DIV_ROUND_UP(timeout, MCE_TIME_UNIT);
 
 	cmdbuf[2] = units >> 8;
 	cmdbuf[3] = units;
@@ -1169,7 +1176,7 @@ static void mceusb_handle_command(struct mceusb_dev *ir, u8 *buf_in)
 		switch (subcmd) {
 		/* the one and only 5-byte return value command */
 		case MCE_RSP_GETPORTSTATUS:
-			if (buf_in[5] == 0)
+			if (buf_in[5] == 0 && *hi < 8)
 				ir->txports_cabled |= 1 << *hi;
 			break;
 
@@ -1196,7 +1203,7 @@ static void mceusb_handle_command(struct mceusb_dev *ir, u8 *buf_in)
 	switch (subcmd) {
 	/* 2-byte return value commands */
 	case MCE_RSP_EQIRTIMEOUT:
-		ir->rc->timeout = US_TO_NS((*hi << 8 | *lo) * MCE_TIME_UNIT);
+		ir->rc->timeout = (*hi << 8 | *lo) * MCE_TIME_UNIT;
 		break;
 	case MCE_RSP_EQIRNUMPORTS:
 		ir->num_txports = *hi;
@@ -1291,9 +1298,9 @@ static void mceusb_process_ir_data(struct mceusb_dev *ir, int buf_len)
 				ir->pulse_tunit += rawir.duration;
 				ir->pulse_count++;
 			}
-			rawir.duration *= US_TO_NS(MCE_TIME_UNIT);
+			rawir.duration *= MCE_TIME_UNIT;
 
-			dev_dbg(ir->dev, "Storing %s %u ns (%02x)",
+			dev_dbg(ir->dev, "Storing %s %u us (%02x)",
 				rawir.pulse ? "pulse" : "space",
 				rawir.duration,	ir->buf_in[i]);
 
@@ -1379,6 +1386,7 @@ static void mceusb_dev_recv(struct urb *urb)
 	case -ECONNRESET:
 	case -ENOENT:
 	case -EILSEQ:
+	case -EPROTO:
 	case -ESHUTDOWN:
 		usb_unlink_urb(urb);
 		return;
@@ -1408,42 +1416,37 @@ static void mceusb_gen1_init(struct mceusb_dev *ir)
 {
 	int ret;
 	struct device *dev = ir->dev;
-	char *data;
-
-	data = kzalloc(USB_CTRL_MSG_SZ, GFP_KERNEL);
-	if (!data) {
-		dev_err(dev, "%s: memory allocation failed!", __func__);
-		return;
-	}
+	char data[USB_CTRL_MSG_SZ];
 
 	/*
 	 * This is a strange one. Windows issues a set address to the device
 	 * on the receive control pipe and expect a certain value pair back
 	 */
-	ret = usb_control_msg(ir->usbdev, usb_rcvctrlpipe(ir->usbdev, 0),
-			      USB_REQ_SET_ADDRESS, USB_TYPE_VENDOR, 0, 0,
-			      data, USB_CTRL_MSG_SZ, HZ * 3);
+	ret = usb_control_msg_recv(ir->usbdev, 0, USB_REQ_SET_ADDRESS,
+				   USB_DIR_IN | USB_TYPE_VENDOR,
+				   0, 0, data, USB_CTRL_MSG_SZ, 3000,
+				   GFP_KERNEL);
 	dev_dbg(dev, "set address - ret = %d", ret);
 	dev_dbg(dev, "set address - data[0] = %d, data[1] = %d",
 						data[0], data[1]);
 
 	/* set feature: bit rate 38400 bps */
-	ret = usb_control_msg(ir->usbdev, usb_sndctrlpipe(ir->usbdev, 0),
-			      USB_REQ_SET_FEATURE, USB_TYPE_VENDOR,
-			      0xc04e, 0x0000, NULL, 0, HZ * 3);
+	ret = usb_control_msg_send(ir->usbdev, 0,
+				   USB_REQ_SET_FEATURE, USB_TYPE_VENDOR,
+				   0xc04e, 0x0000, NULL, 0, 3000, GFP_KERNEL);
 
 	dev_dbg(dev, "set feature - ret = %d", ret);
 
 	/* bRequest 4: set char length to 8 bits */
-	ret = usb_control_msg(ir->usbdev, usb_sndctrlpipe(ir->usbdev, 0),
-			      4, USB_TYPE_VENDOR,
-			      0x0808, 0x0000, NULL, 0, HZ * 3);
+	ret = usb_control_msg_send(ir->usbdev, 0,
+				   4, USB_TYPE_VENDOR,
+				   0x0808, 0x0000, NULL, 0, 3000, GFP_KERNEL);
 	dev_dbg(dev, "set char length - retB = %d", ret);
 
 	/* bRequest 2: set handshaking to use DTR/DSR */
-	ret = usb_control_msg(ir->usbdev, usb_sndctrlpipe(ir->usbdev, 0),
-			      2, USB_TYPE_VENDOR,
-			      0x0000, 0x0100, NULL, 0, HZ * 3);
+	ret = usb_control_msg_send(ir->usbdev, 0,
+				   2, USB_TYPE_VENDOR,
+				   0x0000, 0x0100, NULL, 0, 3000, GFP_KERNEL);
 	dev_dbg(dev, "set handshake  - retC = %d", ret);
 
 	/* device resume */
@@ -1451,8 +1454,6 @@ static void mceusb_gen1_init(struct mceusb_dev *ir)
 
 	/* get hw/sw revision? */
 	mce_command_out(ir, GET_REVISION, sizeof(GET_REVISION));
-
-	kfree(data);
 }
 
 static void mceusb_gen2_init(struct mceusb_dev *ir)
@@ -1605,8 +1606,9 @@ static struct rc_dev *mceusb_init_rc_dev(struct mceusb_dev *ir)
 	rc->dev.parent = dev;
 	rc->priv = ir;
 	rc->allowed_protocols = RC_PROTO_BIT_ALL_IR_DECODER;
-	rc->min_timeout = US_TO_NS(MCE_TIME_UNIT);
-	rc->timeout = MS_TO_NS(100);
+	rc->rx_resolution = MCE_TIME_UNIT;
+	rc->min_timeout = MCE_TIME_UNIT;
+	rc->timeout = MS_TO_US(100);
 	if (!mceusb_model[ir->model].broken_irtimeout) {
 		rc->s_timeout = mceusb_set_timeout;
 		rc->max_timeout = 10 * IR_DEFAULT_TIMEOUT;
@@ -1623,7 +1625,7 @@ static struct rc_dev *mceusb_init_rc_dev(struct mceusb_dev *ir)
 		rc->tx_ir = mceusb_tx_ir;
 	}
 	if (ir->flags.rx2 > 0) {
-		rc->s_learning_mode = mceusb_set_rx_wideband;
+		rc->s_wideband_receiver = mceusb_set_rx_wideband;
 		rc->s_carrier_report = mceusb_set_rx_carrier_report;
 	}
 	rc->driver_name = DRIVER_NAME;
@@ -1719,14 +1721,14 @@ static int mceusb_dev_probe(struct usb_interface *intf,
 		pipe = usb_rcvintpipe(dev, ep_in->bEndpointAddress);
 	else
 		pipe = usb_rcvbulkpipe(dev, ep_in->bEndpointAddress);
-	maxp = usb_maxpacket(dev, pipe, usb_pipeout(pipe));
+	maxp = usb_maxpacket(dev, pipe);
 
 	ir = kzalloc(sizeof(struct mceusb_dev), GFP_KERNEL);
 	if (!ir)
 		goto mem_alloc_fail;
 
 	ir->pipe_in = pipe;
-	ir->buf_in = usb_alloc_coherent(dev, maxp, GFP_ATOMIC, &ir->dma_in);
+	ir->buf_in = usb_alloc_coherent(dev, maxp, GFP_KERNEL, &ir->dma_in);
 	if (!ir->buf_in)
 		goto buf_in_alloc_fail;
 

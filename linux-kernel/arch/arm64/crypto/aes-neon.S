@@ -8,8 +8,8 @@
 #include <linux/linkage.h>
 #include <asm/assembler.h>
 
-#define AES_ENTRY(func)		SYM_FUNC_START(neon_ ## func)
-#define AES_ENDPROC(func)	SYM_FUNC_END(neon_ ## func)
+#define AES_FUNC_START(func)		SYM_FUNC_START(neon_ ## func)
+#define AES_FUNC_END(func)		SYM_FUNC_END(neon_ ## func)
 
 	xtsmask		.req	v7
 	cbciv		.req	v7
@@ -66,7 +66,7 @@
 	prepare		crypto_aes_inv_sbox, .LReverse_ShiftRows, \temp
 	.endm
 
-	/* apply SubBytes transformation using the the preloaded Sbox */
+	/* apply SubBytes transformation using the preloaded Sbox */
 	.macro		sub_bytes, in
 	sub		v9.16b, \in\().16b, v15.16b
 	tbl		\in\().16b, {v16.16b-v19.16b}, \in\().16b

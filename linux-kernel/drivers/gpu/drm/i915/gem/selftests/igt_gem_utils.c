@@ -7,8 +7,10 @@
 #include "igt_gem_utils.h"
 
 #include "gem/i915_gem_context.h"
+#include "gem/i915_gem_internal.h"
 #include "gem/i915_gem_pm.h"
 #include "gt/intel_context.h"
+#include "gt/intel_gpu_commands.h"
 #include "gt/intel_gt.h"
 #include "i915_vma.h"
 #include "i915_drv.h"
@@ -43,7 +45,7 @@ igt_emit_store_dw(struct i915_vma *vma,
 		  u32 val)
 {
 	struct drm_i915_gem_object *obj;
-	const int gen = INTEL_GEN(vma->vm->i915);
+	const int ver = GRAPHICS_VER(vma->vm->i915);
 	unsigned long n, size;
 	u32 *cmd;
 	int err;
@@ -54,24 +56,24 @@ igt_emit_store_dw(struct i915_vma *vma,
 	if (IS_ERR(obj))
 		return ERR_CAST(obj);
 
-	cmd = i915_gem_object_pin_map(obj, I915_MAP_WC);
+	cmd = i915_gem_object_pin_map_unlocked(obj, I915_MAP_WC);
 	if (IS_ERR(cmd)) {
 		err = PTR_ERR(cmd);
 		goto err;
 	}
 
-	GEM_BUG_ON(offset + (count - 1) * PAGE_SIZE > vma->node.size);
-	offset += vma->node.start;
+	GEM_BUG_ON(offset + (count - 1) * PAGE_SIZE > i915_vma_size(vma));
+	offset += i915_vma_offset(vma);
 
 	for (n = 0; n < count; n++) {
-		if (gen >= 8) {
+		if (ver >= 8) {
 			*cmd++ = MI_STORE_DWORD_IMM_GEN4;
 			*cmd++ = lower_32_bits(offset);
 			*cmd++ = upper_32_bits(offset);
 			*cmd++ = val;
-		} else if (gen >= 4) {
+		} else if (ver >= 4) {
 			*cmd++ = MI_STORE_DWORD_IMM_GEN4 |
-				(gen < 6 ? MI_USE_GGTT : 0);
+				(ver < 6 ? MI_USE_GGTT : 0);
 			*cmd++ = 0;
 			*cmd++ = offset;
 			*cmd++ = val;
@@ -83,6 +85,8 @@ igt_emit_store_dw(struct i915_vma *vma,
 		offset += PAGE_SIZE;
 	}
 	*cmd = MI_BATCH_BUFFER_END;
+
+	i915_gem_object_flush_map(obj);
 	i915_gem_object_unpin_map(obj);
 
 	intel_gt_chipset_flush(vma->vm->gt);
@@ -126,41 +130,26 @@ int igt_gpu_fill_dw(struct intel_context *ce,
 		goto err_batch;
 	}
 
+	err = igt_vma_move_to_active_unlocked(batch, rq, 0);
+	if (err)
+		goto skip_request;
+
+	err = igt_vma_move_to_active_unlocked(vma, rq, EXEC_OBJECT_WRITE);
+	if (err)
+		goto skip_request;
+
 	flags = 0;
-	if (INTEL_GEN(ce->vm->i915) <= 5)
+	if (GRAPHICS_VER(ce->vm->i915) <= 5)
 		flags |= I915_DISPATCH_SECURE;
 
 	err = rq->engine->emit_bb_start(rq,
-					batch->node.start, batch->node.size,
+					i915_vma_offset(batch),
+					i915_vma_size(batch),
 					flags);
-	if (err)
-		goto err_request;
-
-	i915_vma_lock(batch);
-	err = i915_request_await_object(rq, batch->obj, false);
-	if (err == 0)
-		err = i915_vma_move_to_active(batch, rq, 0);
-	i915_vma_unlock(batch);
-	if (err)
-		goto skip_request;
-
-	i915_vma_lock(vma);
-	err = i915_request_await_object(rq, vma->obj, true);
-	if (err == 0)
-		err = i915_vma_move_to_active(vma, rq, EXEC_OBJECT_WRITE);
-	i915_vma_unlock(vma);
-	if (err)
-		goto skip_request;
-
-	i915_request_add(rq);
-
-	i915_vma_unpin_and_release(&batch, 0);
-
-	return 0;
 
 skip_request:
-	i915_request_skip(rq, err);
-err_request:
+	if (err)
+		i915_request_set_error_once(rq, err);
 	i915_request_add(rq);
 err_batch:
 	i915_vma_unpin_and_release(&batch, 0);

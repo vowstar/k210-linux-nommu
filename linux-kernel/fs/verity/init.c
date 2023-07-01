@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * fs/verity/init.c: fs-verity module initialization and logging
+ * fs-verity module initialization and logging
  *
  * Copyright 2019 Google LLC
  */
@@ -49,7 +49,6 @@ static int __init fsverity_init(void)
 	if (err)
 		goto err_exit_workqueue;
 
-	pr_debug("Initialized fs-verity\n");
 	return 0;
 
 err_exit_workqueue:

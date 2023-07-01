@@ -12,31 +12,32 @@ maintainers:
   - Palmer Dabbelt <palmer@sifive.com>
 
 allOf:
-  - $ref: "spi-controller.yaml#"
+  - $ref: spi-controller.yaml#
 
 properties:
   compatible:
     items:
-      - const: sifive,fu540-c000-spi
+      - enum:
+          - sifive,fu540-c000-spi
+          - sifive,fu740-c000-spi
       - const: sifive,spi0
 
     description:
       Should be "sifive,<chip>-spi" and "sifive,spi<version>".
       Supported compatible strings are -
-      "sifive,fu540-c000-spi" for the SiFive SPI v0 as integrated
-      onto the SiFive FU540 chip, and "sifive,spi0" for the SiFive
-      SPI v0 IP block with no chip integration tweaks.
+      "sifive,fu540-c000-spi" and "sifive,fu740-c000-spi" for the SiFive SPI v0
+      as integrated onto the SiFive FU540 and FU740 chip resp, and "sifive,spi0"
+      for the SiFive SPI v0 IP block with no chip integration tweaks.
       Please refer to sifive-blocks-ip-versioning.txt for details
 
       SPI RTL that corresponds to the IP block version numbers can be found here -
       https://github.com/sifive/sifive-blocks/tree/master/src/main/scala/devices/spi
 
   reg:
-    maxItems: 1
-
-    description:
-      Physical base address and size of SPI registers map
-      A second (optional) range can indicate memory mapped flash
+    minItems: 1
+    items:
+      - description: SPI registers region
+      - description: Memory mapped flash region
 
   interrupts:
     maxItems: 1
@@ -50,18 +51,16 @@ properties:
   sifive,fifo-depth:
     description:
       Depth of hardware queues; defaults to 8
-    allOf:
-      - $ref: "/schemas/types.yaml#/definitions/uint32"
-      - enum: [ 8 ]
-      - default: 8
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [8]
+    default: 8
 
   sifive,max-bits-per-word:
     description:
       Maximum bits per word; defaults to 8
-    allOf:
-      - $ref: "/schemas/types.yaml#/definitions/uint32"
-      - enum: [ 0, 1, 2, 3, 4, 5, 6, 7, 8 ]
-      - default: 8
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+    default: 8
 
 required:
   - compatible
@@ -69,11 +68,13 @@ required:
   - interrupts
   - clocks
 
+unevaluatedProperties: false
+
 examples:
   - |
     spi: spi@10040000 {
       compatible = "sifive,fu540-c000-spi", "sifive,spi0";
-      reg = <0x0 0x10040000 0x0 0x1000 0x0 0x20000000 0x0 0x10000000>;
+      reg = <0x10040000 0x1000>, <0x20000000 0x10000000>;
       interrupt-parent = <&plic>;
       interrupts = <51>;
       clocks = <&tlclk>;

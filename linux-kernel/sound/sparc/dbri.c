@@ -22,7 +22,7 @@
  *   - Data sheet of the T7903, a newer but very similar ISA bus equivalent
  *     available from the Lucent (formerly AT&T microelectronics) home
  *     page.
- *   - http://www.freesoft.org/Linux/DBRI/
+ *   - https://www.freesoft.org/Linux/DBRI/
  * - MMCODEC: Crystal Semiconductor CS4215 16 bit Multimedia Audio Codec
  *   Interfaces: CHI, Audio In & Out, 2 bits parallel
  *   Documentation: from the Crystal Semiconductor home page.
@@ -76,7 +76,6 @@
 MODULE_AUTHOR("Rudolf Koenig, Brent Baccala and Martin Habets");
 MODULE_DESCRIPTION("Sun DBRI");
 MODULE_LICENSE("GPL");
-MODULE_SUPPORTED_DEVICE("{{Sun,DBRI}}");
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
 static char *id[SNDRV_CARDS] = SNDRV_DEFAULT_STR;	/* ID for this card */
@@ -580,16 +579,16 @@ static __u32 reverse_bytes(__u32 b, int len)
 	switch (len) {
 	case 32:
 		b = ((b & 0xffff0000) >> 16) | ((b & 0x0000ffff) << 16);
-		/* fall through */
+		fallthrough;
 	case 16:
 		b = ((b & 0xff00ff00) >> 8) | ((b & 0x00ff00ff) << 8);
-		/* fall through */
+		fallthrough;
 	case 8:
 		b = ((b & 0xf0f0f0f0) >> 4) | ((b & 0x0f0f0f0f) << 4);
-		/* fall through */
+		fallthrough;
 	case 4:
 		b = ((b & 0xcccccccc) >> 2) | ((b & 0x33333333) << 2);
-		/* fall through */
+		fallthrough;
 	case 2:
 		b = ((b & 0xaaaaaaaa) >> 1) | ((b & 0x55555555) << 1);
 	case 1:
@@ -620,7 +619,7 @@ A circular command buffer is used here. A new command is being added
 while another can be executed. The scheme works by adding two WAIT commands
 after each sent batch of commands. When the next batch is prepared it is
 added after the WAIT commands then the WAITs are replaced with single JUMP
-command to the new batch. The the DBRI is forced to reread the last WAIT
+command to the new batch. Then the DBRI is forced to reread the last WAIT
 command (replaced by the JUMP by then). If the DBRI is still executing
 previous commands the request to reread the WAIT command is ignored.
 
@@ -689,7 +688,7 @@ static void dbri_cmdsend(struct snd_dbri *dbri, s32 *cmd, int len)
 {
 	u32 dvma_addr = (u32)dbri->dma_dvma;
 	s32 tmp, addr;
-	static int wait_id = 0;
+	static int wait_id;
 
 	wait_id++;
 	wait_id &= 0xffff;	/* restrict it to a 16 bit counter. */
@@ -1927,7 +1926,7 @@ static void dbri_process_interrupt_buffer(struct snd_dbri *dbri)
 static irqreturn_t snd_dbri_interrupt(int irq, void *dev_id)
 {
 	struct snd_dbri *dbri = dev_id;
-	static int errcnt = 0;
+	static int errcnt;
 	int x;
 
 	if (dbri == NULL)
@@ -2227,11 +2226,12 @@ static int snd_dbri_pcm(struct snd_card *card)
 	struct snd_pcm *pcm;
 	int err;
 
-	if ((err = snd_pcm_new(card,
-			       /* ID */		    "sun_dbri",
-			       /* device */	    0,
-			       /* playback count */ 1,
-			       /* capture count */  1, &pcm)) < 0)
+	err = snd_pcm_new(card,
+			  /* ID */	    "sun_dbri",
+			  /* device */	    0,
+			  /* playback count */ 1,
+			  /* capture count */  1, &pcm);
+	if (err < 0)
 		return err;
 
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_dbri_ops);
@@ -2591,7 +2591,7 @@ static int dbri_probe(struct platform_device *op)
 	struct snd_dbri *dbri;
 	struct resource *rp;
 	struct snd_card *card;
-	static int dev = 0;
+	static int dev;
 	int irq;
 	int err;
 

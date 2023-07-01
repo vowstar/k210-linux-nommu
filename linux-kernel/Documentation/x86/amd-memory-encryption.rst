@@ -53,7 +53,7 @@ CPUID function 0x8000001f reports information related to SME::
 			   system physical addresses, not guest physical
 			   addresses)
 
-If support for SME is present, MSR 0xc00100010 (MSR_K8_SYSCFG) can be used to
+If support for SME is present, MSR 0xc00100010 (MSR_AMD64_SYSCFG) can be used to
 determine if SME is enabled and/or to enable memory encryption::
 
 	0xc0010010:
@@ -79,7 +79,7 @@ The state of SME in the Linux kernel can be documented as follows:
 	  The CPU supports SME (determined through CPUID instruction).
 
 	- Enabled:
-	  Supported and bit 23 of MSR_K8_SYSCFG is set.
+	  Supported and bit 23 of MSR_AMD64_SYSCFG is set.
 
 	- Active:
 	  Supported, Enabled and the Linux kernel is actively applying
@@ -89,9 +89,45 @@ The state of SME in the Linux kernel can be documented as follows:
 SME can also be enabled and activated in the BIOS. If SME is enabled and
 activated in the BIOS, then all memory accesses will be encrypted and it will
 not be necessary to activate the Linux memory encryption support.  If the BIOS
-merely enables SME (sets bit 23 of the MSR_K8_SYSCFG), then Linux can activate
+merely enables SME (sets bit 23 of the MSR_AMD64_SYSCFG), then Linux can activate
 memory encryption by default (CONFIG_AMD_MEM_ENCRYPT_ACTIVE_BY_DEFAULT=y) or
 by supplying mem_encrypt=on on the kernel command line.  However, if BIOS does
 not enable SME, then Linux will not be able to activate memory encryption, even
 if configured to do so by default or the mem_encrypt=on command line parameter
 is specified.
+
+Secure Nested Paging (SNP)
+==========================
+
+SEV-SNP introduces new features (SEV_FEATURES[1:63]) which can be enabled
+by the hypervisor for security enhancements. Some of these features need
+guest side implementation to function correctly. The below table lists the
+expected guest behavior with various possible scenarios of guest/hypervisor
+SNP feature support.
+
++-----------------+---------------+---------------+------------------+
+| Feature Enabled | Guest needs   | Guest has     | Guest boot       |
+| by the HV       | implementation| implementation| behaviour        |
++=================+===============+===============+==================+
+|      No         |      No       |      No       |     Boot         |
+|                 |               |               |                  |
++-----------------+---------------+---------------+------------------+
+|      No         |      Yes      |      No       |     Boot         |
+|                 |               |               |                  |
++-----------------+---------------+---------------+------------------+
+|      No         |      Yes      |      Yes      |     Boot         |
+|                 |               |               |                  |
++-----------------+---------------+---------------+------------------+
+|      Yes        |      No       |      No       | Boot with        |
+|                 |               |               | feature enabled  |
++-----------------+---------------+---------------+------------------+
+|      Yes        |      Yes      |      No       | Graceful boot    |
+|                 |               |               | failure          |
++-----------------+---------------+---------------+------------------+
+|      Yes        |      Yes      |      Yes      | Boot with        |
+|                 |               |               | feature enabled  |
++-----------------+---------------+---------------+------------------+
+
+More details in AMD64 APM[1] Vol 2: 15.34.10 SEV_STATUS MSR
+
+[1] https://www.amd.com/system/files/TechDocs/40332.pdf

@@ -99,6 +99,11 @@ struct trace_imc_data {
  */
 #define IMC_TRACE_RECORD_TB1_MASK      0x3ffffffffffULL
 
+/*
+ * Bit 0:1 in third DW of IMC trace record
+ * specifies the MSR[HV PR] values.
+ */
+#define IMC_TRACE_RECORD_VAL_HVPR(x)	((x) >> 62)
 
 /*
  * Device tree parser code detects IMC pmu support and
@@ -132,7 +137,7 @@ struct imc_pmu {
  * are inited.
  */
 struct imc_pmu_ref {
-	struct mutex lock;
+	spinlock_t lock;
 	unsigned int id;
 	int refc;
 };

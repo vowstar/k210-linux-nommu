@@ -26,6 +26,10 @@
 #include <drm/ttm/ttm_execbuf_util.h>
 #include <drm/amdgpu_drm.h>
 
+struct hmm_range;
+
+struct drm_file;
+
 struct amdgpu_device;
 struct amdgpu_bo;
 struct amdgpu_bo_va;
@@ -36,6 +40,7 @@ struct amdgpu_bo_list_entry {
 	struct amdgpu_bo_va		*bo_va;
 	uint32_t			priority;
 	struct page			**user_pages;
+	struct hmm_range		*range;
 	bool				user_invalidated;
 };
 
@@ -47,6 +52,10 @@ struct amdgpu_bo_list {
 	struct amdgpu_bo *oa_obj;
 	unsigned first_userptr;
 	unsigned num_entries;
+
+	/* Protect access during command submission.
+	 */
+	struct mutex bo_list_mutex;
 };
 
 int amdgpu_bo_list_get(struct amdgpu_fpriv *fpriv, int id,
@@ -60,7 +69,7 @@ int amdgpu_bo_create_list_entry_array(struct drm_amdgpu_bo_list_in *in,
 int amdgpu_bo_list_create(struct amdgpu_device *adev,
 				 struct drm_file *filp,
 				 struct drm_amdgpu_bo_list_entry *info,
-				 unsigned num_entries,
+				 size_t num_entries,
 				 struct amdgpu_bo_list **list);
 
 static inline struct amdgpu_bo_list_entry *

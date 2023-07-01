@@ -1,15 +1,5 @@
-/*
- * Copyright (C) 2014-2017 Broadcom
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation version 2.
- *
- * This program is distributed "as is" WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- */
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2014-2017 Broadcom
 
 /*
  * This file contains the Broadcom Northstar Plus (NSP) GPIO driver that
@@ -154,15 +144,8 @@ static irqreturn_t nsp_gpio_irq_handler(int irq, void *data)
 		level &= readl(chip->base + NSP_GPIO_INT_MASK);
 		int_bits = level | event;
 
-		for_each_set_bit(bit, &int_bits, gc->ngpio) {
-			/*
-			 * Clear the interrupt before invoking the
-			 * handler, so we do not leave any window
-			 */
-			writel(BIT(bit), chip->base + NSP_GPIO_EVENT);
-			generic_handle_irq(
-				irq_linear_revmap(gc->irq.domain, bit));
-		}
+		for_each_set_bit(bit, &int_bits, gc->ngpio)
+			generic_handle_domain_irq(gc->irq.domain, bit);
 	}
 
 	return  int_bits ? IRQ_HANDLED : IRQ_NONE;
@@ -178,7 +161,7 @@ static void nsp_gpio_irq_ack(struct irq_data *d)
 
 	trigger_type = irq_get_trigger_type(d->irq);
 	if (trigger_type & (IRQ_TYPE_EDGE_FALLING | IRQ_TYPE_EDGE_RISING))
-		nsp_set_bit(chip, REG, NSP_GPIO_EVENT, gpio, val);
+		writel(val, chip->base + NSP_GPIO_EVENT);
 }
 
 /*
@@ -262,6 +245,12 @@ static int nsp_gpio_irq_set_type(struct irq_data *d, unsigned int type)
 
 	nsp_set_bit(chip, REG, NSP_GPIO_EVENT_INT_POLARITY, gpio, falling);
 	nsp_set_bit(chip, REG, NSP_GPIO_INT_POLARITY, gpio, level_low);
+
+	if (type & IRQ_TYPE_EDGE_BOTH)
+		irq_set_handler_locked(d, handle_edge_irq);
+	else
+		irq_set_handler_locked(d, handle_level_irq);
+
 	raw_spin_unlock_irqrestore(&chip->lock, flags);
 
 	dev_dbg(chip->dev, "gpio:%u level_low:%s falling:%s\n", gpio,
@@ -649,7 +638,6 @@ static int nsp_gpio_probe(struct platform_device *pdev)
 	gc->ngpio = val;
 	gc->label = dev_name(dev);
 	gc->parent = dev;
-	gc->of_node = dev->of_node;
 	gc->request = gpiochip_generic_request;
 	gc->free = gpiochip_generic_free;
 	gc->direction_input = nsp_gpio_direction_input;
@@ -691,7 +679,7 @@ static int nsp_gpio_probe(struct platform_device *pdev)
 		girq->num_parents = 0;
 		girq->parents = NULL;
 		girq->default_type = IRQ_TYPE_NONE;
-		girq->handler = handle_simple_irq;
+		girq->handler = handle_bad_irq;
 	}
 
 	ret = devm_gpiochip_add_data(dev, gc, chip);

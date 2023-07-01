@@ -132,7 +132,7 @@ int p54_parse_firmware(struct ieee80211_hw *dev, const struct firmware *fw)
 	if (priv->fw_var < 0x500)
 		wiphy_info(priv->hw->wiphy,
 			   "you are using an obsolete firmware. "
-			   "visit http://wireless.kernel.org/en/users/Drivers/p54 "
+			   "visit http://wireless.wiki.kernel.org/en/users/Drivers/p54 "
 			   "and grab one for \"kernel >= 2.6.28\"!\n");
 
 	if (priv->fw_var >= 0x300) {
@@ -173,10 +173,8 @@ int p54_parse_firmware(struct ieee80211_hw *dev, const struct firmware *fw)
 		 * keeping a extra list for uploaded keys.
 		 */
 
-		priv->used_rxkeys = kcalloc(BITS_TO_LONGS(priv->rx_keycache_size),
-					    sizeof(long),
-					    GFP_KERNEL);
-
+		priv->used_rxkeys = bitmap_zalloc(priv->rx_keycache_size,
+						  GFP_KERNEL);
 		if (!priv->used_rxkeys)
 			return -ENOMEM;
 	}

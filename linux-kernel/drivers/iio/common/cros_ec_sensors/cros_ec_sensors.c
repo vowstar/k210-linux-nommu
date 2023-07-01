@@ -16,6 +16,7 @@
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/triggered_buffer.h>
 #include <linux/kernel.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_data/cros_ec_commands.h>
 #include <linux/platform_data/cros_ec_proto.h>
@@ -73,7 +74,7 @@ static int cros_ec_sensors_read(struct iio_dev *indio_dev,
 		st->core.param.sensor_offset.flags = 0;
 
 		ret = cros_ec_motion_send_host_cmd(&st->core, 0);
-		if (ret == -EPROTO) {
+		if (ret == -EPROTO || ret == -EOPNOTSUPP) {
 			/* Reading calibscale is not supported on older EC. */
 			*val = 1;
 			*val2 = 0;
@@ -200,6 +201,10 @@ static int cros_ec_sensors_write(struct iio_dev *indio_dev,
 		st->core.param.sensor_range.roundup = 1;
 
 		ret = cros_ec_motion_send_host_cmd(&st->core, 0);
+		if (ret == 0) {
+			st->core.range_updated = true;
+			st->core.curr_range = val;
+		}
 		break;
 	default:
 		ret = cros_ec_sensors_core_write(
@@ -230,7 +235,8 @@ static int cros_ec_sensors_probe(struct platform_device *pdev)
 	if (!indio_dev)
 		return -ENOMEM;
 
-	ret = cros_ec_sensors_core_init(pdev, indio_dev, true);
+	ret = cros_ec_sensors_core_init(pdev, indio_dev, true,
+					cros_ec_sensors_capture);
 	if (ret)
 		return ret;
 
@@ -245,7 +251,6 @@ static int cros_ec_sensors_probe(struct platform_device *pdev)
 			BIT(IIO_CHAN_INFO_CALIBSCALE);
 		channel->info_mask_shared_by_all =
 			BIT(IIO_CHAN_INFO_SCALE) |
-			BIT(IIO_CHAN_INFO_FREQUENCY) |
 			BIT(IIO_CHAN_INFO_SAMP_FREQ);
 		channel->info_mask_shared_by_all_available =
 			BIT(IIO_CHAN_INFO_SAMP_FREQ);
@@ -292,12 +297,8 @@ static int cros_ec_sensors_probe(struct platform_device *pdev)
 	else
 		state->core.read_ec_sensors_data = cros_ec_sensors_read_cmd;
 
-	ret = devm_iio_triggered_buffer_setup(dev, indio_dev, NULL,
-			cros_ec_sensors_capture, NULL);
-	if (ret)
-		return ret;
-
-	return devm_iio_device_register(dev, indio_dev);
+	return cros_ec_sensors_core_register(dev, indio_dev,
+			cros_ec_sensors_push_data);
 }
 
 static const struct platform_device_id cros_ec_sensors_ids[] = {

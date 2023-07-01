@@ -16,8 +16,9 @@
 #include "dns_resolve.h"
 
 ssize_t nfs_dns_resolve_name(struct net *net, char *name, size_t namelen,
-		struct sockaddr *sa, size_t salen)
+		struct sockaddr_storage *ss, size_t salen)
 {
+	struct sockaddr *sa = (struct sockaddr *)ss;
 	ssize_t ret;
 	char *ip_addr = NULL;
 	int ip_len;
@@ -39,7 +40,6 @@ ssize_t nfs_dns_resolve_name(struct net *net, char *name, size_t namelen,
 #include <linux/string.h>
 #include <linux/kmod.h>
 #include <linux/slab.h>
-#include <linux/module.h>
 #include <linux/socket.h>
 #include <linux/seq_file.h>
 #include <linux/inet.h>
@@ -152,12 +152,13 @@ static int nfs_dns_upcall(struct cache_detail *cd,
 		struct cache_head *ch)
 {
 	struct nfs_dns_ent *key = container_of(ch, struct nfs_dns_ent, h);
-	int ret;
 
-	ret = nfs_cache_upcall(cd, key->hostname);
-	if (ret)
-		ret = sunrpc_cache_pipe_upcall(cd, ch);
-	return ret;
+	if (test_and_set_bit(CACHE_PENDING, &ch->flags))
+		return 0;
+	if (!nfs_cache_upcall(cd, key->hostname))
+		return 0;
+	clear_bit(CACHE_PENDING, &ch->flags);
+	return sunrpc_cache_pipe_upcall_timeout(cd, ch);
 }
 
 static int nfs_dns_match(struct cache_head *ca,
@@ -341,7 +342,7 @@ out:
 }
 
 ssize_t nfs_dns_resolve_name(struct net *net, char *name,
-		size_t namelen, struct sockaddr *sa, size_t salen)
+		size_t namelen, struct sockaddr_storage *ss, size_t salen)
 {
 	struct nfs_dns_ent key = {
 		.hostname = name,
@@ -354,7 +355,7 @@ ssize_t nfs_dns_resolve_name(struct net *net, char *name,
 	ret = do_cache_lookup_wait(nn->nfs_dns_resolve, &key, &item);
 	if (ret == 0) {
 		if (salen >= item->addrlen) {
-			memcpy(sa, &item->addr, item->addrlen);
+			memcpy(ss, &item->addr, item->addrlen);
 			ret = item->addrlen;
 		} else
 			ret = -EOVERFLOW;

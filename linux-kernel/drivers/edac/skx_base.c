@@ -157,32 +157,34 @@ fail:
 	return -ENODEV;
 }
 
+static struct res_config skx_cfg = {
+	.type			= SKX,
+	.decs_did		= 0x2016,
+	.busno_cfg_offset	= 0xcc,
+};
+
 static const struct x86_cpu_id skx_cpuids[] = {
-	{ X86_VENDOR_INTEL, 6, INTEL_FAM6_SKYLAKE_X, 0, 0 },
+	X86_MATCH_INTEL_FAM6_MODEL_STEPPINGS(SKYLAKE_X, X86_STEPPINGS(0x0, 0xf), &skx_cfg),
 	{ }
 };
 MODULE_DEVICE_TABLE(x86cpu, skx_cpuids);
 
-#define SKX_GET_MTMTR(dev, reg) \
-	pci_read_config_dword((dev), 0x87c, &(reg))
-
-static bool skx_check_ecc(struct pci_dev *pdev)
+static bool skx_check_ecc(u32 mcmtr)
 {
-	u32 mtmtr;
-
-	SKX_GET_MTMTR(pdev, mtmtr);
-
-	return !!GET_BITFIELD(mtmtr, 2, 2);
+	return !!GET_BITFIELD(mcmtr, 2, 2);
 }
 
-static int skx_get_dimm_config(struct mem_ctl_info *mci)
+static int skx_get_dimm_config(struct mem_ctl_info *mci, struct res_config *cfg)
 {
 	struct skx_pvt *pvt = mci->pvt_info;
+	u32 mtr, mcmtr, amap, mcddrtcfg;
 	struct skx_imc *imc = pvt->imc;
-	u32 mtr, amap, mcddrtcfg;
 	struct dimm_info *dimm;
 	int i, j;
 	int ndimms;
+
+	/* Only the mcmtr on the first channel is effective */
+	pci_read_config_dword(imc->chan[0].cdev, 0x87c, &mcmtr);
 
 	for (i = 0; i < SKX_NUM_CHANNELS; i++) {
 		ndimms = 0;
@@ -193,14 +195,14 @@ static int skx_get_dimm_config(struct mem_ctl_info *mci)
 			pci_read_config_dword(imc->chan[i].cdev,
 					      0x80 + 4 * j, &mtr);
 			if (IS_DIMM_PRESENT(mtr)) {
-				ndimms += skx_get_dimm_info(mtr, amap, dimm, imc, i, j);
+				ndimms += skx_get_dimm_info(mtr, mcmtr, amap, dimm, imc, i, j, cfg);
 			} else if (IS_NVDIMM_PRESENT(mcddrtcfg, j)) {
 				ndimms += skx_get_nvdimm_info(dimm, imc, i, j,
 							      EDAC_MOD_STR);
 				nvdimm_count++;
 			}
 		}
-		if (ndimms && !skx_check_ecc(imc->chan[0].cdev)) {
+		if (ndimms && !skx_check_ecc(mcmtr)) {
 			skx_printk(KERN_ERR, "ECC is disabled on imc %d\n", imc->mc);
 			return -ENODEV;
 		}
@@ -228,7 +230,8 @@ static int skx_get_dimm_config(struct mem_ctl_info *mci)
 #define SKX_ILV_TARGET(tgt)	((tgt) & 7)
 
 static void skx_show_retry_rd_err_log(struct decoded_addr *res,
-				      char *msg, int len)
+				      char *msg, int len,
+				      bool scrub_err)
 {
 	u32 log0, log1, log2, log3, log4;
 	u32 corr0, corr1, corr2, corr3;
@@ -641,6 +644,7 @@ static inline void teardown_skx_debug(void) {}
 static int __init skx_init(void)
 {
 	const struct x86_cpu_id *id;
+	struct res_config *cfg;
 	const struct munit *m;
 	const char *owner;
 	int rc = 0, i, off[3] = {0xd0, 0xd4, 0xd8};
@@ -649,19 +653,27 @@ static int __init skx_init(void)
 
 	edac_dbg(2, "\n");
 
+	if (ghes_get_devices())
+		return -EBUSY;
+
 	owner = edac_get_owner();
 	if (owner && strncmp(owner, EDAC_MOD_STR, sizeof(EDAC_MOD_STR)))
 		return -EBUSY;
+
+	if (cpu_feature_enabled(X86_FEATURE_HYPERVISOR))
+		return -ENODEV;
 
 	id = x86_match_cpu(skx_cpuids);
 	if (!id)
 		return -ENODEV;
 
+	cfg = (struct res_config *)id->driver_data;
+
 	rc = skx_get_hi_lo(0x2034, off, &skx_tolm, &skx_tohm);
 	if (rc)
 		return rc;
 
-	rc = skx_get_all_bus_mappings(0x2016, 0xcc, SKX, &skx_edac_list);
+	rc = skx_get_all_bus_mappings(cfg, &skx_edac_list);
 	if (rc < 0)
 		goto fail;
 	if (rc == 0) {
@@ -697,7 +709,7 @@ static int __init skx_init(void)
 			d->imc[i].node_id = node_id;
 			rc = skx_register_mci(&d->imc[i], d->imc[i].chan[0].cdev,
 					      "Skylake Socket", EDAC_MOD_STR,
-					      skx_get_dimm_config);
+					      skx_get_dimm_config, cfg);
 			if (rc < 0)
 				goto fail;
 		}
@@ -705,8 +717,13 @@ static int __init skx_init(void)
 
 	skx_set_decode(skx_decode, skx_show_retry_rd_err_log);
 
-	if (nvdimm_count && skx_adxl_get() == -ENODEV)
-		skx_printk(KERN_NOTICE, "Only decoding DDR4 address!\n");
+	if (nvdimm_count && skx_adxl_get() != -ENODEV) {
+		skx_set_decode(NULL, skx_show_retry_rd_err_log);
+	} else {
+		if (nvdimm_count)
+			skx_printk(KERN_NOTICE, "Only decoding DDR4 address!\n");
+		skx_set_decode(skx_decode, skx_show_retry_rd_err_log);
+	}
 
 	/* Ensure that the OPSTATE is set correctly for POLL or NMI */
 	opstate_init();

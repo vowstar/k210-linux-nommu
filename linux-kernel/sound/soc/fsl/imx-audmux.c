@@ -5,7 +5,7 @@
 // Copyright 2009 Pengutronix, Sascha Hauer <s.hauer@pengutronix.de>
 //
 // Initial development of this code was funded by
-// Phytec Messtechnik GmbH, http://www.phytec.de
+// Phytec Messtechnik GmbH, https://www.phytec.de
 
 #include <linux/clk.h>
 #include <linux/debugfs.h>
@@ -62,24 +62,20 @@ static ssize_t audmux_read_file(struct file *file, char __user *user_buf,
 	uintptr_t port = (uintptr_t)file->private_data;
 	u32 pdcr, ptcr;
 
-	if (audmux_clk) {
-		ret = clk_prepare_enable(audmux_clk);
-		if (ret)
-			return ret;
-	}
+	ret = clk_prepare_enable(audmux_clk);
+	if (ret)
+		return ret;
 
 	ptcr = readl(audmux_base + IMX_AUDMUX_V2_PTCR(port));
 	pdcr = readl(audmux_base + IMX_AUDMUX_V2_PDCR(port));
 
-	if (audmux_clk)
-		clk_disable_unprepare(audmux_clk);
+	clk_disable_unprepare(audmux_clk);
 
 	buf = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
 
-	ret = scnprintf(buf, PAGE_SIZE, "PDCR: %08x\nPTCR: %08x\n",
-		       pdcr, ptcr);
+	ret = sysfs_emit(buf, "PDCR: %08x\nPTCR: %08x\n", pdcr, ptcr);
 
 	if (ptcr & IMX_AUDMUX_V2_PTCR_TFSDIR)
 		ret += scnprintf(buf + ret, PAGE_SIZE - ret,
@@ -170,22 +166,9 @@ static enum imx_audmux_type {
 	IMX31_AUDMUX,
 } audmux_type;
 
-static const struct platform_device_id imx_audmux_ids[] = {
-	{
-		.name = "imx21-audmux",
-		.driver_data = IMX21_AUDMUX,
-	}, {
-		.name = "imx31-audmux",
-		.driver_data = IMX31_AUDMUX,
-	}, {
-		/* sentinel */
-	}
-};
-MODULE_DEVICE_TABLE(platform, imx_audmux_ids);
-
 static const struct of_device_id imx_audmux_dt_ids[] = {
-	{ .compatible = "fsl,imx21-audmux", .data = &imx_audmux_ids[0], },
-	{ .compatible = "fsl,imx31-audmux", .data = &imx_audmux_ids[1], },
+	{ .compatible = "fsl,imx21-audmux", .data = (void *)IMX21_AUDMUX, },
+	{ .compatible = "fsl,imx31-audmux", .data = (void *)IMX31_AUDMUX, },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, imx_audmux_dt_ids);
@@ -222,17 +205,14 @@ int imx_audmux_v2_configure_port(unsigned int port, unsigned int ptcr,
 	if (!audmux_base)
 		return -ENOSYS;
 
-	if (audmux_clk) {
-		ret = clk_prepare_enable(audmux_clk);
-		if (ret)
-			return ret;
-	}
+	ret = clk_prepare_enable(audmux_clk);
+	if (ret)
+		return ret;
 
 	writel(ptcr, audmux_base + IMX_AUDMUX_V2_PTCR(port));
 	writel(pdcr, audmux_base + IMX_AUDMUX_V2_PDCR(port));
 
-	if (audmux_clk)
-		clk_disable_unprepare(audmux_clk);
+	clk_disable_unprepare(audmux_clk);
 
 	return 0;
 }
@@ -300,9 +280,6 @@ static int imx_audmux_parse_dt_defaults(struct platform_device *pdev,
 
 static int imx_audmux_probe(struct platform_device *pdev)
 {
-	const struct of_device_id *of_id =
-			of_match_device(imx_audmux_dt_ids, &pdev->dev);
-
 	audmux_base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(audmux_base))
 		return PTR_ERR(audmux_base);
@@ -314,9 +291,7 @@ static int imx_audmux_probe(struct platform_device *pdev)
 		audmux_clk = NULL;
 	}
 
-	if (of_id)
-		pdev->id_entry = of_id->data;
-	audmux_type = pdev->id_entry->driver_data;
+	audmux_type = (uintptr_t)of_device_get_match_data(&pdev->dev);
 
 	switch (audmux_type) {
 	case IMX31_AUDMUX:
@@ -335,8 +310,7 @@ static int imx_audmux_probe(struct platform_device *pdev)
 	if (!regcache)
 		return -ENOMEM;
 
-	if (of_id)
-		imx_audmux_parse_dt_defaults(pdev, pdev->dev.of_node);
+	imx_audmux_parse_dt_defaults(pdev, pdev->dev.of_node);
 
 	return 0;
 }
@@ -386,7 +360,6 @@ static const struct dev_pm_ops imx_audmux_pm = {
 static struct platform_driver imx_audmux_driver = {
 	.probe		= imx_audmux_probe,
 	.remove		= imx_audmux_remove,
-	.id_table	= imx_audmux_ids,
 	.driver	= {
 		.name	= DRIVER_NAME,
 		.pm = &imx_audmux_pm,

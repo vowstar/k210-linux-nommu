@@ -15,7 +15,6 @@
 #include <linux/crc32.h>
 #include <linux/slab.h>
 #include <linux/ethtool.h>
-#include <net/dsa.h>
 #include <asm/io.h>
 #include "stmmac.h"
 #include "stmmac_pcs.h"
@@ -30,13 +29,6 @@ static void dwmac1000_core_init(struct mac_device_info *hw,
 
 	/* Configure GMAC core */
 	value |= GMAC_CORE_INIT;
-
-	/* Clear ACS bit because Ethernet switch tagging formats such as
-	 * Broadcom tags can look like invalid LLC/SNAP packets and cause the
-	 * hardware to truncate packets on reception.
-	 */
-	if (netdev_uses_dsa(dev))
-		value &= ~GMAC_CONTROL_ACS;
 
 	if (mtu > 1500)
 		value |= GMAC_CONTROL_2K;
@@ -103,7 +95,7 @@ static void dwmac1000_dump_regs(struct mac_device_info *hw, u32 *reg_space)
 }
 
 static void dwmac1000_set_umac_addr(struct mac_device_info *hw,
-				    unsigned char *addr,
+				    const unsigned char *addr,
 				    unsigned int reg_n)
 {
 	void __iomem *ioaddr = hw->pcsr;
@@ -163,6 +155,9 @@ static void dwmac1000_set_filter(struct mac_device_info *hw,
 		value = GMAC_FRAME_FILTER_PR | GMAC_FRAME_FILTER_PCF;
 	} else if (dev->flags & IFF_ALLMULTI) {
 		value = GMAC_FRAME_FILTER_PM;	/* pass all multi */
+	} else if (!netdev_mc_empty(dev) && (mcbitslog2 == 0)) {
+		/* Fall back to all multicast if we've no filter */
+		value = GMAC_FRAME_FILTER_PM;
 	} else if (!netdev_mc_empty(dev)) {
 		struct netdev_hw_addr *ha;
 
@@ -206,7 +201,7 @@ static void dwmac1000_set_filter(struct mac_device_info *hw,
 			reg++;
 		}
 
-		while (reg <= perfect_addr_number) {
+		while (reg < perfect_addr_number) {
 			writel(0, ioaddr + GMAC_ADDR_HIGH(reg));
 			writel(0, ioaddr + GMAC_ADDR_LOW(reg));
 			reg++;

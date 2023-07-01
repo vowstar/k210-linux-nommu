@@ -1,25 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * max8973-regulator.c -- Maxim max8973
+ * max8973-regulator.c -- Maxim max8973A
  *
- * Regulator driver for MAXIM 8973 DC-DC step-down switching regulator.
+ * Regulator driver for MAXIM 8973A DC-DC step-down switching regulator.
  *
  * Copyright (c) 2012, NVIDIA Corporation.
  *
  * Author: Laxman Dewangan <ldewangan@nvidia.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation version 2.
- *
- * This program is distributed "as is" WITHOUT ANY WARRANTY of any kind,
- * whether express or implied; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA
- * 02111-1307, USA
  */
 
 #include <linux/kernel.h>
@@ -265,33 +252,6 @@ static unsigned int max8973_dcdc_get_mode(struct regulator_dev *rdev)
 		REGULATOR_MODE_FAST : REGULATOR_MODE_NORMAL;
 }
 
-static int max8973_set_ramp_delay(struct regulator_dev *rdev,
-		int ramp_delay)
-{
-	struct max8973_chip *max = rdev_get_drvdata(rdev);
-	unsigned int control;
-	int ret;
-
-	/* Set ramp delay */
-	if (ramp_delay <= 12000)
-		control = MAX8973_RAMP_12mV_PER_US;
-	else if (ramp_delay <= 25000)
-		control = MAX8973_RAMP_25mV_PER_US;
-	else if (ramp_delay <= 50000)
-		control = MAX8973_RAMP_50mV_PER_US;
-	else if (ramp_delay <= 200000)
-		control = MAX8973_RAMP_200mV_PER_US;
-	else
-		return -EINVAL;
-
-	ret = regmap_update_bits(max->regmap, MAX8973_CONTROL1,
-			MAX8973_RAMP_MASK, control);
-	if (ret < 0)
-		dev_err(max->dev, "register %d update failed, %d",
-				MAX8973_CONTROL1, ret);
-	return ret;
-}
-
 static int max8973_set_current_limit(struct regulator_dev *rdev,
 		int min_ua, int max_ua)
 {
@@ -341,6 +301,10 @@ static int max8973_get_current_limit(struct regulator_dev *rdev)
 	return 9000000;
 }
 
+static const unsigned int max8973_buck_ramp_table[] = {
+	12000, 25000, 50000, 200000
+};
+
 static const struct regulator_ops max8973_dcdc_ops = {
 	.get_voltage_sel	= max8973_dcdc_get_voltage_sel,
 	.set_voltage_sel	= max8973_dcdc_set_voltage_sel,
@@ -348,7 +312,7 @@ static const struct regulator_ops max8973_dcdc_ops = {
 	.set_mode		= max8973_dcdc_set_mode,
 	.get_mode		= max8973_dcdc_get_mode,
 	.set_voltage_time_sel	= regulator_set_voltage_time_sel,
-	.set_ramp_delay		= max8973_set_ramp_delay,
+	.set_ramp_delay		= regulator_set_ramp_delay_regmap,
 };
 
 static int max8973_init_dcdc(struct max8973_chip *max,
@@ -470,9 +434,9 @@ static int max8973_init_dcdc(struct max8973_chip *max,
 	return ret;
 }
 
-static int max8973_thermal_read_temp(void *data, int *temp)
+static int max8973_thermal_read_temp(struct thermal_zone_device *tz, int *temp)
 {
-	struct max8973_chip *mchip = data;
+	struct max8973_chip *mchip = tz->devdata;
 	unsigned int val;
 	int ret;
 
@@ -482,7 +446,7 @@ static int max8973_thermal_read_temp(void *data, int *temp)
 		return ret;
 	}
 
-	/* +1 degC to trigger cool devive */
+	/* +1 degC to trigger cool device */
 	if (val & MAX77621_CHIPID_TJINT_S)
 		*temp = mchip->junction_temp_warning + 1000;
 	else
@@ -501,7 +465,7 @@ static irqreturn_t max8973_thermal_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
-static const struct thermal_zone_of_device_ops max77621_tz_ops = {
+static const struct thermal_zone_device_ops max77621_tz_ops = {
 	.get_temp = max8973_thermal_read_temp,
 };
 
@@ -515,8 +479,8 @@ static int max8973_thermal_init(struct max8973_chip *mchip)
 	if (mchip->id != MAX77621)
 		return 0;
 
-	tzd = devm_thermal_zone_of_sensor_register(mchip->dev, 0, mchip,
-						   &max77621_tz_ops);
+	tzd = devm_thermal_of_zone_register(mchip->dev, 0, mchip,
+					    &max77621_tz_ops);
 	if (IS_ERR(tzd)) {
 		ret = PTR_ERR(tzd);
 		dev_err(mchip->dev, "Failed to register thermal sensor: %d\n",
@@ -622,9 +586,9 @@ static const struct of_device_id of_max8973_match_tbl[] = {
 };
 MODULE_DEVICE_TABLE(of, of_max8973_match_tbl);
 
-static int max8973_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+static int max8973_probe(struct i2c_client *client)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct max8973_regulator_platform_data *pdata;
 	struct regulator_init_data *ridata;
 	struct regulator_config config = { };
@@ -694,6 +658,10 @@ static int max8973_probe(struct i2c_client *client,
 	max->desc.min_uV = MAX8973_MIN_VOLATGE;
 	max->desc.uV_step = MAX8973_VOLATGE_STEP;
 	max->desc.n_voltages = MAX8973_BUCK_N_VOLTAGE;
+	max->desc.ramp_reg = MAX8973_CONTROL1;
+	max->desc.ramp_mask = MAX8973_RAMP_MASK;
+	max->desc.ramp_delay_table = max8973_buck_ramp_table;
+	max->desc.n_ramp_values = ARRAY_SIZE(max8973_buck_ramp_table);
 
 	max->dvs_gpio = (pdata->dvs_gpio) ? pdata->dvs_gpio : -EINVAL;
 	max->enable_external_control = pdata->enable_ext_control;
@@ -838,7 +806,7 @@ static struct i2c_driver max8973_i2c_driver = {
 		.name = "max8973",
 		.of_match_table = of_max8973_match_tbl,
 	},
-	.probe = max8973_probe,
+	.probe_new = max8973_probe,
 	.id_table = max8973_id,
 };
 

@@ -239,11 +239,6 @@ static void dwxgmac2_set_mss(struct dma_desc *p, unsigned int mss)
 	p->des3 = cpu_to_le32(XGMAC_TDES3_CTXT | XGMAC_TDES3_TCMSSV);
 }
 
-static void dwxgmac2_get_addr(struct dma_desc *p, unsigned int *addr)
-{
-	*addr = le32_to_cpu(p->des0);
-}
-
 static void dwxgmac2_set_addr(struct dma_desc *p, dma_addr_t addr)
 {
 	p->des0 = cpu_to_le32(lower_32_bits(addr));
@@ -286,14 +281,13 @@ static int dwxgmac2_get_rx_hash(struct dma_desc *p, u32 *hash,
 	return -EINVAL;
 }
 
-static int dwxgmac2_get_rx_header_len(struct dma_desc *p, unsigned int *len)
+static void dwxgmac2_get_rx_header_len(struct dma_desc *p, unsigned int *len)
 {
 	if (le32_to_cpu(p->des3) & XGMAC_RDES3_L34T)
 		*len = le32_to_cpu(p->des2) & XGMAC_RDES2_HL;
-	return 0;
 }
 
-static void dwxgmac2_set_sec_addr(struct dma_desc *p, dma_addr_t addr)
+static void dwxgmac2_set_sec_addr(struct dma_desc *p, dma_addr_t addr, bool is_valid)
 {
 	p->des2 = cpu_to_le32(lower_32_bits(addr));
 	p->des3 = cpu_to_le32(upper_32_bits(addr));
@@ -367,7 +361,6 @@ const struct stmmac_desc_ops dwxgmac210_desc_ops = {
 	.init_rx_desc = dwxgmac2_init_rx_desc,
 	.init_tx_desc = dwxgmac2_init_tx_desc,
 	.set_mss = dwxgmac2_set_mss,
-	.get_addr = dwxgmac2_get_addr,
 	.set_addr = dwxgmac2_set_addr,
 	.clear = dwxgmac2_clear,
 	.get_rx_hash = dwxgmac2_get_rx_hash,

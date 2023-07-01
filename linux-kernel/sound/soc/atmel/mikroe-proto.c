@@ -21,7 +21,7 @@
 static int snd_proto_init(struct snd_soc_pcm_runtime *rtd)
 {
 	struct snd_soc_card *card = rtd->card;
-	struct snd_soc_dai *codec_dai = rtd->codec_dai;
+	struct snd_soc_dai *codec_dai = asoc_rtd_to_codec(rtd, 0);
 
 	/* Set proto sysclk */
 	int ret = snd_soc_dai_set_sysclk(codec_dai, WM8731_SYSCLK_XTAL,
@@ -115,42 +115,51 @@ static int snd_proto_probe(struct platform_device *pdev)
 	cpu_np = of_parse_phandle(np, "i2s-controller", 0);
 	if (!cpu_np) {
 		dev_err(&pdev->dev, "i2s-controller missing\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto put_codec_node;
 	}
 	dai->cpus->of_node = cpu_np;
 	dai->platforms->of_node = cpu_np;
 
-	dai_fmt = snd_soc_of_parse_daifmt(np, NULL,
-					  &bitclkmaster, &framemaster);
+	dai_fmt = snd_soc_daifmt_parse_format(np, NULL);
+	snd_soc_daifmt_parse_clock_provider_as_phandle(np, NULL,
+						       &bitclkmaster, &framemaster);
 	if (bitclkmaster != framemaster) {
 		dev_err(&pdev->dev, "Must be the same bitclock and frame master\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto put_cpu_node;
 	}
 	if (bitclkmaster) {
-		dai_fmt &= ~SND_SOC_DAIFMT_MASTER_MASK;
 		if (codec_np == bitclkmaster)
-			dai_fmt |= SND_SOC_DAIFMT_CBM_CFM;
+			dai_fmt |= SND_SOC_DAIFMT_CBP_CFP;
 		else
-			dai_fmt |= SND_SOC_DAIFMT_CBS_CFS;
+			dai_fmt |= SND_SOC_DAIFMT_CBC_CFC;
+	} else {
+		dai_fmt |= snd_soc_daifmt_parse_clock_provider_as_flag(np, NULL);
 	}
+
+
+	dai->dai_fmt = dai_fmt;
+	ret = snd_soc_register_card(&snd_proto);
+	if (ret)
+		dev_err_probe(&pdev->dev, ret,
+			"snd_soc_register_card() failed\n");
+
+
+put_cpu_node:
 	of_node_put(bitclkmaster);
 	of_node_put(framemaster);
-	dai->dai_fmt = dai_fmt;
-
-	of_node_put(codec_np);
 	of_node_put(cpu_np);
-
-	ret = snd_soc_register_card(&snd_proto);
-	if (ret && ret != -EPROBE_DEFER)
-		dev_err(&pdev->dev,
-			"snd_soc_register_card() failed: %d\n", ret);
-
+put_codec_node:
+	of_node_put(codec_np);
 	return ret;
 }
 
 static int snd_proto_remove(struct platform_device *pdev)
 {
-	return snd_soc_unregister_card(&snd_proto);
+	snd_soc_unregister_card(&snd_proto);
+
+	return 0;
 }
 
 static const struct of_device_id snd_proto_of_match[] = {

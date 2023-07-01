@@ -9,22 +9,6 @@
  *  <jkmaline@cc.hut.fi>
  *  Copyright (c) 2002-2003, Jouni Malinen <jkmaline@cc.hut.fi>
  *
- *  This program is free software; you can redistribute it and/or modify it
- *  under the terms of version 2 of the GNU General Public License as
- *  published by the Free Software Foundation.
- *
- *  This program is distributed in the hope that it will be useful, but WITHOUT
- *  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- *  FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- *  more details.
- *
- *  You should have received a copy of the GNU General Public License along with
- *  this program; if not, write to the Free Software Foundation, Inc., 59
- *  Temple Place - Suite 330, Boston, MA  02111-1307, USA.
- *
- *  The full GNU General Public License is included in this distribution in the
- *  file called LICENSE.
- *
  *  Contact Information:
  *  James P. Ketrenos <ipw2100-admin@linux.intel.com>
  *  Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
@@ -68,8 +52,7 @@ static inline int ieee80211_networks_allocate(struct ieee80211_device *ieee)
 				 sizeof(struct ieee80211_network),
 				 GFP_KERNEL);
 	if (!ieee->networks) {
-		printk(KERN_WARNING "%s: Out of memory allocating beacons\n",
-		       ieee->dev->name);
+		netdev_warn(ieee->dev, "Out of memory allocating beacons\n");
 		return -ENOMEM;
 	}
 
@@ -175,9 +158,6 @@ struct net_device *alloc_ieee80211(int sizeof_priv)
 		ieee->last_rxfrag_num[i] = -1;
 		ieee->last_packet_time[i] = 0;
 	}
-
-/* These function were added to load crypte module autoly */
-	ieee80211_tkip_null();
 
 	return dev;
 
@@ -293,7 +273,7 @@ int __init ieee80211_debug_init(void)
 	return 0;
 }
 
-void __exit ieee80211_debug_exit(void)
+void ieee80211_debug_exit(void)
 {
 	if (ieee80211_proc) {
 		remove_proc_entry("debug_level", ieee80211_proc);

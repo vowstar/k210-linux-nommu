@@ -22,9 +22,12 @@
 # interfaces in $ns1 and $ns2. See https://www.wireguard.com/netns/ for further
 # details on how this is accomplished.
 set -e
+shopt -s extglob
 
 exec 3>&1
+export LANG=C
 export WG_HIDE_KEYS=never
+NPROC=( /sys/devices/system/cpu/cpu+([0-9]) ); NPROC=${#NPROC[@]}
 netns0="wg-test-$$-0"
 netns1="wg-test-$$-1"
 netns2="wg-test-$$-2"
@@ -38,7 +41,7 @@ ip0() { pretty 0 "ip $*"; ip -n $netns0 "$@"; }
 ip1() { pretty 1 "ip $*"; ip -n $netns1 "$@"; }
 ip2() { pretty 2 "ip $*"; ip -n $netns2 "$@"; }
 sleep() { read -t "$1" -N 1 || true; }
-waitiperf() { pretty "${1//*-}" "wait for iperf:5201 pid $2"; while [[ $(ss -N "$1" -tlpH 'sport = 5201') != *\"iperf3\",pid=$2,fd=* ]]; do sleep 0.1; done; }
+waitiperf() { pretty "${1//*-}" "wait for iperf:${3:-5201} pid $2"; while [[ $(ss -N "$1" -tlpH "sport = ${3:-5201}") != *\"iperf3\",pid=$2,fd=* ]]; do sleep 0.1; done; }
 waitncatudp() { pretty "${1//*-}" "wait for udp:1111 pid $2"; while [[ $(ss -N "$1" -ulpH 'sport = 1111') != *\"ncat\",pid=$2,fd=* ]]; do sleep 0.1; done; }
 waitiface() { pretty "${1//*-}" "wait for $2 to come up"; ip netns exec "$1" bash -c "while [[ \$(< \"/sys/class/net/$2/operstate\") != up ]]; do read -t .1 -N 0 || true; done;"; }
 
@@ -47,8 +50,11 @@ cleanup() {
 	exec 2>/dev/null
 	printf "$orig_message_cost" > /proc/sys/net/core/message_cost
 	ip0 link del dev wg0
+	ip0 link del dev wg1
 	ip1 link del dev wg0
+	ip1 link del dev wg1
 	ip2 link del dev wg0
+	ip2 link del dev wg1
 	local to_kill="$(ip netns pids $netns0) $(ip netns pids $netns1) $(ip netns pids $netns2)"
 	[[ -n $to_kill ]] && kill $to_kill
 	pp ip netns del $netns1
@@ -76,18 +82,20 @@ ip0 link set wg0 netns $netns2
 key1="$(pp wg genkey)"
 key2="$(pp wg genkey)"
 key3="$(pp wg genkey)"
+key4="$(pp wg genkey)"
 pub1="$(pp wg pubkey <<<"$key1")"
 pub2="$(pp wg pubkey <<<"$key2")"
 pub3="$(pp wg pubkey <<<"$key3")"
+pub4="$(pp wg pubkey <<<"$key4")"
 psk="$(pp wg genpsk)"
 [[ -n $key1 && -n $key2 && -n $psk ]]
 
 configure_peers() {
 	ip1 addr add 192.168.241.1/24 dev wg0
-	ip1 addr add fd00::1/24 dev wg0
+	ip1 addr add fd00::1/112 dev wg0
 
 	ip2 addr add 192.168.241.2/24 dev wg0
-	ip2 addr add fd00::2/24 dev wg0
+	ip2 addr add fd00::2/112 dev wg0
 
 	n1 wg set wg0 \
 		private-key <(echo "$key1") \
@@ -135,6 +143,17 @@ tests() {
 	n2 iperf3 -s -1 -B fd00::2 &
 	waitiperf $netns2 $!
 	n1 iperf3 -Z -t 3 -b 0 -u -c fd00::2
+
+	# TCP over IPv4, in parallel
+	local pids=( ) i
+	for ((i=0; i < NPROC; ++i)) do
+		n2 iperf3 -p $(( 5200 + i )) -s -1 -B 192.168.241.2 &
+		pids+=( $! ); waitiperf $netns2 $! $(( 5200 + i ))
+	done
+	for ((i=0; i < NPROC; ++i)) do
+		n1 iperf3 -Z -t 3 -p $(( 5200 + i )) -c 192.168.241.2 &
+	done
+	wait "${pids[@]}"
 }
 
 [[ $(ip1 link show dev wg0) =~ mtu\ ([0-9]+) ]] && orig_mtu="${BASH_REMATCH[1]}"
@@ -229,9 +248,54 @@ n1 ping -W 1 -c 1 192.168.241.2
 n1 wg set wg0 private-key <(echo "$key3")
 n2 wg set wg0 peer "$pub3" preshared-key <(echo "$psk") allowed-ips 192.168.241.1/32 peer "$pub1" remove
 n1 ping -W 1 -c 1 192.168.241.2
+n2 wg set wg0 peer "$pub3" remove
 
-ip1 link del wg0
+# Test that we can route wg through wg
+ip1 addr flush dev wg0
+ip2 addr flush dev wg0
+ip1 addr add fd00::5:1/112 dev wg0
+ip2 addr add fd00::5:2/112 dev wg0
+n1 wg set wg0 private-key <(echo "$key1") peer "$pub2" preshared-key <(echo "$psk") allowed-ips fd00::5:2/128 endpoint 127.0.0.1:2
+n2 wg set wg0 private-key <(echo "$key2") listen-port 2 peer "$pub1" preshared-key <(echo "$psk") allowed-ips fd00::5:1/128 endpoint 127.212.121.99:9998
+ip1 link add wg1 type wireguard
+ip2 link add wg1 type wireguard
+ip1 addr add 192.168.241.1/24 dev wg1
+ip1 addr add fd00::1/112 dev wg1
+ip2 addr add 192.168.241.2/24 dev wg1
+ip2 addr add fd00::2/112 dev wg1
+ip1 link set mtu 1340 up dev wg1
+ip2 link set mtu 1340 up dev wg1
+n1 wg set wg1 listen-port 5 private-key <(echo "$key3") peer "$pub4" allowed-ips 192.168.241.2/32,fd00::2/128 endpoint [fd00::5:2]:5
+n2 wg set wg1 listen-port 5 private-key <(echo "$key4") peer "$pub3" allowed-ips 192.168.241.1/32,fd00::1/128 endpoint [fd00::5:1]:5
+tests
+# Try to set up a routing loop between the two namespaces
+ip1 link set netns $netns0 dev wg1
+ip0 addr add 192.168.241.1/24 dev wg1
+ip0 link set up dev wg1
+n0 ping -W 1 -c 1 192.168.241.2
+n1 wg set wg0 peer "$pub2" endpoint 192.168.241.2:7
 ip2 link del wg0
+ip2 link del wg1
+read _ _ tx_bytes_before < <(n0 wg show wg1 transfer)
+! n0 ping -W 1 -c 10 -f 192.168.241.2 || false
+sleep 1
+read _ _ tx_bytes_after < <(n0 wg show wg1 transfer)
+if ! (( tx_bytes_after - tx_bytes_before < 70000 )); then
+	errstart=$'\x1b[37m\x1b[41m\x1b[1m'
+	errend=$'\x1b[0m'
+	echo "${errstart}                                                ${errend}"
+	echo "${errstart}                   E  R  R  O  R                ${errend}"
+	echo "${errstart}                                                ${errend}"
+	echo "${errstart} This architecture does not do the right thing  ${errend}"
+	echo "${errstart} with cross-namespace routing loops. This test  ${errend}"
+	echo "${errstart} has thus technically failed but, as this issue ${errend}"
+	echo "${errstart} is as yet unsolved, these tests will continue  ${errend}"
+	echo "${errstart} onward. :(                                     ${errend}"
+	echo "${errstart}                                                ${errend}"
+fi
+
+ip0 link del wg1
+ip1 link del wg0
 
 # Test using NAT. We now change the topology to this:
 # ┌────────────────────────────────────────┐    ┌────────────────────────────────────────────────┐     ┌────────────────────────────────────────┐
@@ -281,6 +345,28 @@ pp sleep 3
 n2 ping -W 1 -c 1 192.168.241.1
 n1 wg set wg0 peer "$pub2" persistent-keepalive 0
 
+# Test that sk_bound_dev_if works
+n1 ping -I wg0 -c 1 -W 1 192.168.241.2
+# What about when the mark changes and the packet must be rerouted?
+n1 iptables -t mangle -I OUTPUT -j MARK --set-xmark 1
+n1 ping -c 1 -W 1 192.168.241.2 # First the boring case
+n1 ping -I wg0 -c 1 -W 1 192.168.241.2 # Then the sk_bound_dev_if case
+n1 iptables -t mangle -D OUTPUT -j MARK --set-xmark 1
+
+# Test that onion routing works, even when it loops
+n1 wg set wg0 peer "$pub3" allowed-ips 192.168.242.2/32 endpoint 192.168.241.2:5
+ip1 addr add 192.168.242.1/24 dev wg0
+ip2 link add wg1 type wireguard
+ip2 addr add 192.168.242.2/24 dev wg1
+n2 wg set wg1 private-key <(echo "$key3") listen-port 5 peer "$pub1" allowed-ips 192.168.242.1/32
+ip2 link set wg1 up
+n1 ping -W 1 -c 1 192.168.242.2
+ip2 link del wg1
+n1 wg set wg0 peer "$pub3" endpoint 192.168.242.2:5
+! n1 ping -W 1 -c 1 192.168.242.2 || false # Should not crash kernel
+n1 wg set wg0 peer "$pub3" remove
+ip1 addr del 192.168.242.1/24 dev wg0
+
 # Do a wg-quick(8)-style policy routing for the default route, making sure vethc has a v6 address to tease out bugs.
 ip1 -6 addr add fc00::9/96 dev vethc
 ip1 -6 route add default via fc00::1
@@ -293,11 +379,22 @@ ip1 -6 rule add table main suppress_prefixlength 0
 ip1 -4 route add default dev wg0 table 51820
 ip1 -4 rule add not fwmark 51820 table 51820
 ip1 -4 rule add table main suppress_prefixlength 0
+n1 bash -c 'printf 0 > /proc/sys/net/ipv4/conf/vethc/rp_filter'
 # Flood the pings instead of sending just one, to trigger routing table reference counting bugs.
 n1 ping -W 1 -c 100 -f 192.168.99.7
 n1 ping -W 1 -c 100 -f abab::1111
 
+# Have ns2 NAT into wg0 packets from ns0, but return an icmp error along the right route.
+n2 iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -d 192.168.241.0/24 -j SNAT --to 192.168.241.2
+n0 iptables -t filter -A INPUT \! -s 10.0.0.0/24 -i vethrs -j DROP # Manual rpfilter just to be explicit.
+n2 bash -c 'printf 1 > /proc/sys/net/ipv4/ip_forward'
+ip0 -4 route add 192.168.241.1 via 10.0.0.100
+n2 wg set wg0 peer "$pub1" remove
+[[ $(! n0 ping -W 1 -c 1 192.168.241.1 || false) == *"From 10.0.0.100 icmp_seq=1 Destination Host Unreachable"* ]]
+
 n0 iptables -t nat -F
+n0 iptables -t filter -F
+n2 iptables -t nat -F
 ip0 link del vethrc
 ip0 link del vethrs
 ip1 link del wg0
@@ -516,21 +613,59 @@ n0 wg set wg0 peer "$pub2" allowed-ips 0.0.0.0/0
 n0 wg set wg0 peer "$pub2" allowed-ips ::/0,1700::/111,5000::/4,e000::/37,9000::/75
 n0 wg set wg0 peer "$pub2" allowed-ips ::/0
 n0 wg set wg0 peer "$pub2" remove
-low_order_points=( AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= 4Ot6fDtBuK4WVuP68Z/EatoJjeucMrH9hmIFFl9JuAA= X5yVvKNQjCSx0LFVnIPvWwREXMRYHI6G2CJO3dCfEVc= 7P///////////////////////////////////////38= 7f///////////////////////////////////////38= 7v///////////////////////////////////////38= )
-n0 wg set wg0 private-key /dev/null ${low_order_points[@]/#/peer }
-[[ -z $(n0 wg show wg0 peers) ]]
-n0 wg set wg0 private-key <(echo "$key1") ${low_order_points[@]/#/peer }
-[[ -z $(n0 wg show wg0 peers) ]]
+for low_order_point in AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= 4Ot6fDtBuK4WVuP68Z/EatoJjeucMrH9hmIFFl9JuAA= X5yVvKNQjCSx0LFVnIPvWwREXMRYHI6G2CJO3dCfEVc= 7P///////////////////////////////////////38= 7f///////////////////////////////////////38= 7v///////////////////////////////////////38=; do
+	n0 wg set wg0 peer "$low_order_point" persistent-keepalive 1 endpoint 127.0.0.1:1111
+done
+[[ -n $(n0 wg show wg0 peers) ]]
+exec 4< <(n0 ncat -l -u -p 1111)
+ncat_pid=$!
+waitncatudp $netns0 $ncat_pid
+ip0 link set wg0 up
+! read -r -n 1 -t 2 <&4 || false
+kill $ncat_pid
 ip0 link del wg0
 
+# Ensure that dst_cache references don't outlive netns lifetime
+ip1 link add dev wg0 type wireguard
+ip2 link add dev wg0 type wireguard
+configure_peers
+ip1 link add veth1 type veth peer name veth2
+ip1 link set veth2 netns $netns2
+ip1 addr add fd00:aa::1/64 dev veth1
+ip2 addr add fd00:aa::2/64 dev veth2
+ip1 link set veth1 up
+ip2 link set veth2 up
+waitiface $netns1 veth1
+waitiface $netns2 veth2
+ip1 -6 route add default dev veth1 via fd00:aa::2
+ip2 -6 route add default dev veth2 via fd00:aa::1
+n1 wg set wg0 peer "$pub2" endpoint [fd00:aa::2]:2
+n2 wg set wg0 peer "$pub1" endpoint [fd00:aa::1]:1
+n1 ping6 -c 1 fd00::2
+pp ip netns delete $netns1
+pp ip netns delete $netns2
+pp ip netns add $netns1
+pp ip netns add $netns2
+
+# Ensure there aren't circular reference loops
+ip1 link add wg1 type wireguard
+ip2 link add wg2 type wireguard
+ip1 link set wg1 netns $netns2
+ip2 link set wg2 netns $netns1
+pp ip netns delete $netns1
+pp ip netns delete $netns2
+pp ip netns add $netns1
+pp ip netns add $netns2
+
+sleep 2 # Wait for cleanup and grace periods
 declare -A objects
 while read -t 0.1 -r line 2>/dev/null || [[ $? -ne 142 ]]; do
-	[[ $line =~ .*(wg[0-9]+:\ [A-Z][a-z]+\ [0-9]+)\ .*(created|destroyed).* ]] || continue
+	[[ $line =~ .*(wg[0-9]+:\ [A-Z][a-z]+\ ?[0-9]*)\ .*(created|destroyed).* ]] || continue
 	objects["${BASH_REMATCH[1]}"]+="${BASH_REMATCH[2]}"
 done < /dev/kmsg
 alldeleted=1
 for object in "${!objects[@]}"; do
-	if [[ ${objects["$object"]} != *createddestroyed ]]; then
+	if [[ ${objects["$object"]} != *createddestroyed && ${objects["$object"]} != *createdcreateddestroyeddestroyed ]]; then
 		echo "Error: $object: merely ${objects["$object"]}" >&3
 		alldeleted=0
 	fi

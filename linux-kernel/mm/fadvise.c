@@ -22,6 +22,8 @@
 
 #include <asm/unistd.h>
 
+#include "internal.h"
+
 /*
  * POSIX_FADV_WILLNEED could set PG_Referenced, and POSIX_FADV_NOREUSE could
  * deactivate the pages and clear PG_Referenced.
@@ -70,7 +72,7 @@ int generic_fadvise(struct file *file, loff_t offset, loff_t len, int advice)
 	 */
 	endbyte = (u64)offset + (u64)len;
 	if (!len || endbyte < len)
-		endbyte = -1;
+		endbyte = LLONG_MAX;
 	else
 		endbyte--;		/* inclusive */
 
@@ -78,7 +80,7 @@ int generic_fadvise(struct file *file, loff_t offset, loff_t len, int advice)
 	case POSIX_FADV_NORMAL:
 		file->f_ra.ra_pages = bdi->ra_pages;
 		spin_lock(&file->f_lock);
-		file->f_mode &= ~FMODE_RANDOM;
+		file->f_mode &= ~(FMODE_RANDOM | FMODE_NOREUSE);
 		spin_unlock(&file->f_lock);
 		break;
 	case POSIX_FADV_RANDOM:
@@ -102,18 +104,16 @@ int generic_fadvise(struct file *file, loff_t offset, loff_t len, int advice)
 		if (!nrpages)
 			nrpages = ~0UL;
 
-		/*
-		 * Ignore return value because fadvise() shall return
-		 * success even if filesystem can't retrieve a hint,
-		 */
 		force_page_cache_readahead(mapping, file, start_index, nrpages);
 		break;
 	case POSIX_FADV_NOREUSE:
+		spin_lock(&file->f_lock);
+		file->f_mode |= FMODE_NOREUSE;
+		spin_unlock(&file->f_lock);
 		break;
 	case POSIX_FADV_DONTNEED:
-		if (!inode_write_congested(mapping->host))
-			__filemap_fdatawrite_range(mapping, offset, endbyte,
-						   WB_SYNC_NONE);
+		__filemap_fdatawrite_range(mapping, offset, endbyte,
+					   WB_SYNC_NONE);
 
 		/*
 		 * First and last FULL page! Partial pages are deliberately
@@ -143,7 +143,7 @@ int generic_fadvise(struct file *file, loff_t offset, loff_t len, int advice)
 		}
 
 		if (end_index >= start_index) {
-			unsigned long count;
+			unsigned long nr_pagevec = 0;
 
 			/*
 			 * It's common to FADV_DONTNEED right after
@@ -156,8 +156,9 @@ int generic_fadvise(struct file *file, loff_t offset, loff_t len, int advice)
 			 */
 			lru_add_drain();
 
-			count = invalidate_mapping_pages(mapping,
-						start_index, end_index);
+			invalidate_mapping_pagevec(mapping,
+						start_index, end_index,
+						&nr_pagevec);
 
 			/*
 			 * If fewer pages were invalidated than expected then
@@ -165,7 +166,7 @@ int generic_fadvise(struct file *file, loff_t offset, loff_t len, int advice)
 			 * a per-cpu pagevec for a remote CPU. Drain all
 			 * pagevecs and try again.
 			 */
-			if (count < (end_index - start_index + 1)) {
+			if (nr_pagevec) {
 				lru_add_drain_all();
 				invalidate_mapping_pages(mapping, start_index,
 						end_index);
@@ -214,6 +215,17 @@ SYSCALL_DEFINE4(fadvise64_64, int, fd, loff_t, offset, loff_t, len, int, advice)
 SYSCALL_DEFINE4(fadvise64, int, fd, loff_t, offset, size_t, len, int, advice)
 {
 	return ksys_fadvise64_64(fd, offset, len, advice);
+}
+
+#endif
+
+#if defined(CONFIG_COMPAT) && defined(__ARCH_WANT_COMPAT_FADVISE64_64)
+
+COMPAT_SYSCALL_DEFINE6(fadvise64_64, int, fd, compat_arg_u64_dual(offset),
+		       compat_arg_u64_dual(len), int, advice)
+{
+	return ksys_fadvise64_64(fd, compat_arg_u64_glue(offset),
+				 compat_arg_u64_glue(len), advice);
 }
 
 #endif

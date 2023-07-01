@@ -540,7 +540,7 @@ static const struct samsung_div_clock exynos5800_div_clks[] __initconst = {
 
 static const struct samsung_gate_clock exynos5800_gate_clks[] __initconst = {
 	GATE(CLK_ACLK550_CAM, "aclk550_cam", "mout_user_aclk550_cam",
-				GATE_BUS_TOP, 24, 0, 0),
+				GATE_BUS_TOP, 24, CLK_IS_CRITICAL, 0),
 	GATE(CLK_ACLK432_SCALER, "aclk432_scaler", "mout_user_aclk432_scaler",
 				GATE_BUS_TOP, 27, CLK_IS_CRITICAL, 0),
 };
@@ -596,13 +596,14 @@ static const struct samsung_gate_clock exynos5420_gate_clks[] __initconst = {
 static const struct samsung_mux_clock exynos5x_mux_clks[] __initconst = {
 	MUX(0, "mout_user_pclk66_gpio", mout_user_pclk66_gpio_p,
 			SRC_TOP7, 4, 1),
-	MUX(0, "mout_mspll_kfc", mout_mspll_cpu_p, SRC_TOP7, 8, 2),
-	MUX(0, "mout_mspll_cpu", mout_mspll_cpu_p, SRC_TOP7, 12, 2),
-
-	MUX_F(0, "mout_apll", mout_apll_p, SRC_CPU, 0, 1,
+	MUX(CLK_MOUT_MSPLL_KFC, "mout_mspll_kfc", mout_mspll_cpu_p,
+	    SRC_TOP7, 8, 2),
+	MUX(CLK_MOUT_MSPLL_CPU, "mout_mspll_cpu", mout_mspll_cpu_p,
+	    SRC_TOP7, 12, 2),
+	MUX_F(CLK_MOUT_APLL, "mout_apll", mout_apll_p, SRC_CPU, 0, 1,
 	      CLK_SET_RATE_PARENT | CLK_RECALC_NEW_RATES, 0),
 	MUX(0, "mout_cpu", mout_cpu_p, SRC_CPU, 16, 1),
-	MUX_F(0, "mout_kpll", mout_kpll_p, SRC_KFC, 0, 1,
+	MUX_F(CLK_MOUT_KPLL, "mout_kpll", mout_kpll_p, SRC_KFC, 0, 1,
 	      CLK_SET_RATE_PARENT | CLK_RECALC_NEW_RATES, 0),
 	MUX(0, "mout_kfc", mout_kfc_p, SRC_KFC, 16, 1),
 
@@ -712,8 +713,8 @@ static const struct samsung_mux_clock exynos5x_mux_clks[] __initconst = {
 			SRC_TOP12, 8, 1),
 	MUX(0, "mout_sw_aclk266_g2d", mout_sw_aclk266_g2d_p,
 			SRC_TOP12, 12, 1),
-	MUX_F(0, "mout_sw_aclk_g3d", mout_sw_aclk_g3d_p, SRC_TOP12, 16, 1,
-	      CLK_SET_RATE_PARENT, 0),
+	MUX_F(CLK_MOUT_SW_ACLK_G3D, "mout_sw_aclk_g3d", mout_sw_aclk_g3d_p,
+			SRC_TOP12, 16, 1, CLK_SET_RATE_PARENT, 0),
 	MUX(0, "mout_sw_aclk300_jpeg", mout_sw_aclk300_jpeg_p,
 			SRC_TOP12, 20, 1),
 	MUX(CLK_MOUT_SW_ACLK300, "mout_sw_aclk300_disp1",
@@ -943,25 +944,25 @@ static const struct samsung_gate_clock exynos5x_gate_clks[] __initconst = {
 	GATE(0, "aclk300_jpeg", "mout_user_aclk300_jpeg",
 			GATE_BUS_TOP, 4, CLK_IGNORE_UNUSED, 0),
 	GATE(0, "aclk333_432_isp0", "mout_user_aclk333_432_isp0",
-			GATE_BUS_TOP, 5, 0, 0),
+			GATE_BUS_TOP, 5, CLK_IS_CRITICAL, 0),
 	GATE(0, "aclk300_gscl", "mout_user_aclk300_gscl",
 			GATE_BUS_TOP, 6, CLK_IS_CRITICAL, 0),
 	GATE(0, "aclk333_432_gscl", "mout_user_aclk333_432_gscl",
 			GATE_BUS_TOP, 7, CLK_IGNORE_UNUSED, 0),
 	GATE(0, "aclk333_432_isp", "mout_user_aclk333_432_isp",
-			GATE_BUS_TOP, 8, 0, 0),
+			GATE_BUS_TOP, 8, CLK_IS_CRITICAL, 0),
 	GATE(CLK_PCLK66_GPIO, "pclk66_gpio", "mout_user_pclk66_gpio",
 			GATE_BUS_TOP, 9, CLK_IGNORE_UNUSED, 0),
 	GATE(0, "aclk66_psgen", "mout_user_aclk66_psgen",
 			GATE_BUS_TOP, 10, CLK_IGNORE_UNUSED, 0),
 	GATE(0, "aclk266_isp", "mout_user_aclk266_isp",
-			GATE_BUS_TOP, 13, 0, 0),
+			GATE_BUS_TOP, 13, CLK_IS_CRITICAL, 0),
 	GATE(0, "aclk166", "mout_user_aclk166",
 			GATE_BUS_TOP, 14, CLK_IGNORE_UNUSED, 0),
 	GATE(CLK_ACLK333, "aclk333", "mout_user_aclk333",
 			GATE_BUS_TOP, 15, CLK_IS_CRITICAL, 0),
 	GATE(0, "aclk400_isp", "mout_user_aclk400_isp",
-			GATE_BUS_TOP, 16, 0, 0),
+			GATE_BUS_TOP, 16, CLK_IS_CRITICAL, 0),
 	GATE(0, "aclk400_mscl", "mout_user_aclk400_mscl",
 			GATE_BUS_TOP, 17, CLK_IS_CRITICAL, 0),
 	GATE(0, "aclk200_disp1", "mout_user_aclk200_disp1",
@@ -1161,9 +1162,11 @@ static const struct samsung_gate_clock exynos5x_gate_clks[] __initconst = {
 			GATE_IP_GSCL1, 3, 0, 0),
 	GATE(CLK_SMMU_FIMCL1, "smmu_fimcl1", "dout_gscl_blk_333",
 			GATE_IP_GSCL1, 4, 0, 0),
-	GATE(CLK_GSCL_WA, "gscl_wa", "sclk_gscl_wa", GATE_IP_GSCL1, 12, 0, 0),
-	GATE(CLK_GSCL_WB, "gscl_wb", "sclk_gscl_wb", GATE_IP_GSCL1, 13, 0, 0),
-	GATE(CLK_SMMU_FIMCL3, "smmu_fimcl3,", "dout_gscl_blk_333",
+	GATE(CLK_GSCL_WA, "gscl_wa", "sclk_gscl_wa", GATE_IP_GSCL1, 12,
+			CLK_IS_CRITICAL, 0),
+	GATE(CLK_GSCL_WB, "gscl_wb", "sclk_gscl_wb", GATE_IP_GSCL1, 13,
+			CLK_IS_CRITICAL, 0),
+	GATE(CLK_SMMU_FIMCL3, "smmu_fimcl3", "dout_gscl_blk_333",
 			GATE_IP_GSCL1, 16, 0, 0),
 	GATE(CLK_FIMC_LITE3, "fimc_lite3", "aclk333_432_gscl",
 			GATE_IP_GSCL1, 17, 0, 0),
@@ -1548,6 +1551,20 @@ static const struct exynos_cpuclk_cfg_data exynos5420_kfcclk_d[] __initconst = {
 	{  0 },
 };
 
+static const struct samsung_cpu_clock exynos5420_cpu_clks[] __initconst = {
+	CPU_CLK(CLK_ARM_CLK, "armclk", CLK_MOUT_APLL, CLK_MOUT_MSPLL_CPU, 0, 0x200,
+			exynos5420_eglclk_d),
+	CPU_CLK(CLK_KFC_CLK, "kfcclk", CLK_MOUT_KPLL, CLK_MOUT_MSPLL_KFC, 0, 0x28200,
+			exynos5420_kfcclk_d),
+};
+
+static const struct samsung_cpu_clock exynos5800_cpu_clks[] __initconst = {
+	CPU_CLK(CLK_ARM_CLK, "armclk", CLK_MOUT_APLL, CLK_MOUT_MSPLL_CPU, 0, 0x200,
+			exynos5800_eglclk_d),
+	CPU_CLK(CLK_KFC_CLK, "kfcclk", CLK_MOUT_KPLL, CLK_MOUT_MSPLL_KFC, 0, 0x28200,
+			exynos5420_kfcclk_d),
+};
+
 static const struct of_device_id ext_clk_match[] __initconst = {
 	{ .compatible = "samsung,exynos5420-oscclk", .data = (void *)0, },
 	{ },
@@ -1558,6 +1575,7 @@ static void __init exynos5x_clk_init(struct device_node *np,
 		enum exynos5x_soc soc)
 {
 	struct samsung_clk_provider *ctx;
+	struct clk_hw **hws;
 
 	if (np) {
 		reg_base = of_iomap(np, 0);
@@ -1570,12 +1588,13 @@ static void __init exynos5x_clk_init(struct device_node *np,
 	exynos5x_soc = soc;
 
 	ctx = samsung_clk_init(np, reg_base, CLK_NR_CLKS);
+	hws = ctx->clk_data.hws;
 
 	samsung_clk_of_register_fixed_ext(ctx, exynos5x_fixed_rate_ext_clks,
 			ARRAY_SIZE(exynos5x_fixed_rate_ext_clks),
 			ext_clk_match);
 
-	if (_get_rate("fin_pll") == 24 * MHZ) {
+	if (clk_hw_get_rate(hws[CLK_FIN_PLL]) == 24 * MHZ) {
 		exynos5x_plls[apll].rate_table = exynos5420_pll2550x_24mhz_tbl;
 		exynos5x_plls[epll].rate_table = exynos5420_epll_24mhz_tbl;
 		exynos5x_plls[kpll].rate_table = exynos5420_pll2550x_24mhz_tbl;
@@ -1620,17 +1639,12 @@ static void __init exynos5x_clk_init(struct device_node *np,
 	}
 
 	if (soc == EXYNOS5420) {
-		exynos_register_cpu_clock(ctx, CLK_ARM_CLK, "armclk",
-			mout_cpu_p[0], mout_cpu_p[1], 0x200,
-			exynos5420_eglclk_d, ARRAY_SIZE(exynos5420_eglclk_d), 0);
+		samsung_clk_register_cpu(ctx, exynos5420_cpu_clks,
+				ARRAY_SIZE(exynos5420_cpu_clks));
 	} else {
-		exynos_register_cpu_clock(ctx, CLK_ARM_CLK, "armclk",
-			mout_cpu_p[0], mout_cpu_p[1], 0x200,
-			exynos5800_eglclk_d, ARRAY_SIZE(exynos5800_eglclk_d), 0);
+		samsung_clk_register_cpu(ctx, exynos5800_cpu_clks,
+				ARRAY_SIZE(exynos5800_cpu_clks));
 	}
-	exynos_register_cpu_clock(ctx, CLK_KFC_CLK, "kfcclk",
-		mout_kfc_p[0], mout_kfc_p[1], 0x28200,
-		exynos5420_kfcclk_d, ARRAY_SIZE(exynos5420_kfcclk_d), 0);
 
 	samsung_clk_extended_sleep_init(reg_base,
 		exynos5x_clk_regs, ARRAY_SIZE(exynos5x_clk_regs),
@@ -1652,7 +1666,12 @@ static void __init exynos5x_clk_init(struct device_node *np,
 	 * that the internal busses get their clock regardless of the
 	 * main G3D clock enablement status.
 	 */
-	clk_prepare_enable(__clk_lookup("mout_sw_aclk_g3d"));
+	clk_prepare_enable(hws[CLK_MOUT_SW_ACLK_G3D]->clk);
+	/*
+	 * Keep top BPLL mux enabled permanently to ensure that DRAM operates
+	 * properly.
+	 */
+	clk_prepare_enable(hws[CLK_MOUT_BPLL]->clk);
 
 	samsung_clk_of_add_provider(np, ctx);
 }

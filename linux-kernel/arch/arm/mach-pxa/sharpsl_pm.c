@@ -24,7 +24,7 @@
 
 #include <asm/mach-types.h>
 #include "pm.h"
-#include <mach/pxa2xx-regs.h>
+#include "pxa2xx-regs.h"
 #include "regs-rtc.h"
 #include "sharpsl_pm.h"
 
@@ -170,10 +170,6 @@ extern int max1111_read_channel(int);
  */
 int sharpsl_pm_pxa_read_max1111(int channel)
 {
-	/* Ugly, better move this function into another module */
-	if (machine_is_tosa())
-	    return 0;
-
 	/* max1111 accepts channels from 0-3, however,
 	 * it is encoded from 0-7 here in the code.
 	 */

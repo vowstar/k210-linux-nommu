@@ -85,11 +85,12 @@ static int tb_path_find_src_hopid(struct tb_port *src,
  * @dst_hopid: HopID to the @dst (%-1 if don't care)
  * @last: Last port is filled here if not %NULL
  * @name: Name of the path
+ * @alloc_hopid: Allocate HopIDs for the ports
  *
  * Follows a path starting from @src and @src_hopid to the last output
- * port of the path. Allocates HopIDs for the visited ports. Call
- * tb_path_free() to release the path and allocated HopIDs when the path
- * is not needed anymore.
+ * port of the path. Allocates HopIDs for the visited ports (if
+ * @alloc_hopid is true). Call tb_path_free() to release the path and
+ * allocated HopIDs when the path is not needed anymore.
  *
  * Note function discovers also incomplete paths so caller should check
  * that the @dst port is the expected one. If it is not, the path can be
@@ -99,7 +100,8 @@ static int tb_path_find_src_hopid(struct tb_port *src,
  */
 struct tb_path *tb_path_discover(struct tb_port *src, int src_hopid,
 				 struct tb_port *dst, int dst_hopid,
-				 struct tb_port **last, const char *name)
+				 struct tb_port **last, const char *name,
+				 bool alloc_hopid)
 {
 	struct tb_port *out_port;
 	struct tb_regs_hop hop;
@@ -156,12 +158,16 @@ struct tb_path *tb_path_discover(struct tb_port *src, int src_hopid,
 	path->tb = src->sw->tb;
 	path->path_length = num_hops;
 	path->activated = true;
+	path->alloc_hopid = alloc_hopid;
 
 	path->hops = kcalloc(num_hops, sizeof(*path->hops), GFP_KERNEL);
 	if (!path->hops) {
 		kfree(path);
 		return NULL;
 	}
+
+	tb_dbg(path->tb, "discovering %s path starting from %llx:%u\n",
+	       path->name, tb_route(src->sw), src->port);
 
 	p = src;
 	h = src_hopid;
@@ -177,13 +183,14 @@ struct tb_path *tb_path_discover(struct tb_port *src, int src_hopid,
 			goto err;
 		}
 
-		if (tb_port_alloc_in_hopid(p, h, h) < 0)
+		if (alloc_hopid && tb_port_alloc_in_hopid(p, h, h) < 0)
 			goto err;
 
 		out_port = &sw->ports[hop.out_port];
 		next_hop = hop.next_hop;
 
-		if (tb_port_alloc_out_hopid(out_port, next_hop, next_hop) < 0) {
+		if (alloc_hopid &&
+		    tb_port_alloc_out_hopid(out_port, next_hop, next_hop) < 0) {
 			tb_port_release_in_hopid(p, h);
 			goto err;
 		}
@@ -194,10 +201,13 @@ struct tb_path *tb_path_discover(struct tb_port *src, int src_hopid,
 		path->hops[i].out_port = out_port;
 		path->hops[i].next_hop_index = next_hop;
 
+		tb_dump_hop(&path->hops[i], &hop);
+
 		h = next_hop;
 		p = out_port->remote;
 	}
 
+	tb_dbg(path->tb, "path discovery complete\n");
 	return path;
 
 err:
@@ -229,7 +239,7 @@ struct tb_path *tb_path_alloc(struct tb *tb, struct tb_port *src, int src_hopid,
 			      struct tb_port *dst, int dst_hopid, int link_nr,
 			      const char *name)
 {
-	struct tb_port *in_port, *out_port;
+	struct tb_port *in_port, *out_port, *first_port, *last_port;
 	int in_hopid, out_hopid;
 	struct tb_path *path;
 	size_t num_hops;
@@ -239,18 +249,31 @@ struct tb_path *tb_path_alloc(struct tb *tb, struct tb_port *src, int src_hopid,
 	if (!path)
 		return NULL;
 
-	/*
-	 * Number of hops on a path is the distance between the two
-	 * switches plus the source adapter port.
-	 */
-	num_hops = abs(tb_route_length(tb_route(src->sw)) -
-		       tb_route_length(tb_route(dst->sw))) + 1;
+	first_port = last_port = NULL;
+	i = 0;
+	tb_for_each_port_on_path(src, dst, in_port) {
+		if (!first_port)
+			first_port = in_port;
+		last_port = in_port;
+		i++;
+	}
+
+	/* Check that src and dst are reachable */
+	if (first_port != src || last_port != dst) {
+		kfree(path);
+		return NULL;
+	}
+
+	/* Each hop takes two ports */
+	num_hops = i / 2;
 
 	path->hops = kcalloc(num_hops, sizeof(*path->hops), GFP_KERNEL);
 	if (!path->hops) {
 		kfree(path);
 		return NULL;
 	}
+
+	path->alloc_hopid = true;
 
 	in_hopid = src_hopid;
 	out_port = NULL;
@@ -334,17 +357,19 @@ err:
  */
 void tb_path_free(struct tb_path *path)
 {
-	int i;
+	if (path->alloc_hopid) {
+		int i;
 
-	for (i = 0; i < path->path_length; i++) {
-		const struct tb_path_hop *hop = &path->hops[i];
+		for (i = 0; i < path->path_length; i++) {
+			const struct tb_path_hop *hop = &path->hops[i];
 
-		if (hop->in_port)
-			tb_port_release_in_hopid(hop->in_port,
-						 hop->in_hop_index);
-		if (hop->out_port)
-			tb_port_release_out_hopid(hop->out_port,
-						  hop->next_hop_index);
+			if (hop->in_port)
+				tb_port_release_in_hopid(hop->in_port,
+							 hop->in_hop_index);
+			if (hop->out_port)
+				tb_port_release_out_hopid(hop->out_port,
+							  hop->next_hop_index);
+		}
 	}
 
 	kfree(path->hops);
@@ -356,7 +381,7 @@ static void __tb_path_deallocate_nfc(struct tb_path *path, int first_hop)
 	int i, res;
 	for (i = first_hop; i < path->path_length; i++) {
 		res = tb_port_add_nfc_credits(path->hops[i].in_port,
-					      -path->nfc_credits);
+					      -path->hops[i].nfc_credits);
 		if (res)
 			tb_port_warn(path->hops[i].in_port,
 				     "nfc credits deallocation failed for hop %d\n",
@@ -395,10 +420,17 @@ static int __tb_path_deactivate_hop(struct tb_port *port, int hop_index,
 
 		if (!hop.pending) {
 			if (clear_fc) {
-				/* Clear flow control */
-				hop.ingress_fc = 0;
+				/*
+				 * Clear flow control. Protocol adapters
+				 * IFC and ISE bits are vendor defined
+				 * in the USB4 spec so we clear them
+				 * only for pre-USB4 adapters.
+				 */
+				if (!tb_switch_is_usb4(port->sw)) {
+					hop.ingress_fc = 0;
+					hop.ingress_shared_buffer = 0;
+				}
 				hop.egress_fc = 0;
-				hop.ingress_shared_buffer = 0;
 				hop.egress_shared_buffer = 0;
 
 				return tb_port_write(port, &hop, TB_CFG_HOPS,
@@ -436,7 +468,7 @@ void tb_path_deactivate(struct tb_path *path)
 		return;
 	}
 	tb_dbg(path->tb,
-	       "deactivating %s path from %llx:%x to %llx:%x\n",
+	       "deactivating %s path from %llx:%u to %llx:%u\n",
 	       path->name, tb_route(path->hops[0].in_port->sw),
 	       path->hops[0].in_port->port,
 	       tb_route(path->hops[path->path_length - 1].out_port->sw),
@@ -448,6 +480,7 @@ void tb_path_deactivate(struct tb_path *path)
 
 /**
  * tb_path_activate() - activate a path
+ * @path: Path to activate
  *
  * Activate a path starting with the last hop and iterating backwards. The
  * caller must fill path->hops before calling tb_path_activate().
@@ -464,7 +497,7 @@ int tb_path_activate(struct tb_path *path)
 	}
 
 	tb_dbg(path->tb,
-	       "activating %s path from %llx:%x to %llx:%x\n",
+	       "activating %s path from %llx:%u to %llx:%u\n",
 	       path->name, tb_route(path->hops[0].in_port->sw),
 	       path->hops[0].in_port->port,
 	       tb_route(path->hops[path->path_length - 1].out_port->sw),
@@ -483,7 +516,7 @@ int tb_path_activate(struct tb_path *path)
 	/* Add non flow controlled credits. */
 	for (i = path->path_length - 1; i >= 0; i--) {
 		res = tb_port_add_nfc_credits(path->hops[i].in_port,
-					      path->nfc_credits);
+					      path->hops[i].nfc_credits);
 		if (res) {
 			__tb_path_deallocate_nfc(path, i);
 			goto err;
@@ -543,6 +576,7 @@ err:
 
 /**
  * tb_path_is_invalid() - check whether any ports on the path are invalid
+ * @path: Path to check
  *
  * Return: Returns true if the path is invalid, false otherwise.
  */
@@ -559,21 +593,20 @@ bool tb_path_is_invalid(struct tb_path *path)
 }
 
 /**
- * tb_path_switch_on_path() - Does the path go through certain switch
+ * tb_path_port_on_path() - Does the path go through certain port
  * @path: Path to check
- * @sw: Switch to check
+ * @port: Switch to check
  *
- * Goes over all hops on path and checks if @sw is any of them.
+ * Goes over all hops on path and checks if @port is any of them.
  * Direction does not matter.
  */
-bool tb_path_switch_on_path(const struct tb_path *path,
-			    const struct tb_switch *sw)
+bool tb_path_port_on_path(const struct tb_path *path, const struct tb_port *port)
 {
 	int i;
 
 	for (i = 0; i < path->path_length; i++) {
-		if (path->hops[i].in_port->sw == sw ||
-		    path->hops[i].out_port->sw == sw)
+		if (path->hops[i].in_port == port ||
+		    path->hops[i].out_port == port)
 			return true;
 	}
 

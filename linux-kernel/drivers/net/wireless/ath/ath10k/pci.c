@@ -116,7 +116,7 @@ static void ath10k_pci_htt_rx_cb(struct ath10k_ce_pipe *ce_state);
 static void ath10k_pci_htt_htc_rx_cb(struct ath10k_ce_pipe *ce_state);
 static void ath10k_pci_pktlog_rx_cb(struct ath10k_ce_pipe *ce_state);
 
-static struct ce_attr host_ce_config_wlan[] = {
+static const struct ce_attr pci_host_ce_config_wlan[] = {
 	/* CE0: host->target HTC control and raw streams */
 	{
 		.flags = CE_ATTR_FLAGS,
@@ -222,7 +222,7 @@ static struct ce_attr host_ce_config_wlan[] = {
 };
 
 /* Target firmware's Copy Engine configuration. */
-static struct ce_pipe_config target_ce_config_wlan[] = {
+static const struct ce_pipe_config pci_target_ce_config_wlan[] = {
 	/* CE0: host->target HTC control and raw streams */
 	{
 		.pipenum = __cpu_to_le32(0),
@@ -335,7 +335,7 @@ static struct ce_pipe_config target_ce_config_wlan[] = {
  * This table is derived from the CE_PCI TABLE, above.
  * It is passed to the Target at startup for use by firmware.
  */
-static struct service_to_pipe target_service_to_ce_map_wlan[] = {
+static const struct ce_service_to_pipe pci_target_service_to_ce_map_wlan[] = {
 	{
 		__cpu_to_le32(ATH10K_HTC_SVC_ID_WMI_DATA_VO),
 		__cpu_to_le32(PIPEDIR_OUT),	/* out = UL = host -> target */
@@ -1244,7 +1244,7 @@ static void ath10k_pci_process_htt_rx_cb(struct ath10k_ce_pipe *ce_state,
 	unsigned int nbytes, max_nbytes, nentries;
 	int orig_len;
 
-	/* No need to aquire ce_lock for CE5, since this is the only place CE5
+	/* No need to acquire ce_lock for CE5, since this is the only place CE5
 	 * is processed other than init and deinit. Before releasing CE5
 	 * buffers, interrupts are disabled. Thus CE5 access is serialized.
 	 */
@@ -1774,7 +1774,7 @@ static void ath10k_pci_fw_dump_work(struct work_struct *work)
 
 	mutex_unlock(&ar->dump_mutex);
 
-	queue_work(ar->workqueue, &ar->restart_work);
+	ath10k_core_start_recovery(ar);
 }
 
 static void ath10k_pci_fw_crashed_dump(struct ath10k *ar)
@@ -1787,6 +1787,8 @@ static void ath10k_pci_fw_crashed_dump(struct ath10k *ar)
 void ath10k_pci_hif_send_complete_check(struct ath10k *ar, u8 pipe,
 					int force)
 {
+	struct ath10k_pci *ar_pci = ath10k_pci_priv(ar);
+
 	ath10k_dbg(ar, ATH10K_DBG_PCI, "pci hif send complete check\n");
 
 	if (!force) {
@@ -1804,7 +1806,7 @@ void ath10k_pci_hif_send_complete_check(struct ath10k *ar, u8 pipe,
 		 * If at least 50% of the total resources are still available,
 		 * don't bother checking again yet.
 		 */
-		if (resources > (host_ce_config_wlan[pipe].src_nentries >> 1))
+		if (resources > (ar_pci->attr[pipe].src_nentries >> 1))
 			return;
 	}
 	ath10k_ce_per_engine_service(ar, pipe);
@@ -1820,14 +1822,15 @@ static void ath10k_pci_rx_retry_sync(struct ath10k *ar)
 int ath10k_pci_hif_map_service_to_pipe(struct ath10k *ar, u16 service_id,
 				       u8 *ul_pipe, u8 *dl_pipe)
 {
-	const struct service_to_pipe *entry;
+	struct ath10k_pci *ar_pci = ath10k_pci_priv(ar);
+	const struct ce_service_to_pipe *entry;
 	bool ul_set = false, dl_set = false;
 	int i;
 
 	ath10k_dbg(ar, ATH10K_DBG_PCI, "pci hif map service\n");
 
-	for (i = 0; i < ARRAY_SIZE(target_service_to_ce_map_wlan); i++) {
-		entry = &target_service_to_ce_map_wlan[i];
+	for (i = 0; i < ARRAY_SIZE(pci_target_service_to_ce_map_wlan); i++) {
+		entry = &ar_pci->serv_to_pipe[i];
 
 		if (__le32_to_cpu(entry->service_id) != service_id)
 			continue;
@@ -1955,7 +1958,7 @@ static int ath10k_pci_hif_start(struct ath10k *ar)
 
 	ath10k_dbg(ar, ATH10K_DBG_BOOT, "boot hif start\n");
 
-	napi_enable(&ar->napi);
+	ath10k_core_napi_enable(ar);
 
 	ath10k_pci_irq_enable(ar);
 	ath10k_pci_rx_post(ar);
@@ -2072,8 +2075,10 @@ static void ath10k_pci_hif_stop(struct ath10k *ar)
 
 	ath10k_pci_irq_disable(ar);
 	ath10k_pci_irq_sync(ar);
-	napi_synchronize(&ar->napi);
-	napi_disable(&ar->napi);
+
+	ath10k_core_napi_sync_disable(ar);
+
+	cancel_work_sync(&ar_pci->dump_work);
 
 	/* Most likely the device has HTT Rx ring configured. The only way to
 	 * prevent the device from accessing (and possible corrupting) host
@@ -2180,7 +2185,7 @@ err_req:
 
 	if (ret == 0 && resp_len) {
 		*resp_len = min(*resp_len, xfer.resp_len);
-		memcpy(resp, tresp, xfer.resp_len);
+		memcpy(resp, tresp, *resp_len);
 	}
 err_dma:
 	kfree(treq);
@@ -2315,6 +2320,7 @@ static int ath10k_bus_get_num_banks(struct ath10k *ar)
 
 int ath10k_pci_init_config(struct ath10k *ar)
 {
+	struct ath10k_pci *ar_pci = ath10k_pci_priv(ar);
 	u32 interconnect_targ_addr;
 	u32 pcie_state_targ_addr = 0;
 	u32 pipe_cfg_targ_addr = 0;
@@ -2360,7 +2366,7 @@ int ath10k_pci_init_config(struct ath10k *ar)
 	}
 
 	ret = ath10k_pci_diag_write_mem(ar, pipe_cfg_targ_addr,
-					target_ce_config_wlan,
+					ar_pci->pipe_config,
 					sizeof(struct ce_pipe_config) *
 					NUM_TARGET_CE_CONFIG_WLAN);
 
@@ -2385,8 +2391,8 @@ int ath10k_pci_init_config(struct ath10k *ar)
 	}
 
 	ret = ath10k_pci_diag_write_mem(ar, svc_to_pipe_map,
-					target_service_to_ce_map_wlan,
-					sizeof(target_service_to_ce_map_wlan));
+					ar_pci->serv_to_pipe,
+					sizeof(pci_target_service_to_ce_map_wlan));
 	if (ret != 0) {
 		ath10k_err(ar, "Failed to write svc/pipe map: %d\n", ret);
 		return ret;
@@ -2458,23 +2464,24 @@ static void ath10k_pci_override_ce_config(struct ath10k *ar)
 {
 	struct ce_attr *attr;
 	struct ce_pipe_config *config;
+	struct ath10k_pci *ar_pci = ath10k_pci_priv(ar);
 
 	/* For QCA6174 we're overriding the Copy Engine 5 configuration,
 	 * since it is currently used for other feature.
 	 */
 
 	/* Override Host's Copy Engine 5 configuration */
-	attr = &host_ce_config_wlan[5];
+	attr = &ar_pci->attr[5];
 	attr->src_sz_max = 0;
 	attr->dest_nentries = 0;
 
 	/* Override Target firmware's Copy Engine configuration */
-	config = &target_ce_config_wlan[5];
+	config = &ar_pci->pipe_config[5];
 	config->pipedir = __cpu_to_le32(PIPEDIR_OUT);
 	config->nbytes_max = __cpu_to_le32(2048);
 
 	/* Map from service/endpoint to Copy Engine */
-	target_service_to_ce_map_wlan[15].pipenum = __cpu_to_le32(1);
+	ar_pci->serv_to_pipe[15].pipenum = __cpu_to_le32(1);
 }
 
 int ath10k_pci_alloc_pipes(struct ath10k *ar)
@@ -2490,7 +2497,7 @@ int ath10k_pci_alloc_pipes(struct ath10k *ar)
 		pipe->pipe_num = i;
 		pipe->hif_ce_state = ar;
 
-		ret = ath10k_ce_alloc_pipe(ar, i, &host_ce_config_wlan[i]);
+		ret = ath10k_ce_alloc_pipe(ar, i, &ar_pci->attr[i]);
 		if (ret) {
 			ath10k_err(ar, "failed to allocate copy engine pipe %d: %d\n",
 				   i, ret);
@@ -2503,7 +2510,7 @@ int ath10k_pci_alloc_pipes(struct ath10k *ar)
 			continue;
 		}
 
-		pipe->buf_sz = (size_t)(host_ce_config_wlan[i].src_sz_max);
+		pipe->buf_sz = (size_t)(ar_pci->attr[i].src_sz_max);
 	}
 
 	return 0;
@@ -2519,10 +2526,11 @@ void ath10k_pci_free_pipes(struct ath10k *ar)
 
 int ath10k_pci_init_pipes(struct ath10k *ar)
 {
+	struct ath10k_pci *ar_pci = ath10k_pci_priv(ar);
 	int i, ret;
 
 	for (i = 0; i < CE_COUNT; i++) {
-		ret = ath10k_ce_init_pipe(ar, i, &host_ce_config_wlan[i]);
+		ret = ath10k_ce_init_pipe(ar, i, &ar_pci->attr[i]);
 		if (ret) {
 			ath10k_err(ar, "failed to initialize copy engine pipe %d: %d\n",
 				   i, ret);
@@ -3207,8 +3215,7 @@ static void ath10k_pci_free_irq(struct ath10k *ar)
 
 void ath10k_pci_init_napi(struct ath10k *ar)
 {
-	netif_napi_add(&ar->napi_dev, &ar->napi, ath10k_pci_napi_poll,
-		       ATH10K_NAPI_BUDGET);
+	netif_napi_add(&ar->napi_dev, &ar->napi, ath10k_pci_napi_poll);
 }
 
 static int ath10k_pci_init_irq(struct ath10k *ar)
@@ -3229,7 +3236,7 @@ static int ath10k_pci_init_irq(struct ath10k *ar)
 		if (ret == 0)
 			return 0;
 
-		/* fall-through */
+		/* MHI failed, try legacy irq next */
 	}
 
 	/* Try legacy irq
@@ -3385,16 +3392,9 @@ static int ath10k_pci_claim(struct ath10k *ar)
 	}
 
 	/* Target expects 32 bit DMA. Enforce it. */
-	ret = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 	if (ret) {
 		ath10k_err(ar, "failed to set dma mask to 32-bit: %d\n", ret);
-		goto err_region;
-	}
-
-	ret = pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
-	if (ret) {
-		ath10k_err(ar, "failed to set consistent dma mask to 32-bit: %d\n",
-			   ret);
 		goto err_region;
 	}
 
@@ -3466,6 +3466,28 @@ int ath10k_pci_setup_resource(struct ath10k *ar)
 
 	timer_setup(&ar_pci->rx_post_retry, ath10k_pci_rx_replenish_retry, 0);
 
+	ar_pci->attr = kmemdup(pci_host_ce_config_wlan,
+			       sizeof(pci_host_ce_config_wlan),
+			       GFP_KERNEL);
+	if (!ar_pci->attr)
+		return -ENOMEM;
+
+	ar_pci->pipe_config = kmemdup(pci_target_ce_config_wlan,
+				      sizeof(pci_target_ce_config_wlan),
+				      GFP_KERNEL);
+	if (!ar_pci->pipe_config) {
+		ret = -ENOMEM;
+		goto err_free_attr;
+	}
+
+	ar_pci->serv_to_pipe = kmemdup(pci_target_service_to_ce_map_wlan,
+				       sizeof(pci_target_service_to_ce_map_wlan),
+				       GFP_KERNEL);
+	if (!ar_pci->serv_to_pipe) {
+		ret = -ENOMEM;
+		goto err_free_pipe_config;
+	}
+
 	if (QCA_REV_6174(ar) || QCA_REV_9377(ar))
 		ath10k_pci_override_ce_config(ar);
 
@@ -3473,18 +3495,31 @@ int ath10k_pci_setup_resource(struct ath10k *ar)
 	if (ret) {
 		ath10k_err(ar, "failed to allocate copy engine pipes: %d\n",
 			   ret);
-		return ret;
+		goto err_free_serv_to_pipe;
 	}
 
 	return 0;
+
+err_free_serv_to_pipe:
+	kfree(ar_pci->serv_to_pipe);
+err_free_pipe_config:
+	kfree(ar_pci->pipe_config);
+err_free_attr:
+	kfree(ar_pci->attr);
+	return ret;
 }
 
 void ath10k_pci_release_resource(struct ath10k *ar)
 {
+	struct ath10k_pci *ar_pci = ath10k_pci_priv(ar);
+
 	ath10k_pci_rx_retry_sync(ar);
 	netif_napi_del(&ar->napi);
 	ath10k_pci_ce_deinit(ar);
 	ath10k_pci_free_pipes(ar);
+	kfree(ar_pci->attr);
+	kfree(ar_pci->pipe_config);
+	kfree(ar_pci->serv_to_pipe);
 }
 
 static const struct ath10k_bus_ops ath10k_pci_bus_ops = {
@@ -3642,8 +3677,10 @@ static int ath10k_pci_probe(struct pci_dev *pdev,
 			ath10k_pci_soc_read32(ar, SOC_CHIP_ID_ADDRESS);
 		if (bus_params.chip_id != 0xffffffff) {
 			if (!ath10k_pci_chip_is_supported(pdev->device,
-							  bus_params.chip_id))
+							  bus_params.chip_id)) {
+				ret = -ENODEV;
 				goto err_unsupported;
+			}
 		}
 	}
 
@@ -3654,11 +3691,15 @@ static int ath10k_pci_probe(struct pci_dev *pdev,
 	}
 
 	bus_params.chip_id = ath10k_pci_soc_read32(ar, SOC_CHIP_ID_ADDRESS);
-	if (bus_params.chip_id == 0xffffffff)
+	if (bus_params.chip_id == 0xffffffff) {
+		ret = -ENODEV;
 		goto err_unsupported;
+	}
 
-	if (!ath10k_pci_chip_is_supported(pdev->device, bus_params.chip_id))
-		goto err_free_irq;
+	if (!ath10k_pci_chip_is_supported(pdev->device, bus_params.chip_id)) {
+		ret = -ENODEV;
+		goto err_unsupported;
+	}
 
 	ret = ath10k_core_register(ar, &bus_params);
 	if (ret) {
@@ -3674,10 +3715,9 @@ err_unsupported:
 
 err_free_irq:
 	ath10k_pci_free_irq(ar);
-	ath10k_pci_rx_retry_sync(ar);
 
 err_deinit_irq:
-	ath10k_pci_deinit_irq(ar);
+	ath10k_pci_release_resource(ar);
 
 err_sleep:
 	ath10k_pci_sleep_sync(ar);
@@ -3695,16 +3735,10 @@ err_core_destroy:
 static void ath10k_pci_remove(struct pci_dev *pdev)
 {
 	struct ath10k *ar = pci_get_drvdata(pdev);
-	struct ath10k_pci *ar_pci;
 
 	ath10k_dbg(ar, ATH10K_DBG_PCI, "pci remove\n");
 
 	if (!ar)
-		return;
-
-	ar_pci = ath10k_pci_priv(ar);
-
-	if (!ar_pci)
 		return;
 
 	ath10k_core_unregister(ar);
@@ -3758,18 +3792,22 @@ static struct pci_driver ath10k_pci_driver = {
 
 static int __init ath10k_pci_init(void)
 {
-	int ret;
+	int ret1, ret2;
 
-	ret = pci_register_driver(&ath10k_pci_driver);
-	if (ret)
+	ret1 = pci_register_driver(&ath10k_pci_driver);
+	if (ret1)
 		printk(KERN_ERR "failed to register ath10k pci driver: %d\n",
-		       ret);
+		       ret1);
 
-	ret = ath10k_ahb_init();
-	if (ret)
-		printk(KERN_ERR "ahb init failed: %d\n", ret);
+	ret2 = ath10k_ahb_init();
+	if (ret2)
+		printk(KERN_ERR "ahb init failed: %d\n", ret2);
 
-	return ret;
+	if (ret1 && ret2)
+		return ret1;
+
+	/* registered to at least one bus */
+	return 0;
 }
 module_init(ath10k_pci_init);
 

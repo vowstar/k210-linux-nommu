@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- *  linux/fs/9p/v9fs.c
- *
  *  This file contains functions assisting in mapping VFS to 9P2000
  *
  *  Copyright (C) 2004-2008 by Eric Van Hensbergen <ericvh@gmail.com>
@@ -16,7 +14,6 @@
 #include <linux/sched.h>
 #include <linux/cred.h>
 #include <linux/parser.h>
-#include <linux/idr.h>
 #include <linux/slab.h>
 #include <linux/seq_file.h>
 #include <net/9p/9p.h>
@@ -155,6 +152,7 @@ int v9fs_show_options(struct seq_file *m, struct dentry *root)
 /**
  * v9fs_parse_options - parse mount options into session structure
  * @v9ses: existing v9fs session information
+ * @opts: The mount option string
  *
  * Return 0 upon success, -ERRNO upon failure.
  */
@@ -165,7 +163,7 @@ static int v9fs_parse_options(struct v9fs_session_info *v9ses, char *opts)
 	substring_t args[MAX_OPT_ARGS];
 	char *p;
 	int option = 0;
-	char *s, *e;
+	char *s;
 	int ret = 0;
 
 	/* setup defaults */
@@ -189,8 +187,10 @@ static int v9fs_parse_options(struct v9fs_session_info *v9ses, char *opts)
 
 	while ((p = strsep(&options, ",")) != NULL) {
 		int token, r;
+
 		if (!*p)
 			continue;
+
 		token = match_token(p, tokens, args);
 		switch (token) {
 		case Opt_debug:
@@ -320,12 +320,13 @@ static int v9fs_parse_options(struct v9fs_session_info *v9ses, char *opts)
 				v9ses->flags |= V9FS_ACCESS_CLIENT;
 			} else {
 				uid_t uid;
+
 				v9ses->flags |= V9FS_ACCESS_SINGLE;
-				uid = simple_strtoul(s, &e, 10);
-				if (*e != '\0') {
-					ret = -EINVAL;
-					pr_info("Unknown access argument %s\n",
-						s);
+				r = kstrtouint(s, 10, &uid);
+				if (r) {
+					ret = r;
+					pr_info("Unknown access argument %s: %d\n",
+						s, r);
 					kfree(s);
 					continue;
 				}
@@ -467,7 +468,11 @@ struct p9_fid *v9fs_session_init(struct v9fs_session_info *v9ses,
 
 #ifdef CONFIG_9P_FSCACHE
 	/* register the session for caching */
-	v9fs_cache_session_get_cookie(v9ses);
+	if (v9ses->cache == CACHE_FSCACHE) {
+		rc = v9fs_cache_session_get_cookie(v9ses, dev_name);
+		if (rc < 0)
+			goto err_clnt;
+	}
 #endif
 	spin_lock(&v9fs_sessionlist_lock);
 	list_add(&v9ses->slist, &v9fs_sessionlist);
@@ -500,10 +505,8 @@ void v9fs_session_close(struct v9fs_session_info *v9ses)
 	}
 
 #ifdef CONFIG_9P_FSCACHE
-	if (v9ses->fscache) {
-		v9fs_cache_session_put_cookie(v9ses);
-		kfree(v9ses->cachetag);
-	}
+	fscache_relinquish_volume(v9fs_session_cache(v9ses), NULL, false);
+	kfree(v9ses->cachetag);
 #endif
 	kfree(v9ses->uname);
 	kfree(v9ses->aname);
@@ -520,7 +523,8 @@ void v9fs_session_close(struct v9fs_session_info *v9ses)
  * mark transport as disconnected and cancel all pending requests.
  */
 
-void v9fs_session_cancel(struct v9fs_session_info *v9ses) {
+void v9fs_session_cancel(struct v9fs_session_info *v9ses)
+{
 	p9_debug(P9_DEBUG_ERROR, "cancel session %p\n", v9ses);
 	p9_client_disconnect(v9ses->clnt);
 }
@@ -543,12 +547,9 @@ extern int v9fs_error_init(void);
 static struct kobject *v9fs_kobj;
 
 #ifdef CONFIG_9P_FSCACHE
-/**
- * caches_show - list caches associated with a session
- *
- * Returns the size of buffer written.
+/*
+ * List caches associated with a session
  */
-
 static ssize_t caches_show(struct kobject *kobj,
 			   struct kobj_attribute *attr,
 			   char *buf)
@@ -584,7 +585,7 @@ static struct attribute *v9fs_attrs[] = {
 	NULL,
 };
 
-static struct attribute_group v9fs_attr_group = {
+static const struct attribute_group v9fs_attr_group = {
 	.attrs = v9fs_attrs,
 };
 
@@ -621,11 +622,9 @@ static void v9fs_sysfs_cleanup(void)
 static void v9fs_inode_init_once(void *foo)
 {
 	struct v9fs_inode *v9inode = (struct v9fs_inode *)foo;
-#ifdef CONFIG_9P_FSCACHE
-	v9inode->fscache = NULL;
-#endif
+
 	memset(&v9inode->qid, 0, sizeof(v9inode->qid));
-	inode_init_once(&v9inode->vfs_inode);
+	inode_init_once(&v9inode->netfs.inode);
 }
 
 /**
@@ -662,23 +661,16 @@ static void v9fs_destroy_inode_cache(void)
 static int v9fs_cache_register(void)
 {
 	int ret;
+
 	ret = v9fs_init_inode_cache();
 	if (ret < 0)
 		return ret;
-#ifdef CONFIG_9P_FSCACHE
-	ret = fscache_register_netfs(&v9fs_cache_netfs);
-	if (ret < 0)
-		v9fs_destroy_inode_cache();
-#endif
 	return ret;
 }
 
 static void v9fs_cache_unregister(void)
 {
 	v9fs_destroy_inode_cache();
-#ifdef CONFIG_9P_FSCACHE
-	fscache_unregister_netfs(&v9fs_cache_netfs);
-#endif
 }
 
 /**
@@ -689,6 +681,7 @@ static void v9fs_cache_unregister(void)
 static int __init init_v9fs(void)
 {
 	int err;
+
 	pr_info("Installing v9fs 9p2000 file system support\n");
 	/* TODO: Setup list of registered trasnport modules */
 

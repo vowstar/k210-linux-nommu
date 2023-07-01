@@ -1,5 +1,5 @@
 /*
-* Copyright 2016 Advanced Micro Devices, Inc.
+* Copyright 2016-2020 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -34,6 +34,11 @@ struct dc;
 void dcn10_hw_sequencer_construct(struct dc *dc);
 
 int dcn10_get_vupdate_offset_from_vsync(struct pipe_ctx *pipe_ctx);
+void dcn10_calc_vupdate_position(
+		struct dc *dc,
+		struct pipe_ctx *pipe_ctx,
+		uint32_t *start_line,
+		uint32_t *end_line);
 void dcn10_setup_vupdate_interrupt(struct dc *dc, struct pipe_ctx *pipe_ctx);
 enum dc_status dcn10_enable_stream_timing(
 		struct pipe_ctx *pipe_ctx,
@@ -49,6 +54,7 @@ void dcn10_pipe_control_lock(
 	struct dc *dc,
 	struct pipe_ctx *pipe,
 	bool lock);
+void dcn10_cursor_lock(struct dc *dc, struct pipe_ctx *pipe, bool lock);
 void dcn10_blank_pixel_data(
 		struct dc *dc,
 		struct pipe_ctx *pipe_ctx,
@@ -70,10 +76,12 @@ void dcn10_reset_hw_ctx_wrap(
 		struct dc *dc,
 		struct dc_state *context);
 void dcn10_disable_plane(struct dc *dc, struct pipe_ctx *pipe_ctx);
-void dcn10_apply_ctx_for_surface(
+void dcn10_lock_all_pipes(
 		struct dc *dc,
-		const struct dc_stream_state *stream,
-		int num_planes,
+		struct dc_state *context,
+		bool lock);
+void dcn10_post_unlock_program_front_end(
+		struct dc *dc,
 		struct dc_state *context);
 void dcn10_hubp_pg_control(
 		struct dce_hwseq *hws,
@@ -96,6 +104,7 @@ void dcn10_program_pipe(
 void dcn10_program_gamut_remap(struct pipe_ctx *pipe_ctx);
 void dcn10_init_hw(struct dc *dc);
 void dcn10_init_pipes(struct dc *dc, struct dc_state *context);
+void dcn10_power_down_on_boot(struct dc *dc);
 enum dc_status dce110_apply_ctx_to_hw(
 		struct dc *dc,
 		struct dc_state *context);
@@ -105,6 +114,11 @@ void dcn10_update_pending_status(struct pipe_ctx *pipe_ctx);
 void dce110_power_down(struct dc *dc);
 void dce110_enable_accelerated_mode(struct dc *dc, struct dc_state *context);
 void dcn10_enable_timing_synchronization(
+		struct dc *dc,
+		int group_index,
+		int group_size,
+		struct pipe_ctx *grouped_pipes[]);
+void dcn10_enable_vblanks_synchronization(
 		struct dc *dc,
 		int group_index,
 		int group_size,
@@ -126,8 +140,7 @@ bool dcn10_dummy_display_power_gating(
 		struct dc_bios *dcb,
 		enum pipe_gating_control power_gating);
 void dcn10_set_drr(struct pipe_ctx **pipe_ctx,
-		int num_pipes, unsigned int vmin, unsigned int vmax,
-		unsigned int vmid, unsigned int vmid_frame_number);
+		int num_pipes, struct dc_crtc_timing_adjust adjust);
 void dcn10_get_position(struct pipe_ctx **pipe_ctx,
 		int num_pipes,
 		struct crtc_position *position);
@@ -149,6 +162,8 @@ void dcn10_wait_for_mpcc_disconnect(
 void dce110_edp_backlight_control(
 		struct dc_link *link,
 		bool enable);
+void dce110_edp_wait_for_T12(
+		struct dc_link *link);
 void dce110_edp_power_control(
 		struct dc_link *link,
 		bool power_up);
@@ -160,8 +175,7 @@ void dcn10_set_cursor_attribute(struct pipe_ctx *pipe_ctx);
 void dcn10_set_cursor_sdr_white_level(struct pipe_ctx *pipe_ctx);
 void dcn10_setup_periodic_interrupt(
 		struct dc *dc,
-		struct pipe_ctx *pipe_ctx,
-		enum vline_select vline);
+		struct pipe_ctx *pipe_ctx);
 enum dc_status dcn10_set_clock(struct dc *dc,
 		enum dc_clock_type clock_type,
 		uint32_t clk_khz,
@@ -174,13 +188,21 @@ void dcn10_bios_golden_init(struct dc *dc);
 void dcn10_plane_atomic_power_down(struct dc *dc,
 		struct dpp *dpp,
 		struct hubp *hubp);
-void dcn10_get_surface_visual_confirm_color(
-		const struct pipe_ctx *pipe_ctx,
-		struct tg_color *color);
-void dcn10_get_hdr_visual_confirm_color(
-		struct pipe_ctx *pipe_ctx,
-		struct tg_color *color);
+bool dcn10_disconnect_pipes(
+		struct dc *dc,
+		struct dc_state *context);
+
+void dcn10_wait_for_pending_cleared(struct dc *dc,
+		struct dc_state *context);
 void dcn10_set_hdr_multiplier(struct pipe_ctx *pipe_ctx);
 void dcn10_verify_allow_pstate_change_high(struct dc *dc);
+
+void dcn10_get_dcc_en_bits(struct dc *dc, int *dcc_en_bits);
+
+void dcn10_update_visual_confirm_color(
+		struct dc *dc,
+		struct pipe_ctx *pipe_ctx,
+		struct tg_color *color,
+		int mpcc_id);
 
 #endif /* __DC_HWSS_DCN10_H__ */

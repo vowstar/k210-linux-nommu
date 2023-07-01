@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Motorola CPCAP PMIC USB PHY driver
  * Copyright (C) 2017 Tony Lindgren <tony@atomide.com>
@@ -5,15 +6,6 @@
  * Some parts based on earlier Motorola Linux kernel tree code in
  * board-mapphone-usb.c and cpcap-usb-det.c:
  * Copyright (C) 2007 - 2011 Motorola, Inc.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation version 2.
- *
- * This program is distributed "as is" WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
- * GNU General Public License for more details.
  */
 
 #include <linux/atomic.h>
@@ -122,7 +114,6 @@ enum cpcap_gpio_mode {
 struct cpcap_phy_ddata {
 	struct regmap *reg;
 	struct device *dev;
-	struct clk *refclk;
 	struct usb_phy phy;
 	struct delayed_work detect_work;
 	struct pinctrl *pins;
@@ -144,7 +135,7 @@ static bool cpcap_usb_vbus_valid(struct cpcap_phy_ddata *ddata)
 
 	error = iio_read_channel_processed(ddata->vbus, &value);
 	if (error >= 0)
-		return value > 3900 ? true : false;
+		return value > 3900;
 
 	dev_err(ddata->dev, "error reading VBUS: %i\n", error);
 
@@ -365,7 +356,8 @@ static int cpcap_usb_init_irq(struct platform_device *pdev,
 
 	error = devm_request_threaded_irq(ddata->dev, irq, NULL,
 					  cpcap_phy_irq_thread,
-					  IRQF_SHARED,
+					  IRQF_SHARED |
+					  IRQF_ONESHOT,
 					  name, ddata);
 	if (error) {
 		dev_err(ddata->dev, "could not get irq %s: %i\n",
@@ -662,35 +654,42 @@ static int cpcap_usb_phy_probe(struct platform_device *pdev)
 	generic_phy = devm_phy_create(ddata->dev, NULL, &ops);
 	if (IS_ERR(generic_phy)) {
 		error = PTR_ERR(generic_phy);
-		return PTR_ERR(generic_phy);
+		goto out_reg_disable;
 	}
 
 	phy_set_drvdata(generic_phy, ddata);
 
 	phy_provider = devm_of_phy_provider_register(ddata->dev,
 						     of_phy_simple_xlate);
-	if (IS_ERR(phy_provider))
-		return PTR_ERR(phy_provider);
+	if (IS_ERR(phy_provider)) {
+		error = PTR_ERR(phy_provider);
+		goto out_reg_disable;
+	}
 
 	error = cpcap_usb_init_optional_pins(ddata);
 	if (error)
-		return error;
+		goto out_reg_disable;
 
 	cpcap_usb_init_optional_gpios(ddata);
 
 	error = cpcap_usb_init_iio(ddata);
 	if (error)
-		return error;
+		goto out_reg_disable;
 
 	error = cpcap_usb_init_interrupts(pdev, ddata);
 	if (error)
-		return error;
+		goto out_reg_disable;
 
 	usb_add_phy_dev(&ddata->phy);
 	atomic_set(&ddata->active, 1);
 	schedule_delayed_work(&ddata->detect_work, msecs_to_jiffies(1));
 
 	return 0;
+
+out_reg_disable:
+	regulator_disable(ddata->vusb);
+
+	return error;
 }
 
 static int cpcap_usb_phy_remove(struct platform_device *pdev)
@@ -707,7 +706,6 @@ static int cpcap_usb_phy_remove(struct platform_device *pdev)
 
 	usb_remove_phy(&ddata->phy);
 	cancel_delayed_work_sync(&ddata->detect_work);
-	clk_unprepare(ddata->refclk);
 	regulator_disable(ddata->vusb);
 
 	return 0;

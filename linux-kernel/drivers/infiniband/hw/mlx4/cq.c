@@ -135,7 +135,7 @@ static void mlx4_ib_free_cq_buf(struct mlx4_ib_dev *dev, struct mlx4_ib_cq_buf *
 	mlx4_buf_free(dev->dev, (cqe + 1) * buf->entry_size, &buf->buf);
 }
 
-static int mlx4_ib_get_cq_umem(struct mlx4_ib_dev *dev, struct ib_udata *udata,
+static int mlx4_ib_get_cq_umem(struct mlx4_ib_dev *dev,
 			       struct mlx4_ib_cq_buf *buf,
 			       struct ib_umem **umem, u64 buf_addr, int cqe)
 {
@@ -149,7 +149,6 @@ static int mlx4_ib_get_cq_umem(struct mlx4_ib_dev *dev, struct ib_udata *udata,
 	if (IS_ERR(*umem))
 		return PTR_ERR(*umem);
 
-	n = ib_umem_page_count(*umem);
 	shift = mlx4_ib_umem_calc_optimal_mtt_size(*umem, 0, &n);
 	err = mlx4_mtt_init(dev->dev, n, shift, &buf->mtt);
 
@@ -211,7 +210,7 @@ int mlx4_ib_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
 		}
 
 		buf_addr = (void *)(unsigned long)ucmd.buf_addr;
-		err = mlx4_ib_get_cq_umem(dev, udata, &cq->buf, &cq->umem,
+		err = mlx4_ib_get_cq_umem(dev, &cq->buf, &cq->umem,
 					  ucmd.buf_addr, entries);
 		if (err)
 			goto err_cq;
@@ -328,8 +327,8 @@ static int mlx4_alloc_resize_umem(struct mlx4_ib_dev *dev, struct mlx4_ib_cq *cq
 	if (!cq->resize_buf)
 		return -ENOMEM;
 
-	err = mlx4_ib_get_cq_umem(dev, udata, &cq->resize_buf->buf,
-				  &cq->resize_umem, ucmd.buf_addr, entries);
+	err = mlx4_ib_get_cq_umem(dev, &cq->resize_buf->buf, &cq->resize_umem,
+				  ucmd.buf_addr, entries);
 	if (err) {
 		kfree(cq->resize_buf);
 		cq->resize_buf = NULL;
@@ -475,7 +474,7 @@ out:
 	return err;
 }
 
-void mlx4_ib_destroy_cq(struct ib_cq *cq, struct ib_udata *udata)
+int mlx4_ib_destroy_cq(struct ib_cq *cq, struct ib_udata *udata)
 {
 	struct mlx4_ib_dev *dev = to_mdev(cq->device);
 	struct mlx4_ib_cq *mcq = to_mcq(cq);
@@ -495,6 +494,7 @@ void mlx4_ib_destroy_cq(struct ib_cq *cq, struct ib_udata *udata)
 		mlx4_db_free(dev->dev, &mcq->db);
 	}
 	ib_umem_release(mcq->umem);
+	return 0;
 }
 
 static void dump_cqe(void *cqe)
@@ -765,13 +765,13 @@ repoll:
 		switch (cqe->owner_sr_opcode & MLX4_CQE_OPCODE_MASK) {
 		case MLX4_OPCODE_RDMA_WRITE_IMM:
 			wc->wc_flags |= IB_WC_WITH_IMM;
-			/* fall through */
+			fallthrough;
 		case MLX4_OPCODE_RDMA_WRITE:
 			wc->opcode    = IB_WC_RDMA_WRITE;
 			break;
 		case MLX4_OPCODE_SEND_IMM:
 			wc->wc_flags |= IB_WC_WITH_IMM;
-			/* fall through */
+			fallthrough;
 		case MLX4_OPCODE_SEND:
 		case MLX4_OPCODE_SEND_INVAL:
 			wc->opcode    = IB_WC_SEND;

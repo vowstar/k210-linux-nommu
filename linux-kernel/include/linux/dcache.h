@@ -4,6 +4,7 @@
 
 #include <linux/atomic.h>
 #include <linux/list.h>
+#include <linux/math.h>
 #include <linux/rculist.h>
 #include <linux/rculist_bl.h>
 #include <linux/spinlock.h>
@@ -15,6 +16,7 @@
 #include <linux/wait.h>
 
 struct path;
+struct file;
 struct vfsmount;
 
 /*
@@ -58,16 +60,7 @@ struct qstr {
 
 extern const struct qstr empty_name;
 extern const struct qstr slash_name;
-
-struct dentry_stat_t {
-	long nr_dentry;
-	long nr_unused;
-	long age_limit;		/* age in seconds */
-	long want_pages;	/* pages requested by system */
-	long nr_negative;	/* # of unused negative dentries */
-	long dummy;		/* Reserved for future use */
-};
-extern struct dentry_stat_t dentry_stat;
+extern const struct qstr dotdot_name;
 
 /*
  * Try to keep struct dentry aligned on 64 byte cachelines (this will
@@ -89,7 +82,7 @@ extern struct dentry_stat_t dentry_stat;
 struct dentry {
 	/* RCU lookup touched fields */
 	unsigned int d_flags;		/* protected by d_lock */
-	seqcount_t d_seq;		/* per dentry seqlock */
+	seqcount_spinlock_t d_seq;	/* per dentry seqlock */
 	struct hlist_bl_node d_hash;	/* lookup hash list */
 	struct dentry *d_parent;	/* parent directory */
 	struct qstr d_name;
@@ -177,6 +170,8 @@ struct dentry_operations {
 
 #define DCACHE_REFERENCED		0x00000040 /* Recently used, don't discard. */
 
+#define DCACHE_DONTCACHE		0x00000080 /* Purge from memory on final dput() */
+
 #define DCACHE_CANT_MOUNT		0x00000100
 #define DCACHE_GENOCIDE			0x00000200
 #define DCACHE_SHRINK_LIST		0x00000400
@@ -211,7 +206,7 @@ struct dentry_operations {
 
 #define DCACHE_MAY_FREE			0x00800000
 #define DCACHE_FALLTHRU			0x01000000 /* Fall through to lower layer */
-#define DCACHE_ENCRYPTED_NAME		0x02000000 /* Encrypted name (dir key was unavailable) */
+#define DCACHE_NOKEY_NAME		0x02000000 /* Encrypted name encoded without key */
 #define DCACHE_OP_REAL			0x04000000
 
 #define DCACHE_PAR_LOOKUP		0x10000000 /* being looked up (with parent locked shared) */
@@ -239,6 +234,8 @@ extern struct dentry * d_alloc_parallel(struct dentry *, const struct qstr *,
 					wait_queue_head_t *);
 extern struct dentry * d_splice_alias(struct inode *, struct dentry *);
 extern struct dentry * d_add_ci(struct dentry *, struct inode *, struct qstr *);
+extern bool d_same_name(const struct dentry *dentry, const struct dentry *parent,
+			const struct qstr *name);
 extern struct dentry * d_exact_alias(struct dentry *, struct inode *);
 extern struct dentry *d_find_any_alias(struct inode *inode);
 extern struct dentry * d_obtain_alias(struct inode *);
@@ -254,10 +251,12 @@ extern struct dentry * d_make_root(struct inode *);
 /* <clickety>-<click> the ramfs-type tree */
 extern void d_genocide(struct dentry *);
 
-extern void d_tmpfile(struct dentry *, struct inode *);
+extern void d_tmpfile(struct file *, struct inode *);
 
 extern struct dentry *d_find_alias(struct inode *);
 extern void d_prune_aliases(struct inode *);
+
+extern struct dentry *d_find_alias_rcu(struct inode *);
 
 /* test whether we have any submounts in a subdir tree */
 extern int path_has_submounts(const struct path *);
@@ -289,14 +288,14 @@ static inline unsigned d_count(const struct dentry *dentry)
 /*
  * helper function for dentry_operations.d_dname() members
  */
-extern __printf(4, 5)
-char *dynamic_dname(struct dentry *, char *, int, const char *, ...);
+extern __printf(3, 4)
+char *dynamic_dname(char *, int, const char *, ...);
 
 extern char *__d_path(const struct path *, const struct path *, char *, int);
 extern char *d_absolute_path(const struct path *, char *, int);
 extern char *d_path(const struct path *, char *, int);
-extern char *dentry_path_raw(struct dentry *, char *, int);
-extern char *dentry_path(struct dentry *, char *, int);
+extern char *dentry_path_raw(const struct dentry *, char *, int);
+extern char *dentry_path(const struct dentry *, char *, int);
 
 /* Allocation counts.. */
 
@@ -353,7 +352,7 @@ static inline void dont_mount(struct dentry *dentry)
 	spin_unlock(&dentry->d_lock);
 }
 
-extern void __d_lookup_done(struct dentry *);
+extern void __d_lookup_unhash_wake(struct dentry *dentry);
 
 static inline int d_in_lookup(const struct dentry *dentry)
 {
@@ -362,11 +361,8 @@ static inline int d_in_lookup(const struct dentry *dentry)
 
 static inline void d_lookup_done(struct dentry *dentry)
 {
-	if (unlikely(d_in_lookup(dentry))) {
-		spin_lock(&dentry->d_lock);
-		__d_lookup_done(dentry);
-		spin_unlock(&dentry->d_lock);
-	}
+	if (unlikely(d_in_lookup(dentry)))
+		__d_lookup_unhash_wake(dentry);
 }
 
 extern void dput(struct dentry *);

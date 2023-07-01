@@ -13,18 +13,18 @@
 
 #ifndef __ASSEMBLY__
 
-#include <linux/compiler.h>
-#include <linux/time.h>
-
 #include <asm/vdso/vdso.h>
 #include <asm/clocksource.h>
-#include <asm/io.h>
 #include <asm/unistd.h>
 #include <asm/vdso.h>
 
 #define VDSO_HAS_CLOCK_GETRES		1
 
-#define __VDSO_USE_SYSCALL		ULLONG_MAX
+#if MIPS_ISA_REV < 6
+#define VDSO_SYSCALL_CLOBBERS "hi", "lo",
+#else
+#define VDSO_SYSCALL_CLOBBERS
+#endif
 
 static __always_inline long gettimeofday_fallback(
 				struct __kernel_old_timeval *_tv,
@@ -41,7 +41,9 @@ static __always_inline long gettimeofday_fallback(
 	: "=r" (ret), "=r" (error)
 	: "r" (tv), "r" (tz), "r" (nr)
 	: "$1", "$3", "$8", "$9", "$10", "$11", "$12", "$13",
-	  "$14", "$15", "$24", "$25", "hi", "lo", "memory");
+	  "$14", "$15", "$24", "$25",
+	  VDSO_SYSCALL_CLOBBERS
+	  "memory");
 
 	return error ? -ret : ret;
 }
@@ -65,7 +67,9 @@ static __always_inline long clock_gettime_fallback(
 	: "=r" (ret), "=r" (error)
 	: "r" (clkid), "r" (ts), "r" (nr)
 	: "$1", "$3", "$8", "$9", "$10", "$11", "$12", "$13",
-	  "$14", "$15", "$24", "$25", "hi", "lo", "memory");
+	  "$14", "$15", "$24", "$25",
+	  VDSO_SYSCALL_CLOBBERS
+	  "memory");
 
 	return error ? -ret : ret;
 }
@@ -89,7 +93,9 @@ static __always_inline int clock_getres_fallback(
 	: "=r" (ret), "=r" (error)
 	: "r" (clkid), "r" (ts), "r" (nr)
 	: "$1", "$3", "$8", "$9", "$10", "$11", "$12", "$13",
-	  "$14", "$15", "$24", "$25", "hi", "lo", "memory");
+	  "$14", "$15", "$24", "$25",
+	  VDSO_SYSCALL_CLOBBERS
+	  "memory");
 
 	return error ? -ret : ret;
 }
@@ -111,7 +117,9 @@ static __always_inline long clock_gettime32_fallback(
 	: "=r" (ret), "=r" (error)
 	: "r" (clkid), "r" (ts), "r" (nr)
 	: "$1", "$3", "$8", "$9", "$10", "$11", "$12", "$13",
-	  "$14", "$15", "$24", "$25", "hi", "lo", "memory");
+	  "$14", "$15", "$24", "$25",
+	  VDSO_SYSCALL_CLOBBERS
+	  "memory");
 
 	return error ? -ret : ret;
 }
@@ -131,7 +139,9 @@ static __always_inline int clock_getres32_fallback(
 	: "=r" (ret), "=r" (error)
 	: "r" (clkid), "r" (ts), "r" (nr)
 	: "$1", "$3", "$8", "$9", "$10", "$11", "$12", "$13",
-	  "$14", "$15", "$24", "$25", "hi", "lo", "memory");
+	  "$14", "$15", "$24", "$25",
+	  VDSO_SYSCALL_CLOBBERS
+	  "memory");
 
 	return error ? -ret : ret;
 }
@@ -173,31 +183,31 @@ static __always_inline u64 read_gic_count(const struct vdso_data *data)
 
 #endif
 
-static __always_inline u64 __arch_get_hw_counter(s32 clock_mode)
+static __always_inline u64 __arch_get_hw_counter(s32 clock_mode,
+						 const struct vdso_data *vd)
 {
-#ifdef CONFIG_CLKSRC_MIPS_GIC
-	const struct vdso_data *data = get_vdso_data();
-#endif
-	u64 cycle_now;
-
-	switch (clock_mode) {
 #ifdef CONFIG_CSRC_R4K
-	case VDSO_CLOCK_R4K:
-		cycle_now = read_r4k_count();
-		break;
+	if (clock_mode == VDSO_CLOCKMODE_R4K)
+		return read_r4k_count();
 #endif
 #ifdef CONFIG_CLKSRC_MIPS_GIC
-	case VDSO_CLOCK_GIC:
-		cycle_now = read_gic_count(data);
-		break;
+	if (clock_mode == VDSO_CLOCKMODE_GIC)
+		return read_gic_count(vd);
 #endif
-	default:
-		cycle_now = __VDSO_USE_SYSCALL;
-		break;
-	}
-
-	return cycle_now;
+	/*
+	 * Core checks mode already. So this raced against a concurrent
+	 * update. Return something. Core will do another round see the
+	 * change and fallback to syscall.
+	 */
+	return 0;
 }
+
+static inline bool mips_vdso_hres_capable(void)
+{
+	return IS_ENABLED(CONFIG_CSRC_R4K) ||
+	       IS_ENABLED(CONFIG_CLKSRC_MIPS_GIC);
+}
+#define __arch_vdso_hres_capable mips_vdso_hres_capable
 
 static __always_inline const struct vdso_data *__arch_get_vdso_data(void)
 {

@@ -5,7 +5,7 @@
  * Copyright (c) 2019 AVL DiTEST GmbH
  *   Tomislav Denis <tomislav.denis@avl.com>
  *
- * Datasheet: http://www.allsensors.com/cad/DS-0355_Rev_B.PDF
+ * Datasheet: https://www.allsensors.com/cad/DS-0355_Rev_B.PDF
  */
 
 #include <linux/module.h>
@@ -47,7 +47,7 @@ struct dlh_state {
 	struct dlh_info info;
 	bool use_interrupt;
 	struct completion completion;
-	u8 rx_buf[DLH_NUM_READ_BYTES] ____cacheline_aligned;
+	u8 rx_buf[DLH_NUM_READ_BYTES];
 };
 
 static struct dlh_info dlh_info_tbl[] = {
@@ -129,9 +129,8 @@ static int dlh_read_direct(struct dlh_state *st,
 	if (ret)
 		return ret;
 
-	*pressure = get_unaligned_be32(&st->rx_buf[1]) >> 8;
-	*temperature = get_unaligned_be32(&st->rx_buf[3]) &
-		GENMASK(DLH_NUM_TEMP_BITS - 1, 0);
+	*pressure = get_unaligned_be24(&st->rx_buf[1]);
+	*temperature = get_unaligned_be24(&st->rx_buf[4]);
 
 	return 0;
 }
@@ -283,9 +282,9 @@ static irqreturn_t dlh_interrupt(int irq, void *private)
 	return IRQ_HANDLED;
 };
 
-static int dlh_probe(struct i2c_client *client,
-	const struct i2c_device_id *id)
+static int dlh_probe(struct i2c_client *client)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct dlh_state *st;
 	struct iio_dev *indio_dev;
 	int ret;
@@ -311,8 +310,6 @@ static int dlh_probe(struct i2c_client *client,
 	st->use_interrupt = false;
 
 	indio_dev->name = id->name;
-	indio_dev->dev.parent = &client->dev;
-	indio_dev->dev.of_node = client->dev.of_node;
 	indio_dev->info = &dlh_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels =  dlh_channels;
@@ -365,7 +362,7 @@ static struct i2c_driver dlh_driver = {
 		.name = "dlhl60d",
 		.of_match_table = dlh_of_match,
 	},
-	.probe = dlh_probe,
+	.probe_new = dlh_probe,
 	.id_table = dlh_id,
 };
 module_i2c_driver(dlh_driver);

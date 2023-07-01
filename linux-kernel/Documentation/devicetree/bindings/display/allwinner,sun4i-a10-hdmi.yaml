@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/display/allwinner,sun4i-a10-hdmi.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Allwinner A10 HDMI Controller Device Tree Bindings
+title: Allwinner A10 HDMI Controller
 
 description: |
   The HDMI Encoder supports the HDMI video and audio outputs, and does
@@ -21,8 +21,8 @@ properties:
       - const: allwinner,sun5i-a10s-hdmi
       - const: allwinner,sun6i-a31-hdmi
       - items:
-        - const: allwinner,sun7i-a20-hdmi
-        - const: allwinner,sun5i-a10s-hdmi
+          - const: allwinner,sun7i-a20-hdmi
+          - const: allwinner,sun5i-a10s-hdmi
 
   reg:
     maxItems: 1
@@ -33,32 +33,32 @@ properties:
   clocks:
     oneOf:
       - items:
-        - description: The HDMI interface clock
-        - description: The HDMI module clock
-        - description: The first video PLL
-        - description: The second video PLL
+          - description: The HDMI interface clock
+          - description: The HDMI module clock
+          - description: The first video PLL
+          - description: The second video PLL
 
       - items:
-        - description: The HDMI interface clock
-        - description: The HDMI module clock
-        - description: The HDMI DDC clock
-        - description: The first video PLL
-        - description: The second video PLL
+          - description: The HDMI interface clock
+          - description: The HDMI module clock
+          - description: The HDMI DDC clock
+          - description: The first video PLL
+          - description: The second video PLL
 
   clock-names:
     oneOf:
       - items:
-        - const: ahb
-        - const: mod
-        - const: pll-0
-        - const: pll-1
+          - const: ahb
+          - const: mod
+          - const: pll-0
+          - const: pll-1
 
       - items:
-        - const: ahb
-        - const: mod
-        - const: ddc
-        - const: pll-0
-        - const: pll-1
+          - const: ahb
+          - const: mod
+          - const: ddc
+          - const: pll-0
+          - const: pll-1
 
   resets:
     maxItems: 1
@@ -76,36 +76,23 @@ properties:
       - const: audio-tx
 
   ports:
-    type: object
-    description: |
-      A ports node with endpoint definitions as defined in
-      Documentation/devicetree/bindings/media/video-interfaces.txt.
+    $ref: /schemas/graph.yaml#/properties/ports
 
     properties:
-      "#address-cells":
-        const: 1
-
-      "#size-cells":
-        const: 0
-
       port@0:
-        type: object
+        $ref: /schemas/graph.yaml#/properties/port
         description: |
           Input endpoints of the controller.
 
       port@1:
-        type: object
+        $ref: /schemas/graph.yaml#/properties/port
         description: |
           Output endpoints of the controller. Usually an HDMI
           connector.
 
     required:
-      - "#address-cells"
-      - "#size-cells"
       - port@0
       - port@1
-
-    additionalProperties: false
 
 required:
   - compatible

@@ -112,10 +112,7 @@ static void skl_set_suspend_active(struct snd_pcm_substream *substream,
 	struct snd_soc_dapm_widget *w;
 	struct skl_dev *skl = bus_to_skl(bus);
 
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-		w = dai->playback_widget;
-	else
-		w = dai->capture_widget;
+	w = snd_soc_dai_get_widget(dai, substream->stream);
 
 	if (w->ignore_suspend && enable)
 		skl->supend_active++;
@@ -193,16 +190,16 @@ int skl_pcm_link_dma_prepare(struct device *dev, struct skl_pipe_params *params)
 	dev_dbg(dev, "format_val=%d, rate=%d, ch=%d, format=%d\n",
 		format_val, params->s_freq, params->ch, params->format);
 
-	snd_hdac_ext_link_stream_reset(stream);
+	snd_hdac_ext_stream_reset(stream);
 
-	snd_hdac_ext_link_stream_setup(stream, format_val);
+	snd_hdac_ext_stream_setup(stream, format_val);
 
 	stream_tag = hstream->stream_tag;
 	if (stream->hstream.direction == SNDRV_PCM_STREAM_PLAYBACK) {
 		list_for_each_entry(link, &bus->hlink_list, list) {
 			if (link->index == params->link_index)
-				snd_hdac_ext_link_set_stream_id(link,
-								stream_tag);
+				snd_hdac_ext_bus_link_set_stream_id(link,
+								    stream_tag);
 		}
 	}
 
@@ -278,7 +275,7 @@ static int skl_pcm_prepare(struct snd_pcm_substream *substream,
 	 * calls prepare another time, reset the FW pipe to clean state
 	 */
 	if (mconfig &&
-		(substream->runtime->status->state == SNDRV_PCM_STATE_XRUN ||
+		(substream->runtime->state == SNDRV_PCM_STATE_XRUN ||
 		 mconfig->pipe->state == SKL_PIPE_CREATED ||
 		 mconfig->pipe->state == SKL_PIPE_PAUSED)) {
 
@@ -320,6 +317,7 @@ static int skl_pcm_hw_params(struct snd_pcm_substream *substream,
 	dev_dbg(dai->dev, "dma_id=%d\n", dma_id);
 
 	p_params.s_fmt = snd_pcm_format_width(params_format(params));
+	p_params.s_cont = snd_pcm_format_physical_width(params_format(params));
 	p_params.ch = params_channels(params);
 	p_params.s_freq = params_rate(params);
 	p_params.host_dma_id = dma_id;
@@ -408,6 +406,7 @@ static int skl_be_hw_params(struct snd_pcm_substream *substream,
 	struct skl_pipe_params p_params = {0};
 
 	p_params.s_fmt = snd_pcm_format_width(params_format(params));
+	p_params.s_cont = snd_pcm_format_physical_width(params_format(params));
 	p_params.ch = params_channels(params);
 	p_params.s_freq = params_rate(params);
 	p_params.stream = substream->stream;
@@ -450,7 +449,7 @@ static int skl_decoupled_trigger(struct snd_pcm_substream *substream,
 	spin_lock_irqsave(&bus->reg_lock, cookie);
 
 	if (start) {
-		snd_hdac_stream_start(hdac_stream(stream), true);
+		snd_hdac_stream_start(hdac_stream(stream));
 		snd_hdac_stream_timecounter_init(hstr, 0);
 	} else {
 		snd_hdac_stream_stop(hdac_stream(stream));
@@ -468,6 +467,7 @@ static int skl_pcm_trigger(struct snd_pcm_substream *substream, int cmd,
 	struct skl_module_cfg *mconfig;
 	struct hdac_bus *bus = get_bus_ctx(substream);
 	struct hdac_ext_stream *stream = get_hdac_ext_stream(substream);
+	struct hdac_stream *hstream = hdac_stream(stream);
 	struct snd_soc_dapm_widget *w;
 	int ret;
 
@@ -475,10 +475,7 @@ static int skl_pcm_trigger(struct snd_pcm_substream *substream, int cmd,
 	if (!mconfig)
 		return -EIO;
 
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-		w = dai->playback_widget;
-	else
-		w = dai->capture_widget;
+	w = snd_soc_dai_get_widget(dai, substream->stream);
 
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_RESUME:
@@ -488,13 +485,11 @@ static int skl_pcm_trigger(struct snd_pcm_substream *substream, int cmd,
 			 * dpib & lpib position to resume before starting the
 			 * DMA
 			 */
-			snd_hdac_ext_stream_drsm_enable(bus, true,
-						hdac_stream(stream)->index);
-			snd_hdac_ext_stream_set_dpibr(bus, stream,
-							stream->lpib);
-			snd_hdac_ext_stream_set_lpib(stream, stream->lpib);
+			snd_hdac_stream_drsm_enable(bus, true, hstream->index);
+			snd_hdac_stream_set_dpibr(bus, hstream, hstream->lpib);
+			snd_hdac_stream_set_lpib(hstream, hstream->lpib);
 		}
-		/* fall through */
+		fallthrough;
 
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
@@ -508,7 +503,6 @@ static int skl_pcm_trigger(struct snd_pcm_substream *substream, int cmd,
 		if (ret < 0)
 			return ret;
 		return skl_run_pipe(skl, mconfig->pipe);
-		break;
 
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
@@ -525,13 +519,13 @@ static int skl_pcm_trigger(struct snd_pcm_substream *substream, int cmd,
 		ret = skl_decoupled_trigger(substream, cmd);
 		if ((cmd == SNDRV_PCM_TRIGGER_SUSPEND) && !w->ignore_suspend) {
 			/* save the dpib and lpib positions */
-			stream->dpib = readl(bus->remap_addr +
+			hstream->dpib = readl(bus->remap_addr +
 					AZX_REG_VS_SDXDPIB_XBASE +
 					(AZX_REG_VS_SDXDPIB_XINTERVAL *
-					hdac_stream(stream)->index));
+					hstream->index));
 
-			stream->lpib = snd_hdac_stream_get_pos_lpib(
-							hdac_stream(stream));
+			hstream->lpib = snd_hdac_stream_get_pos_lpib(hstream);
+
 			snd_hdac_ext_stream_decouple(bus, stream, false);
 		}
 		break;
@@ -550,8 +544,8 @@ static int skl_link_hw_params(struct snd_pcm_substream *substream,
 {
 	struct hdac_bus *bus = dev_get_drvdata(dai->dev);
 	struct hdac_ext_stream *link_dev;
-	struct snd_soc_pcm_runtime *rtd = snd_pcm_substream_chip(substream);
-	struct snd_soc_dai *codec_dai = rtd->codec_dai;
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_dai *codec_dai = asoc_rtd_to_codec(rtd, 0);
 	struct skl_pipe_params p_params = {0};
 	struct hdac_ext_link *link;
 	int stream_tag;
@@ -563,19 +557,17 @@ static int skl_link_hw_params(struct snd_pcm_substream *substream,
 
 	snd_soc_dai_set_dma_data(dai, substream, (void *)link_dev);
 
-	link = snd_hdac_ext_bus_get_link(bus, codec_dai->component->name);
+	link = snd_hdac_ext_bus_get_hlink_by_name(bus, codec_dai->component->name);
 	if (!link)
 		return -EINVAL;
 
 	stream_tag = hdac_stream(link_dev)->stream_tag;
 
-	/* set the stream tag in the codec dai dma params  */
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-		snd_soc_dai_set_tdm_slot(codec_dai, stream_tag, 0, 0, 0);
-	else
-		snd_soc_dai_set_tdm_slot(codec_dai, 0, stream_tag, 0, 0);
+	/* set the hdac_stream in the codec dai */
+	snd_soc_dai_set_stream(codec_dai, hdac_stream(link_dev), substream->stream);
 
 	p_params.s_fmt = snd_pcm_format_width(params_format(params));
+	p_params.s_cont = snd_pcm_format_physical_width(params_format(params));
 	p_params.ch = params_channels(params);
 	p_params.s_freq = params_rate(params);
 	p_params.stream = substream->stream;
@@ -600,7 +592,7 @@ static int skl_link_pcm_prepare(struct snd_pcm_substream *substream,
 	/* In case of XRUN recovery, reset the FW pipe to clean state */
 	mconfig = skl_tplg_be_get_cpr_module(dai, substream->stream);
 	if (mconfig && !mconfig->pipe->passthru &&
-		(substream->runtime->status->state == SNDRV_PCM_STATE_XRUN))
+		(substream->runtime->state == SNDRV_PCM_STATE_XRUN))
 		skl_reset_pipe(skl, mconfig->pipe);
 
 	return 0;
@@ -619,13 +611,13 @@ static int skl_link_pcm_trigger(struct snd_pcm_substream *substream,
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
-		snd_hdac_ext_link_stream_start(link_dev);
+		snd_hdac_ext_stream_start(link_dev);
 		break;
 
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_STOP:
-		snd_hdac_ext_link_stream_clear(link_dev);
+		snd_hdac_ext_stream_clear(link_dev);
 		if (cmd == SNDRV_PCM_TRIGGER_SUSPEND)
 			snd_hdac_ext_stream_decouple(bus, stream, false);
 		break;
@@ -640,7 +632,7 @@ static int skl_link_hw_free(struct snd_pcm_substream *substream,
 		struct snd_soc_dai *dai)
 {
 	struct hdac_bus *bus = dev_get_drvdata(dai->dev);
-	struct snd_soc_pcm_runtime *rtd = snd_pcm_substream_chip(substream);
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
 	struct hdac_ext_stream *link_dev =
 				snd_soc_dai_get_dma_data(dai, substream);
 	struct hdac_ext_link *link;
@@ -650,13 +642,13 @@ static int skl_link_hw_free(struct snd_pcm_substream *substream,
 
 	link_dev->link_prepared = 0;
 
-	link = snd_hdac_ext_bus_get_link(bus, rtd->codec_dai->component->name);
+	link = snd_hdac_ext_bus_get_hlink_by_name(bus, asoc_rtd_to_codec(rtd, 0)->component->name);
 	if (!link)
 		return -EINVAL;
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
 		stream_tag = hdac_stream(link_dev)->stream_tag;
-		snd_hdac_ext_link_clear_stream_id(link, stream_tag);
+		snd_hdac_ext_bus_link_clear_stream_id(link, stream_tag);
 	}
 
 	snd_hdac_ext_stream_release(link_dev, HDAC_EXT_STREAM_TYPE_LINK);
@@ -1077,10 +1069,10 @@ int skl_dai_load(struct snd_soc_component *cmp, int index,
 static int skl_platform_soc_open(struct snd_soc_component *component,
 				 struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
 	struct snd_soc_dai_link *dai_link = rtd->dai_link;
 
-	dev_dbg(rtd->cpu_dai->dev, "In %s:%s\n", __func__,
+	dev_dbg(asoc_rtd_to_cpu(rtd, 0)->dev, "In %s:%s\n", __func__,
 					dai_link->cpus->dai_name);
 
 	snd_soc_set_runtime_hwparams(substream, &azx_pcm_hw);
@@ -1142,7 +1134,7 @@ static int skl_coupled_trigger(struct snd_pcm_substream *substream,
 			continue;
 		stream = get_hdac_ext_stream(s);
 		if (start)
-			snd_hdac_stream_start(hdac_stream(stream), true);
+			snd_hdac_stream_start(hdac_stream(stream));
 		else
 			snd_hdac_stream_stop(hdac_stream(stream));
 	}
@@ -1221,18 +1213,11 @@ static snd_pcm_uframes_t skl_platform_soc_pointer(
 	return bytes_to_frames(substream->runtime, pos);
 }
 
-static int skl_platform_soc_mmap(struct snd_soc_component *component,
-				 struct snd_pcm_substream *substream,
-				 struct vm_area_struct *area)
-{
-	return snd_pcm_lib_default_mmap(substream, area);
-}
-
 static u64 skl_adjust_codec_delay(struct snd_pcm_substream *substream,
 				u64 nsec)
 {
-	struct snd_soc_pcm_runtime *rtd = snd_pcm_substream_chip(substream);
-	struct snd_soc_dai *codec_dai = rtd->codec_dai;
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_dai *codec_dai = asoc_rtd_to_codec(rtd, 0);
 	u64 codec_frames, codec_nsecs;
 
 	if (!codec_dai->driver->ops->delay)
@@ -1265,7 +1250,6 @@ static int skl_platform_soc_get_time_info(
 		snd_pcm_gettime(substream->runtime, system_ts);
 
 		nsec = timecounter_read(&hstr->tc);
-		nsec = div_u64(nsec, 3); /* can be optimized */
 		if (audio_tstamp_config->report_delay)
 			nsec = skl_adjust_codec_delay(substream, nsec);
 
@@ -1287,7 +1271,7 @@ static int skl_platform_soc_get_time_info(
 static int skl_platform_soc_new(struct snd_soc_component *component,
 				struct snd_soc_pcm_runtime *rtd)
 {
-	struct snd_soc_dai *dai = rtd->cpu_dai;
+	struct snd_soc_dai *dai = asoc_rtd_to_cpu(rtd, 0);
 	struct hdac_bus *bus = dev_get_drvdata(dai->dev);
 	struct snd_pcm *pcm = rtd->pcm;
 	unsigned int size;
@@ -1324,21 +1308,6 @@ static int skl_get_module_info(struct skl_dev *skl,
 		return -EIO;
 	}
 
-	list_for_each_entry(module, &skl->uuid_list, list) {
-		if (guid_equal(uuid_mod, &module->uuid)) {
-			mconfig->id.module_id = module->id;
-			if (mconfig->module)
-				mconfig->module->loadable = module->is_loadable;
-			ret = 0;
-			break;
-		}
-	}
-
-	if (ret)
-		return ret;
-
-	uuid_mod = &module->uuid;
-	ret = -EIO;
 	for (i = 0; i < skl->nr_modules; i++) {
 		skl_module = skl->modules[i];
 		uuid_tplg = &skl_module->uuid;
@@ -1348,10 +1317,18 @@ static int skl_get_module_info(struct skl_dev *skl,
 			break;
 		}
 	}
+
 	if (skl->nr_modules && ret)
 		return ret;
 
+	ret = -EIO;
 	list_for_each_entry(module, &skl->uuid_list, list) {
+		if (guid_equal(uuid_mod, &module->uuid)) {
+			mconfig->id.module_id = module->id;
+			mconfig->module->loadable = module->is_loadable;
+			ret = 0;
+		}
+
 		for (i = 0; i < MAX_IN_QUEUE; i++) {
 			pin_id = &mconfig->m_in_pin[i].id;
 			if (guid_equal(&pin_id->mod_uuid, &module->uuid))
@@ -1365,7 +1342,7 @@ static int skl_get_module_info(struct skl_dev *skl,
 		}
 	}
 
-	return 0;
+	return ret;
 }
 
 static int skl_populate_modules(struct skl_dev *skl)
@@ -1402,7 +1379,10 @@ static int skl_platform_soc_probe(struct snd_soc_component *component)
 	const struct skl_dsp_ops *ops;
 	int ret;
 
-	pm_runtime_get_sync(component->dev);
+	ret = pm_runtime_resume_and_get(component->dev);
+	if (ret < 0 && ret != -EACCES)
+		return ret;
+
 	if (bus->ppcap) {
 		skl->component = component;
 
@@ -1467,7 +1447,6 @@ static const struct snd_soc_component_driver skl_component  = {
 	.trigger	= skl_platform_soc_trigger,
 	.pointer	= skl_platform_soc_pointer,
 	.get_time_info	= skl_platform_soc_get_time_info,
-	.mmap		= skl_platform_soc_mmap,
 	.pcm_construct	= skl_platform_soc_new,
 	.module_get_upon_open = 1, /* increment refcount when a pcm is opened */
 };
@@ -1515,11 +1494,9 @@ int skl_platform_unregister(struct device *dev)
 	struct skl_dev *skl = bus_to_skl(bus);
 	struct skl_module_deferred_bind *modules, *tmp;
 
-	if (!list_empty(&skl->bind_list)) {
-		list_for_each_entry_safe(modules, tmp, &skl->bind_list, node) {
-			list_del(&modules->node);
-			kfree(modules);
-		}
+	list_for_each_entry_safe(modules, tmp, &skl->bind_list, node) {
+		list_del(&modules->node);
+		kfree(modules);
 	}
 
 	kfree(skl->dais);

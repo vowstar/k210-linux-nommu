@@ -15,9 +15,10 @@
 
 struct srcu_struct {
 	short srcu_lock_nesting[2];	/* srcu_read_lock() nesting depth. */
-	short srcu_idx;			/* Current reader array element. */
 	u8 srcu_gp_running;		/* GP workqueue running? */
 	u8 srcu_gp_waiting;		/* GP waiting for readers? */
+	unsigned long srcu_idx;		/* Current reader array element in bit 0x2. */
+	unsigned long srcu_idx_max;	/* Furthest future srcu_idx request. */
 	struct swait_queue_head srcu_wq;
 					/* Last srcu_read_unlock() wakes GP. */
 	struct rcu_head *srcu_cb_head;	/* Pending callbacks: Head. */
@@ -59,8 +60,8 @@ static inline int __srcu_read_lock(struct srcu_struct *ssp)
 {
 	int idx;
 
-	idx = READ_ONCE(ssp->srcu_idx);
-	WRITE_ONCE(ssp->srcu_lock_nesting[idx], ssp->srcu_lock_nesting[idx] + 1);
+	idx = ((READ_ONCE(ssp->srcu_idx) + 1) & 0x2) >> 1;
+	WRITE_ONCE(ssp->srcu_lock_nesting[idx], READ_ONCE(ssp->srcu_lock_nesting[idx]) + 1);
 	return idx;
 }
 
@@ -80,11 +81,13 @@ static inline void srcu_torture_stats_print(struct srcu_struct *ssp,
 {
 	int idx;
 
-	idx = READ_ONCE(ssp->srcu_idx) & 0x1;
-	pr_alert("%s%s Tiny SRCU per-CPU(idx=%d): (%hd,%hd)\n",
+	idx = ((data_race(READ_ONCE(ssp->srcu_idx)) + 1) & 0x2) >> 1;
+	pr_alert("%s%s Tiny SRCU per-CPU(idx=%d): (%hd,%hd) gp: %lu->%lu\n",
 		 tt, tf, idx,
-		 READ_ONCE(ssp->srcu_lock_nesting[!idx]),
-		 READ_ONCE(ssp->srcu_lock_nesting[idx]));
+		 data_race(READ_ONCE(ssp->srcu_lock_nesting[!idx])),
+		 data_race(READ_ONCE(ssp->srcu_lock_nesting[idx])),
+		 data_race(READ_ONCE(ssp->srcu_idx)),
+		 data_race(READ_ONCE(ssp->srcu_idx_max)));
 }
 
 #endif

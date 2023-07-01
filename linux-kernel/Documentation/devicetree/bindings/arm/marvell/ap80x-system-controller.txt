@@ -72,13 +72,18 @@ mpp19	19	gpio, uart0(rxd), sdio(pw_off)
 GPIO:
 -----
 For common binding part and usage, refer to
-Documentation/devicetree/bindings/gpio/gpio-mvebu.txt.
+Documentation/devicetree/bindings/gpio/gpio-mvebu.yaml.
 
 Required properties:
 
 - compatible: "marvell,armada-8k-gpio"
 
 - offset: offset address inside the syscon block
+
+Optional properties:
+
+- marvell,pwm-offset: offset address of PWM duration control registers inside
+  the syscon block
 
 Example:
 ap_syscon: system-controller@6f4000 {
@@ -101,6 +106,9 @@ ap_syscon: system-controller@6f4000 {
 		gpio-controller;
 		#gpio-cells = <2>;
 		gpio-ranges = <&ap_pinctrl 0 0 19>;
+		marvell,pwm-offset = <0x10c0>;
+		#pwm-cells = <2>;
+		clocks = <&ap_clk 3>;
 	};
 };
 
@@ -111,7 +119,7 @@ Thermal:
 --------
 
 For common binding part and usage, refer to
-Documentation/devicetree/bindings/thermal/thermal.txt
+Documentation/devicetree/bindings/thermal/thermal*.yaml
 
 The thermal IP can probe the temperature all around the processor. It
 may feature several channels, each of them wired to one sensor.

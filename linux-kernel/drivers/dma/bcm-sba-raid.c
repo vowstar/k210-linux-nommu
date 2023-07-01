@@ -1,15 +1,5 @@
-/*
- * Copyright (C) 2017 Broadcom
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation version 2.
- *
- * This program is distributed "as is" WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- */
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2017 Broadcom
 
 /*
  * Broadcom SBA RAID Driver
@@ -120,7 +110,7 @@ struct sba_request {
 	struct brcm_message msg;
 	struct dma_async_tx_descriptor tx;
 	/* SBA commands */
-	struct brcm_sba_command cmds[0];
+	struct brcm_sba_command cmds[];
 };
 
 enum sba_version {

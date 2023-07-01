@@ -28,7 +28,7 @@
 #include <nvfw/pmu.h>
 
 static int
-gm20b_pmu_acr_bootstrap_falcon_cb(void *priv, struct nv_falcon_msg *hdr)
+gm20b_pmu_acr_bootstrap_falcon_cb(void *priv, struct nvfw_falcon_msg *hdr)
 {
 	struct nv_pmu_acr_bootstrap_falcon_msg *msg =
 		container_of(hdr, typeof(*msg), msg.hdr);
@@ -60,16 +60,6 @@ gm20b_pmu_acr_bootstrap_falcon(struct nvkm_falcon *falcon,
 	}
 
 	return ret;
-}
-
-int
-gm20b_pmu_acr_boot(struct nvkm_falcon *falcon)
-{
-	struct nv_pmu_args args = { .secure_mode = true };
-	const u32 addr_args = falcon->data.limit - sizeof(struct nv_pmu_args);
-	nvkm_falcon_load_dmem(falcon, &args, addr_args, sizeof(args), 0);
-	nvkm_falcon_start(falcon);
-	return 0;
 }
 
 void
@@ -125,12 +115,14 @@ gm20b_pmu_acr = {
 	.bld_size = sizeof(struct loader_config),
 	.bld_write = gm20b_pmu_acr_bld_write,
 	.bld_patch = gm20b_pmu_acr_bld_patch,
-	.boot = gm20b_pmu_acr_boot,
+	.bootstrap_falcons = BIT_ULL(NVKM_ACR_LSF_PMU) |
+			     BIT_ULL(NVKM_ACR_LSF_FECS) |
+			     BIT_ULL(NVKM_ACR_LSF_GPCCS),
 	.bootstrap_falcon = gm20b_pmu_acr_bootstrap_falcon,
 };
 
 static int
-gm20b_pmu_acr_init_wpr_callback(void *priv, struct nv_falcon_msg *hdr)
+gm20b_pmu_acr_init_wpr_callback(void *priv, struct nvfw_falcon_msg *hdr)
 {
 	struct nv_pmu_acr_init_wpr_region_msg *msg =
 		container_of(hdr, typeof(*msg), msg.hdr);
@@ -163,7 +155,7 @@ gm20b_pmu_acr_init_wpr(struct nvkm_pmu *pmu)
 				     gm20b_pmu_acr_init_wpr_callback, pmu, 0);
 }
 
-int
+static int
 gm20b_pmu_initmsg(struct nvkm_pmu *pmu)
 {
 	struct nv_pmu_init_msg msg;
@@ -189,14 +181,13 @@ gm20b_pmu_initmsg(struct nvkm_pmu *pmu)
 	return gm20b_pmu_acr_init_wpr(pmu);
 }
 
-void
+static void
 gm20b_pmu_recv(struct nvkm_pmu *pmu)
 {
 	if (!pmu->initmsg_received) {
 		int ret = pmu->func->initmsg(pmu);
 		if (ret) {
-			nvkm_error(&pmu->subdev,
-				   "error parsing init message: %d\n", ret);
+			nvkm_error(&pmu->subdev, "error parsing init message: %d\n", ret);
 			return;
 		}
 
@@ -206,13 +197,48 @@ gm20b_pmu_recv(struct nvkm_pmu *pmu)
 	nvkm_falcon_msgq_recv(pmu->msgq);
 }
 
-static const struct nvkm_pmu_func
+static void
+gm20b_pmu_fini(struct nvkm_pmu *pmu)
+{
+	/*TODO: shutdown RTOS. */
+
+	flush_work(&pmu->recv.work);
+	nvkm_falcon_cmdq_fini(pmu->lpq);
+	nvkm_falcon_cmdq_fini(pmu->hpq);
+
+	reinit_completion(&pmu->wpr_ready);
+
+	nvkm_falcon_put(&pmu->falcon, &pmu->subdev);
+}
+
+static int
+gm20b_pmu_init(struct nvkm_pmu *pmu)
+{
+	struct nvkm_falcon *falcon = &pmu->falcon;
+	struct nv_pmu_args args = { .secure_mode = true };
+	u32 addr_args = falcon->data.limit - sizeof(args);
+	int ret;
+
+	ret = nvkm_falcon_get(&pmu->falcon, &pmu->subdev);
+	if (ret)
+		return ret;
+
+	pmu->initmsg_received = false;
+
+	nvkm_falcon_pio_wr(falcon, (u8 *)&args, 0, 0, DMEM, addr_args, sizeof(args), 0, false);
+	nvkm_falcon_start(falcon);
+	return 0;
+}
+
+const struct nvkm_pmu_func
 gm20b_pmu = {
-	.flcn = &gt215_pmu_flcn,
-	.enabled = gf100_pmu_enabled,
+	.flcn = &gm200_pmu_flcn,
+	.init = gm20b_pmu_init,
+	.fini = gm20b_pmu_fini,
 	.intr = gt215_pmu_intr,
 	.recv = gm20b_pmu_recv,
 	.initmsg = gm20b_pmu_initmsg,
+	.reset = gf100_pmu_reset,
 };
 
 #if IS_ENABLED(CONFIG_ARCH_TEGRA_210_SOC)
@@ -231,12 +257,14 @@ gm20b_pmu_load(struct nvkm_pmu *pmu, int ver, const struct nvkm_pmu_fwif *fwif)
 
 static const struct nvkm_pmu_fwif
 gm20b_pmu_fwif[] = {
-	{ 0, gm20b_pmu_load, &gm20b_pmu, &gm20b_pmu_acr },
+	{  0, gm20b_pmu_load, &gm20b_pmu, &gm20b_pmu_acr },
+	{ -1, gm200_pmu_nofw, &gm20b_pmu },
 	{}
 };
 
 int
-gm20b_pmu_new(struct nvkm_device *device, int index, struct nvkm_pmu **ppmu)
+gm20b_pmu_new(struct nvkm_device *device, enum nvkm_subdev_type type, int inst,
+	      struct nvkm_pmu **ppmu)
 {
-	return nvkm_pmu_new_(gm20b_pmu_fwif, device, index, ppmu);
+	return nvkm_pmu_new_(gm20b_pmu_fwif, device, type, inst, ppmu);
 }

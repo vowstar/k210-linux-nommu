@@ -8,9 +8,6 @@
  *
  *  proc net directory handling functions
  */
-
-#include <linux/uaccess.h>
-
 #include <linux/errno.h>
 #include <linux/time.h>
 #include <linux/proc_fs.h>
@@ -39,22 +36,6 @@ static struct net *get_proc_net(const struct inode *inode)
 	return maybe_get_net(PDE_NET(PDE(inode)));
 }
 
-static int proc_net_d_revalidate(struct dentry *dentry, unsigned int flags)
-{
-	return 0;
-}
-
-static const struct dentry_operations proc_net_dentry_ops = {
-	.d_revalidate	= proc_net_d_revalidate,
-	.d_delete	= always_delete_dentry,
-};
-
-static void pde_force_lookup(struct proc_dir_entry *pde)
-{
-	/* /proc/net/ entries can be changed under us by setns(CLONE_NEWNET) */
-	pde->proc_dops = &proc_net_dentry_ops;
-}
-
 static int seq_open_net(struct inode *inode, struct file *file)
 {
 	unsigned int state_size = PDE(inode)->state_size;
@@ -77,15 +58,27 @@ static int seq_open_net(struct inode *inode, struct file *file)
 	}
 #ifdef CONFIG_NET_NS
 	p->net = net;
+	netns_tracker_alloc(net, &p->ns_tracker, GFP_KERNEL);
 #endif
 	return 0;
+}
+
+static void seq_file_net_put_net(struct seq_file *seq)
+{
+#ifdef CONFIG_NET_NS
+	struct seq_net_private *priv = seq->private;
+
+	put_net_track(priv->net, &priv->ns_tracker);
+#else
+	put_net(&init_net);
+#endif
 }
 
 static int seq_release_net(struct inode *ino, struct file *f)
 {
 	struct seq_file *seq = f->private_data;
 
-	put_net(seq_file_net(seq));
+	seq_file_net_put_net(seq);
 	seq_release_private(ino, f);
 	return 0;
 }
@@ -97,6 +90,26 @@ static const struct proc_ops proc_net_seq_ops = {
 	.proc_lseek	= seq_lseek,
 	.proc_release	= seq_release_net,
 };
+
+int bpf_iter_init_seq_net(void *priv_data, struct bpf_iter_aux_info *aux)
+{
+#ifdef CONFIG_NET_NS
+	struct seq_net_private *p = priv_data;
+
+	p->net = get_net_track(current->nsproxy->net_ns, &p->ns_tracker,
+			       GFP_KERNEL);
+#endif
+	return 0;
+}
+
+void bpf_iter_fini_seq_net(void *priv_data)
+{
+#ifdef CONFIG_NET_NS
+	struct seq_net_private *p = priv_data;
+
+	put_net_track(p->net, &p->ns_tracker);
+#endif
+}
 
 struct proc_dir_entry *proc_create_net_data(const char *name, umode_t mode,
 		struct proc_dir_entry *parent, const struct seq_operations *ops,
@@ -121,8 +134,8 @@ EXPORT_SYMBOL_GPL(proc_create_net_data);
  * @mode: The file's access mode.
  * @parent: The parent directory in which to create.
  * @ops: The seq_file ops with which to read the file.
- * @write: The write method which which to 'modify' the file.
- * @data: Data for retrieval by PDE_DATA().
+ * @write: The write method with which to 'modify' the file.
+ * @data: Data for retrieval by pde_data().
  *
  * Create a network namespaced proc file in the @parent directory with the
  * specified @name and @mode that allows reading of a file that displays a
@@ -137,7 +150,7 @@ EXPORT_SYMBOL_GPL(proc_create_net_data);
  * modified by the @write function.  @write should return 0 on success.
  *
  * The @data value is accessible from the @show and @write functions by calling
- * PDE_DATA() on the file inode.  The network namespace must be accessed by
+ * pde_data() on the file inode.  The network namespace must be accessed by
  * calling seq_file_net() on the seq_file struct.
  */
 struct proc_dir_entry *proc_create_net_data_write(const char *name, umode_t mode,
@@ -213,8 +226,8 @@ EXPORT_SYMBOL_GPL(proc_create_net_single);
  * @mode: The file's access mode.
  * @parent: The parent directory in which to create.
  * @show: The seqfile show method with which to read the file.
- * @write: The write method which which to 'modify' the file.
- * @data: Data for retrieval by PDE_DATA().
+ * @write: The write method with which to 'modify' the file.
+ * @data: Data for retrieval by pde_data().
  *
  * Create a network-namespaced proc file in the @parent directory with the
  * specified @name and @mode that allows reading of a file that displays a
@@ -229,7 +242,7 @@ EXPORT_SYMBOL_GPL(proc_create_net_single);
  * modified by the @write function.  @write should return 0 on success.
  *
  * The @data value is accessible from the @show and @write functions by calling
- * PDE_DATA() on the file inode.  The network namespace must be accessed by
+ * pde_data() on the file inode.  The network namespace must be accessed by
  * calling seq_file_single_net() on the seq_file struct.
  */
 struct proc_dir_entry *proc_create_net_single_write(const char *name, umode_t mode,
@@ -286,7 +299,8 @@ static struct dentry *proc_tgid_net_lookup(struct inode *dir,
 	return de;
 }
 
-static int proc_tgid_net_getattr(const struct path *path, struct kstat *stat,
+static int proc_tgid_net_getattr(struct mnt_idmap *idmap,
+				 const struct path *path, struct kstat *stat,
 				 u32 request_mask, unsigned int query_flags)
 {
 	struct inode *inode = d_inode(path->dentry);
@@ -294,7 +308,7 @@ static int proc_tgid_net_getattr(const struct path *path, struct kstat *stat,
 
 	net = get_proc_task_net(inode);
 
-	generic_fillattr(inode, stat);
+	generic_fillattr(&nop_mnt_idmap, inode, stat);
 
 	if (net != NULL) {
 		stat->nlink = net->proc_net->nlink;
@@ -336,6 +350,12 @@ static __net_init int proc_net_ns_init(struct net *net)
 	kgid_t gid;
 	int err;
 
+	/*
+	 * This PDE acts only as an anchor for /proc/${pid}/net hierarchy.
+	 * Corresponding inode (PDE(inode) == net->proc_net) is never
+	 * instantiated therefore blanket zeroing is fine.
+	 * net->proc_net_stat inode is instantiated normally.
+	 */
 	err = -ENOMEM;
 	netd = kmem_cache_zalloc(proc_dir_entry_cache, GFP_KERNEL);
 	if (!netd)
@@ -358,6 +378,9 @@ static __net_init int proc_net_ns_init(struct net *net)
 		gid = netd->gid;
 
 	proc_set_user(netd, uid, gid);
+
+	/* Seed dentry revalidation for /proc/${pid}/net */
+	pde_force_lookup(netd);
 
 	err = -EEXIST;
 	net_statd = proc_net_mkdir(net, "stat", netd);

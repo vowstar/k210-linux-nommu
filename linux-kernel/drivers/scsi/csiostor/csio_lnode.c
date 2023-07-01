@@ -619,7 +619,7 @@ csio_ln_vnp_read_cbfn(struct csio_hw *hw, struct csio_mb *mbp)
 	struct fc_els_csp *csp;
 	struct fc_els_cssp *clsp;
 	enum fw_retval retval;
-	__be32 nport_id;
+	__be32 nport_id = 0;
 
 	retval = FW_CMD_RETVAL_G(ntohl(rsp->alloc_to_len16));
 	if (retval != FW_SUCCESS) {
@@ -1187,7 +1187,6 @@ csio_lns_online(struct csio_lnode *ln, enum csio_ln_ev evt)
 		break;
 
 	case CSIO_LNE_LINK_DOWN:
-		/* Fall through */
 	case CSIO_LNE_DOWN_LINK:
 		csio_set_state(&ln->sm, csio_lns_uninit);
 		if (csio_is_phys_ln(ln)) {
@@ -2068,10 +2067,9 @@ csio_ln_exit(struct csio_lnode *ln)
 	ln->fcfinfo = NULL;
 }
 
-/**
+/*
  * csio_lnode_init - Initialize the members of an lnode.
  * @ln:		lnode
- *
  */
 int
 csio_lnode_init(struct csio_lnode *ln, struct csio_hw *hw,

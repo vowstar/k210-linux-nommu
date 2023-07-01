@@ -174,7 +174,7 @@ static int sc18is602_setup_transfer(struct sc18is602 *hw, u32 hz, u8 mode)
 static int sc18is602_check_transfer(struct spi_device *spi,
 				    struct spi_transfer *t, int tlen)
 {
-	if (t && t->len + tlen > SC18IS602_BUFSIZ)
+	if (t && t->len + tlen > SC18IS602_BUFSIZ + 1)
 		return -EINVAL;
 
 	return 0;
@@ -219,6 +219,11 @@ static int sc18is602_transfer_one(struct spi_master *master,
 	return status;
 }
 
+static size_t sc18is602_max_transfer_size(struct spi_device *spi)
+{
+	return SC18IS602_BUFSIZ;
+}
+
 static int sc18is602_setup(struct spi_device *spi)
 {
 	struct sc18is602 *hw = spi_master_get_devdata(spi->master);
@@ -230,21 +235,20 @@ static int sc18is602_setup(struct spi_device *spi)
 	return 0;
 }
 
-static int sc18is602_probe(struct i2c_client *client,
-			   const struct i2c_device_id *id)
+static int sc18is602_probe(struct i2c_client *client)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct device *dev = &client->dev;
 	struct device_node *np = dev->of_node;
 	struct sc18is602_platform_data *pdata = dev_get_platdata(dev);
 	struct sc18is602 *hw;
 	struct spi_master *master;
-	int error;
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C |
 				     I2C_FUNC_SMBUS_WRITE_BYTE_DATA))
 		return -EINVAL;
 
-	master = spi_alloc_master(dev, sizeof(struct sc18is602));
+	master = devm_spi_alloc_master(dev, sizeof(struct sc18is602));
 	if (!master)
 		return -ENOMEM;
 
@@ -294,19 +298,13 @@ static int sc18is602_probe(struct i2c_client *client,
 	master->bits_per_word_mask = SPI_BPW_MASK(8);
 	master->setup = sc18is602_setup;
 	master->transfer_one_message = sc18is602_transfer_one;
+	master->max_transfer_size = sc18is602_max_transfer_size;
+	master->max_message_size = sc18is602_max_transfer_size;
 	master->dev.of_node = np;
 	master->min_speed_hz = hw->freq / 128;
 	master->max_speed_hz = hw->freq / 4;
 
-	error = devm_spi_register_master(dev, master);
-	if (error)
-		goto error_reg;
-
-	return 0;
-
-error_reg:
-	spi_master_put(master);
-	return error;
+	return devm_spi_register_master(dev, master);
 }
 
 static const struct i2c_device_id sc18is602_id[] = {
@@ -339,12 +337,12 @@ static struct i2c_driver sc18is602_driver = {
 		.name = "sc18is602",
 		.of_match_table = of_match_ptr(sc18is602_of_match),
 	},
-	.probe = sc18is602_probe,
+	.probe_new = sc18is602_probe,
 	.id_table = sc18is602_id,
 };
 
 module_i2c_driver(sc18is602_driver);
 
-MODULE_DESCRIPTION("SC18IC602/603 SPI Master Driver");
+MODULE_DESCRIPTION("SC18IS602/603 SPI Master Driver");
 MODULE_AUTHOR("Guenter Roeck");
 MODULE_LICENSE("GPL");

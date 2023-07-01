@@ -301,7 +301,7 @@ static int tas571x_hw_params(struct snd_pcm_substream *substream,
 				  TAS571X_SDI_FMT_MASK, val);
 }
 
-static int tas571x_mute(struct snd_soc_dai *dai, int mute)
+static int tas571x_mute(struct snd_soc_dai *dai, int mute, int direction)
 {
 	struct snd_soc_component *component = dai->component;
 	u8 sysctl2;
@@ -354,7 +354,8 @@ static int tas571x_set_bias_level(struct snd_soc_component *component,
 static const struct snd_soc_dai_ops tas571x_dai_ops = {
 	.set_fmt	= tas571x_set_dai_fmt,
 	.hw_params	= tas571x_hw_params,
-	.digital_mute	= tas571x_mute,
+	.mute_stream	= tas571x_mute,
+	.no_capture_mute = 1,
 };
 
 
@@ -755,7 +756,6 @@ static const struct snd_soc_component_driver tas571x_component = {
 	.num_dapm_routes	= ARRAY_SIZE(tas571x_dapm_routes),
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 static struct snd_soc_dai_driver tas571x_dai = {
@@ -772,10 +772,10 @@ static struct snd_soc_dai_driver tas571x_dai = {
 	.ops = &tas571x_dai_ops,
 };
 
-static const struct of_device_id tas571x_of_match[];
+static const struct of_device_id tas571x_of_match[] __maybe_unused;
+static const struct i2c_device_id tas571x_i2c_id[];
 
-static int tas571x_i2c_probe(struct i2c_client *client,
-			     const struct i2c_device_id *id)
+static int tas571x_i2c_probe(struct i2c_client *client)
 {
 	struct tas571x_private *priv;
 	struct device *dev = &client->dev;
@@ -790,8 +790,11 @@ static int tas571x_i2c_probe(struct i2c_client *client,
 	of_id = of_match_device(tas571x_of_match, dev);
 	if (of_id)
 		priv->chip = of_id->data;
-	else
+	else {
+		const struct i2c_device_id *id =
+			i2c_match_id(tas571x_i2c_id, client);
 		priv->chip = (void *) id->driver_data;
+	}
 
 	priv->mclk = devm_clk_get(dev, "mclk");
 	if (IS_ERR(priv->mclk) && PTR_ERR(priv->mclk) != -ENOENT) {
@@ -820,14 +823,17 @@ static int tas571x_i2c_probe(struct i2c_client *client,
 
 	priv->regmap = devm_regmap_init(dev, NULL, client,
 					priv->chip->regmap_config);
-	if (IS_ERR(priv->regmap))
-		return PTR_ERR(priv->regmap);
+	if (IS_ERR(priv->regmap)) {
+		ret = PTR_ERR(priv->regmap);
+		goto disable_regs;
+	}
 
 	priv->pdn_gpio = devm_gpiod_get_optional(dev, "pdn", GPIOD_OUT_LOW);
 	if (IS_ERR(priv->pdn_gpio)) {
 		dev_err(dev, "error requesting pdn_gpio: %ld\n",
 			PTR_ERR(priv->pdn_gpio));
-		return PTR_ERR(priv->pdn_gpio);
+		ret = PTR_ERR(priv->pdn_gpio);
+		goto disable_regs;
 	}
 
 	priv->reset_gpio = devm_gpiod_get_optional(dev, "reset",
@@ -835,7 +841,8 @@ static int tas571x_i2c_probe(struct i2c_client *client,
 	if (IS_ERR(priv->reset_gpio)) {
 		dev_err(dev, "error requesting reset_gpio: %ld\n",
 			PTR_ERR(priv->reset_gpio));
-		return PTR_ERR(priv->reset_gpio);
+		ret = PTR_ERR(priv->reset_gpio);
+		goto disable_regs;
 	} else if (priv->reset_gpio) {
 		/* pulse the active low reset line for ~100us */
 		usleep_range(100, 200);
@@ -845,7 +852,7 @@ static int tas571x_i2c_probe(struct i2c_client *client,
 
 	ret = regmap_write(priv->regmap, TAS571X_OSC_TRIM_REG, 0);
 	if (ret)
-		return ret;
+		goto disable_regs;
 
 	usleep_range(50000, 60000);
 
@@ -861,24 +868,30 @@ static int tas571x_i2c_probe(struct i2c_client *client,
 		 */
 		ret = regmap_update_bits(priv->regmap, TAS571X_MVOL_REG, 1, 0);
 		if (ret)
-			return ret;
+			goto disable_regs;
 	}
 
-	return devm_snd_soc_register_component(&client->dev,
+	ret = devm_snd_soc_register_component(&client->dev,
 				      &priv->component_driver,
 				      &tas571x_dai, 1);
+	if (ret)
+		goto disable_regs;
+
+	return ret;
+
+disable_regs:
+	regulator_bulk_disable(priv->chip->num_supply_names, priv->supplies);
+	return ret;
 }
 
-static int tas571x_i2c_remove(struct i2c_client *client)
+static void tas571x_i2c_remove(struct i2c_client *client)
 {
 	struct tas571x_private *priv = i2c_get_clientdata(client);
 
 	regulator_bulk_disable(priv->chip->num_supply_names, priv->supplies);
-
-	return 0;
 }
 
-static const struct of_device_id tas571x_of_match[] = {
+static const struct of_device_id tas571x_of_match[] __maybe_unused = {
 	{ .compatible = "ti,tas5707", .data = &tas5707_chip, },
 	{ .compatible = "ti,tas5711", .data = &tas5711_chip, },
 	{ .compatible = "ti,tas5717", .data = &tas5717_chip, },
@@ -903,7 +916,7 @@ static struct i2c_driver tas571x_i2c_driver = {
 		.name = "tas571x",
 		.of_match_table = of_match_ptr(tas571x_of_match),
 	},
-	.probe = tas571x_i2c_probe,
+	.probe_new = tas571x_i2c_probe,
 	.remove = tas571x_i2c_remove,
 	.id_table = tas571x_i2c_id,
 };

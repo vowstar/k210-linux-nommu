@@ -30,7 +30,7 @@ enum bcma_boot_dev {
 	BCMA_BOOT_DEV_NAND,
 };
 
-/* The 47162a0 hangs when reading MIPS DMP registers registers */
+/* The 47162a0 hangs when reading MIPS DMP registers */
 static inline bool bcma_core_mips_bcm47162a0_quirk(struct bcma_device *dev)
 {
 	return dev->bus->chipinfo.id == BCMA_CHIP_ID_BCM47162 &&
@@ -50,13 +50,6 @@ static inline u32 mips_read32(struct bcma_drv_mips *mcore,
 			      u16 offset)
 {
 	return bcma_read32(mcore->core, offset);
-}
-
-static inline void mips_write32(struct bcma_drv_mips *mcore,
-				u16 offset,
-				u32 value)
-{
-	bcma_write32(mcore->core, offset, value);
 }
 
 static u32 bcma_core_mips_irqflag(struct bcma_device *dev)

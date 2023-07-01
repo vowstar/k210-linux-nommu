@@ -70,7 +70,7 @@ EXPORT_SYMBOL_GPL(axg_tdm_formatter_set_channel_masks);
 static int axg_tdm_formatter_enable(struct axg_tdm_formatter *formatter)
 {
 	struct axg_tdm_stream *ts = formatter->stream;
-	bool invert = formatter->drv->quirks->invert_sclk;
+	bool invert;
 	int ret;
 
 	/* Do nothing if the formatter is already enabled */
@@ -96,11 +96,12 @@ static int axg_tdm_formatter_enable(struct axg_tdm_formatter *formatter)
 		return ret;
 
 	/*
-	 * If sclk is inverted, invert it back and provide the inversion
-	 * required by the formatter
+	 * If sclk is inverted, it means the bit should latched on the
+	 * rising edge which is what our HW expects. If not, we need to
+	 * invert it before the formatter.
 	 */
-	invert ^= axg_tdm_sclk_invert(ts->iface->fmt);
-	ret = clk_set_phase(formatter->sclk, invert ? 180 : 0);
+	invert = axg_tdm_sclk_invert(ts->iface->fmt);
+	ret = clk_set_phase(formatter->sclk, invert ? 0 : 180);
 	if (ret)
 		return ret;
 
@@ -254,7 +255,6 @@ int axg_tdm_formatter_probe(struct platform_device *pdev)
 	const struct axg_tdm_formatter_driver *drv;
 	struct axg_tdm_formatter *formatter;
 	void __iomem *regs;
-	int ret;
 
 	drv = of_device_get_match_data(dev);
 	if (!drv) {
@@ -281,57 +281,34 @@ int axg_tdm_formatter_probe(struct platform_device *pdev)
 
 	/* Peripharal clock */
 	formatter->pclk = devm_clk_get(dev, "pclk");
-	if (IS_ERR(formatter->pclk)) {
-		ret = PTR_ERR(formatter->pclk);
-		if (ret != -EPROBE_DEFER)
-			dev_err(dev, "failed to get pclk: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(formatter->pclk))
+		return dev_err_probe(dev, PTR_ERR(formatter->pclk), "failed to get pclk\n");
 
 	/* Formatter bit clock */
 	formatter->sclk = devm_clk_get(dev, "sclk");
-	if (IS_ERR(formatter->sclk)) {
-		ret = PTR_ERR(formatter->sclk);
-		if (ret != -EPROBE_DEFER)
-			dev_err(dev, "failed to get sclk: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(formatter->sclk))
+		return dev_err_probe(dev, PTR_ERR(formatter->sclk), "failed to get sclk\n");
 
 	/* Formatter sample clock */
 	formatter->lrclk = devm_clk_get(dev, "lrclk");
-	if (IS_ERR(formatter->lrclk)) {
-		ret = PTR_ERR(formatter->lrclk);
-		if (ret != -EPROBE_DEFER)
-			dev_err(dev, "failed to get lrclk: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(formatter->lrclk))
+		return dev_err_probe(dev, PTR_ERR(formatter->lrclk), "failed to get lrclk\n");
 
 	/* Formatter bit clock input multiplexer */
 	formatter->sclk_sel = devm_clk_get(dev, "sclk_sel");
-	if (IS_ERR(formatter->sclk_sel)) {
-		ret = PTR_ERR(formatter->sclk_sel);
-		if (ret != -EPROBE_DEFER)
-			dev_err(dev, "failed to get sclk_sel: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(formatter->sclk_sel))
+		return dev_err_probe(dev, PTR_ERR(formatter->sclk_sel), "failed to get sclk_sel\n");
 
 	/* Formatter sample clock input multiplexer */
 	formatter->lrclk_sel = devm_clk_get(dev, "lrclk_sel");
-	if (IS_ERR(formatter->lrclk_sel)) {
-		ret = PTR_ERR(formatter->lrclk_sel);
-		if (ret != -EPROBE_DEFER)
-			dev_err(dev, "failed to get lrclk_sel: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(formatter->lrclk_sel))
+		return dev_err_probe(dev, PTR_ERR(formatter->lrclk_sel),
+				     "failed to get lrclk_sel\n");
 
 	/* Formatter dedicated reset line */
 	formatter->reset = devm_reset_control_get_optional_exclusive(dev, NULL);
-	if (IS_ERR(formatter->reset)) {
-		ret = PTR_ERR(formatter->reset);
-		if (ret != -EPROBE_DEFER)
-			dev_err(dev, "failed to get reset: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(formatter->reset))
+		return dev_err_probe(dev, PTR_ERR(formatter->reset), "failed to get reset\n");
 
 	return devm_snd_soc_register_component(dev, drv->component_drv,
 					       NULL, 0);
@@ -397,7 +374,7 @@ void axg_tdm_stream_free(struct axg_tdm_stream *ts)
 	/*
 	 * If the list is not empty, it would mean that one of the formatter
 	 * widget is still powered and attached to the interface while we
-	 * we are removing the TDM DAI. It should not be possible
+	 * are removing the TDM DAI. It should not be possible
 	 */
 	WARN_ON(!list_empty(&ts->formatter_list));
 	mutex_destroy(&ts->lock);

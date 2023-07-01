@@ -17,6 +17,8 @@
 #include "xfs_itable.h"
 #include "xfs_fsops.h"
 #include "xfs_rtalloc.h"
+#include "xfs_da_format.h"
+#include "xfs_da_btree.h"
 #include "xfs_attr.h"
 #include "xfs_ioctl.h"
 #include "xfs_ioctl32.h"
@@ -28,29 +30,13 @@
 
 #ifdef BROKEN_X86_ALIGNMENT
 STATIC int
-xfs_compat_flock64_copyin(
-	xfs_flock64_t		*bf,
-	compat_xfs_flock64_t	__user *arg32)
-{
-	if (get_user(bf->l_type,	&arg32->l_type) ||
-	    get_user(bf->l_whence,	&arg32->l_whence) ||
-	    get_user(bf->l_start,	&arg32->l_start) ||
-	    get_user(bf->l_len,		&arg32->l_len) ||
-	    get_user(bf->l_sysid,	&arg32->l_sysid) ||
-	    get_user(bf->l_pid,		&arg32->l_pid) ||
-	    copy_from_user(bf->l_pad,	&arg32->l_pad,	4*sizeof(u32)))
-		return -EFAULT;
-	return 0;
-}
-
-STATIC int
 xfs_compat_ioc_fsgeometry_v1(
 	struct xfs_mount	  *mp,
 	compat_xfs_fsop_geom_v1_t __user *arg32)
 {
 	struct xfs_fsop_geom	  fsgeo;
 
-	xfs_fs_geometry(&mp->m_sb, &fsgeo, 3);
+	xfs_fs_geometry(mp, &fsgeo, 3);
 	/* The 32-bit variant simply has some padding at the end */
 	if (copy_to_user(arg32, &fsgeo, sizeof(struct compat_xfs_fsop_geom_v1)))
 		return -EFAULT;
@@ -209,14 +195,16 @@ xfs_fsbulkstat_one_fmt_compat(
 /* copied from xfs_ioctl.c */
 STATIC int
 xfs_compat_ioc_fsbulkstat(
-	xfs_mount_t		  *mp,
+	struct file		*file,
 	unsigned int		  cmd,
 	struct compat_xfs_fsop_bulkreq __user *p32)
 {
+	struct xfs_mount	*mp = XFS_I(file_inode(file))->i_mount;
 	u32			addr;
 	struct xfs_fsop_bulkreq	bulkreq;
 	struct xfs_ibulk	breq = {
 		.mp		= mp,
+		.idmap		= file_mnt_idmap(file),
 		.ocount		= 0,
 	};
 	xfs_ino_t		lastino;
@@ -231,7 +219,7 @@ xfs_compat_ioc_fsbulkstat(
 	inumbers_fmt_pf		inumbers_func = xfs_fsinumbers_fmt_compat;
 	bulkstat_one_fmt_pf	bs_one_func = xfs_fsbulkstat_one_fmt_compat;
 
-#ifdef CONFIG_X86_X32
+#ifdef CONFIG_X86_X32_ABI
 	if (in_x32_syscall()) {
 		/*
 		 * ... but on x32 the input xfs_fsop_bulkreq has pointers
@@ -252,7 +240,7 @@ xfs_compat_ioc_fsbulkstat(
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	if (XFS_FORCED_SHUTDOWN(mp))
+	if (xfs_is_shutdown(mp))
 		return -EIO;
 
 	if (get_user(addr, &p32->lastip))
@@ -352,56 +340,24 @@ xfs_compat_handlereq_to_dentry(
 STATIC int
 xfs_compat_attrlist_by_handle(
 	struct file		*parfilp,
-	void			__user *arg)
+	compat_xfs_fsop_attrlist_handlereq_t __user *p)
 {
-	int			error;
-	attrlist_cursor_kern_t	*cursor;
-	compat_xfs_fsop_attrlist_handlereq_t __user *p = arg;
 	compat_xfs_fsop_attrlist_handlereq_t al_hreq;
 	struct dentry		*dentry;
-	char			*kbuf;
+	int			error;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
-	if (copy_from_user(&al_hreq, arg,
-			   sizeof(compat_xfs_fsop_attrlist_handlereq_t)))
+	if (copy_from_user(&al_hreq, p, sizeof(al_hreq)))
 		return -EFAULT;
-	if (al_hreq.buflen < sizeof(struct attrlist) ||
-	    al_hreq.buflen > XFS_XATTR_LIST_MAX)
-		return -EINVAL;
-
-	/*
-	 * Reject flags, only allow namespaces.
-	 */
-	if (al_hreq.flags & ~(ATTR_ROOT | ATTR_SECURE))
-		return -EINVAL;
 
 	dentry = xfs_compat_handlereq_to_dentry(parfilp, &al_hreq.hreq);
 	if (IS_ERR(dentry))
 		return PTR_ERR(dentry);
 
-	error = -ENOMEM;
-	kbuf = kmem_zalloc_large(al_hreq.buflen, 0);
-	if (!kbuf)
-		goto out_dput;
-
-	cursor = (attrlist_cursor_kern_t *)&al_hreq.pos;
-	error = xfs_attr_list(XFS_I(d_inode(dentry)), kbuf, al_hreq.buflen,
-					al_hreq.flags, cursor);
-	if (error)
-		goto out_kfree;
-
-	if (copy_to_user(&p->pos, cursor, sizeof(attrlist_cursor_kern_t))) {
-		error = -EFAULT;
-		goto out_kfree;
-	}
-
-	if (copy_to_user(compat_ptr(al_hreq.buffer), kbuf, al_hreq.buflen))
-		error = -EFAULT;
-
-out_kfree:
-	kmem_free(kbuf);
-out_dput:
+	error = xfs_ioc_attr_list(XFS_I(d_inode(dentry)),
+			compat_ptr(al_hreq.buffer), al_hreq.buflen,
+			al_hreq.flags, &p->pos);
 	dput(dentry);
 	return error;
 }
@@ -416,7 +372,6 @@ xfs_compat_attrmulti_by_handle(
 	compat_xfs_fsop_attrmulti_handlereq_t	am_hreq;
 	struct dentry				*dentry;
 	unsigned int				i, size;
-	unsigned char				*attr_name;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -443,64 +398,18 @@ xfs_compat_attrmulti_by_handle(
 		goto out_dput;
 	}
 
-	error = -ENOMEM;
-	attr_name = kmalloc(MAXNAMELEN, GFP_KERNEL);
-	if (!attr_name)
-		goto out_kfree_ops;
-
 	error = 0;
 	for (i = 0; i < am_hreq.opcount; i++) {
-		if ((ops[i].am_flags & ATTR_ROOT) &&
-		    (ops[i].am_flags & ATTR_SECURE)) {
-			ops[i].am_error = -EINVAL;
-			continue;
-		}
-		ops[i].am_flags &= ~ATTR_KERNEL_FLAGS;
-
-		ops[i].am_error = strncpy_from_user((char *)attr_name,
+		ops[i].am_error = xfs_ioc_attrmulti_one(parfilp,
+				d_inode(dentry), ops[i].am_opcode,
 				compat_ptr(ops[i].am_attrname),
-				MAXNAMELEN);
-		if (ops[i].am_error == 0 || ops[i].am_error == MAXNAMELEN)
-			error = -ERANGE;
-		if (ops[i].am_error < 0)
-			break;
-
-		switch (ops[i].am_opcode) {
-		case ATTR_OP_GET:
-			ops[i].am_error = xfs_attrmulti_attr_get(
-					d_inode(dentry), attr_name,
-					compat_ptr(ops[i].am_attrvalue),
-					&ops[i].am_length, ops[i].am_flags);
-			break;
-		case ATTR_OP_SET:
-			ops[i].am_error = mnt_want_write_file(parfilp);
-			if (ops[i].am_error)
-				break;
-			ops[i].am_error = xfs_attrmulti_attr_set(
-					d_inode(dentry), attr_name,
-					compat_ptr(ops[i].am_attrvalue),
-					ops[i].am_length, ops[i].am_flags);
-			mnt_drop_write_file(parfilp);
-			break;
-		case ATTR_OP_REMOVE:
-			ops[i].am_error = mnt_want_write_file(parfilp);
-			if (ops[i].am_error)
-				break;
-			ops[i].am_error = xfs_attrmulti_attr_remove(
-					d_inode(dentry), attr_name,
-					ops[i].am_flags);
-			mnt_drop_write_file(parfilp);
-			break;
-		default:
-			ops[i].am_error = -EINVAL;
-		}
+				compat_ptr(ops[i].am_attrvalue),
+				&ops[i].am_length, ops[i].am_flags);
 	}
 
 	if (copy_to_user(compat_ptr(am_hreq.ops), ops, size))
 		error = -EFAULT;
 
-	kfree(attr_name);
- out_kfree_ops:
 	kfree(ops);
  out_dput:
 	dput(dentry);
@@ -515,7 +424,6 @@ xfs_file_compat_ioctl(
 {
 	struct inode		*inode = file_inode(filp);
 	struct xfs_inode	*ip = XFS_I(inode);
-	struct xfs_mount	*mp = ip->i_mount;
 	void			__user *arg = compat_ptr(p);
 	int			error;
 
@@ -523,19 +431,8 @@ xfs_file_compat_ioctl(
 
 	switch (cmd) {
 #if defined(BROKEN_X86_ALIGNMENT)
-	case XFS_IOC_ALLOCSP_32:
-	case XFS_IOC_FREESP_32:
-	case XFS_IOC_ALLOCSP64_32:
-	case XFS_IOC_FREESP64_32: {
-		struct xfs_flock64	bf;
-
-		if (xfs_compat_flock64_copyin(&bf, arg))
-			return -EFAULT;
-		cmd = _NATIVE_IOC(cmd, struct xfs_flock64);
-		return xfs_ioc_space(filp, &bf);
-	}
 	case XFS_IOC_FSGEOMETRY_V1_32:
-		return xfs_compat_ioc_fsgeometry_v1(mp, arg);
+		return xfs_compat_ioc_fsgeometry_v1(ip->i_mount, arg);
 	case XFS_IOC_FSGROWFSDATA_32: {
 		struct xfs_growfs_data	in;
 
@@ -544,7 +441,7 @@ xfs_file_compat_ioctl(
 		error = mnt_want_write_file(filp);
 		if (error)
 			return error;
-		error = xfs_growfs_data(mp, &in);
+		error = xfs_growfs_data(ip->i_mount, &in);
 		mnt_drop_write_file(filp);
 		return error;
 	}
@@ -556,14 +453,12 @@ xfs_file_compat_ioctl(
 		error = mnt_want_write_file(filp);
 		if (error)
 			return error;
-		error = xfs_growfs_rt(mp, &in);
+		error = xfs_growfs_rt(ip->i_mount, &in);
 		mnt_drop_write_file(filp);
 		return error;
 	}
 #endif
 	/* long changes size, but xfs only copiese out 32 bits */
-	case XFS_IOC_GETXFLAGS_32:
-	case XFS_IOC_SETXFLAGS_32:
 	case XFS_IOC_GETVERSION_32:
 		cmd = _NATIVE_IOC(cmd, long);
 		return xfs_file_ioctl(filp, cmd, p);
@@ -586,7 +481,7 @@ xfs_file_compat_ioctl(
 	case XFS_IOC_FSBULKSTAT_32:
 	case XFS_IOC_FSBULKSTAT_SINGLE_32:
 	case XFS_IOC_FSINUMBERS_32:
-		return xfs_compat_ioc_fsbulkstat(mp, cmd, arg);
+		return xfs_compat_ioc_fsbulkstat(filp, cmd, arg);
 	case XFS_IOC_FD_TO_HANDLE_32:
 	case XFS_IOC_PATH_TO_HANDLE_32:
 	case XFS_IOC_PATH_TO_FSHANDLE_32: {

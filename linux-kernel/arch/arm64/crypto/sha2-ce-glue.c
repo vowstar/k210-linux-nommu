@@ -10,7 +10,7 @@
 #include <asm/unaligned.h>
 #include <crypto/internal/hash.h>
 #include <crypto/internal/simd.h>
-#include <crypto/sha.h>
+#include <crypto/sha2.h>
 #include <crypto/sha256_base.h>
 #include <linux/cpufeature.h>
 #include <linux/crypto.h>
@@ -19,20 +19,33 @@
 MODULE_DESCRIPTION("SHA-224/SHA-256 secure hash using ARMv8 Crypto Extensions");
 MODULE_AUTHOR("Ard Biesheuvel <ard.biesheuvel@linaro.org>");
 MODULE_LICENSE("GPL v2");
+MODULE_ALIAS_CRYPTO("sha224");
+MODULE_ALIAS_CRYPTO("sha256");
 
 struct sha256_ce_state {
 	struct sha256_state	sst;
 	u32			finalize;
 };
 
-asmlinkage void sha2_ce_transform(struct sha256_ce_state *sst, u8 const *src,
-				  int blocks);
+extern const u32 sha256_ce_offsetof_count;
+extern const u32 sha256_ce_offsetof_finalize;
+
+asmlinkage int sha2_ce_transform(struct sha256_ce_state *sst, u8 const *src,
+				 int blocks);
 
 static void __sha2_ce_transform(struct sha256_state *sst, u8 const *src,
 				int blocks)
 {
-	sha2_ce_transform(container_of(sst, struct sha256_ce_state, sst), src,
-			  blocks);
+	while (blocks) {
+		int rem;
+
+		kernel_neon_begin();
+		rem = sha2_ce_transform(container_of(sst, struct sha256_ce_state,
+						     sst), src, blocks);
+		kernel_neon_end();
+		src += (blocks - rem) * SHA256_BLOCK_SIZE;
+		blocks = rem;
+	}
 }
 
 const u32 sha256_ce_offsetof_count = offsetof(struct sha256_ce_state,
@@ -58,9 +71,7 @@ static int sha256_ce_update(struct shash_desc *desc, const u8 *data,
 				__sha256_block_data_order);
 
 	sctx->finalize = 0;
-	kernel_neon_begin();
 	sha256_base_do_update(desc, data, len, __sha2_ce_transform);
-	kernel_neon_end();
 
 	return 0;
 }
@@ -85,11 +96,9 @@ static int sha256_ce_finup(struct shash_desc *desc, const u8 *data,
 	 */
 	sctx->finalize = finalize;
 
-	kernel_neon_begin();
 	sha256_base_do_update(desc, data, len, __sha2_ce_transform);
 	if (!finalize)
 		sha256_base_do_finalize(desc, __sha2_ce_transform);
-	kernel_neon_end();
 	return sha256_base_finish(desc, out);
 }
 
@@ -103,10 +112,25 @@ static int sha256_ce_final(struct shash_desc *desc, u8 *out)
 	}
 
 	sctx->finalize = 0;
-	kernel_neon_begin();
 	sha256_base_do_finalize(desc, __sha2_ce_transform);
-	kernel_neon_end();
 	return sha256_base_finish(desc, out);
+}
+
+static int sha256_ce_export(struct shash_desc *desc, void *out)
+{
+	struct sha256_ce_state *sctx = shash_desc_ctx(desc);
+
+	memcpy(out, &sctx->sst, sizeof(struct sha256_state));
+	return 0;
+}
+
+static int sha256_ce_import(struct shash_desc *desc, const void *in)
+{
+	struct sha256_ce_state *sctx = shash_desc_ctx(desc);
+
+	memcpy(&sctx->sst, in, sizeof(struct sha256_state));
+	sctx->finalize = 0;
+	return 0;
 }
 
 static struct shash_alg algs[] = { {
@@ -114,7 +138,10 @@ static struct shash_alg algs[] = { {
 	.update			= sha256_ce_update,
 	.final			= sha256_ce_final,
 	.finup			= sha256_ce_finup,
+	.export			= sha256_ce_export,
+	.import			= sha256_ce_import,
 	.descsize		= sizeof(struct sha256_ce_state),
+	.statesize		= sizeof(struct sha256_state),
 	.digestsize		= SHA224_DIGEST_SIZE,
 	.base			= {
 		.cra_name		= "sha224",
@@ -128,7 +155,10 @@ static struct shash_alg algs[] = { {
 	.update			= sha256_ce_update,
 	.final			= sha256_ce_final,
 	.finup			= sha256_ce_finup,
+	.export			= sha256_ce_export,
+	.import			= sha256_ce_import,
 	.descsize		= sizeof(struct sha256_ce_state),
+	.statesize		= sizeof(struct sha256_state),
 	.digestsize		= SHA256_DIGEST_SIZE,
 	.base			= {
 		.cra_name		= "sha256",

@@ -2,7 +2,7 @@
 /*
  * omap-twl4030.c  --  SoC audio for TI SoC based boards with twl4030 codec
  *
- * Copyright (C) 2012 Texas Instruments Incorporated - http://www.ti.com
+ * Copyright (C) 2012 Texas Instruments Incorporated - https://www.ti.com
  * All rights reserved.
  *
  * Author: Peter Ujfalusi <peter.ujfalusi@ti.com>
@@ -38,7 +38,7 @@ struct omap_twl4030 {
 static int omap_twl4030_hw_params(struct snd_pcm_substream *substream,
 	struct snd_pcm_hw_params *params)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
 	unsigned int fmt;
 
 	switch (params_channels(params)) {
@@ -155,10 +155,10 @@ static int omap_twl4030_init(struct snd_soc_pcm_runtime *rtd)
 	if (priv->jack_detect > 0) {
 		hs_jack_gpios[0].gpio = priv->jack_detect;
 
-		ret = snd_soc_card_jack_new(rtd->card, "Headset Jack",
-					    SND_JACK_HEADSET, &priv->hs_jack,
-					    hs_jack_pins,
-					    ARRAY_SIZE(hs_jack_pins));
+		ret = snd_soc_card_jack_new_pins(rtd->card, "Headset Jack",
+						 SND_JACK_HEADSET,
+						 &priv->hs_jack, hs_jack_pins,
+						 ARRAY_SIZE(hs_jack_pins));
 		if (ret)
 			return ret;
 

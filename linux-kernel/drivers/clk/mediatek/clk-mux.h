@@ -7,14 +7,15 @@
 #ifndef __DRV_CLK_MTK_MUX_H
 #define __DRV_CLK_MTK_MUX_H
 
-#include <linux/clk-provider.h>
+#include <linux/notifier.h>
+#include <linux/spinlock.h>
+#include <linux/types.h>
 
-struct mtk_clk_mux {
-	struct clk_hw hw;
-	struct regmap *regmap;
-	const struct mtk_mux *data;
-	spinlock_t *lock;
-};
+struct clk;
+struct clk_hw_onecell_data;
+struct clk_ops;
+struct device;
+struct device_node;
 
 struct mtk_mux {
 	int id;
@@ -33,14 +34,8 @@ struct mtk_mux {
 	s8 upd_shift;
 
 	const struct clk_ops *ops;
-
 	signed char num_parents;
 };
-
-extern const struct clk_ops mtk_mux_ops;
-extern const struct clk_ops mtk_mux_clr_set_upd_ops;
-extern const struct clk_ops mtk_mux_gate_ops;
-extern const struct clk_ops mtk_mux_gate_clr_set_upd_ops;
 
 #define GATE_CLR_SET_UPD_FLAGS(_id, _name, _parents, _mux_ofs,		\
 			_mux_set_ofs, _mux_clr_ofs, _shift, _width,	\
@@ -61,6 +56,9 @@ extern const struct clk_ops mtk_mux_gate_clr_set_upd_ops;
 		.ops = &_ops,						\
 	}
 
+extern const struct clk_ops mtk_mux_clr_set_upd_ops;
+extern const struct clk_ops mtk_mux_gate_clr_set_upd_ops;
+
 #define MUX_GATE_CLR_SET_UPD_FLAGS(_id, _name, _parents, _mux_ofs,	\
 			_mux_set_ofs, _mux_clr_ofs, _shift, _width,	\
 			_gate, _upd_ofs, _upd, _flags)			\
@@ -77,13 +75,34 @@ extern const struct clk_ops mtk_mux_gate_clr_set_upd_ops;
 			_width, _gate, _upd_ofs, _upd,			\
 			CLK_SET_RATE_PARENT)
 
-struct clk *mtk_clk_register_mux(const struct mtk_mux *mux,
-				 struct regmap *regmap,
-				 spinlock_t *lock);
+#define MUX_CLR_SET_UPD(_id, _name, _parents, _mux_ofs,			\
+			_mux_set_ofs, _mux_clr_ofs, _shift, _width,	\
+			_upd_ofs, _upd)					\
+		GATE_CLR_SET_UPD_FLAGS(_id, _name, _parents, _mux_ofs,	\
+			_mux_set_ofs, _mux_clr_ofs, _shift, _width,	\
+			0, _upd_ofs, _upd, CLK_SET_RATE_PARENT,		\
+			mtk_mux_clr_set_upd_ops)
 
-int mtk_clk_register_muxes(const struct mtk_mux *muxes,
+int mtk_clk_register_muxes(struct device *dev,
+			   const struct mtk_mux *muxes,
 			   int num, struct device_node *node,
 			   spinlock_t *lock,
-			   struct clk_onecell_data *clk_data);
+			   struct clk_hw_onecell_data *clk_data);
+
+void mtk_clk_unregister_muxes(const struct mtk_mux *muxes, int num,
+			      struct clk_hw_onecell_data *clk_data);
+
+struct mtk_mux_nb {
+	struct notifier_block	nb;
+	const struct clk_ops	*ops;
+
+	u8	bypass_index;	/* Which parent to temporarily use */
+	u8	original_index;	/* Set by notifier callback */
+};
+
+#define to_mtk_mux_nb(_nb)	container_of(_nb, struct mtk_mux_nb, nb)
+
+int devm_mtk_clk_mux_notifier_register(struct device *dev, struct clk *clk,
+				       struct mtk_mux_nb *mux_nb);
 
 #endif /* __DRV_CLK_MTK_MUX_H */

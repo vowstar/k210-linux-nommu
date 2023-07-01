@@ -19,7 +19,7 @@ struct drr_class {
 	struct Qdisc_class_common	common;
 	unsigned int			filter_cnt;
 
-	struct gnet_stats_basic_packed		bstats;
+	struct gnet_stats_basic_sync		bstats;
 	struct gnet_stats_queue		qstats;
 	struct net_rate_estimator __rcu *rate_est;
 	struct list_head		alist;
@@ -85,8 +85,7 @@ static int drr_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 		if (tca[TCA_RATE]) {
 			err = gen_replace_estimator(&cl->bstats, NULL,
 						    &cl->rate_est,
-						    NULL,
-						    qdisc_root_sleeping_running(sch),
+						    NULL, true,
 						    tca[TCA_RATE]);
 			if (err) {
 				NL_SET_ERR_MSG(extack, "Failed to replace estimator");
@@ -106,6 +105,7 @@ static int drr_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	if (cl == NULL)
 		return -ENOBUFS;
 
+	gnet_stats_basic_sync_init(&cl->bstats);
 	cl->common.classid = classid;
 	cl->quantum	   = quantum;
 	cl->qdisc	   = qdisc_create_dflt(sch->dev_queue,
@@ -118,9 +118,7 @@ static int drr_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 
 	if (tca[TCA_RATE]) {
 		err = gen_replace_estimator(&cl->bstats, NULL, &cl->rate_est,
-					    NULL,
-					    qdisc_root_sleeping_running(sch),
-					    tca[TCA_RATE]);
+					    NULL, true, tca[TCA_RATE]);
 		if (err) {
 			NL_SET_ERR_MSG(extack, "Failed to replace estimator");
 			qdisc_put(cl->qdisc);
@@ -146,7 +144,8 @@ static void drr_destroy_class(struct Qdisc *sch, struct drr_class *cl)
 	kfree(cl);
 }
 
-static int drr_delete_class(struct Qdisc *sch, unsigned long arg)
+static int drr_delete_class(struct Qdisc *sch, unsigned long arg,
+			    struct netlink_ext_ack *extack)
 {
 	struct drr_sched *q = qdisc_priv(sch);
 	struct drr_class *cl = (struct drr_class *)arg;
@@ -266,8 +265,7 @@ static int drr_dump_class_stats(struct Qdisc *sch, unsigned long arg,
 	if (qlen)
 		xstats.deficit = cl->deficit;
 
-	if (gnet_stats_copy_basic(qdisc_root_sleeping_running(sch),
-				  d, NULL, &cl->bstats) < 0 ||
+	if (gnet_stats_copy_basic(d, NULL, &cl->bstats, true) < 0 ||
 	    gnet_stats_copy_rate_est(d, &cl->rate_est) < 0 ||
 	    gnet_stats_copy_queue(d, cl_q->cpu_qstats, &cl_q->qstats, qlen) < 0)
 		return -1;
@@ -286,15 +284,8 @@ static void drr_walk(struct Qdisc *sch, struct qdisc_walker *arg)
 
 	for (i = 0; i < q->clhash.hashsize; i++) {
 		hlist_for_each_entry(cl, &q->clhash.hash[i], common.hnode) {
-			if (arg->count < arg->skip) {
-				arg->count++;
-				continue;
-			}
-			if (arg->fn(sch, (unsigned long)cl, arg) < 0) {
-				arg->stop = 1;
+			if (!tc_qdisc_stats_dump(sch, (unsigned long)cl, arg))
 				return;
-			}
-			arg->count++;
 		}
 	}
 }
@@ -316,7 +307,7 @@ static struct drr_class *drr_classify(struct sk_buff *skb, struct Qdisc *sch,
 
 	*qerr = NET_XMIT_SUCCESS | __NET_XMIT_BYPASS;
 	fl = rcu_dereference_bh(q->filter_list);
-	result = tcf_classify(skb, fl, &res, false);
+	result = tcf_classify(skb, NULL, fl, &res, false);
 	if (result >= 0) {
 #ifdef CONFIG_NET_CLS_ACT
 		switch (result) {
@@ -324,7 +315,7 @@ static struct drr_class *drr_classify(struct sk_buff *skb, struct Qdisc *sch,
 		case TC_ACT_STOLEN:
 		case TC_ACT_TRAP:
 			*qerr = NET_XMIT_SUCCESS | __NET_XMIT_STOLEN;
-			/* fall through */
+			fallthrough;
 		case TC_ACT_SHOT:
 			return NULL;
 		}
@@ -443,8 +434,6 @@ static void drr_reset_qdisc(struct Qdisc *sch)
 			qdisc_reset(cl->qdisc);
 		}
 	}
-	sch->qstats.backlog = 0;
-	sch->q.qlen = 0;
 }
 
 static void drr_destroy_qdisc(struct Qdisc *sch)

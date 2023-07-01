@@ -18,7 +18,7 @@
 #include <linux/sched.h>
 #include <linux/cred.h>
 
-#define dprintk(fmt, args...) do{}while(0)
+#define dprintk(fmt, args...) pr_debug(fmt, ##args)
 
 
 static int get_name(const struct path *path, char *name, struct dentry *child);
@@ -132,8 +132,8 @@ static struct dentry *reconnect_one(struct vfsmount *mnt,
 	inode_unlock(dentry->d_inode);
 
 	if (IS_ERR(parent)) {
-		dprintk("%s: get_parent of %ld failed, err %d\n",
-			__func__, dentry->d_inode->i_ino, PTR_ERR(parent));
+		dprintk("get_parent of %lu failed, err %ld\n",
+			dentry->d_inode->i_ino, PTR_ERR(parent));
 		return parent;
 	}
 
@@ -145,9 +145,9 @@ static struct dentry *reconnect_one(struct vfsmount *mnt,
 	if (err)
 		goto out_err;
 	dprintk("%s: found name: %s\n", __func__, nbuf);
-	tmp = lookup_one_len_unlocked(nbuf, parent, strlen(nbuf));
+	tmp = lookup_one_unlocked(mnt_idmap(mnt), nbuf, parent, strlen(nbuf));
 	if (IS_ERR(tmp)) {
-		dprintk("%s: lookup failed: %d\n", __func__, PTR_ERR(tmp));
+		dprintk("lookup failed: %ld\n", PTR_ERR(tmp));
 		err = PTR_ERR(tmp);
 		goto out_err;
 	}
@@ -248,21 +248,20 @@ struct getdents_callback {
  * A rather strange filldir function to capture
  * the name matching the specified inode number.
  */
-static int filldir_one(struct dir_context *ctx, const char *name, int len,
+static bool filldir_one(struct dir_context *ctx, const char *name, int len,
 			loff_t pos, u64 ino, unsigned int d_type)
 {
 	struct getdents_callback *buf =
 		container_of(ctx, struct getdents_callback, ctx);
-	int result = 0;
 
 	buf->sequence++;
 	if (buf->ino == ino && len <= NAME_MAX) {
 		memcpy(buf->name, name, len);
 		buf->name[len] = '\0';
 		buf->found = 1;
-		result = -1;
+		return false;	// no more
 	}
-	return result;
+	return true;
 }
 
 /**
@@ -417,9 +416,11 @@ int exportfs_encode_fh(struct dentry *dentry, struct fid *fid, int *max_len,
 }
 EXPORT_SYMBOL_GPL(exportfs_encode_fh);
 
-struct dentry *exportfs_decode_fh(struct vfsmount *mnt, struct fid *fid,
-		int fh_len, int fileid_type,
-		int (*acceptable)(void *, struct dentry *), void *context)
+struct dentry *
+exportfs_decode_fh_raw(struct vfsmount *mnt, struct fid *fid, int fh_len,
+		       int fileid_type,
+		       int (*acceptable)(void *, struct dentry *),
+		       void *context)
 {
 	const struct export_operations *nop = mnt->mnt_sb->s_export_op;
 	struct dentry *result, *alias;
@@ -432,10 +433,8 @@ struct dentry *exportfs_decode_fh(struct vfsmount *mnt, struct fid *fid,
 	if (!nop || !nop->fh_to_dentry)
 		return ERR_PTR(-ESTALE);
 	result = nop->fh_to_dentry(mnt->mnt_sb, fid, fh_len, fileid_type);
-	if (PTR_ERR(result) == -ENOMEM)
-		return ERR_CAST(result);
 	if (IS_ERR_OR_NULL(result))
-		return ERR_PTR(-ESTALE);
+		return result;
 
 	/*
 	 * If no acceptance criteria was specified by caller, a disconnected
@@ -525,7 +524,8 @@ struct dentry *exportfs_decode_fh(struct vfsmount *mnt, struct fid *fid,
 		}
 
 		inode_lock(target_dir->d_inode);
-		nresult = lookup_one_len(nbuf, target_dir, strlen(nbuf));
+		nresult = lookup_one(mnt_idmap(mnt), nbuf,
+				     target_dir, strlen(nbuf));
 		if (!IS_ERR(nresult)) {
 			if (unlikely(nresult->d_inode != result->d_inode)) {
 				dput(nresult);
@@ -561,9 +561,25 @@ struct dentry *exportfs_decode_fh(struct vfsmount *mnt, struct fid *fid,
 
  err_result:
 	dput(result);
-	if (err != -ENOMEM)
-		err = -ESTALE;
 	return ERR_PTR(err);
+}
+EXPORT_SYMBOL_GPL(exportfs_decode_fh_raw);
+
+struct dentry *exportfs_decode_fh(struct vfsmount *mnt, struct fid *fid,
+				  int fh_len, int fileid_type,
+				  int (*acceptable)(void *, struct dentry *),
+				  void *context)
+{
+	struct dentry *ret;
+
+	ret = exportfs_decode_fh_raw(mnt, fid, fh_len, fileid_type,
+				     acceptable, context);
+	if (IS_ERR_OR_NULL(ret)) {
+		if (ret == ERR_PTR(-ENOMEM))
+			return ret;
+		return ERR_PTR(-ESTALE);
+	}
+	return ret;
 }
 EXPORT_SYMBOL_GPL(exportfs_decode_fh);
 

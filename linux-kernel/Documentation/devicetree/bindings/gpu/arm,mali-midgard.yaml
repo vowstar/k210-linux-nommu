@@ -16,33 +16,33 @@ properties:
     oneOf:
       - items:
           - enum:
-             - samsung,exynos5250-mali
+              - samsung,exynos5250-mali
           - const: arm,mali-t604
       - items:
           - enum:
-             - samsung,exynos5420-mali
+              - samsung,exynos5420-mali
           - const: arm,mali-t628
       - items:
           - enum:
-             - allwinner,sun50i-h6-mali
+              - allwinner,sun50i-h6-mali
           - const: arm,mali-t720
       - items:
           - enum:
-             - amlogic,meson-gxm-mali
-             - realtek,rtd1295-mali
+              - amlogic,meson-gxm-mali
+              - realtek,rtd1295-mali
           - const: arm,mali-t820
       - items:
           - enum:
-             - arm,juno-mali
+              - arm,juno-mali
           - const: arm,mali-t624
       - items:
           - enum:
-             - rockchip,rk3288-mali
-             - samsung,exynos5433-mali
+              - rockchip,rk3288-mali
+              - samsung,exynos5433-mali
           - const: arm,mali-t760
       - items:
           - enum:
-             - rockchip,rk3399-mali
+              - rockchip,rk3399-mali
           - const: arm,mali-t860
 
           # "arm,mali-t830"
@@ -74,6 +74,11 @@ properties:
       - const: bus
 
   mali-supply: true
+  opp-table:
+    type: object
+
+  power-domains:
+    maxItems: 1
 
   resets:
     minItems: 1
@@ -84,12 +89,33 @@ properties:
   "#cooling-cells":
     const: 2
 
+  dma-coherent: true
+
+  dynamic-power-coefficient:
+    $ref: '/schemas/types.yaml#/definitions/uint32'
+    description:
+      A u32 value that represents the running time dynamic
+      power coefficient in units of uW/MHz/V^2. The
+      coefficient can either be calculated from power
+      measurements or derived by analysis.
+
+      The dynamic power consumption of the GPU is
+      proportional to the square of the Voltage (V) and
+      the clock frequency (f). The coefficient is used to
+      calculate the dynamic power as below -
+
+      Pdyn = dynamic-power-coefficient * V^2 * f
+
+      where voltage is in V, frequency is in MHz.
+
 required:
   - compatible
   - reg
   - interrupts
   - interrupt-names
   - clocks
+
+additionalProperties: false
 
 allOf:
   - if:
@@ -135,34 +161,34 @@ examples:
       #cooling-cells = <2>;
     };
 
-    gpu_opp_table: opp_table0 {
+    gpu_opp_table: opp-table {
       compatible = "operating-points-v2";
 
-      opp@533000000 {
+      opp-533000000 {
         opp-hz = /bits/ 64 <533000000>;
         opp-microvolt = <1250000>;
       };
-      opp@450000000 {
+      opp-450000000 {
         opp-hz = /bits/ 64 <450000000>;
         opp-microvolt = <1150000>;
       };
-      opp@400000000 {
+      opp-400000000 {
         opp-hz = /bits/ 64 <400000000>;
         opp-microvolt = <1125000>;
       };
-      opp@350000000 {
+      opp-350000000 {
         opp-hz = /bits/ 64 <350000000>;
         opp-microvolt = <1075000>;
       };
-      opp@266000000 {
+      opp-266000000 {
         opp-hz = /bits/ 64 <266000000>;
         opp-microvolt = <1025000>;
       };
-      opp@160000000 {
+      opp-160000000 {
         opp-hz = /bits/ 64 <160000000>;
         opp-microvolt = <925000>;
       };
-      opp@100000000 {
+      opp-100000000 {
         opp-hz = /bits/ 64 <100000000>;
         opp-microvolt = <912500>;
       };

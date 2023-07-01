@@ -21,8 +21,6 @@
 
 #define CHACHA_KEY_WORDS	(CHACHA_KEY_SIZE / sizeof(u32))
 
-bool __init chacha20poly1305_selftest(void);
-
 static void chacha_load_key(u32 *k, const u8 *in)
 {
 	k[0] = get_unaligned_le32(in);
@@ -235,6 +233,9 @@ bool chacha20poly1305_crypt_sg_inplace(struct scatterlist *src,
 		__le64 lens[2];
 	} b __aligned(16);
 
+	if (WARN_ON(src_len > INT_MAX))
+		return false;
+
 	chacha_load_key(b.k, key);
 
 	b.iv[0] = 0;
@@ -250,9 +251,7 @@ bool chacha20poly1305_crypt_sg_inplace(struct scatterlist *src,
 			poly1305_update(&poly1305_state, pad0, 0x10 - (ad_len & 0xf));
 	}
 
-	flags = SG_MITER_TO_SG;
-	if (!preemptible())
-		flags |= SG_MITER_ATOMIC;
+	flags = SG_MITER_TO_SG | SG_MITER_ATOMIC;
 
 	sg_miter_start(&miter, src, sg_nents(src), flags);
 
@@ -355,7 +354,7 @@ bool chacha20poly1305_decrypt_sg_inplace(struct scatterlist *src, size_t src_len
 }
 EXPORT_SYMBOL(chacha20poly1305_decrypt_sg_inplace);
 
-static int __init mod_init(void)
+static int __init chacha20poly1305_init(void)
 {
 	if (!IS_ENABLED(CONFIG_CRYPTO_MANAGER_DISABLE_TESTS) &&
 	    WARN_ON(!chacha20poly1305_selftest()))
@@ -363,7 +362,12 @@ static int __init mod_init(void)
 	return 0;
 }
 
-module_init(mod_init);
+static void __exit chacha20poly1305_exit(void)
+{
+}
+
+module_init(chacha20poly1305_init);
+module_exit(chacha20poly1305_exit);
 MODULE_LICENSE("GPL v2");
 MODULE_DESCRIPTION("ChaCha20Poly1305 AEAD construction");
 MODULE_AUTHOR("Jason A. Donenfeld <Jason@zx2c4.com>");

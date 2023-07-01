@@ -5,16 +5,22 @@
 
 #include <linux/dmi.h>
 
+#include "i915_drv.h"
 #include "intel_display_types.h"
 #include "intel_quirks.h"
+
+static void intel_set_quirk(struct drm_i915_private *i915, enum intel_quirk_id quirk)
+{
+	i915->display.quirks.mask |= BIT(quirk);
+}
 
 /*
  * Some machines (Lenovo U160) do not work with SSC on LVDS for some reason
  */
 static void quirk_ssc_force_disable(struct drm_i915_private *i915)
 {
-	i915->quirks |= QUIRK_LVDS_SSC_DISABLE;
-	DRM_INFO("applying lvds SSC disable quirk\n");
+	intel_set_quirk(i915, QUIRK_LVDS_SSC_DISABLE);
+	drm_info(&i915->drm, "applying lvds SSC disable quirk\n");
 }
 
 /*
@@ -23,15 +29,15 @@ static void quirk_ssc_force_disable(struct drm_i915_private *i915)
  */
 static void quirk_invert_brightness(struct drm_i915_private *i915)
 {
-	i915->quirks |= QUIRK_INVERT_BRIGHTNESS;
-	DRM_INFO("applying inverted panel brightness quirk\n");
+	intel_set_quirk(i915, QUIRK_INVERT_BRIGHTNESS);
+	drm_info(&i915->drm, "applying inverted panel brightness quirk\n");
 }
 
 /* Some VBT's incorrectly indicate no backlight is present */
 static void quirk_backlight_present(struct drm_i915_private *i915)
 {
-	i915->quirks |= QUIRK_BACKLIGHT_PRESENT;
-	DRM_INFO("applying backlight present quirk\n");
+	intel_set_quirk(i915, QUIRK_BACKLIGHT_PRESENT);
+	drm_info(&i915->drm, "applying backlight present quirk\n");
 }
 
 /* Toshiba Satellite P50-C-18C requires T12 delay to be min 800ms
@@ -39,8 +45,8 @@ static void quirk_backlight_present(struct drm_i915_private *i915)
  */
 static void quirk_increase_t12_delay(struct drm_i915_private *i915)
 {
-	i915->quirks |= QUIRK_INCREASE_T12_DELAY;
-	DRM_INFO("Applying T12 delay quirk\n");
+	intel_set_quirk(i915, QUIRK_INCREASE_T12_DELAY);
+	drm_info(&i915->drm, "Applying T12 delay quirk\n");
 }
 
 /*
@@ -49,8 +55,14 @@ static void quirk_increase_t12_delay(struct drm_i915_private *i915)
  */
 static void quirk_increase_ddi_disabled_time(struct drm_i915_private *i915)
 {
-	i915->quirks |= QUIRK_INCREASE_DDI_DISABLED_TIME;
-	DRM_INFO("Applying Increase DDI Disabled quirk\n");
+	intel_set_quirk(i915, QUIRK_INCREASE_DDI_DISABLED_TIME);
+	drm_info(&i915->drm, "Applying Increase DDI Disabled quirk\n");
+}
+
+static void quirk_no_pps_backlight_power_hook(struct drm_i915_private *i915)
+{
+	intel_set_quirk(i915, QUIRK_NO_PPS_BACKLIGHT_POWER_HOOK);
+	drm_info(&i915->drm, "Applying no pps backlight power quirk\n");
 }
 
 struct intel_quirk {
@@ -72,6 +84,12 @@ static int intel_dmi_reverse_brightness(const struct dmi_system_id *id)
 	return 1;
 }
 
+static int intel_dmi_no_pps_backlight(const struct dmi_system_id *id)
+{
+	DRM_INFO("No pps backlight support on %s\n", id->ident);
+	return 1;
+}
+
 static const struct intel_dmi_quirk intel_dmi_quirks[] = {
 	{
 		.dmi_id_list = &(const struct dmi_system_id[]) {
@@ -82,9 +100,41 @@ static const struct intel_dmi_quirk intel_dmi_quirks[] = {
 					    DMI_MATCH(DMI_PRODUCT_NAME, ""),
 				},
 			},
+			{
+				.callback = intel_dmi_reverse_brightness,
+				.ident = "Thundersoft TST178 tablet",
+				/* DMI strings are too generic, also match on BIOS date */
+				.matches = {DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "AMI Corporation"),
+					    DMI_EXACT_MATCH(DMI_BOARD_NAME, "Aptio CRB"),
+					    DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "To be filled by O.E.M."),
+					    DMI_EXACT_MATCH(DMI_BIOS_DATE, "04/15/2014"),
+				},
+			},
 			{ }  /* terminating entry */
 		},
 		.hook = quirk_invert_brightness,
+	},
+	{
+		.dmi_id_list = &(const struct dmi_system_id[]) {
+			{
+				.callback = intel_dmi_no_pps_backlight,
+				.ident = "Google Lillipup sku524294",
+				.matches = {DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "Google"),
+					    DMI_EXACT_MATCH(DMI_BOARD_NAME, "Lindar"),
+					    DMI_EXACT_MATCH(DMI_PRODUCT_SKU, "sku524294"),
+				},
+			},
+			{
+				.callback = intel_dmi_no_pps_backlight,
+				.ident = "Google Lillipup sku524295",
+				.matches = {DMI_EXACT_MATCH(DMI_BOARD_VENDOR, "Google"),
+					    DMI_EXACT_MATCH(DMI_BOARD_NAME, "Lindar"),
+					    DMI_EXACT_MATCH(DMI_PRODUCT_SKU, "sku524295"),
+				},
+			},
+			{ }
+		},
+		.hook = quirk_no_pps_backlight_power_hook,
 	},
 };
 
@@ -146,11 +196,16 @@ static struct intel_quirk intel_quirks[] = {
 	/* ASRock ITX*/
 	{ 0x3185, 0x1849, 0x2212, quirk_increase_ddi_disabled_time },
 	{ 0x3184, 0x1849, 0x2212, quirk_increase_ddi_disabled_time },
+	/* ECS Liva Q2 */
+	{ 0x3185, 0x1019, 0xa94d, quirk_increase_ddi_disabled_time },
+	{ 0x3184, 0x1019, 0xa94d, quirk_increase_ddi_disabled_time },
+	/* HP Notebook - 14-r206nv */
+	{ 0x0f31, 0x103c, 0x220f, quirk_invert_brightness },
 };
 
 void intel_init_quirks(struct drm_i915_private *i915)
 {
-	struct pci_dev *d = i915->drm.pdev;
+	struct pci_dev *d = to_pci_dev(i915->drm.dev);
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(intel_quirks); i++) {
@@ -167,4 +222,9 @@ void intel_init_quirks(struct drm_i915_private *i915)
 		if (dmi_check_system(*intel_dmi_quirks[i].dmi_id_list) != 0)
 			intel_dmi_quirks[i].hook(i915);
 	}
+}
+
+bool intel_has_quirk(struct drm_i915_private *i915, enum intel_quirk_id quirk)
+{
+	return i915->display.quirks.mask & BIT(quirk);
 }

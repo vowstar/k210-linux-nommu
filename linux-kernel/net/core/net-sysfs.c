@@ -11,6 +11,7 @@
 #include <linux/if_arp.h>
 #include <linux/slab.h>
 #include <linux/sched/signal.h>
+#include <linux/sched/isolation.h>
 #include <linux/nsproxy.h>
 #include <net/sock.h>
 #include <net/net_namespace.h>
@@ -23,6 +24,7 @@
 #include <linux/of_net.h>
 #include <linux/cpu.h>
 
+#include "dev.h"
 #include "net-sysfs.h"
 
 #ifdef CONFIG_SYSFS
@@ -31,6 +33,7 @@ static const char fmt_dec[] = "%d\n";
 static const char fmt_ulong[] = "%lu\n";
 static const char fmt_u64[] = "%llu\n";
 
+/* Caller holds RTNL or dev_base_lock */
 static inline int dev_isalive(const struct net_device *dev)
 {
 	return dev->reg_state <= NETREG_REGISTERED;
@@ -56,7 +59,7 @@ static ssize_t netdev_show(const struct device *dev,
 #define NETDEVICE_SHOW(field, format_string)				\
 static ssize_t format_##field(const struct net_device *dev, char *buf)	\
 {									\
-	return sprintf(buf, format_string, dev->field);			\
+	return sysfs_emit(buf, format_string, dev->field);		\
 }									\
 static ssize_t field##_show(struct device *dev,				\
 			    struct device_attribute *attr, char *buf)	\
@@ -80,7 +83,7 @@ static ssize_t netdev_store(struct device *dev, struct device_attribute *attr,
 	struct net_device *netdev = to_net_dev(dev);
 	struct net *net = dev_net(netdev);
 	unsigned long new;
-	int ret = -EINVAL;
+	int ret;
 
 	if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
 		return -EPERM;
@@ -115,13 +118,13 @@ static ssize_t iflink_show(struct device *dev, struct device_attribute *attr,
 {
 	struct net_device *ndev = to_net_dev(dev);
 
-	return sprintf(buf, fmt_dec, dev_get_iflink(ndev));
+	return sysfs_emit(buf, fmt_dec, dev_get_iflink(ndev));
 }
 static DEVICE_ATTR_RO(iflink);
 
 static ssize_t format_name_assign_type(const struct net_device *dev, char *buf)
 {
-	return sprintf(buf, fmt_dec, dev->name_assign_type);
+	return sysfs_emit(buf, fmt_dec, dev->name_assign_type);
 }
 
 static ssize_t name_assign_type_show(struct device *dev,
@@ -174,6 +177,14 @@ static int change_carrier(struct net_device *dev, unsigned long new_carrier)
 static ssize_t carrier_store(struct device *dev, struct device_attribute *attr,
 			     const char *buf, size_t len)
 {
+	struct net_device *netdev = to_net_dev(dev);
+
+	/* The check is also done in change_carrier; this helps returning early
+	 * without hitting the trylock/restart in netdev_store.
+	 */
+	if (!netdev->netdev_ops->ndo_change_carrier)
+		return -EOPNOTSUPP;
+
 	return netdev_store(dev, attr, buf, len, change_carrier);
 }
 
@@ -183,7 +194,7 @@ static ssize_t carrier_show(struct device *dev,
 	struct net_device *netdev = to_net_dev(dev);
 
 	if (netif_running(netdev))
-		return sprintf(buf, fmt_dec, !!netif_carrier_ok(netdev));
+		return sysfs_emit(buf, fmt_dec, !!netif_carrier_ok(netdev));
 
 	return -EINVAL;
 }
@@ -195,14 +206,20 @@ static ssize_t speed_show(struct device *dev,
 	struct net_device *netdev = to_net_dev(dev);
 	int ret = -EINVAL;
 
+	/* The check is also done in __ethtool_get_link_ksettings; this helps
+	 * returning early without hitting the trylock/restart below.
+	 */
+	if (!netdev->ethtool_ops->get_link_ksettings)
+		return ret;
+
 	if (!rtnl_trylock())
 		return restart_syscall();
 
-	if (netif_running(netdev)) {
+	if (netif_running(netdev) && netif_device_present(netdev)) {
 		struct ethtool_link_ksettings cmd;
 
 		if (!__ethtool_get_link_ksettings(netdev, &cmd))
-			ret = sprintf(buf, fmt_dec, cmd.base.speed);
+			ret = sysfs_emit(buf, fmt_dec, cmd.base.speed);
 	}
 	rtnl_unlock();
 	return ret;
@@ -214,6 +231,12 @@ static ssize_t duplex_show(struct device *dev,
 {
 	struct net_device *netdev = to_net_dev(dev);
 	int ret = -EINVAL;
+
+	/* The check is also done in __ethtool_get_link_ksettings; this helps
+	 * returning early without hitting the trylock/restart below.
+	 */
+	if (!netdev->ethtool_ops->get_link_ksettings)
+		return ret;
 
 	if (!rtnl_trylock())
 		return restart_syscall();
@@ -235,7 +258,7 @@ static ssize_t duplex_show(struct device *dev,
 				duplex = "unknown";
 				break;
 			}
-			ret = sprintf(buf, "%s\n", duplex);
+			ret = sysfs_emit(buf, "%s\n", duplex);
 		}
 	}
 	rtnl_unlock();
@@ -243,13 +266,25 @@ static ssize_t duplex_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(duplex);
 
+static ssize_t testing_show(struct device *dev,
+			    struct device_attribute *attr, char *buf)
+{
+	struct net_device *netdev = to_net_dev(dev);
+
+	if (netif_running(netdev))
+		return sysfs_emit(buf, fmt_dec, !!netif_testing(netdev));
+
+	return -EINVAL;
+}
+static DEVICE_ATTR_RO(testing);
+
 static ssize_t dormant_show(struct device *dev,
 			    struct device_attribute *attr, char *buf)
 {
 	struct net_device *netdev = to_net_dev(dev);
 
 	if (netif_running(netdev))
-		return sprintf(buf, fmt_dec, !!netif_dormant(netdev));
+		return sysfs_emit(buf, fmt_dec, !!netif_dormant(netdev));
 
 	return -EINVAL;
 }
@@ -260,7 +295,7 @@ static const char *const operstates[] = {
 	"notpresent", /* currently unused */
 	"down",
 	"lowerlayerdown",
-	"testing", /* currently unused */
+	"testing",
 	"dormant",
 	"up"
 };
@@ -280,7 +315,7 @@ static ssize_t operstate_show(struct device *dev,
 	if (operstate >= ARRAY_SIZE(operstates))
 		return -EINVAL; /* should not happen */
 
-	return sprintf(buf, "%s\n", operstates[operstate]);
+	return sysfs_emit(buf, "%s\n", operstates[operstate]);
 }
 static DEVICE_ATTR_RO(operstate);
 
@@ -290,9 +325,9 @@ static ssize_t carrier_changes_show(struct device *dev,
 {
 	struct net_device *netdev = to_net_dev(dev);
 
-	return sprintf(buf, fmt_dec,
-		       atomic_read(&netdev->carrier_up_count) +
-		       atomic_read(&netdev->carrier_down_count));
+	return sysfs_emit(buf, fmt_dec,
+			  atomic_read(&netdev->carrier_up_count) +
+			  atomic_read(&netdev->carrier_down_count));
 }
 static DEVICE_ATTR_RO(carrier_changes);
 
@@ -302,7 +337,7 @@ static ssize_t carrier_up_count_show(struct device *dev,
 {
 	struct net_device *netdev = to_net_dev(dev);
 
-	return sprintf(buf, fmt_dec, atomic_read(&netdev->carrier_up_count));
+	return sysfs_emit(buf, fmt_dec, atomic_read(&netdev->carrier_up_count));
 }
 static DEVICE_ATTR_RO(carrier_up_count);
 
@@ -312,7 +347,7 @@ static ssize_t carrier_down_count_show(struct device *dev,
 {
 	struct net_device *netdev = to_net_dev(dev);
 
-	return sprintf(buf, fmt_dec, atomic_read(&netdev->carrier_down_count));
+	return sysfs_emit(buf, fmt_dec, atomic_read(&netdev->carrier_down_count));
 }
 static DEVICE_ATTR_RO(carrier_down_count);
 
@@ -355,7 +390,7 @@ NETDEVICE_SHOW_RW(tx_queue_len, fmt_dec);
 
 static int change_gro_flush_timeout(struct net_device *dev, unsigned long val)
 {
-	dev->gro_flush_timeout = val;
+	WRITE_ONCE(dev->gro_flush_timeout, val);
 	return 0;
 }
 
@@ -369,6 +404,23 @@ static ssize_t gro_flush_timeout_store(struct device *dev,
 	return netdev_store(dev, attr, buf, len, change_gro_flush_timeout);
 }
 NETDEVICE_SHOW_RW(gro_flush_timeout, fmt_ulong);
+
+static int change_napi_defer_hard_irqs(struct net_device *dev, unsigned long val)
+{
+	WRITE_ONCE(dev->napi_defer_hard_irqs, val);
+	return 0;
+}
+
+static ssize_t napi_defer_hard_irqs_store(struct device *dev,
+					  struct device_attribute *attr,
+					  const char *buf, size_t len)
+{
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
+
+	return netdev_store(dev, attr, buf, len, change_napi_defer_hard_irqs);
+}
+NETDEVICE_SHOW_RW(napi_defer_hard_irqs, fmt_dec);
 
 static ssize_t ifalias_store(struct device *dev, struct device_attribute *attr,
 			     const char *buf, size_t len)
@@ -410,7 +462,7 @@ static ssize_t ifalias_show(struct device *dev,
 
 	ret = dev_get_alias(netdev, tmp, sizeof(tmp));
 	if (ret > 0)
-		ret = sprintf(buf, "%s\n", tmp);
+		ret = sysfs_emit(buf, "%s\n", tmp);
 	return ret;
 }
 static DEVICE_ATTR_RW(ifalias);
@@ -448,6 +500,12 @@ static ssize_t phys_port_id_show(struct device *dev,
 	struct net_device *netdev = to_net_dev(dev);
 	ssize_t ret = -EINVAL;
 
+	/* The check is also done in dev_get_phys_port_id; this helps returning
+	 * early without hitting the trylock/restart below.
+	 */
+	if (!netdev->netdev_ops->ndo_get_phys_port_id)
+		return -EOPNOTSUPP;
+
 	if (!rtnl_trylock())
 		return restart_syscall();
 
@@ -456,7 +514,7 @@ static ssize_t phys_port_id_show(struct device *dev,
 
 		ret = dev_get_phys_port_id(netdev, &ppid);
 		if (!ret)
-			ret = sprintf(buf, "%*phN\n", ppid.id_len, ppid.id);
+			ret = sysfs_emit(buf, "%*phN\n", ppid.id_len, ppid.id);
 	}
 	rtnl_unlock();
 
@@ -470,6 +528,13 @@ static ssize_t phys_port_name_show(struct device *dev,
 	struct net_device *netdev = to_net_dev(dev);
 	ssize_t ret = -EINVAL;
 
+	/* The checks are also done in dev_get_phys_port_name; this helps
+	 * returning early without hitting the trylock/restart below.
+	 */
+	if (!netdev->netdev_ops->ndo_get_phys_port_name &&
+	    !netdev->devlink_port)
+		return -EOPNOTSUPP;
+
 	if (!rtnl_trylock())
 		return restart_syscall();
 
@@ -478,7 +543,7 @@ static ssize_t phys_port_name_show(struct device *dev,
 
 		ret = dev_get_phys_port_name(netdev, name, sizeof(name));
 		if (!ret)
-			ret = sprintf(buf, "%s\n", name);
+			ret = sysfs_emit(buf, "%s\n", name);
 	}
 	rtnl_unlock();
 
@@ -492,6 +557,14 @@ static ssize_t phys_switch_id_show(struct device *dev,
 	struct net_device *netdev = to_net_dev(dev);
 	ssize_t ret = -EINVAL;
 
+	/* The checks are also done in dev_get_phys_port_name; this helps
+	 * returning early without hitting the trylock/restart below. This works
+	 * because recurse is false when calling dev_get_port_parent_id.
+	 */
+	if (!netdev->netdev_ops->ndo_get_port_parent_id &&
+	    !netdev->devlink_port)
+		return -EOPNOTSUPP;
+
 	if (!rtnl_trylock())
 		return restart_syscall();
 
@@ -500,13 +573,52 @@ static ssize_t phys_switch_id_show(struct device *dev,
 
 		ret = dev_get_port_parent_id(netdev, &ppid, false);
 		if (!ret)
-			ret = sprintf(buf, "%*phN\n", ppid.id_len, ppid.id);
+			ret = sysfs_emit(buf, "%*phN\n", ppid.id_len, ppid.id);
 	}
 	rtnl_unlock();
 
 	return ret;
 }
 static DEVICE_ATTR_RO(phys_switch_id);
+
+static ssize_t threaded_show(struct device *dev,
+			     struct device_attribute *attr, char *buf)
+{
+	struct net_device *netdev = to_net_dev(dev);
+	ssize_t ret = -EINVAL;
+
+	if (!rtnl_trylock())
+		return restart_syscall();
+
+	if (dev_isalive(netdev))
+		ret = sysfs_emit(buf, fmt_dec, netdev->threaded);
+
+	rtnl_unlock();
+	return ret;
+}
+
+static int modify_napi_threaded(struct net_device *dev, unsigned long val)
+{
+	int ret;
+
+	if (list_empty(&dev->napi_list))
+		return -EOPNOTSUPP;
+
+	if (val != 0 && val != 1)
+		return -EOPNOTSUPP;
+
+	ret = dev_set_threaded(dev, val);
+
+	return ret;
+}
+
+static ssize_t threaded_store(struct device *dev,
+			      struct device_attribute *attr,
+			      const char *buf, size_t len)
+{
+	return netdev_store(dev, attr, buf, len, modify_napi_threaded);
+}
+static DEVICE_ATTR_RW(threaded);
 
 static struct attribute *net_class_attrs[] __ro_after_init = {
 	&dev_attr_netdev_group.attr,
@@ -524,6 +636,7 @@ static struct attribute *net_class_attrs[] __ro_after_init = {
 	&dev_attr_speed.attr,
 	&dev_attr_duplex.attr,
 	&dev_attr_dormant.attr,
+	&dev_attr_testing.attr,
 	&dev_attr_operstate.attr,
 	&dev_attr_carrier_changes.attr,
 	&dev_attr_ifalias.attr,
@@ -532,12 +645,14 @@ static struct attribute *net_class_attrs[] __ro_after_init = {
 	&dev_attr_flags.attr,
 	&dev_attr_tx_queue_len.attr,
 	&dev_attr_gro_flush_timeout.attr,
+	&dev_attr_napi_defer_hard_irqs.attr,
 	&dev_attr_phys_port_id.attr,
 	&dev_attr_phys_port_name.attr,
 	&dev_attr_phys_switch_id.attr,
 	&dev_attr_proto_down.attr,
 	&dev_attr_carrier_up_count.attr,
 	&dev_attr_carrier_down_count.attr,
+	&dev_attr_threaded.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(net_class);
@@ -558,7 +673,7 @@ static ssize_t netstat_show(const struct device *d,
 		struct rtnl_link_stats64 temp;
 		const struct rtnl_link_stats64 *stats = dev_get_stats(dev, &temp);
 
-		ret = sprintf(buf, fmt_u64, *(u64 *)(((u8 *)stats) + offset));
+		ret = sysfs_emit(buf, fmt_u64, *(u64 *)(((u8 *)stats) + offset));
 	}
 	read_unlock(&dev_base_lock);
 	return ret;
@@ -632,7 +747,6 @@ static const struct attribute_group netstat_group = {
 	.attrs  = netstat_attrs,
 };
 
-#if IS_ENABLED(CONFIG_WIRELESS_EXT) || IS_ENABLED(CONFIG_CFG80211)
 static struct attribute *wireless_attrs[] = {
 	NULL
 };
@@ -641,7 +755,19 @@ static const struct attribute_group wireless_group = {
 	.name = "wireless",
 	.attrs = wireless_attrs,
 };
+
+static bool wireless_group_needed(struct net_device *ndev)
+{
+#if IS_ENABLED(CONFIG_CFG80211)
+	if (ndev->ieee80211_ptr)
+		return true;
 #endif
+#if IS_ENABLED(CONFIG_WIRELESS_EXT)
+	if (ndev->wireless_handlers)
+		return true;
+#endif
+	return false;
+}
 
 #else /* CONFIG_SYSFS */
 #define net_class_groups	NULL
@@ -698,40 +824,25 @@ static ssize_t show_rps_map(struct netdev_rx_queue *queue, char *buf)
 		for (i = 0; i < map->len; i++)
 			cpumask_set_cpu(map->cpus[i], mask);
 
-	len = snprintf(buf, PAGE_SIZE, "%*pb\n", cpumask_pr_args(mask));
+	len = sysfs_emit(buf, "%*pb\n", cpumask_pr_args(mask));
 	rcu_read_unlock();
 	free_cpumask_var(mask);
 
 	return len < PAGE_SIZE ? len : -EINVAL;
 }
 
-static ssize_t store_rps_map(struct netdev_rx_queue *queue,
-			     const char *buf, size_t len)
+static int netdev_rx_queue_set_rps_mask(struct netdev_rx_queue *queue,
+					cpumask_var_t mask)
 {
-	struct rps_map *old_map, *map;
-	cpumask_var_t mask;
-	int err, cpu, i;
 	static DEFINE_MUTEX(rps_map_mutex);
-
-	if (!capable(CAP_NET_ADMIN))
-		return -EPERM;
-
-	if (!alloc_cpumask_var(&mask, GFP_KERNEL))
-		return -ENOMEM;
-
-	err = bitmap_parse(buf, len, cpumask_bits(mask), nr_cpumask_bits);
-	if (err) {
-		free_cpumask_var(mask);
-		return err;
-	}
+	struct rps_map *old_map, *map;
+	int cpu, i;
 
 	map = kzalloc(max_t(unsigned int,
 			    RPS_MAP_SIZE(cpumask_weight(mask)), L1_CACHE_BYTES),
 		      GFP_KERNEL);
-	if (!map) {
-		free_cpumask_var(mask);
+	if (!map)
 		return -ENOMEM;
-	}
 
 	i = 0;
 	for_each_cpu_and(cpu, mask, cpu_online_mask)
@@ -758,9 +869,45 @@ static ssize_t store_rps_map(struct netdev_rx_queue *queue,
 
 	if (old_map)
 		kfree_rcu(old_map, rcu);
+	return 0;
+}
 
+int rps_cpumask_housekeeping(struct cpumask *mask)
+{
+	if (!cpumask_empty(mask)) {
+		cpumask_and(mask, mask, housekeeping_cpumask(HK_TYPE_DOMAIN));
+		cpumask_and(mask, mask, housekeeping_cpumask(HK_TYPE_WQ));
+		if (cpumask_empty(mask))
+			return -EINVAL;
+	}
+	return 0;
+}
+
+static ssize_t store_rps_map(struct netdev_rx_queue *queue,
+			     const char *buf, size_t len)
+{
+	cpumask_var_t mask;
+	int err;
+
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
+
+	if (!alloc_cpumask_var(&mask, GFP_KERNEL))
+		return -ENOMEM;
+
+	err = bitmap_parse(buf, len, cpumask_bits(mask), nr_cpumask_bits);
+	if (err)
+		goto out;
+
+	err = rps_cpumask_housekeeping(mask);
+	if (err)
+		goto out;
+
+	err = netdev_rx_queue_set_rps_mask(queue, mask);
+
+out:
 	free_cpumask_var(mask);
-	return len;
+	return err ? : len;
 }
 
 static ssize_t show_rps_dev_flow_table_cnt(struct netdev_rx_queue *queue,
@@ -775,7 +922,7 @@ static ssize_t show_rps_dev_flow_table_cnt(struct netdev_rx_queue *queue,
 		val = (unsigned long)flow_table->mask + 1;
 	rcu_read_unlock();
 
-	return sprintf(buf, "%lu\n", val);
+	return sysfs_emit(buf, "%lu\n", val);
 }
 
 static void rps_dev_flow_table_release(struct rcu_head *rcu)
@@ -882,10 +1029,10 @@ static void rx_queue_release(struct kobject *kobj)
 #endif
 
 	memset(kobj, 0, sizeof(*kobj));
-	dev_put(queue->dev);
+	netdev_put(queue->dev, &queue->dev_tracker);
 }
 
-static const void *rx_queue_namespace(struct kobject *kobj)
+static const void *rx_queue_namespace(const struct kobject *kobj)
 {
 	struct netdev_rx_queue *queue = to_rx_queue(kobj);
 	struct device *dev = &queue->dev->dev;
@@ -897,7 +1044,7 @@ static const void *rx_queue_namespace(struct kobject *kobj)
 	return ns;
 }
 
-static void rx_queue_get_ownership(struct kobject *kobj,
+static void rx_queue_get_ownership(const struct kobject *kobj,
 				   kuid_t *uid, kgid_t *gid)
 {
 	const struct net *net = rx_queue_namespace(kobj);
@@ -905,13 +1052,25 @@ static void rx_queue_get_ownership(struct kobject *kobj,
 	net_ns_get_ownership(net, uid, gid);
 }
 
-static struct kobj_type rx_queue_ktype __ro_after_init = {
+static const struct kobj_type rx_queue_ktype = {
 	.sysfs_ops = &rx_queue_sysfs_ops,
 	.release = rx_queue_release,
 	.default_groups = rx_queue_default_groups,
 	.namespace = rx_queue_namespace,
 	.get_ownership = rx_queue_get_ownership,
 };
+
+static int rx_queue_default_mask(struct net_device *dev,
+				 struct netdev_rx_queue *queue)
+{
+#if IS_ENABLED(CONFIG_RPS) && IS_ENABLED(CONFIG_SYSCTL)
+	struct cpumask *rps_default_mask = READ_ONCE(dev_net(dev)->core.rps_default_mask);
+
+	if (rps_default_mask && !cpumask_empty(rps_default_mask))
+		return netdev_rx_queue_set_rps_mask(queue, rps_default_mask);
+#endif
+	return 0;
+}
 
 static int rx_queue_add_kobject(struct net_device *dev, int index)
 {
@@ -922,7 +1081,7 @@ static int rx_queue_add_kobject(struct net_device *dev, int index)
 	/* Kobject_put later will trigger rx_queue_release call which
 	 * decreases dev refcount: Take that reference here
 	 */
-	dev_hold(queue->dev);
+	netdev_hold(queue->dev, &queue->dev_tracker, GFP_KERNEL);
 
 	kobj->kset = dev->queues_kset;
 	error = kobject_init_and_add(kobj, &rx_queue_ktype, NULL,
@@ -936,12 +1095,34 @@ static int rx_queue_add_kobject(struct net_device *dev, int index)
 			goto err;
 	}
 
+	error = rx_queue_default_mask(dev, queue);
+	if (error)
+		goto err;
+
 	kobject_uevent(kobj, KOBJ_ADD);
 
 	return error;
 
 err:
 	kobject_put(kobj);
+	return error;
+}
+
+static int rx_queue_change_owner(struct net_device *dev, int index, kuid_t kuid,
+				 kgid_t kgid)
+{
+	struct netdev_rx_queue *queue = dev->_rx + index;
+	struct kobject *kobj = &queue->kobj;
+	int error;
+
+	error = sysfs_change_owner(kobj, kuid, kgid);
+	if (error)
+		return error;
+
+	if (dev->sysfs_rx_queue_group)
+		error = sysfs_group_change_owner(
+			kobj, dev->sysfs_rx_queue_group, kuid, kgid);
+
 	return error;
 }
 #endif /* CONFIG_SYSFS */
@@ -968,11 +1149,34 @@ net_rx_queue_update_kobjects(struct net_device *dev, int old_num, int new_num)
 	while (--i >= new_num) {
 		struct kobject *kobj = &dev->_rx[i].kobj;
 
-		if (!refcount_read(&dev_net(dev)->count))
+		if (!refcount_read(&dev_net(dev)->ns.count))
 			kobj->uevent_suppress = 1;
 		if (dev->sysfs_rx_queue_group)
 			sysfs_remove_group(kobj, dev->sysfs_rx_queue_group);
 		kobject_put(kobj);
+	}
+
+	return error;
+#else
+	return 0;
+#endif
+}
+
+static int net_rx_queue_change_owner(struct net_device *dev, int num,
+				     kuid_t kuid, kgid_t kgid)
+{
+#ifdef CONFIG_SYSFS
+	int error = 0;
+	int i;
+
+#ifndef CONFIG_RPS
+	if (!dev->sysfs_rx_queue_group)
+		return 0;
+#endif
+	for (i = 0; i < num; i++) {
+		error = rx_queue_change_owner(dev, i, kuid, kgid);
+		if (error)
+			break;
 	}
 
 	return error;
@@ -1030,13 +1234,9 @@ static const struct sysfs_ops netdev_queue_sysfs_ops = {
 
 static ssize_t tx_timeout_show(struct netdev_queue *queue, char *buf)
 {
-	unsigned long trans_timeout;
+	unsigned long trans_timeout = atomic_long_read(&queue->trans_timeout);
 
-	spin_lock_irq(&queue->_xmit_lock);
-	trans_timeout = queue->trans_timeout;
-	spin_unlock_irq(&queue->_xmit_lock);
-
-	return sprintf(buf, "%lu", trans_timeout);
+	return sysfs_emit(buf, fmt_ulong, trans_timeout);
 }
 
 static unsigned int get_netdev_queue_index(struct netdev_queue *queue)
@@ -1054,18 +1254,25 @@ static ssize_t traffic_class_show(struct netdev_queue *queue,
 				  char *buf)
 {
 	struct net_device *dev = queue->dev;
+	int num_tc, tc;
 	int index;
-	int tc;
 
 	if (!netif_is_multiqueue(dev))
 		return -ENOENT;
+
+	if (!rtnl_trylock())
+		return restart_syscall();
 
 	index = get_netdev_queue_index(queue);
 
 	/* If queue belongs to subordinate dev use its TC mapping */
 	dev = netdev_get_tx_queue(dev, index)->sb_dev ? : dev;
 
+	num_tc = dev->num_tc;
 	tc = netdev_txq_to_tc(dev, index);
+
+	rtnl_unlock();
+
 	if (tc < 0)
 		return -EINVAL;
 
@@ -1076,15 +1283,15 @@ static ssize_t traffic_class_show(struct netdev_queue *queue,
 	 * belongs to the root device it will be reported with just the
 	 * traffic class, so just "0" for TC 0 for example.
 	 */
-	return dev->num_tc < 0 ? sprintf(buf, "%u%d\n", tc, dev->num_tc) :
-				 sprintf(buf, "%u\n", tc);
+	return num_tc < 0 ? sysfs_emit(buf, "%d%d\n", tc, num_tc) :
+			    sysfs_emit(buf, "%d\n", tc);
 }
 
 #ifdef CONFIG_XPS
 static ssize_t tx_maxrate_show(struct netdev_queue *queue,
 			       char *buf)
 {
-	return sprintf(buf, "%lu\n", queue->tx_maxrate);
+	return sysfs_emit(buf, "%lu\n", queue->tx_maxrate);
 }
 
 static ssize_t tx_maxrate_store(struct netdev_queue *queue,
@@ -1096,6 +1303,12 @@ static ssize_t tx_maxrate_store(struct netdev_queue *queue,
 
 	if (!capable(CAP_NET_ADMIN))
 		return -EPERM;
+
+	/* The check is also done later; this helps returning early without
+	 * hitting the trylock/restart below.
+	 */
+	if (!dev->netdev_ops->ndo_set_tx_maxrate)
+		return -EOPNOTSUPP;
 
 	err = kstrtou32(buf, 10, &rate);
 	if (err < 0)
@@ -1132,7 +1345,7 @@ static struct netdev_queue_attribute queue_traffic_class __ro_after_init
  */
 static ssize_t bql_show(char *buf, unsigned int value)
 {
-	return sprintf(buf, "%u\n", value);
+	return sysfs_emit(buf, "%u\n", value);
 }
 
 static ssize_t bql_set(const char *buf, const size_t count,
@@ -1161,7 +1374,7 @@ static ssize_t bql_show_hold_time(struct netdev_queue *queue,
 {
 	struct dql *dql = &queue->dql;
 
-	return sprintf(buf, "%u\n", jiffies_to_msecs(dql->slack_hold_time));
+	return sysfs_emit(buf, "%u\n", jiffies_to_msecs(dql->slack_hold_time));
 }
 
 static ssize_t bql_set_hold_time(struct netdev_queue *queue,
@@ -1189,7 +1402,7 @@ static ssize_t bql_show_inflight(struct netdev_queue *queue,
 {
 	struct dql *dql = &queue->dql;
 
-	return sprintf(buf, "%u\n", dql->num_queued - dql->num_completed);
+	return sysfs_emit(buf, "%u\n", dql->num_queued - dql->num_completed);
 }
 
 static struct netdev_queue_attribute bql_inflight_attribute __ro_after_init =
@@ -1232,68 +1445,94 @@ static const struct attribute_group dql_group = {
 #endif /* CONFIG_BQL */
 
 #ifdef CONFIG_XPS
-static ssize_t xps_cpus_show(struct netdev_queue *queue,
-			     char *buf)
+static ssize_t xps_queue_show(struct net_device *dev, unsigned int index,
+			      int tc, char *buf, enum xps_map_type type)
+{
+	struct xps_dev_maps *dev_maps;
+	unsigned long *mask;
+	unsigned int nr_ids;
+	int j, len;
+
+	rcu_read_lock();
+	dev_maps = rcu_dereference(dev->xps_maps[type]);
+
+	/* Default to nr_cpu_ids/dev->num_rx_queues and do not just return 0
+	 * when dev_maps hasn't been allocated yet, to be backward compatible.
+	 */
+	nr_ids = dev_maps ? dev_maps->nr_ids :
+		 (type == XPS_CPUS ? nr_cpu_ids : dev->num_rx_queues);
+
+	mask = bitmap_zalloc(nr_ids, GFP_NOWAIT);
+	if (!mask) {
+		rcu_read_unlock();
+		return -ENOMEM;
+	}
+
+	if (!dev_maps || tc >= dev_maps->num_tc)
+		goto out_no_maps;
+
+	for (j = 0; j < nr_ids; j++) {
+		int i, tci = j * dev_maps->num_tc + tc;
+		struct xps_map *map;
+
+		map = rcu_dereference(dev_maps->attr_map[tci]);
+		if (!map)
+			continue;
+
+		for (i = map->len; i--;) {
+			if (map->queues[i] == index) {
+				__set_bit(j, mask);
+				break;
+			}
+		}
+	}
+out_no_maps:
+	rcu_read_unlock();
+
+	len = bitmap_print_to_pagebuf(false, buf, mask, nr_ids);
+	bitmap_free(mask);
+
+	return len < PAGE_SIZE ? len : -EINVAL;
+}
+
+static ssize_t xps_cpus_show(struct netdev_queue *queue, char *buf)
 {
 	struct net_device *dev = queue->dev;
-	int cpu, len, num_tc = 1, tc = 0;
-	struct xps_dev_maps *dev_maps;
-	cpumask_var_t mask;
-	unsigned long index;
+	unsigned int index;
+	int len, tc;
 
 	if (!netif_is_multiqueue(dev))
 		return -ENOENT;
 
 	index = get_netdev_queue_index(queue);
 
-	if (dev->num_tc) {
-		/* Do not allow XPS on subordinate device directly */
-		num_tc = dev->num_tc;
-		if (num_tc < 0)
-			return -EINVAL;
+	if (!rtnl_trylock())
+		return restart_syscall();
 
-		/* If queue belongs to subordinate dev use its map */
-		dev = netdev_get_tx_queue(dev, index)->sb_dev ? : dev;
+	/* If queue belongs to subordinate dev use its map */
+	dev = netdev_get_tx_queue(dev, index)->sb_dev ? : dev;
 
-		tc = netdev_txq_to_tc(dev, index);
-		if (tc < 0)
-			return -EINVAL;
+	tc = netdev_txq_to_tc(dev, index);
+	if (tc < 0) {
+		rtnl_unlock();
+		return -EINVAL;
 	}
 
-	if (!zalloc_cpumask_var(&mask, GFP_KERNEL))
-		return -ENOMEM;
+	/* Make sure the subordinate device can't be freed */
+	get_device(&dev->dev);
+	rtnl_unlock();
 
-	rcu_read_lock();
-	dev_maps = rcu_dereference(dev->xps_cpus_map);
-	if (dev_maps) {
-		for_each_possible_cpu(cpu) {
-			int i, tci = cpu * num_tc + tc;
-			struct xps_map *map;
+	len = xps_queue_show(dev, index, tc, buf, XPS_CPUS);
 
-			map = rcu_dereference(dev_maps->attr_map[tci]);
-			if (!map)
-				continue;
-
-			for (i = map->len; i--;) {
-				if (map->queues[i] == index) {
-					cpumask_set_cpu(cpu, mask);
-					break;
-				}
-			}
-		}
-	}
-	rcu_read_unlock();
-
-	len = snprintf(buf, PAGE_SIZE, "%*pb\n", cpumask_pr_args(mask));
-	free_cpumask_var(mask);
-	return len < PAGE_SIZE ? len : -EINVAL;
+	put_device(&dev->dev);
+	return len;
 }
 
 static ssize_t xps_cpus_store(struct netdev_queue *queue,
 			      const char *buf, size_t len)
 {
 	struct net_device *dev = queue->dev;
-	unsigned long index;
+	unsigned int index;
 	cpumask_var_t mask;
 	int err;
 
@@ -1314,7 +1553,13 @@ static ssize_t xps_cpus_store(struct netdev_queue *queue,
 		return err;
 	}
 
+	if (!rtnl_trylock()) {
+		free_cpumask_var(mask);
+		return restart_syscall();
+	}
+
 	err = netif_set_xps_queue(dev, mask, index);
+	rtnl_unlock();
 
 	free_cpumask_var(mask);
 
@@ -1327,50 +1572,20 @@ static struct netdev_queue_attribute xps_cpus_attribute __ro_after_init
 static ssize_t xps_rxqs_show(struct netdev_queue *queue, char *buf)
 {
 	struct net_device *dev = queue->dev;
-	struct xps_dev_maps *dev_maps;
-	unsigned long *mask, index;
-	int j, len, num_tc = 1, tc = 0;
+	unsigned int index;
+	int tc;
 
 	index = get_netdev_queue_index(queue);
 
-	if (dev->num_tc) {
-		num_tc = dev->num_tc;
-		tc = netdev_txq_to_tc(dev, index);
-		if (tc < 0)
-			return -EINVAL;
-	}
-	mask = bitmap_zalloc(dev->num_rx_queues, GFP_KERNEL);
-	if (!mask)
-		return -ENOMEM;
+	if (!rtnl_trylock())
+		return restart_syscall();
 
-	rcu_read_lock();
-	dev_maps = rcu_dereference(dev->xps_rxqs_map);
-	if (!dev_maps)
-		goto out_no_maps;
+	tc = netdev_txq_to_tc(dev, index);
+	rtnl_unlock();
+	if (tc < 0)
+		return -EINVAL;
 
-	for (j = -1; j = netif_attrmask_next(j, NULL, dev->num_rx_queues),
-	     j < dev->num_rx_queues;) {
-		int i, tci = j * num_tc + tc;
-		struct xps_map *map;
-
-		map = rcu_dereference(dev_maps->attr_map[tci]);
-		if (!map)
-			continue;
-
-		for (i = map->len; i--;) {
-			if (map->queues[i] == index) {
-				set_bit(j, mask);
-				break;
-			}
-		}
-	}
-out_no_maps:
-	rcu_read_unlock();
-
-	len = bitmap_print_to_pagebuf(false, buf, mask, dev->num_rx_queues);
-	bitmap_free(mask);
-
-	return len < PAGE_SIZE ? len : -EINVAL;
+	return xps_queue_show(dev, index, tc, buf, XPS_RXQS);
 }
 
 static ssize_t xps_rxqs_store(struct netdev_queue *queue, const char *buf,
@@ -1378,7 +1593,8 @@ static ssize_t xps_rxqs_store(struct netdev_queue *queue, const char *buf,
 {
 	struct net_device *dev = queue->dev;
 	struct net *net = dev_net(dev);
-	unsigned long *mask, index;
+	unsigned long *mask;
+	unsigned int index;
 	int err;
 
 	if (!ns_capable(net->user_ns, CAP_NET_ADMIN))
@@ -1396,9 +1612,16 @@ static ssize_t xps_rxqs_store(struct netdev_queue *queue, const char *buf,
 		return err;
 	}
 
+	if (!rtnl_trylock()) {
+		bitmap_free(mask);
+		return restart_syscall();
+	}
+
 	cpus_read_lock();
-	err = __netif_set_xps_queue(dev, mask, index, true);
+	err = __netif_set_xps_queue(dev, mask, index, XPS_RXQS);
 	cpus_read_unlock();
+
+	rtnl_unlock();
 
 	bitmap_free(mask);
 	return err ? : len;
@@ -1425,10 +1648,10 @@ static void netdev_queue_release(struct kobject *kobj)
 	struct netdev_queue *queue = to_netdev_queue(kobj);
 
 	memset(kobj, 0, sizeof(*kobj));
-	dev_put(queue->dev);
+	netdev_put(queue->dev, &queue->dev_tracker);
 }
 
-static const void *netdev_queue_namespace(struct kobject *kobj)
+static const void *netdev_queue_namespace(const struct kobject *kobj)
 {
 	struct netdev_queue *queue = to_netdev_queue(kobj);
 	struct device *dev = &queue->dev->dev;
@@ -1440,7 +1663,7 @@ static const void *netdev_queue_namespace(struct kobject *kobj)
 	return ns;
 }
 
-static void netdev_queue_get_ownership(struct kobject *kobj,
+static void netdev_queue_get_ownership(const struct kobject *kobj,
 				       kuid_t *uid, kgid_t *gid)
 {
 	const struct net *net = netdev_queue_namespace(kobj);
@@ -1448,7 +1671,7 @@ static void netdev_queue_get_ownership(struct kobject *kobj,
 	net_ns_get_ownership(net, uid, gid);
 }
 
-static struct kobj_type netdev_queue_ktype __ro_after_init = {
+static const struct kobj_type netdev_queue_ktype = {
 	.sysfs_ops = &netdev_queue_sysfs_ops,
 	.release = netdev_queue_release,
 	.default_groups = netdev_queue_default_groups,
@@ -1465,7 +1688,7 @@ static int netdev_queue_add_kobject(struct net_device *dev, int index)
 	/* Kobject_put later will trigger netdev_queue_release call
 	 * which decreases dev refcount: Take that reference here
 	 */
-	dev_hold(queue->dev);
+	netdev_hold(queue->dev, &queue->dev_tracker, GFP_KERNEL);
 
 	kobj->kset = dev->queues_kset;
 	error = kobject_init_and_add(kobj, &netdev_queue_ktype, NULL,
@@ -1486,6 +1709,23 @@ err:
 	kobject_put(kobj);
 	return error;
 }
+
+static int tx_queue_change_owner(struct net_device *ndev, int index,
+				 kuid_t kuid, kgid_t kgid)
+{
+	struct netdev_queue *queue = ndev->_tx + index;
+	struct kobject *kobj = &queue->kobj;
+	int error;
+
+	error = sysfs_change_owner(kobj, kuid, kgid);
+	if (error)
+		return error;
+
+#ifdef CONFIG_BQL
+	error = sysfs_group_change_owner(kobj, &dql_group, kuid, kgid);
+#endif
+	return error;
+}
 #endif /* CONFIG_SYSFS */
 
 int
@@ -1494,6 +1734,13 @@ netdev_queue_update_kobjects(struct net_device *dev, int old_num, int new_num)
 #ifdef CONFIG_SYSFS
 	int i;
 	int error = 0;
+
+	/* Tx queue kobjects are allowed to be updated when a device is being
+	 * unregistered, but solely to remove queues from qdiscs. Any path
+	 * adding queues should be fixed.
+	 */
+	WARN(dev->reg_state == NETREG_UNREGISTERING && new_num > old_num,
+	     "New queues can't be registered after device unregistration.");
 
 	for (i = old_num; i < new_num; i++) {
 		error = netdev_queue_add_kobject(dev, i);
@@ -1506,12 +1753,31 @@ netdev_queue_update_kobjects(struct net_device *dev, int old_num, int new_num)
 	while (--i >= new_num) {
 		struct netdev_queue *queue = dev->_tx + i;
 
-		if (!refcount_read(&dev_net(dev)->count))
+		if (!refcount_read(&dev_net(dev)->ns.count))
 			queue->kobj.uevent_suppress = 1;
 #ifdef CONFIG_BQL
 		sysfs_remove_group(&queue->kobj, &dql_group);
 #endif
 		kobject_put(&queue->kobj);
+	}
+
+	return error;
+#else
+	return 0;
+#endif /* CONFIG_SYSFS */
+}
+
+static int net_tx_queue_change_owner(struct net_device *dev, int num,
+				     kuid_t kuid, kgid_t kgid)
+{
+#ifdef CONFIG_SYSFS
+	int error = 0;
+	int i;
+
+	for (i = 0; i < num; i++) {
+		error = tx_queue_change_owner(dev, i, kuid, kgid);
+		if (error)
+			break;
 	}
 
 	return error;
@@ -1554,6 +1820,31 @@ error:
 	return error;
 }
 
+static int queue_change_owner(struct net_device *ndev, kuid_t kuid, kgid_t kgid)
+{
+	int error = 0, real_rx = 0, real_tx = 0;
+
+#ifdef CONFIG_SYSFS
+	if (ndev->queues_kset) {
+		error = sysfs_change_owner(&ndev->queues_kset->kobj, kuid, kgid);
+		if (error)
+			return error;
+	}
+	real_rx = ndev->real_num_rx_queues;
+#endif
+	real_tx = ndev->real_num_tx_queues;
+
+	error = net_rx_queue_change_owner(ndev, real_rx, kuid, kgid);
+	if (error)
+		return error;
+
+	error = net_tx_queue_change_owner(ndev, real_tx, kuid, kgid);
+	if (error)
+		return error;
+
+	return 0;
+}
+
 static void remove_queue_kobjects(struct net_device *dev)
 {
 	int real_rx = 0, real_tx = 0;
@@ -1565,6 +1856,9 @@ static void remove_queue_kobjects(struct net_device *dev)
 
 	net_rx_queue_update_kobjects(dev, real_rx, 0);
 	netdev_queue_update_kobjects(dev, real_tx, 0);
+
+	dev->real_num_rx_queues = 0;
+	dev->real_num_tx_queues = 0;
 #ifdef CONFIG_SYSFS
 	kset_unregister(dev->queues_kset);
 #endif
@@ -1607,9 +1901,9 @@ const struct kobj_ns_type_operations net_ns_type_operations = {
 };
 EXPORT_SYMBOL_GPL(net_ns_type_operations);
 
-static int netdev_uevent(struct device *d, struct kobj_uevent_env *env)
+static int netdev_uevent(const struct device *d, struct kobj_uevent_env *env)
 {
-	struct net_device *dev = to_net_dev(d);
+	const struct net_device *dev = to_net_dev(d);
 	int retval;
 
 	/* pass interface to uevent. */
@@ -1644,16 +1938,16 @@ static void netdev_release(struct device *d)
 	netdev_freemem(dev);
 }
 
-static const void *net_namespace(struct device *d)
+static const void *net_namespace(const struct device *d)
 {
-	struct net_device *dev = to_net_dev(d);
+	const struct net_device *dev = to_net_dev(d);
 
 	return dev_net(dev);
 }
 
-static void net_get_ownership(struct device *d, kuid_t *uid, kgid_t *gid)
+static void net_get_ownership(const struct device *d, kuid_t *uid, kgid_t *gid)
 {
-	struct net_device *dev = to_net_dev(d);
+	const struct net_device *dev = to_net_dev(d);
 	const struct net *net = dev_net(dev);
 
 	net_ns_get_ownership(net, uid, gid);
@@ -1669,15 +1963,15 @@ static struct class net_class __ro_after_init = {
 	.get_ownership = net_get_ownership,
 };
 
-#ifdef CONFIG_OF_NET
+#ifdef CONFIG_OF
 static int of_dev_node_match(struct device *dev, const void *data)
 {
-	int ret = 0;
+	for (; dev; dev = dev->parent) {
+		if (dev->of_node == data)
+			return 1;
+	}
 
-	if (dev->parent)
-		ret = dev->parent->of_node == data;
-
-	return ret == 0 ? dev->of_node == data : ret;
+	return 0;
 }
 
 /*
@@ -1709,7 +2003,7 @@ void netdev_unregister_kobject(struct net_device *ndev)
 {
 	struct device *dev = &ndev->dev;
 
-	if (!refcount_read(&dev_net(ndev)->count))
+	if (!refcount_read(&dev_net(ndev)->ns.count))
 		dev_set_uevent_suppress(dev, 1);
 
 	kobject_get(&dev->kobj);
@@ -1742,14 +2036,8 @@ int netdev_register_kobject(struct net_device *ndev)
 
 	*groups++ = &netstat_group;
 
-#if IS_ENABLED(CONFIG_WIRELESS_EXT) || IS_ENABLED(CONFIG_CFG80211)
-	if (ndev->ieee80211_ptr)
+	if (wireless_group_needed(ndev))
 		*groups++ = &wireless_group;
-#if IS_ENABLED(CONFIG_WIRELESS_EXT)
-	else if (ndev->wireless_handlers)
-		*groups++ = &wireless_group;
-#endif
-#endif
 #endif /* CONFIG_SYSFS */
 
 	error = device_add(dev);
@@ -1765,6 +2053,37 @@ int netdev_register_kobject(struct net_device *ndev)
 	pm_runtime_set_memalloc_noio(dev, true);
 
 	return error;
+}
+
+/* Change owner for sysfs entries when moving network devices across network
+ * namespaces owned by different user namespaces.
+ */
+int netdev_change_owner(struct net_device *ndev, const struct net *net_old,
+			const struct net *net_new)
+{
+	kuid_t old_uid = GLOBAL_ROOT_UID, new_uid = GLOBAL_ROOT_UID;
+	kgid_t old_gid = GLOBAL_ROOT_GID, new_gid = GLOBAL_ROOT_GID;
+	struct device *dev = &ndev->dev;
+	int error;
+
+	net_ns_get_ownership(net_old, &old_uid, &old_gid);
+	net_ns_get_ownership(net_new, &new_uid, &new_gid);
+
+	/* The network namespace was changed but the owning user namespace is
+	 * identical so there's no need to change the owner of sysfs entries.
+	 */
+	if (uid_eq(old_uid, new_uid) && gid_eq(old_gid, new_gid))
+		return 0;
+
+	error = device_change_owner(dev, new_uid, new_gid);
+	if (error)
+		return error;
+
+	error = queue_change_owner(ndev, new_uid, new_gid);
+	if (error)
+		return error;
+
+	return 0;
 }
 
 int netdev_class_create_file_ns(const struct class_attribute *class_attr,

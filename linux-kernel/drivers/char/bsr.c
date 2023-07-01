@@ -17,7 +17,6 @@
 #include <linux/list.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
-#include <asm/pgtable.h>
 #include <asm/io.h>
 
 /*
@@ -61,7 +60,7 @@ struct bsr_dev {
 };
 
 static unsigned total_bsr_devs;
-static struct list_head bsr_devs = LIST_HEAD_INIT(bsr_devs);
+static LIST_HEAD(bsr_devs);
 static struct class *bsr_class;
 static int bsr_major;
 

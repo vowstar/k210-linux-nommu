@@ -3,7 +3,7 @@
  *
  * Module Name: exfield - AML execution - field_unit read/write
  *
- * Copyright (C) 2000 - 2020, Intel Corp.
+ * Copyright (C) 2000 - 2022, Intel Corp.
  *
  *****************************************************************************/
 
@@ -22,7 +22,7 @@ ACPI_MODULE_NAME("exfield")
  */
 #define ACPI_INVALID_PROTOCOL_ID        0x80
 #define ACPI_MAX_PROTOCOL_ID            0x0F
-const u8 acpi_protocol_lengths[] = {
+static const u8 acpi_protocol_lengths[] = {
 	ACPI_INVALID_PROTOCOL_ID,	/* 0 - reserved */
 	ACPI_INVALID_PROTOCOL_ID,	/* 1 - reserved */
 	0x00,			/* 2 - ATTRIB_QUICK */
@@ -139,7 +139,11 @@ acpi_ex_read_data_from_field(struct acpi_walk_state *walk_state,
 		    || obj_desc->field.region_obj->region.space_id ==
 		    ACPI_ADR_SPACE_GSBUS
 		    || obj_desc->field.region_obj->region.space_id ==
-		    ACPI_ADR_SPACE_IPMI)) {
+		    ACPI_ADR_SPACE_IPMI
+		    || obj_desc->field.region_obj->region.space_id ==
+		    ACPI_ADR_SPACE_PLATFORM_RT
+		    || obj_desc->field.region_obj->region.space_id ==
+		    ACPI_ADR_SPACE_FIXED_HARDWARE)) {
 
 		/* SMBus, GSBus, IPMI serial */
 
@@ -301,7 +305,11 @@ acpi_ex_write_data_to_field(union acpi_operand_object *source_desc,
 		    || obj_desc->field.region_obj->region.space_id ==
 		    ACPI_ADR_SPACE_GSBUS
 		    || obj_desc->field.region_obj->region.space_id ==
-		    ACPI_ADR_SPACE_IPMI)) {
+		    ACPI_ADR_SPACE_IPMI
+		    || obj_desc->field.region_obj->region.space_id ==
+		    ACPI_ADR_SPACE_PLATFORM_RT
+		    || obj_desc->field.region_obj->region.space_id ==
+		    ACPI_ADR_SPACE_FIXED_HARDWARE)) {
 
 		/* SMBus, GSBus, IPMI serial */
 
@@ -326,12 +334,7 @@ acpi_ex_write_data_to_field(union acpi_operand_object *source_desc,
 		       obj_desc->field.base_byte_offset,
 		       source_desc->buffer.pointer, data_length);
 
-		if ((obj_desc->field.region_obj->region.address ==
-		     PCC_MASTER_SUBSPACE
-		     && MASTER_SUBSPACE_COMMAND(obj_desc->field.
-						base_byte_offset))
-		    || GENERIC_SUBSPACE_COMMAND(obj_desc->field.
-						base_byte_offset)) {
+		if (MASTER_SUBSPACE_COMMAND(obj_desc->field.base_byte_offset)) {
 
 			/* Perform the write */
 

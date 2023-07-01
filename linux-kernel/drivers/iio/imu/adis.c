@@ -7,18 +7,15 @@
  */
 
 #include <linux/delay.h>
+#include <linux/gpio/consumer.h>
 #include <linux/mutex.h>
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/spi/spi.h>
-#include <linux/slab.h>
-#include <linux/sysfs.h>
 #include <linux/module.h>
 #include <asm/unaligned.h>
 
 #include <linux/iio/iio.h>
-#include <linux/iio/sysfs.h>
-#include <linux/iio/buffer.h>
 #include <linux/iio/imu/adis.h>
 
 #define ADIS_MSC_CTRL_DATA_RDY_EN	BIT(2)
@@ -33,8 +30,8 @@
  * @value: The value to write to device (up to 4 bytes)
  * @size: The size of the @value (in bytes)
  */
-int __adis_write_reg(struct adis *adis, unsigned int reg,
-	unsigned int value, unsigned int size)
+int __adis_write_reg(struct adis *adis, unsigned int reg, unsigned int value,
+		     unsigned int size)
 {
 	unsigned int page = reg / ADIS_PAGE_SIZE;
 	int ret, i;
@@ -96,11 +93,11 @@ int __adis_write_reg(struct adis *adis, unsigned int reg,
 		adis->tx[9] = (value >> 24) & 0xff;
 		adis->tx[6] = ADIS_WRITE_REG(reg + 2);
 		adis->tx[7] = (value >> 16) & 0xff;
-		/* fall through */
+		fallthrough;
 	case 2:
 		adis->tx[4] = ADIS_WRITE_REG(reg + 1);
 		adis->tx[5] = (value >> 8) & 0xff;
-		/* fall through */
+		fallthrough;
 	case 1:
 		adis->tx[2] = ADIS_WRITE_REG(reg);
 		adis->tx[3] = value & 0xff;
@@ -117,14 +114,14 @@ int __adis_write_reg(struct adis *adis, unsigned int reg,
 	ret = spi_sync(adis->spi, &msg);
 	if (ret) {
 		dev_err(&adis->spi->dev, "Failed to write register 0x%02X: %d\n",
-				reg, ret);
+			reg, ret);
 	} else {
 		adis->current_page = page;
 	}
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(__adis_write_reg);
+EXPORT_SYMBOL_NS_GPL(__adis_write_reg, IIO_ADISLIB);
 
 /**
  * __adis_read_reg() - read N bytes from register (unlocked version)
@@ -133,8 +130,8 @@ EXPORT_SYMBOL_GPL(__adis_write_reg);
  * @val: The value read back from the device
  * @size: The size of the @val buffer
  */
-int __adis_read_reg(struct adis *adis, unsigned int reg,
-	unsigned int *val, unsigned int size)
+int __adis_read_reg(struct adis *adis, unsigned int reg, unsigned int *val,
+		    unsigned int size)
 {
 	unsigned int page = reg / ADIS_PAGE_SIZE;
 	struct spi_message msg;
@@ -190,7 +187,7 @@ int __adis_read_reg(struct adis *adis, unsigned int reg,
 		adis->tx[2] = ADIS_READ_REG(reg + 2);
 		adis->tx[3] = 0;
 		spi_message_add_tail(&xfers[1], &msg);
-		/* fall through */
+		fallthrough;
 	case 2:
 		adis->tx[4] = ADIS_READ_REG(reg);
 		adis->tx[5] = 0;
@@ -204,11 +201,11 @@ int __adis_read_reg(struct adis *adis, unsigned int reg,
 	ret = spi_sync(adis->spi, &msg);
 	if (ret) {
 		dev_err(&adis->spi->dev, "Failed to read register 0x%02X: %d\n",
-				reg, ret);
+			reg, ret);
 		return ret;
-	} else {
-		adis->current_page = page;
 	}
+
+	adis->current_page = page;
 
 	switch (size) {
 	case 4:
@@ -221,17 +218,42 @@ int __adis_read_reg(struct adis *adis, unsigned int reg,
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(__adis_read_reg);
+EXPORT_SYMBOL_NS_GPL(__adis_read_reg, IIO_ADISLIB);
+/**
+ * __adis_update_bits_base() - ADIS Update bits function - Unlocked version
+ * @adis: The adis device
+ * @reg: The address of the lower of the two registers
+ * @mask: Bitmask to change
+ * @val: Value to be written
+ * @size: Size of the register to update
+ *
+ * Updates the desired bits of @reg in accordance with @mask and @val.
+ */
+int __adis_update_bits_base(struct adis *adis, unsigned int reg, const u32 mask,
+			    const u32 val, u8 size)
+{
+	int ret;
+	u32 __val;
+
+	ret = __adis_read_reg(adis, reg, &__val, size);
+	if (ret)
+		return ret;
+
+	__val = (__val & ~mask) | (val & mask);
+
+	return __adis_write_reg(adis, reg, __val, size);
+}
+EXPORT_SYMBOL_NS_GPL(__adis_update_bits_base, IIO_ADISLIB);
 
 #ifdef CONFIG_DEBUG_FS
 
-int adis_debugfs_reg_access(struct iio_dev *indio_dev,
-	unsigned int reg, unsigned int writeval, unsigned int *readval)
+int adis_debugfs_reg_access(struct iio_dev *indio_dev, unsigned int reg,
+			    unsigned int writeval, unsigned int *readval)
 {
 	struct adis *adis = iio_device_get_drvdata(indio_dev);
 
 	if (readval) {
-		uint16_t val16;
+		u16 val16;
 		int ret;
 
 		ret = adis_read_reg_16(adis, reg, &val16);
@@ -239,36 +261,41 @@ int adis_debugfs_reg_access(struct iio_dev *indio_dev,
 			*readval = val16;
 
 		return ret;
-	} else {
-		return adis_write_reg_16(adis, reg, writeval);
 	}
+
+	return adis_write_reg_16(adis, reg, writeval);
 }
-EXPORT_SYMBOL(adis_debugfs_reg_access);
+EXPORT_SYMBOL_NS(adis_debugfs_reg_access, IIO_ADISLIB);
 
 #endif
 
 /**
- * adis_enable_irq() - Enable or disable data ready IRQ
+ * __adis_enable_irq() - Enable or disable data ready IRQ (unlocked)
  * @adis: The adis device
  * @enable: Whether to enable the IRQ
  *
  * Returns 0 on success, negative error code otherwise
  */
-int adis_enable_irq(struct adis *adis, bool enable)
+int __adis_enable_irq(struct adis *adis, bool enable)
 {
-	int ret = 0;
-	uint16_t msc;
+	int ret;
+	u16 msc;
 
-	mutex_lock(&adis->state_lock);
+	if (adis->data->enable_irq)
+		return adis->data->enable_irq(adis, enable);
 
-	if (adis->data->enable_irq) {
-		ret = adis->data->enable_irq(adis, enable);
-		goto out_unlock;
+	if (adis->data->unmasked_drdy) {
+		if (enable)
+			enable_irq(adis->spi->irq);
+		else
+			disable_irq(adis->spi->irq);
+
+		return 0;
 	}
 
 	ret = __adis_read_reg_16(adis, adis->data->msc_ctrl_reg, &msc);
 	if (ret)
-		goto out_unlock;
+		return ret;
 
 	msc |= ADIS_MSC_CTRL_DATA_RDY_POL_HIGH;
 	msc &= ~ADIS_MSC_CTRL_DATA_RDY_DIO2;
@@ -277,13 +304,9 @@ int adis_enable_irq(struct adis *adis, bool enable)
 	else
 		msc &= ~ADIS_MSC_CTRL_DATA_RDY_EN;
 
-	ret = __adis_write_reg_16(adis, adis->data->msc_ctrl_reg, msc);
-
-out_unlock:
-	mutex_unlock(&adis->state_lock);
-	return ret;
+	return __adis_write_reg_16(adis, adis->data->msc_ctrl_reg, msc);
 }
-EXPORT_SYMBOL(adis_enable_irq);
+EXPORT_SYMBOL_NS(__adis_enable_irq, IIO_ADISLIB);
 
 /**
  * __adis_check_status() - Check the device for error conditions (unlocked)
@@ -293,7 +316,7 @@ EXPORT_SYMBOL(adis_enable_irq);
  */
 int __adis_check_status(struct adis *adis)
 {
-	uint16_t status;
+	u16 status;
 	int ret;
 	int i;
 
@@ -315,7 +338,7 @@ int __adis_check_status(struct adis *adis)
 
 	return -EIO;
 }
-EXPORT_SYMBOL_GPL(__adis_check_status);
+EXPORT_SYMBOL_NS_GPL(__adis_check_status, IIO_ADISLIB);
 
 /**
  * __adis_reset() - Reset the device (unlocked version)
@@ -329,7 +352,7 @@ int __adis_reset(struct adis *adis)
 	const struct adis_timeout *timeouts = adis->data->timeouts;
 
 	ret = __adis_write_reg_8(adis, adis->data->glob_cmd_reg,
-			ADIS_GLOB_CMD_SW_RESET);
+				 ADIS_GLOB_CMD_SW_RESET);
 	if (ret) {
 		dev_err(&adis->spi->dev, "Failed to reset device: %d\n", ret);
 		return ret;
@@ -339,15 +362,15 @@ int __adis_reset(struct adis *adis)
 
 	return 0;
 }
-EXPORT_SYMBOL_GPL(__adis_reset);
+EXPORT_SYMBOL_NS_GPL(__adis_reset, IIO_ADIS_LIB);
 
 static int adis_self_test(struct adis *adis)
 {
 	int ret;
 	const struct adis_timeout *timeouts = adis->data->timeouts;
 
-	ret = __adis_write_reg_16(adis, adis->data->msc_ctrl_reg,
-			adis->data->self_test_mask);
+	ret = __adis_write_reg_16(adis, adis->data->self_test_reg,
+				  adis->data->self_test_mask);
 	if (ret) {
 		dev_err(&adis->spi->dev, "Failed to initiate self test: %d\n",
 			ret);
@@ -359,42 +382,78 @@ static int adis_self_test(struct adis *adis)
 	ret = __adis_check_status(adis);
 
 	if (adis->data->self_test_no_autoclear)
-		__adis_write_reg_16(adis, adis->data->msc_ctrl_reg, 0x00);
+		__adis_write_reg_16(adis, adis->data->self_test_reg, 0x00);
 
 	return ret;
 }
 
 /**
- * adis_inital_startup() - Performs device self-test
+ * __adis_initial_startup() - Device initial setup
  * @adis: The adis device
+ *
+ * The function performs a HW reset via a reset pin that should be specified
+ * via GPIOLIB. If no pin is configured a SW reset will be performed.
+ * The RST pin for the ADIS devices should be configured as ACTIVE_LOW.
+ *
+ * After the self-test operation is performed, the function will also check
+ * that the product ID is as expected. This assumes that drivers providing
+ * 'prod_id_reg' will also provide the 'prod_id'.
  *
  * Returns 0 if the device is operational, a negative error code otherwise.
  *
  * This function should be called early on in the device initialization sequence
  * to ensure that the device is in a sane and known state and that it is usable.
  */
-int adis_initial_startup(struct adis *adis)
+int __adis_initial_startup(struct adis *adis)
 {
+	const struct adis_timeout *timeouts = adis->data->timeouts;
+	struct gpio_desc *gpio;
+	u16 prod_id;
 	int ret;
 
-	mutex_lock(&adis->state_lock);
+	/* check if the device has rst pin low */
+	gpio = devm_gpiod_get_optional(&adis->spi->dev, "reset", GPIOD_OUT_HIGH);
+	if (IS_ERR(gpio))
+		return PTR_ERR(gpio);
 
-	ret = adis_self_test(adis);
-	if (ret) {
-		dev_err(&adis->spi->dev, "Self-test failed, trying reset.\n");
-		__adis_reset(adis);
-		ret = adis_self_test(adis);
-		if (ret) {
-			dev_err(&adis->spi->dev, "Second self-test failed, giving up.\n");
-			goto out_unlock;
-		}
+	if (gpio) {
+		usleep_range(10, 12);
+		/* bring device out of reset */
+		gpiod_set_value_cansleep(gpio, 0);
+		msleep(timeouts->reset_ms);
+	} else {
+		ret = __adis_reset(adis);
+		if (ret)
+			return ret;
 	}
 
-out_unlock:
-	mutex_unlock(&adis->state_lock);
-	return ret;
+	ret = adis_self_test(adis);
+	if (ret)
+		return ret;
+
+	/*
+	 * don't bother calling this if we can't unmask the IRQ as in this case
+	 * the IRQ is most likely not yet requested and we will request it
+	 * with 'IRQF_NO_AUTOEN' anyways.
+	 */
+	if (!adis->data->unmasked_drdy)
+		__adis_enable_irq(adis, false);
+
+	if (!adis->data->prod_id_reg)
+		return 0;
+
+	ret = adis_read_reg_16(adis, adis->data->prod_id_reg, &prod_id);
+	if (ret)
+		return ret;
+
+	if (prod_id != adis->data->prod_id)
+		dev_warn(&adis->spi->dev,
+			 "Device ID(%u) and product ID(%u) do not match.\n",
+			 adis->data->prod_id, prod_id);
+
+	return 0;
 }
-EXPORT_SYMBOL_GPL(adis_initial_startup);
+EXPORT_SYMBOL_NS_GPL(__adis_initial_startup, IIO_ADISLIB);
 
 /**
  * adis_single_conversion() - Performs a single sample conversion
@@ -412,7 +471,8 @@ EXPORT_SYMBOL_GPL(adis_initial_startup);
  * a error bit in the channels raw value set error_mask to 0.
  */
 int adis_single_conversion(struct iio_dev *indio_dev,
-	const struct iio_chan_spec *chan, unsigned int error_mask, int *val)
+			   const struct iio_chan_spec *chan,
+			   unsigned int error_mask, int *val)
 {
 	struct adis *adis = iio_device_get_drvdata(indio_dev);
 	unsigned int uval;
@@ -421,7 +481,7 @@ int adis_single_conversion(struct iio_dev *indio_dev,
 	mutex_lock(&adis->state_lock);
 
 	ret = __adis_read_reg(adis, chan->address, &uval,
-			chan->scan_type.storagebits / 8);
+			      chan->scan_type.storagebits / 8);
 	if (ret)
 		goto err_unlock;
 
@@ -441,7 +501,7 @@ err_unlock:
 	mutex_unlock(&adis->state_lock);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(adis_single_conversion);
+EXPORT_SYMBOL_NS_GPL(adis_single_conversion, IIO_ADISLIB);
 
 /**
  * adis_init() - Initialize adis device structure
@@ -456,7 +516,7 @@ EXPORT_SYMBOL_GPL(adis_single_conversion);
  * called.
  */
 int adis_init(struct adis *adis, struct iio_dev *indio_dev,
-	struct spi_device *spi, const struct adis_data *data)
+	      struct spi_device *spi, const struct adis_data *data)
 {
 	if (!data || !data->timeouts) {
 		dev_err(&spi->dev, "No config data or timeouts not defined!\n");
@@ -476,9 +536,9 @@ int adis_init(struct adis *adis, struct iio_dev *indio_dev,
 		adis->current_page = 0;
 	}
 
-	return adis_enable_irq(adis, false);
+	return 0;
 }
-EXPORT_SYMBOL_GPL(adis_init);
+EXPORT_SYMBOL_NS_GPL(adis_init, IIO_ADISLIB);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Lars-Peter Clausen <lars@metafoo.de>");

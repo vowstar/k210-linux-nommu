@@ -62,23 +62,10 @@ struct crypto_shash_spawn {
 int crypto_hash_walk_done(struct crypto_hash_walk *walk, int err);
 int crypto_hash_walk_first(struct ahash_request *req,
 			   struct crypto_hash_walk *walk);
-int crypto_ahash_walk_first(struct ahash_request *req,
-			   struct crypto_hash_walk *walk);
-
-static inline int crypto_ahash_walk_done(struct crypto_hash_walk *walk,
-					 int err)
-{
-	return crypto_hash_walk_done(walk, err);
-}
 
 static inline int crypto_hash_walk_last(struct crypto_hash_walk *walk)
 {
 	return !(walk->entrylen | walk->total);
-}
-
-static inline int crypto_ahash_walk_last(struct crypto_hash_walk *walk)
-{
-	return crypto_hash_walk_last(walk);
 }
 
 int crypto_register_ahash(struct ahash_alg *alg);
@@ -153,6 +140,11 @@ static inline void *crypto_ahash_ctx(struct crypto_ahash *tfm)
 	return crypto_tfm_ctx(crypto_ahash_tfm(tfm));
 }
 
+static inline void *crypto_ahash_ctx_dma(struct crypto_ahash *tfm)
+{
+	return crypto_tfm_ctx_dma(crypto_ahash_tfm(tfm));
+}
+
 static inline struct ahash_alg *__crypto_ahash_alg(struct crypto_alg *alg)
 {
 	return container_of(__crypto_hash_alg_common(alg), struct ahash_alg,
@@ -163,6 +155,13 @@ static inline void crypto_ahash_set_reqsize(struct crypto_ahash *tfm,
 					    unsigned int reqsize)
 {
 	tfm->reqsize = reqsize;
+}
+
+static inline void crypto_ahash_set_reqsize_dma(struct crypto_ahash *ahash,
+						unsigned int reqsize)
+{
+	reqsize += crypto_dma_align() & ~(crypto_tfm_ctx_alignment() - 1);
+	ahash->reqsize = reqsize;
 }
 
 static inline struct crypto_instance *ahash_crypto_instance(
@@ -177,14 +176,30 @@ static inline struct ahash_instance *ahash_instance(
 	return container_of(inst, struct ahash_instance, s.base);
 }
 
+static inline struct ahash_instance *ahash_alg_instance(
+	struct crypto_ahash *ahash)
+{
+	return ahash_instance(crypto_tfm_alg_instance(&ahash->base));
+}
+
 static inline void *ahash_instance_ctx(struct ahash_instance *inst)
 {
 	return crypto_instance_ctx(ahash_crypto_instance(inst));
 }
 
+static inline void *ahash_request_ctx_dma(struct ahash_request *req)
+{
+	unsigned int align = crypto_dma_align();
+
+	if (align <= crypto_tfm_ctx_alignment())
+		align = 1;
+
+	return PTR_ALIGN(ahash_request_ctx(req), align);
+}
+
 static inline void ahash_request_complete(struct ahash_request *req, int err)
 {
-	req->base.complete(&req->base, err);
+	crypto_request_complete(&req->base, err);
 }
 
 static inline u32 ahash_request_flags(struct ahash_request *req)

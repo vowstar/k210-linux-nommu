@@ -12,7 +12,18 @@
 
 #define HAVE_FUNCTION_GRAPH_FP_TEST
 
-#ifdef CONFIG_DYNAMIC_FTRACE_WITH_REGS
+/*
+ * HAVE_FUNCTION_GRAPH_RET_ADDR_PTR means that the architecture can provide a
+ * "return address pointer" which can be used to uniquely identify a return
+ * address which has been overwritten.
+ *
+ * On arm64 we use the address of the caller's frame record, which remains the
+ * same for the lifetime of the instrumented function, unlike the return
+ * address in the LR.
+ */
+#define HAVE_FUNCTION_GRAPH_RET_ADDR_PTR
+
+#ifdef CONFIG_DYNAMIC_FTRACE_WITH_ARGS
 #define ARCH_SUPPORTS_FTRACE_OPS 1
 #else
 #define MCOUNT_ADDR		((unsigned long)_mcount)
@@ -22,8 +33,7 @@
 #define MCOUNT_INSN_SIZE	AARCH64_INSN_SIZE
 
 #define FTRACE_PLT_IDX		0
-#define FTRACE_REGS_PLT_IDX	1
-#define NR_FTRACE_PLTS		2
+#define NR_FTRACE_PLTS		1
 
 /*
  * Currently, gcc tends to save the link register after the local variables
@@ -52,25 +62,80 @@ extern unsigned long ftrace_graph_call;
 
 extern void return_to_handler(void);
 
-static inline unsigned long ftrace_call_adjust(unsigned long addr)
+unsigned long ftrace_call_adjust(unsigned long addr);
+
+#ifdef CONFIG_DYNAMIC_FTRACE_WITH_ARGS
+struct dyn_ftrace;
+struct ftrace_ops;
+
+#define arch_ftrace_get_regs(regs) NULL
+
+struct ftrace_regs {
+	/* x0 - x8 */
+	unsigned long regs[9];
+	unsigned long __unused;
+
+	unsigned long fp;
+	unsigned long lr;
+
+	unsigned long sp;
+	unsigned long pc;
+};
+
+static __always_inline unsigned long
+ftrace_regs_get_instruction_pointer(const struct ftrace_regs *fregs)
 {
-	/*
-	 * Adjust addr to point at the BL in the callsite.
-	 * See ftrace_init_nop() for the callsite sequence.
-	 */
-	if (IS_ENABLED(CONFIG_DYNAMIC_FTRACE_WITH_REGS))
-		return addr + AARCH64_INSN_SIZE;
-	/*
-	 * addr is the address of the mcount call instruction.
-	 * recordmcount does the necessary offset calculation.
-	 */
-	return addr;
+	return fregs->pc;
 }
 
-#ifdef CONFIG_DYNAMIC_FTRACE_WITH_REGS
-struct dyn_ftrace;
+static __always_inline void
+ftrace_regs_set_instruction_pointer(struct ftrace_regs *fregs,
+				    unsigned long pc)
+{
+	fregs->pc = pc;
+}
+
+static __always_inline unsigned long
+ftrace_regs_get_stack_pointer(const struct ftrace_regs *fregs)
+{
+	return fregs->sp;
+}
+
+static __always_inline unsigned long
+ftrace_regs_get_argument(struct ftrace_regs *fregs, unsigned int n)
+{
+	if (n < 8)
+		return fregs->regs[n];
+	return 0;
+}
+
+static __always_inline unsigned long
+ftrace_regs_get_return_value(const struct ftrace_regs *fregs)
+{
+	return fregs->regs[0];
+}
+
+static __always_inline void
+ftrace_regs_set_return_value(struct ftrace_regs *fregs,
+			     unsigned long ret)
+{
+	fregs->regs[0] = ret;
+}
+
+static __always_inline void
+ftrace_override_function_with_return(struct ftrace_regs *fregs)
+{
+	fregs->pc = fregs->lr;
+}
+
+int ftrace_regs_query_register_offset(const char *name);
+
 int ftrace_init_nop(struct module *mod, struct dyn_ftrace *rec);
 #define ftrace_init_nop ftrace_init_nop
+
+void ftrace_graph_func(unsigned long ip, unsigned long parent_ip,
+		       struct ftrace_ops *op, struct ftrace_regs *fregs);
+#define ftrace_graph_func ftrace_graph_func
 #endif
 
 #define ftrace_return_address(n) return_address(n)

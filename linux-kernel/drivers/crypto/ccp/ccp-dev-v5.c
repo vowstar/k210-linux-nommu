@@ -221,8 +221,8 @@ static unsigned int ccp5_get_free_slots(struct ccp_cmd_queue *cmd_q)
 static int ccp5_do_cmd(struct ccp5_desc *desc,
 		       struct ccp_cmd_queue *cmd_q)
 {
-	u32 *mP;
-	__le32 *dP;
+	__le32 *mP;
+	u32 *dP;
 	u32 tail;
 	int	i;
 	int ret = 0;
@@ -235,8 +235,8 @@ static int ccp5_do_cmd(struct ccp5_desc *desc,
 	}
 	mutex_lock(&cmd_q->q_mutex);
 
-	mP = (u32 *) &cmd_q->qbase[cmd_q->qidx];
-	dP = (__le32 *) desc;
+	mP = (__le32 *)&cmd_q->qbase[cmd_q->qidx];
+	dP = (u32 *)desc;
 	for (i = 0; i < 8; i++)
 		mP[i] = cpu_to_le32(dP[i]); /* handle endianness */
 
@@ -950,8 +950,8 @@ static int ccp5_init(struct ccp_device *ccp)
 
 		cmd_q = &ccp->cmd_q[i];
 
-		kthread = kthread_create(ccp_cmd_queue_thread, cmd_q,
-					 "%s-q%u", ccp->name, cmd_q->id);
+		kthread = kthread_run(ccp_cmd_queue_thread, cmd_q,
+				      "%s-q%u", ccp->name, cmd_q->id);
 		if (IS_ERR(kthread)) {
 			dev_err(dev, "error creating queue thread (%ld)\n",
 				PTR_ERR(kthread));
@@ -960,7 +960,6 @@ static int ccp5_init(struct ccp_device *ccp)
 		}
 
 		cmd_q->kthread = kthread;
-		wake_up_process(kthread);
 	}
 
 	dev_dbg(dev, "Enabling interrupts...\n");

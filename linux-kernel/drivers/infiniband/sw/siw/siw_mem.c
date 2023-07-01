@@ -106,8 +106,6 @@ int siw_mr_add_mem(struct siw_mr *mr, struct ib_pd *pd, void *mem_obj,
 	mem->perms = rights & IWARP_ACCESS_MASK;
 	kref_init(&mem->ref);
 
-	mr->mem = mem;
-
 	get_random_bytes(&next, 4);
 	next &= 0x00ffffff;
 
@@ -116,6 +114,8 @@ int siw_mr_add_mem(struct siw_mr *mr, struct ib_pd *pd, void *mem_obj,
 		kfree(mem);
 		return -ENOMEM;
 	}
+
+	mr->mem = mem;
 	/* Set the STag index part */
 	mem->stag = id << 8;
 	mr->base_mr.lkey = mr->base_mr.rkey = mem->stag;
@@ -349,14 +349,11 @@ dma_addr_t siw_pbl_get_buffer(struct siw_pbl *pbl, u64 off, int *len, int *idx)
 struct siw_pbl *siw_pbl_alloc(u32 num_buf)
 {
 	struct siw_pbl *pbl;
-	int buf_size = sizeof(*pbl);
 
 	if (num_buf == 0)
 		return ERR_PTR(-EINVAL);
 
-	buf_size += ((num_buf - 1) * sizeof(struct siw_pble));
-
-	pbl = kzalloc(buf_size, GFP_KERNEL);
+	pbl = kzalloc(struct_size(pbl, pbe, num_buf), GFP_KERNEL);
 	if (!pbl)
 		return ERR_PTR(-ENOMEM);
 
@@ -371,7 +368,7 @@ struct siw_umem *siw_umem_get(u64 start, u64 len, bool writable)
 	struct mm_struct *mm_s;
 	u64 first_page_va;
 	unsigned long mlock_limit;
-	unsigned int foll_flags = FOLL_WRITE;
+	unsigned int foll_flags = FOLL_LONGTERM;
 	int num_pages, num_chunks, i, rv = 0;
 
 	if (!can_do_mlock())
@@ -394,14 +391,14 @@ struct siw_umem *siw_umem_get(u64 start, u64 len, bool writable)
 
 	mmgrab(mm_s);
 
-	if (!writable)
-		foll_flags |= FOLL_FORCE;
+	if (writable)
+		foll_flags |= FOLL_WRITE;
 
-	down_read(&mm_s->mmap_sem);
+	mmap_read_lock(mm_s);
 
 	mlock_limit = rlimit(RLIMIT_MEMLOCK) >> PAGE_SHIFT;
 
-	if (num_pages + atomic64_read(&mm_s->pinned_vm) > mlock_limit) {
+	if (atomic64_add_return(num_pages, &mm_s->pinned_vm) > mlock_limit) {
 		rv = -ENOMEM;
 		goto out_sem_up;
 	}
@@ -414,37 +411,37 @@ struct siw_umem *siw_umem_get(u64 start, u64 len, bool writable)
 		goto out_sem_up;
 	}
 	for (i = 0; num_pages; i++) {
-		int got, nents = min_t(int, num_pages, PAGES_PER_CHUNK);
-
-		umem->page_chunk[i].plist =
+		int nents = min_t(int, num_pages, PAGES_PER_CHUNK);
+		struct page **plist =
 			kcalloc(nents, sizeof(struct page *), GFP_KERNEL);
-		if (!umem->page_chunk[i].plist) {
+
+		if (!plist) {
 			rv = -ENOMEM;
 			goto out_sem_up;
 		}
-		got = 0;
+		umem->page_chunk[i].plist = plist;
 		while (nents) {
-			struct page **plist = &umem->page_chunk[i].plist[got];
-
-			rv = pin_user_pages(first_page_va, nents,
-					    foll_flags | FOLL_LONGTERM,
+			rv = pin_user_pages(first_page_va, nents, foll_flags,
 					    plist, NULL);
 			if (rv < 0)
 				goto out_sem_up;
 
 			umem->num_pages += rv;
-			atomic64_add(rv, &mm_s->pinned_vm);
 			first_page_va += rv * PAGE_SIZE;
+			plist += rv;
 			nents -= rv;
-			got += rv;
+			num_pages -= rv;
 		}
-		num_pages -= got;
 	}
 out_sem_up:
-	up_read(&mm_s->mmap_sem);
+	mmap_read_unlock(mm_s);
 
 	if (rv > 0)
 		return umem;
+
+	/* Adjust accounting for pages not pinned */
+	if (num_pages)
+		atomic64_sub(num_pages, &mm_s->pinned_vm);
 
 	siw_umem_release(umem, false);
 

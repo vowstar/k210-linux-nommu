@@ -13,11 +13,10 @@
 
 #include <linux/vmalloc.h>
 #include <linux/io.h>
+#include <linux/pgtable.h>
 #include <asm/pgalloc.h>
-#include <asm/kmap_types.h>
 #include <asm/fixmap.h>
 #include <asm/bug.h>
-#include <asm/pgtable.h>
 #include <linux/sched.h>
 #include <asm/tlbflush.h>
 
@@ -78,7 +77,7 @@ void __iomem *__ref ioremap(phys_addr_t addr, unsigned long size)
 }
 EXPORT_SYMBOL(ioremap);
 
-void iounmap(void *addr)
+void iounmap(volatile void __iomem *addr)
 {
 	/* If the page is from the fixmap pool then we just clear out
 	 * the fixmap mapping.

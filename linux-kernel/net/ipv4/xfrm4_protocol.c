@@ -181,21 +181,18 @@ static const struct net_protocol esp4_protocol = {
 	.handler	=	xfrm4_esp_rcv,
 	.err_handler	=	xfrm4_esp_err,
 	.no_policy	=	1,
-	.netns_ok	=	1,
 };
 
 static const struct net_protocol ah4_protocol = {
 	.handler	=	xfrm4_ah_rcv,
 	.err_handler	=	xfrm4_ah_err,
 	.no_policy	=	1,
-	.netns_ok	=	1,
 };
 
 static const struct net_protocol ipcomp4_protocol = {
 	.handler	=	xfrm4_ipcomp_rcv,
 	.err_handler	=	xfrm4_ipcomp_err,
 	.no_policy	=	1,
-	.netns_ok	=	1,
 };
 
 static const struct xfrm_input_afinfo xfrm4_input_afinfo = {
@@ -307,4 +304,3 @@ void __init xfrm4_protocol_init(void)
 {
 	xfrm_input_register_afinfo(&xfrm4_input_afinfo);
 }
-EXPORT_SYMBOL(xfrm4_protocol_init);

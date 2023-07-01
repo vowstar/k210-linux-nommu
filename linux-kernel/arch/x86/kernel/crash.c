@@ -37,7 +37,6 @@
 #include <linux/kdebug.h>
 #include <asm/cpu.h>
 #include <asm/reboot.h>
-#include <asm/virtext.h>
 #include <asm/intel_pt.h>
 #include <asm/crash.h>
 #include <asm/cmdline.h>
@@ -70,19 +69,6 @@ static inline void cpu_crash_vmclear_loaded_vmcss(void)
 	rcu_read_unlock();
 }
 
-/*
- * When the crashkernel option is specified, only use the low
- * 1M for the real mode trampoline.
- */
-void __init crash_reserve_low_1M(void)
-{
-	if (cmdline_find_option(boot_command_line, "crashkernel", NULL, 0) < 0)
-		return;
-
-	memblock_reserve(0, 1<<20);
-	pr_info("Reserving the low 1M of memory for crashkernel\n");
-}
-
 #if defined(CONFIG_SMP) && defined(CONFIG_X86_LOCAL_APIC)
 
 static void kdump_nmi_callback(int cpu, struct pt_regs *regs)
@@ -93,15 +79,6 @@ static void kdump_nmi_callback(int cpu, struct pt_regs *regs)
 	 * VMCLEAR VMCSs loaded on all cpus if needed.
 	 */
 	cpu_crash_vmclear_loaded_vmcss();
-
-	/* Disable VMX or SVM if needed.
-	 *
-	 * We need to disable virtualization on all CPUs.
-	 * Having VMX or SVM enabled on any CPU may break rebooting
-	 * after the kdump kernel has finished its task.
-	 */
-	cpu_emergency_vmxoff();
-	cpu_emergency_svm_disable();
 
 	/*
 	 * Disable Intel PT to stop its logging
@@ -161,12 +138,7 @@ void native_machine_crash_shutdown(struct pt_regs *regs)
 	 */
 	cpu_crash_vmclear_loaded_vmcss();
 
-	/* Booting kdump kernel with VMX or SVM enabled won't work,
-	 * because (among other limitations) we can't disable paging
-	 * with the virt flags.
-	 */
-	cpu_emergency_vmxoff();
-	cpu_emergency_svm_disable();
+	cpu_emergency_disable_virtualization();
 
 	/*
 	 * Disable Intel PT to stop its logging
@@ -230,7 +202,7 @@ static int elf_header_exclude_ranges(struct crash_mem *cmem)
 	int ret = 0;
 
 	/* Exclude the low 1M because it is always reserved */
-	ret = crash_exclude_mem_range(cmem, 0, 1<<20);
+	ret = crash_exclude_mem_range(cmem, 0, (1<<20)-1);
 	if (ret)
 		return ret;
 
@@ -323,8 +295,8 @@ static int memmap_exclude_ranges(struct kimage *image, struct crash_mem *cmem,
 	cmem->nr_ranges = 1;
 
 	/* Exclude elf header region */
-	start = image->arch.elf_load_addr;
-	end = start + image->arch.elf_headers_sz - 1;
+	start = image->elf_load_addr;
+	end = start + image->elf_headers_sz - 1;
 	return crash_exclude_mem_range(cmem, start, end);
 }
 
@@ -337,7 +309,7 @@ int crash_setup_memmap_entries(struct kimage *image, struct boot_params *params)
 	struct crash_memmap_data cmd;
 	struct crash_mem *cmem;
 
-	cmem = vzalloc(sizeof(struct crash_mem));
+	cmem = vzalloc(struct_size(cmem, ranges, 1));
 	if (!cmem)
 		return -ENOMEM;
 
@@ -407,20 +379,18 @@ int crash_load_segments(struct kimage *image)
 	if (ret)
 		return ret;
 
-	image->arch.elf_headers = kbuf.buffer;
-	image->arch.elf_headers_sz = kbuf.bufsz;
+	image->elf_headers = kbuf.buffer;
+	image->elf_headers_sz = kbuf.bufsz;
 
 	kbuf.memsz = kbuf.bufsz;
 	kbuf.buf_align = ELF_CORE_HEADER_ALIGN;
 	kbuf.mem = KEXEC_BUF_MEM_UNKNOWN;
 	ret = kexec_add_buffer(&kbuf);
-	if (ret) {
-		vfree((void *)image->arch.elf_headers);
+	if (ret)
 		return ret;
-	}
-	image->arch.elf_load_addr = kbuf.mem;
+	image->elf_load_addr = kbuf.mem;
 	pr_debug("Loaded ELF headers at 0x%lx bufsz=0x%lx memsz=0x%lx\n",
-		 image->arch.elf_load_addr, kbuf.bufsz, kbuf.bufsz);
+		 image->elf_load_addr, kbuf.bufsz, kbuf.memsz);
 
 	return ret;
 }

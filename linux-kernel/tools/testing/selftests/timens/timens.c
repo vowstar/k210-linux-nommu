@@ -10,7 +10,6 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
-#include <time.h>
 #include <string.h>
 
 #include "log.h"
@@ -22,8 +21,6 @@
  */
 #define DAY_IN_SEC			(60*60*24)
 #define TEN_DAYS_IN_SEC			(10*DAY_IN_SEC)
-
-#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 
 struct test_clock {
 	clockid_t id;
@@ -156,7 +153,7 @@ int main(int argc, char *argv[])
 
 	nscheck();
 
-	check_config_posix_timers();
+	check_supported_timers();
 
 	ksft_set_plan(ARRAY_SIZE(clocks) * 2);
 

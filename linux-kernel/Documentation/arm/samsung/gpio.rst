@@ -9,14 +9,6 @@ This outlines the Samsung GPIO implementation and the architecture
 specific calls provided alongside the drivers/gpio core.
 
 
-S3C24XX (Legacy)
-----------------
-
-See Documentation/arm/samsung-s3c24xx/gpio.rst for more information
-about these devices. Their implementation has been brought into line
-with the core samsung implementation described in this document.
-
-
 GPIOLIB integration
 -------------------
 
@@ -37,5 +29,4 @@ implementation to configure pins as necessary.
 The s3c_gpio_cfgpin() and s3c_gpio_setpull() provide the means for a
 driver or machine to change gpio configuration.
 
-See arch/arm/plat-samsung/include/plat/gpio-cfg.h for more information
-on these functions.
+See arch/arm/mach-s3c/gpio-cfg.h for more information on these functions.

@@ -34,6 +34,10 @@
 #define MEMORY_TYPE_HBM 2
 
 
+#define IS_PIPE_SYNCD_VALID(pipe) ((((pipe)->pipe_idx_syncd) & 0x80)?1:0)
+#define GET_PIPE_SYNCD_FROM_PIPE(pipe) ((pipe)->pipe_idx_syncd & 0x7F)
+#define SET_PIPE_SYNCD_TO_PIPE(pipe, pipe_syncd) ((pipe)->pipe_idx_syncd = (0x80 | pipe_syncd))
+
 enum dce_version resource_parse_asic_id(
 		struct hw_asic_id asic_id);
 
@@ -48,6 +52,11 @@ struct resource_caps {
 	int num_ddc;
 	int num_vmid;
 	int num_dsc;
+	unsigned int num_dig_link_enc; // Total number of DIGs (digital encoders) in DIO (Display Input/Output).
+	unsigned int num_usb4_dpia; // Total number of USB4 DPIA (DisplayPort Input Adapters).
+	int num_hpo_dp_stream_encoder;
+	int num_hpo_dp_link_encoder;
+	int num_mpc_3dlut;
 };
 
 struct resource_straps {
@@ -65,6 +74,13 @@ struct resource_create_funcs {
 
 	struct stream_encoder *(*create_stream_encoder)(
 			enum engine_id eng_id, struct dc_context *ctx);
+
+	struct hpo_dp_stream_encoder *(*create_hpo_dp_stream_encoder)(
+			enum engine_id eng_id, struct dc_context *ctx);
+
+	struct hpo_dp_link_encoder *(*create_hpo_dp_link_encoder)(
+			uint8_t inst,
+			struct dc_context *ctx);
 
 	struct dce_hwseq *(*create_hwseq)(
 			struct dc_context *ctx);
@@ -114,6 +130,10 @@ bool resource_are_streams_timing_synchronizable(
 		struct dc_stream_state *stream1,
 		struct dc_stream_state *stream2);
 
+bool resource_are_vblanks_synchronizable(
+		struct dc_stream_state *stream1,
+		struct dc_stream_state *stream2);
+
 struct clock_source *resource_find_used_clk_src_for_sharing(
 		struct resource_context *res_ctx,
 		struct pipe_ctx *pipe_ctx);
@@ -138,19 +158,12 @@ struct pipe_ctx *find_idle_secondary_pipe(
 		const struct resource_pool *pool,
 		const struct pipe_ctx *primary_pipe);
 
-bool resource_is_stream_unchanged(
-	struct dc_state *old_context, struct dc_stream_state *stream);
-
 bool resource_validate_attach_surfaces(
 		const struct dc_validation_set set[],
 		int set_count,
 		const struct dc_state *old_context,
 		struct dc_state *context,
 		const struct resource_pool *pool);
-
-void resource_validate_ctx_update_pointer_after_copy(
-		const struct dc_state *src_ctx,
-		struct dc_state *dst_ctx);
 
 enum dc_status resource_map_clock_resources(
 		const struct dc *dc,
@@ -179,4 +192,53 @@ unsigned int resource_pixel_format_to_bpp(enum surface_pixel_format format);
 
 void get_audio_check(struct audio_info *aud_modes,
 	struct audio_check *aud_chk);
+
+int get_num_mpc_splits(struct pipe_ctx *pipe);
+
+int get_num_odm_splits(struct pipe_ctx *pipe);
+
+bool get_temp_dp_link_res(struct dc_link *link,
+		struct link_resource *link_res,
+		struct dc_link_settings *link_settings);
+
+#if defined(CONFIG_DRM_AMD_DC_DCN)
+struct hpo_dp_link_encoder *resource_get_hpo_dp_link_enc_for_det_lt(
+		const struct resource_context *res_ctx,
+		const struct resource_pool *pool,
+		const struct dc_link *link);
+#endif
+
+void reset_syncd_pipes_from_disabled_pipes(struct dc *dc,
+	struct dc_state *context);
+
+void check_syncd_pipes_for_disabled_master_pipe(struct dc *dc,
+	struct dc_state *context,
+	uint8_t disabled_master_pipe_idx);
+
+void reset_sync_context_for_pipe(const struct dc *dc,
+	struct dc_state *context,
+	uint8_t pipe_idx);
+
+uint8_t resource_transmitter_to_phy_idx(const struct dc *dc, enum transmitter transmitter);
+
+const struct link_hwss *get_link_hwss(const struct dc_link *link,
+		const struct link_resource *link_res);
+
+bool is_h_timing_divisible_by_2(struct dc_stream_state *stream);
+
+bool dc_resource_acquire_secondary_pipe_for_mpc_odm(
+		const struct dc *dc,
+		struct dc_state *state,
+		struct pipe_ctx *pri_pipe,
+		struct pipe_ctx *sec_pipe,
+		bool odm);
+
+/* A test harness interface that modifies dp encoder resources in the given dc
+ * state and bypasses the need to revalidate. The interface assumes that the
+ * test harness interface is called with pre-validated link config stored in the
+ * pipe_ctx and updates dp encoder resources according to the link config.
+ */
+enum dc_status update_dp_encoder_resources_for_test_harness(const struct dc *dc,
+		struct dc_state *context,
+		struct pipe_ctx *pipe_ctx);
 #endif /* DRIVERS_GPU_DRM_AMD_DC_DEV_DC_INC_RESOURCE_H_ */

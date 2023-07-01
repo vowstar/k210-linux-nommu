@@ -4,11 +4,10 @@
  *
  * Copyright (C) 2012 Texas Instruments, Inc.
  * Copyright (C) 2019 Samsung Electronics Co., Ltd.
+ * Copyright (C) 2020 Krzysztof Kozlowski <krzk@kernel.org>
  */
 
 #include <linux/device.h>
-#include <linux/platform_device.h>
-#include <linux/list.h>
 #include <linux/of.h>
 #include <linux/gfp.h>
 #include <linux/export.h>
@@ -19,7 +18,7 @@
 /**
  * of_get_min_tck() - extract min timing values for ddr
  * @np: pointer to ddr device tree node
- * @device: device requesting for min timing values
+ * @dev: device requesting for min timing values
  *
  * Populates the lpddr2_min_tck structure by extracting data
  * from device tree node. Returns a pointer to the populated
@@ -27,7 +26,7 @@
  * default min timings provided by JEDEC.
  */
 const struct lpddr2_min_tck *of_get_min_tck(struct device_node *np,
-		struct device *dev)
+					    struct device *dev)
 {
 	int			ret = 0;
 	struct lpddr2_min_tck	*min;
@@ -56,13 +55,13 @@ const struct lpddr2_min_tck *of_get_min_tck(struct device_node *np,
 	return min;
 
 default_min_tck:
-	dev_warn(dev, "%s: using default min-tck values\n", __func__);
+	dev_warn(dev, "Using default min-tck values\n");
 	return &lpddr2_jedec_min_tck;
 }
 EXPORT_SYMBOL(of_get_min_tck);
 
 static int of_do_get_timings(struct device_node *np,
-		struct lpddr2_timings *tim)
+			     struct lpddr2_timings *tim)
 {
 	int ret;
 
@@ -84,7 +83,7 @@ static int of_do_get_timings(struct device_node *np,
 	ret |= of_property_read_u32(np, "tZQinit", &tim->tZQinit);
 	ret |= of_property_read_u32(np, "tRAS-max-ns", &tim->tRAS_max_ns);
 	ret |= of_property_read_u32(np, "tDQSCK-max-derated",
-		&tim->tDQSCK_max_derated);
+				    &tim->tDQSCK_max_derated);
 
 	return ret;
 }
@@ -103,7 +102,9 @@ static int of_do_get_timings(struct device_node *np,
  * while populating, returns default timings provided by JEDEC.
  */
 const struct lpddr2_timings *of_get_ddr_timings(struct device_node *np_ddr,
-		struct device *dev, u32 device_type, u32 *nr_frequencies)
+						struct device *dev,
+						u32 device_type,
+						u32 *nr_frequencies)
 {
 	struct lpddr2_timings	*timings = NULL;
 	u32			arr_sz = 0, i = 0;
@@ -116,7 +117,7 @@ const struct lpddr2_timings *of_get_ddr_timings(struct device_node *np_ddr,
 		tim_compat = "jedec,lpddr2-timings";
 		break;
 	default:
-		dev_warn(dev, "%s: un-supported memory type\n", __func__);
+		dev_warn(dev, "Unsupported memory type\n");
 	}
 
 	for_each_child_of_node(np_ddr, np_tim)
@@ -133,6 +134,7 @@ const struct lpddr2_timings *of_get_ddr_timings(struct device_node *np_ddr,
 	for_each_child_of_node(np_ddr, np_tim) {
 		if (of_device_is_compatible(np_tim, tim_compat)) {
 			if (of_do_get_timings(np_tim, &timings[i])) {
+				of_node_put(np_tim);
 				devm_kfree(dev, timings);
 				goto default_timings;
 			}
@@ -145,7 +147,7 @@ const struct lpddr2_timings *of_get_ddr_timings(struct device_node *np_ddr,
 	return timings;
 
 default_timings:
-	dev_warn(dev, "%s: using default timings\n", __func__);
+	dev_warn(dev, "Using default memory timings\n");
 	*nr_frequencies = ARRAY_SIZE(lpddr2_jedec_timings);
 	return lpddr2_jedec_timings;
 }
@@ -154,7 +156,7 @@ EXPORT_SYMBOL(of_get_ddr_timings);
 /**
  * of_lpddr3_get_min_tck() - extract min timing values for lpddr3
  * @np: pointer to ddr device tree node
- * @device: device requesting for min timing values
+ * @dev: device requesting for min timing values
  *
  * Populates the lpddr3_min_tck structure by extracting data
  * from device tree node. Returns a pointer to the populated
@@ -193,8 +195,7 @@ const struct lpddr3_min_tck *of_lpddr3_get_min_tck(struct device_node *np,
 	ret |= of_property_read_u32(np, "tMRD-min-tck", &min->tMRD);
 
 	if (ret) {
-		dev_warn(dev, "%s: errors while parsing min-tck values\n",
-			 __func__);
+		dev_warn(dev, "Errors while parsing min-tck values\n");
 		devm_kfree(dev, min);
 		goto default_min_tck;
 	}
@@ -202,7 +203,7 @@ const struct lpddr3_min_tck *of_lpddr3_get_min_tck(struct device_node *np,
 	return min;
 
 default_min_tck:
-	dev_warn(dev, "%s: using default min-tck values\n", __func__);
+	dev_warn(dev, "Using default min-tck values\n");
 	return NULL;
 }
 EXPORT_SYMBOL(of_lpddr3_get_min_tck);
@@ -212,8 +213,10 @@ static int of_lpddr3_do_get_timings(struct device_node *np,
 {
 	int ret;
 
-	/* The 'reg' param required since DT has changed, used as 'max-freq' */
-	ret = of_property_read_u32(np, "reg", &tim->max_freq);
+	ret = of_property_read_u32(np, "max-freq", &tim->max_freq);
+	if (ret)
+		/* Deprecated way of passing max-freq as 'reg' */
+		ret = of_property_read_u32(np, "reg", &tim->max_freq);
 	ret |= of_property_read_u32(np, "min-freq", &tim->min_freq);
 	ret |= of_property_read_u32(np, "tRFC", &tim->tRFC);
 	ret |= of_property_read_u32(np, "tRRD", &tim->tRRD);
@@ -264,7 +267,7 @@ const struct lpddr3_timings
 		tim_compat = "jedec,lpddr3-timings";
 		break;
 	default:
-		dev_warn(dev, "%s: un-supported memory type\n", __func__);
+		dev_warn(dev, "Unsupported memory type\n");
 	}
 
 	for_each_child_of_node(np_ddr, np_tim)
@@ -282,6 +285,7 @@ const struct lpddr3_timings
 		if (of_device_is_compatible(np_tim, tim_compat)) {
 			if (of_lpddr3_do_get_timings(np_tim, &timings[i])) {
 				devm_kfree(dev, timings);
+				of_node_put(np_tim);
 				goto default_timings;
 			}
 			i++;
@@ -293,8 +297,102 @@ const struct lpddr3_timings
 	return timings;
 
 default_timings:
-	dev_warn(dev, "%s: failed to get timings\n", __func__);
+	dev_warn(dev, "Failed to get timings\n");
 	*nr_frequencies = 0;
 	return NULL;
 }
 EXPORT_SYMBOL(of_lpddr3_get_ddr_timings);
+
+/**
+ * of_lpddr2_get_info() - extracts information about the lpddr2 chip.
+ * @np: Pointer to device tree node containing lpddr2 info
+ * @dev: Device requesting info
+ *
+ * Populates lpddr2_info structure by extracting data from device
+ * tree node. Returns pointer to populated structure. If error
+ * happened while populating, returns NULL. If property is missing
+ * in a device-tree, then the corresponding value is set to -ENOENT.
+ */
+const struct lpddr2_info
+*of_lpddr2_get_info(struct device_node *np, struct device *dev)
+{
+	struct lpddr2_info *ret_info, info = {};
+	struct property *prop;
+	const char *cp;
+	int err;
+	u32 revision_id[2];
+
+	err = of_property_read_u32_array(np, "revision-id", revision_id, 2);
+	if (!err) {
+		info.revision_id1 = revision_id[0];
+		info.revision_id2 = revision_id[1];
+	} else {
+		err = of_property_read_u32(np, "revision-id1", &info.revision_id1);
+		if (err)
+			info.revision_id1 = -ENOENT;
+
+		err = of_property_read_u32(np, "revision-id2", &info.revision_id2);
+		if (err)
+			info.revision_id2 = -ENOENT;
+	}
+
+	err = of_property_read_u32(np, "io-width", &info.io_width);
+	if (err)
+		return NULL;
+
+	info.io_width = 32 / info.io_width - 1;
+
+	err = of_property_read_u32(np, "density", &info.density);
+	if (err)
+		return NULL;
+
+	info.density = ffs(info.density) - 7;
+
+	if (of_device_is_compatible(np, "jedec,lpddr2-s4"))
+		info.arch_type = LPDDR2_TYPE_S4;
+	else if (of_device_is_compatible(np, "jedec,lpddr2-s2"))
+		info.arch_type = LPDDR2_TYPE_S2;
+	else if (of_device_is_compatible(np, "jedec,lpddr2-nvm"))
+		info.arch_type = LPDDR2_TYPE_NVM;
+	else
+		return NULL;
+
+	prop = of_find_property(np, "compatible", NULL);
+	for (cp = of_prop_next_string(prop, NULL); cp;
+	     cp = of_prop_next_string(prop, cp)) {
+
+#define OF_LPDDR2_VENDOR_CMP(compat, ID) \
+		if (!of_compat_cmp(cp, compat ",", strlen(compat ","))) { \
+			info.manufacturer_id = LPDDR2_MANID_##ID; \
+			break; \
+		}
+
+		OF_LPDDR2_VENDOR_CMP("samsung", SAMSUNG)
+		OF_LPDDR2_VENDOR_CMP("qimonda", QIMONDA)
+		OF_LPDDR2_VENDOR_CMP("elpida", ELPIDA)
+		OF_LPDDR2_VENDOR_CMP("etron", ETRON)
+		OF_LPDDR2_VENDOR_CMP("nanya", NANYA)
+		OF_LPDDR2_VENDOR_CMP("hynix", HYNIX)
+		OF_LPDDR2_VENDOR_CMP("mosel", MOSEL)
+		OF_LPDDR2_VENDOR_CMP("winbond", WINBOND)
+		OF_LPDDR2_VENDOR_CMP("esmt", ESMT)
+		OF_LPDDR2_VENDOR_CMP("spansion", SPANSION)
+		OF_LPDDR2_VENDOR_CMP("sst", SST)
+		OF_LPDDR2_VENDOR_CMP("zmos", ZMOS)
+		OF_LPDDR2_VENDOR_CMP("intel", INTEL)
+		OF_LPDDR2_VENDOR_CMP("numonyx", NUMONYX)
+		OF_LPDDR2_VENDOR_CMP("micron", MICRON)
+
+#undef OF_LPDDR2_VENDOR_CMP
+	}
+
+	if (!info.manufacturer_id)
+		info.manufacturer_id = -ENOENT;
+
+	ret_info = devm_kzalloc(dev, sizeof(*ret_info), GFP_KERNEL);
+	if (ret_info)
+		*ret_info = info;
+
+	return ret_info;
+}
+EXPORT_SYMBOL(of_lpddr2_get_info);

@@ -4,16 +4,16 @@
 $id: http://devicetree.org/schemas/clock/qcom,sdm845-dispcc.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Qualcomm Display Clock & Reset Controller Binding for SDM845
+title: Qualcomm Display Clock & Reset Controller on SDM845
 
 maintainers:
   - Taniya Das <tdas@codeaurora.org>
 
 description: |
-  Qualcomm display clock control module which supports the clocks, resets and
-  power domains on SDM845.
+  Qualcomm display clock control module provides the clocks, resets and power
+  domains on SDM845.
 
-  See also dt-bindings/clock/qcom,dispcc-sdm845.h.
+  See also:: include/dt-bindings/clock/qcom,dispcc-sdm845.h
 
 properties:
   compatible:
@@ -67,13 +67,15 @@ required:
   - '#reset-cells'
   - '#power-domain-cells'
 
+additionalProperties: false
+
 examples:
   - |
     #include <dt-bindings/clock/qcom,gcc-sdm845.h>
     #include <dt-bindings/clock/qcom,rpmh.h>
     clock-controller@af00000 {
       compatible = "qcom,sdm845-dispcc";
-      reg = <0 0x0af00000 0 0x10000>;
+      reg = <0x0af00000 0x10000>;
       clocks = <&rpmhcc RPMH_CXO_CLK>,
                <&gcc GCC_DISP_GPLL0_CLK_SRC>,
                <&gcc GCC_DISP_GPLL0_DIV_CLK_SRC>,

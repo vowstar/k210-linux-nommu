@@ -2,7 +2,7 @@
 /*
  * phy-keystone - USB PHY, talking to dwc3 controller in Keystone.
  *
- * Copyright (C) 2013 Texas Instruments Incorporated - http://www.ti.com
+ * Copyright (C) 2013 Texas Instruments Incorporated - https://www.ti.com
  *
  * Author: WingMan Kwok <w-kwok2@ti.com>
  */
@@ -59,7 +59,7 @@ static void keystone_usbphy_shutdown(struct usb_phy *phy)
 
 	val  = keystone_usbphy_readl(k_phy->phy_ctrl, USB_PHY_CTL_CLOCK);
 	keystone_usbphy_writel(k_phy->phy_ctrl, USB_PHY_CTL_CLOCK,
-				val &= ~PHY_REF_SSP_EN);
+				val & ~PHY_REF_SSP_EN);
 }
 
 static int keystone_usbphy_probe(struct platform_device *pdev)

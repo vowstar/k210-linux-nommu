@@ -9,9 +9,18 @@
 #define _CRYPTO_INTERNAL_SKCIPHER_H
 
 #include <crypto/algapi.h>
+#include <crypto/internal/cipher.h>
 #include <crypto/skcipher.h>
 #include <linux/list.h>
 #include <linux/types.h>
+
+/*
+ * Set this if your algorithm is sync but needs a reqsize larger
+ * than MAX_SYNC_SKCIPHER_REQSIZE.
+ *
+ * Reuse bit that is specific to hash algorithms.
+ */
+#define CRYPTO_ALG_SKCIPHER_REQSIZE_LARGE CRYPTO_ALG_OPTIONAL_KEY
 
 struct aead_request;
 struct rtattr;
@@ -85,7 +94,7 @@ static inline void *skcipher_instance_ctx(struct skcipher_instance *inst)
 
 static inline void skcipher_request_complete(struct skcipher_request *req, int err)
 {
-	req->base.complete(&req->base, err);
+	crypto_request_complete(&req->base, err);
 }
 
 int crypto_grab_skcipher(struct crypto_skcipher_spawn *spawn,
@@ -121,6 +130,13 @@ static inline void crypto_skcipher_set_reqsize(
 	skcipher->reqsize = reqsize;
 }
 
+static inline void crypto_skcipher_set_reqsize_dma(
+	struct crypto_skcipher *skcipher, unsigned int reqsize)
+{
+	reqsize += crypto_dma_align() & ~(crypto_tfm_ctx_alignment() - 1);
+	skcipher->reqsize = reqsize;
+}
+
 int crypto_register_skcipher(struct skcipher_alg *alg);
 void crypto_unregister_skcipher(struct skcipher_alg *alg);
 int crypto_register_skciphers(struct skcipher_alg *algs, int count);
@@ -132,7 +148,6 @@ int skcipher_walk_done(struct skcipher_walk *walk, int err);
 int skcipher_walk_virt(struct skcipher_walk *walk,
 		       struct skcipher_request *req,
 		       bool atomic);
-void skcipher_walk_atomise(struct skcipher_walk *walk);
 int skcipher_walk_async(struct skcipher_walk *walk,
 			struct skcipher_request *req);
 int skcipher_walk_aead_encrypt(struct skcipher_walk *walk,
@@ -151,9 +166,24 @@ static inline void *crypto_skcipher_ctx(struct crypto_skcipher *tfm)
 	return crypto_tfm_ctx(&tfm->base);
 }
 
+static inline void *crypto_skcipher_ctx_dma(struct crypto_skcipher *tfm)
+{
+	return crypto_tfm_ctx_dma(&tfm->base);
+}
+
 static inline void *skcipher_request_ctx(struct skcipher_request *req)
 {
 	return req->__ctx;
+}
+
+static inline void *skcipher_request_ctx_dma(struct skcipher_request *req)
+{
+	unsigned int align = crypto_dma_align();
+
+	if (align <= crypto_tfm_ctx_alignment())
+		align = 1;
+
+	return PTR_ALIGN(skcipher_request_ctx(req), align);
 }
 
 static inline u32 skcipher_request_flags(struct skcipher_request *req)

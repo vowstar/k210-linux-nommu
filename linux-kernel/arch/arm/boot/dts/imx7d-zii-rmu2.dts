@@ -24,7 +24,7 @@
 		pinctrl-0 = <&pinctrl_leds_debug>;
 		pinctrl-names = "default";
 
-		debug {
+		led-debug {
 			label = "zii:green:debug1";
 			gpios = <&gpio2 8 GPIO_ACTIVE_HIGH>;
 			linux,default-trigger = "heartbeat";
@@ -33,13 +33,13 @@
 };
 
 &cpu0 {
-	arm-supply = <&sw1a_reg>;
+	cpu-supply = <&sw1a_reg>;
 };
 
 &ecspi1 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pinctrl_ecspi1>;
-	cs-gpios = <&gpio4 19 GPIO_ACTIVE_HIGH>;
+	cs-gpios = <&gpio4 19 GPIO_ACTIVE_LOW>;
 	status = "okay";
 
 	flash@0 {
@@ -58,7 +58,7 @@
 			  <&clks IMX7D_ENET1_TIME_ROOT_CLK>;
 	assigned-clock-parents = <&clks IMX7D_PLL_ENET_MAIN_100M_CLK>;
 	assigned-clock-rates = <0>, <100000000>;
-	phy-mode = "rgmii";
+	phy-mode = "rgmii-id";
 	phy-handle = <&fec1_phy>;
 	status = "okay";
 
@@ -204,7 +204,7 @@
 	assigned-clock-parents = <&clks IMX7D_PLL_SYS_MAIN_240M_CLK>;
 	status = "okay";
 
-	rave-sp {
+	mcu {
 		compatible = "zii,rave-sp-rdu2";
 		current-speed = <1000000>;
 		#address-cells = <1>;

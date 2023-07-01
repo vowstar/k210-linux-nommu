@@ -31,8 +31,8 @@
 #include <linux/types.h>
 #include <linux/udp.h>
 #include <linux/workqueue.h>
+#include <linux/pgtable.h>
 
-#include <asm/pgtable.h>
 #include <asm/cacheflush.h>
 
 #define DRIVER_NAME	"pxa168-eth"
@@ -389,7 +389,7 @@ static void inverse_every_nibble(unsigned char *mac_addr)
  * Outputs
  * return the calculated entry.
  */
-static u32 hash_function(unsigned char *mac_addr_orig)
+static u32 hash_function(const unsigned char *mac_addr_orig)
 {
 	u32 hash_result;
 	u32 addr0;
@@ -434,7 +434,7 @@ static u32 hash_function(unsigned char *mac_addr_orig)
  * -ENOSPC if table full
  */
 static int add_del_hash_entry(struct pxa168_eth_private *pep,
-			      unsigned char *mac_addr,
+			      const unsigned char *mac_addr,
 			      u32 rd, u32 skip, int del)
 {
 	struct addr_table_entry *entry, *start;
@@ -521,7 +521,7 @@ static int add_del_hash_entry(struct pxa168_eth_private *pep,
  */
 static void update_hash_table_mac_address(struct pxa168_eth_private *pep,
 					  unsigned char *oaddr,
-					  unsigned char *addr)
+					  const unsigned char *addr)
 {
 	/* Delete old entry */
 	if (oaddr)
@@ -607,7 +607,7 @@ static int pxa168_eth_set_mac_address(struct net_device *dev, void *addr)
 	if (!is_valid_ether_addr(sa->sa_data))
 		return -EADDRNOTAVAIL;
 	memcpy(oldMac, dev->dev_addr, ETH_ALEN);
-	memcpy(dev->dev_addr, sa->sa_data, ETH_ALEN);
+	eth_hw_addr_set(dev, sa->sa_data);
 
 	mac_h = dev->dev_addr[0] << 24;
 	mac_h |= dev->dev_addr[1] << 16;
@@ -965,7 +965,7 @@ static int pxa168_init_phy(struct net_device *dev)
 	if (dev->phydev)
 		return 0;
 
-	phy = mdiobus_scan(pep->smi_bus, pep->phy_addr);
+	phy = mdiobus_scan_c22(pep->smi_bus, pep->phy_addr);
 	if (IS_ERR(phy))
 		return PTR_ERR(phy);
 
@@ -977,8 +977,7 @@ static int pxa168_init_phy(struct net_device *dev)
 	cmd.base.phy_address = pep->phy_addr;
 	cmd.base.speed = pep->phy_speed;
 	cmd.base.duplex = pep->phy_duplex;
-	bitmap_copy(cmd.link_modes.advertising, PHY_BASIC_FEATURES,
-		    __ETHTOOL_LINK_MODE_MASK_NBITS);
+	linkmode_copy(cmd.link_modes.advertising, PHY_BASIC_FEATURES);
 	cmd.base.autoneg = AUTONEG_ENABLE;
 
 	if (cmd.base.speed != 0)
@@ -1187,11 +1186,10 @@ static int pxa168_eth_stop(struct net_device *dev)
 
 static int pxa168_eth_change_mtu(struct net_device *dev, int mtu)
 {
-	int retval;
 	struct pxa168_eth_private *pep = netdev_priv(dev);
 
 	dev->mtu = mtu;
-	retval = set_port_config_ext(pep);
+	set_port_config_ext(pep);
 
 	if (!netif_running(dev))
 		return 0;
@@ -1356,10 +1354,10 @@ static void pxa168_eth_netpoll(struct net_device *dev)
 static void pxa168_get_drvinfo(struct net_device *dev,
 			       struct ethtool_drvinfo *info)
 {
-	strlcpy(info->driver, DRIVER_NAME, sizeof(info->driver));
-	strlcpy(info->version, DRIVER_VERSION, sizeof(info->version));
-	strlcpy(info->fw_version, "N/A", sizeof(info->fw_version));
-	strlcpy(info->bus_info, "N/A", sizeof(info->bus_info));
+	strscpy(info->driver, DRIVER_NAME, sizeof(info->driver));
+	strscpy(info->version, DRIVER_VERSION, sizeof(info->version));
+	strscpy(info->fw_version, "N/A", sizeof(info->fw_version));
+	strscpy(info->bus_info, "N/A", sizeof(info->bus_info));
 }
 
 static const struct ethtool_ops pxa168_ethtool_ops = {
@@ -1378,7 +1376,7 @@ static const struct net_device_ops pxa168_eth_netdev_ops = {
 	.ndo_set_rx_mode	= pxa168_eth_set_rx_mode,
 	.ndo_set_mac_address	= pxa168_eth_set_mac_address,
 	.ndo_validate_addr	= eth_validate_addr,
-	.ndo_do_ioctl		= phy_do_ioctl,
+	.ndo_eth_ioctl		= phy_do_ioctl,
 	.ndo_change_mtu		= pxa168_eth_change_mtu,
 	.ndo_tx_timeout		= pxa168_eth_tx_timeout,
 #ifdef CONFIG_NET_POLL_CONTROLLER
@@ -1390,10 +1388,8 @@ static int pxa168_eth_probe(struct platform_device *pdev)
 {
 	struct pxa168_eth_private *pep = NULL;
 	struct net_device *dev = NULL;
-	struct resource *res;
 	struct clk *clk;
 	struct device_node *np;
-	const unsigned char *mac_addr = NULL;
 	int err;
 
 	printk(KERN_NOTICE "PXA168 10/100 Ethernet Driver\n");
@@ -1418,13 +1414,15 @@ static int pxa168_eth_probe(struct platform_device *pdev)
 
 	pep->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(pep->base)) {
-		err = -ENOMEM;
+		err = PTR_ERR(pep->base);
 		goto err_netdev;
 	}
 
-	res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
-	BUG_ON(!res);
-	dev->irq = res->start;
+	err = platform_get_irq(pdev, 0);
+	if (err == -EPROBE_DEFER)
+		goto err_netdev;
+	BUG_ON(dev->irq < 0);
+	dev->irq = err;
 	dev->netdev_ops = &pxa168_eth_netdev_ops;
 	dev->watchdog_timeo = 2 * HZ;
 	dev->base_addr = 0;
@@ -1436,15 +1434,15 @@ static int pxa168_eth_probe(struct platform_device *pdev)
 
 	INIT_WORK(&pep->tx_timeout_task, pxa168_eth_tx_timeout_task);
 
-	if (pdev->dev.of_node)
-		mac_addr = of_get_mac_address(pdev->dev.of_node);
+	err = of_get_ethdev_address(pdev->dev.of_node, dev);
+	if (err) {
+		u8 addr[ETH_ALEN];
 
-	if (!IS_ERR_OR_NULL(mac_addr)) {
-		ether_addr_copy(dev->dev_addr, mac_addr);
-	} else {
 		/* try reading the mac address, if set by the bootloader */
-		pxa168_eth_get_mac_address(dev, dev->dev_addr);
-		if (!is_valid_ether_addr(dev->dev_addr)) {
+		pxa168_eth_get_mac_address(dev, addr);
+		if (is_valid_ether_addr(addr)) {
+			eth_hw_addr_set(dev, addr);
+		} else {
 			dev_info(&pdev->dev, "Using random mac address\n");
 			eth_hw_addr_random(dev);
 		}
@@ -1488,7 +1486,8 @@ static int pxa168_eth_probe(struct platform_device *pdev)
 
 	/* Hardware supports only 3 ports */
 	BUG_ON(pep->port_num > 2);
-	netif_napi_add(dev, &pep->napi, pxa168_rx_poll, pep->rx_ring_size);
+	netif_napi_add_weight(dev, &pep->napi, pxa168_rx_poll,
+			      pep->rx_ring_size);
 
 	memset(&pep->timeout, 0, sizeof(struct timer_list));
 	timer_setup(&pep->timeout, rxq_refill_timer_wrapper, 0);
@@ -1534,6 +1533,7 @@ static int pxa168_eth_remove(struct platform_device *pdev)
 	struct net_device *dev = platform_get_drvdata(pdev);
 	struct pxa168_eth_private *pep = netdev_priv(dev);
 
+	cancel_work_sync(&pep->tx_timeout_task);
 	if (pep->htpr) {
 		dma_free_coherent(pep->dev->dev.parent, HASH_ADDR_TABLE_SIZE,
 				  pep->htpr, pep->htpr_dma);
@@ -1541,14 +1541,11 @@ static int pxa168_eth_remove(struct platform_device *pdev)
 	}
 	if (dev->phydev)
 		phy_disconnect(dev->phydev);
-	if (pep->clk) {
-		clk_disable_unprepare(pep->clk);
-	}
 
+	clk_disable_unprepare(pep->clk);
 	mdiobus_unregister(pep->smi_bus);
 	mdiobus_free(pep->smi_bus);
 	unregister_netdev(dev);
-	cancel_work_sync(&pep->tx_timeout_task);
 	free_netdev(dev);
 	return 0;
 }

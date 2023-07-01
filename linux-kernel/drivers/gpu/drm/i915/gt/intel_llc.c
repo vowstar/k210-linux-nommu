@@ -1,15 +1,18 @@
+// SPDX-License-Identifier: MIT
 /*
- * SPDX-License-Identifier: MIT
- *
  * Copyright © 2019 Intel Corporation
  */
 
+#include <asm/tsc.h>
 #include <linux/cpufreq.h>
 
 #include "i915_drv.h"
+#include "i915_reg.h"
 #include "intel_gt.h"
 #include "intel_llc.h"
-#include "intel_sideband.h"
+#include "intel_mchbar_regs.h"
+#include "intel_pcode.h"
+#include "intel_rps.h"
 
 struct ia_constants {
 	unsigned int min_gpu_freq;
@@ -50,7 +53,7 @@ static bool get_ia_constants(struct intel_llc *llc,
 	struct drm_i915_private *i915 = llc_to_gt(llc)->i915;
 	struct intel_rps *rps = &llc_to_gt(llc)->rps;
 
-	if (rps->max_freq <= rps->min_freq)
+	if (!HAS_LLC(i915) || IS_DGFX(i915))
 		return false;
 
 	consts->max_ia_freq = cpu_max_MHz();
@@ -60,13 +63,8 @@ static bool get_ia_constants(struct intel_llc *llc,
 	/* convert DDR frequency from units of 266.6MHz to bandwidth */
 	consts->min_ring_freq = mult_frac(consts->min_ring_freq, 8, 3);
 
-	consts->min_gpu_freq = rps->min_freq;
-	consts->max_gpu_freq = rps->max_freq;
-	if (INTEL_GEN(i915) >= 9) {
-		/* Convert GT frequency to 50 HZ units */
-		consts->min_gpu_freq /= GEN9_FREQ_SCALER;
-		consts->max_gpu_freq /= GEN9_FREQ_SCALER;
-	}
+	consts->min_gpu_freq = intel_rps_get_min_raw_freq(rps);
+	consts->max_gpu_freq = intel_rps_get_max_raw_freq(rps);
 
 	return true;
 }
@@ -81,13 +79,13 @@ static void calc_ia_freq(struct intel_llc *llc,
 	const int diff = consts->max_gpu_freq - gpu_freq;
 	unsigned int ia_freq = 0, ring_freq = 0;
 
-	if (INTEL_GEN(i915) >= 9) {
+	if (GRAPHICS_VER(i915) >= 9) {
 		/*
 		 * ring_freq = 2 * GT. ring_freq is in 100MHz units
 		 * No floor required for ring frequency on SKL.
 		 */
 		ring_freq = gpu_freq;
-	} else if (INTEL_GEN(i915) >= 8) {
+	} else if (GRAPHICS_VER(i915) >= 8) {
 		/* max(2 * GT, DDR). NB: GT is 50MHz units */
 		ring_freq = max(consts->min_ring_freq, gpu_freq);
 	} else if (IS_HASWELL(i915)) {
@@ -119,13 +117,18 @@ static void calc_ia_freq(struct intel_llc *llc,
 
 static void gen6_update_ring_freq(struct intel_llc *llc)
 {
-	struct drm_i915_private *i915 = llc_to_gt(llc)->i915;
 	struct ia_constants consts;
 	unsigned int gpu_freq;
 
 	if (!get_ia_constants(llc, &consts))
 		return;
 
+	/*
+	 * Although this is unlikely on any platform during initialization,
+	 * let's ensure we don't get accidentally into infinite loop
+	 */
+	if (consts.max_gpu_freq <= consts.min_gpu_freq)
+		return;
 	/*
 	 * For each potential GPU frequency, load a ring frequency we'd like
 	 * to use for memory access.  We do this by specifying the IA frequency
@@ -137,18 +140,16 @@ static void gen6_update_ring_freq(struct intel_llc *llc)
 		unsigned int ia_freq, ring_freq;
 
 		calc_ia_freq(llc, gpu_freq, &consts, &ia_freq, &ring_freq);
-		sandybridge_pcode_write(i915,
-					GEN6_PCODE_WRITE_MIN_FREQ_TABLE,
-					ia_freq << GEN6_PCODE_FREQ_IA_RATIO_SHIFT |
-					ring_freq << GEN6_PCODE_FREQ_RING_RATIO_SHIFT |
-					gpu_freq);
+		snb_pcode_write(llc_to_gt(llc)->uncore, GEN6_PCODE_WRITE_MIN_FREQ_TABLE,
+				ia_freq << GEN6_PCODE_FREQ_IA_RATIO_SHIFT |
+				ring_freq << GEN6_PCODE_FREQ_RING_RATIO_SHIFT |
+				gpu_freq);
 	}
 }
 
 void intel_llc_enable(struct intel_llc *llc)
 {
-	if (HAS_LLC(llc_to_gt(llc)->i915))
-		gen6_update_ring_freq(llc);
+	gen6_update_ring_freq(llc);
 }
 
 void intel_llc_disable(struct intel_llc *llc)

@@ -25,7 +25,7 @@ asmlinkage void poly1305_emit(void *state, u8 *digest, const u32 *nonce);
 
 static __ro_after_init DEFINE_STATIC_KEY_FALSE(have_neon);
 
-void poly1305_init_arch(struct poly1305_desc_ctx *dctx, const u8 *key)
+void poly1305_init_arch(struct poly1305_desc_ctx *dctx, const u8 key[POLY1305_KEY_SIZE])
 {
 	poly1305_init_arm64(&dctx->h, key);
 	dctx->s[0] = get_unaligned_le32(key + 16);
@@ -52,7 +52,7 @@ static void neon_poly1305_blocks(struct poly1305_desc_ctx *dctx, const u8 *src,
 {
 	if (unlikely(!dctx->sset)) {
 		if (!dctx->rset) {
-			poly1305_init_arch(dctx, src);
+			poly1305_init_arm64(&dctx->h, src);
 			src += POLY1305_BLOCK_SIZE;
 			len -= POLY1305_BLOCK_SIZE;
 			dctx->rset = 1;
@@ -143,13 +143,20 @@ void poly1305_update_arch(struct poly1305_desc_ctx *dctx, const u8 *src,
 		unsigned int len = round_down(nbytes, POLY1305_BLOCK_SIZE);
 
 		if (static_branch_likely(&have_neon) && crypto_simd_usable()) {
-			kernel_neon_begin();
-			poly1305_blocks_neon(&dctx->h, src, len, 1);
-			kernel_neon_end();
+			do {
+				unsigned int todo = min_t(unsigned int, len, SZ_4K);
+
+				kernel_neon_begin();
+				poly1305_blocks_neon(&dctx->h, src, todo, 1);
+				kernel_neon_end();
+
+				len -= todo;
+				src += todo;
+			} while (len);
 		} else {
 			poly1305_blocks(&dctx->h, src, len, 1);
+			src += len;
 		}
-		src += len;
 		nbytes %= POLY1305_BLOCK_SIZE;
 	}
 
@@ -170,7 +177,7 @@ void poly1305_final_arch(struct poly1305_desc_ctx *dctx, u8 *dst)
 	}
 
 	poly1305_emit(&dctx->h, dst, dctx->s);
-	*dctx = (struct poly1305_desc_ctx){};
+	memzero_explicit(dctx, sizeof(*dctx));
 }
 EXPORT_SYMBOL(poly1305_final_arch);
 

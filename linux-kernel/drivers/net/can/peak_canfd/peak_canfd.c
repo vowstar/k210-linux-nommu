@@ -7,6 +7,7 @@
 
 #include <linux/can.h>
 #include <linux/can/dev.h>
+#include <linux/ethtool.h>
 
 #include "peak_canfd_user.h"
 
@@ -257,27 +258,31 @@ static int pucan_handle_can_rx(struct peak_canfd_priv *priv,
 	u8 cf_len;
 
 	if (rx_msg_flags & PUCAN_MSG_EXT_DATA_LEN)
-		cf_len = can_dlc2len(get_canfd_dlc(pucan_msg_get_dlc(msg)));
+		cf_len = can_fd_dlc2len(pucan_msg_get_dlc(msg));
 	else
-		cf_len = get_can_dlc(pucan_msg_get_dlc(msg));
+		cf_len = can_cc_dlc2len(pucan_msg_get_dlc(msg));
 
 	/* if this frame is an echo, */
-	if ((rx_msg_flags & PUCAN_MSG_LOOPED_BACK) &&
-	    !(rx_msg_flags & PUCAN_MSG_SELF_RECEIVE)) {
+	if (rx_msg_flags & PUCAN_MSG_LOOPED_BACK) {
 		unsigned long flags;
 
 		spin_lock_irqsave(&priv->echo_lock, flags);
-		can_get_echo_skb(priv->ndev, msg->client);
 
 		/* count bytes of the echo instead of skb */
-		stats->tx_bytes += cf_len;
+		stats->tx_bytes += can_get_echo_skb(priv->ndev, msg->client, NULL);
 		stats->tx_packets++;
 
 		/* restart tx queue (a slot is free) */
 		netif_wake_queue(priv->ndev);
 
 		spin_unlock_irqrestore(&priv->echo_lock, flags);
-		return 0;
+
+		/* if this frame is only an echo, stop here. Otherwise,
+		 * continue to push this application self-received frame into
+		 * its own rx queue.
+		 */
+		if (!(rx_msg_flags & PUCAN_MSG_SELF_RECEIVE))
+			return 0;
 	}
 
 	/* otherwise, it should be pushed into rx fifo */
@@ -305,12 +310,13 @@ static int pucan_handle_can_rx(struct peak_canfd_priv *priv,
 	if (rx_msg_flags & PUCAN_MSG_EXT_ID)
 		cf->can_id |= CAN_EFF_FLAG;
 
-	if (rx_msg_flags & PUCAN_MSG_RTR)
+	if (rx_msg_flags & PUCAN_MSG_RTR) {
 		cf->can_id |= CAN_RTR_FLAG;
-	else
+	} else {
 		memcpy(cf->data, msg->d, cf->len);
 
-	stats->rx_bytes += cf->len;
+		stats->rx_bytes += cf->len;
+	}
 	stats->rx_packets++;
 
 	pucan_netif_rx(skb, msg->ts_low, msg->ts_high);
@@ -346,8 +352,8 @@ static int pucan_handle_status(struct peak_canfd_priv *priv,
 				return err;
 		}
 
-		/* start network queue (echo_skb array is empty) */
-		netif_start_queue(ndev);
+		/* wake network queue up (echo_skb array is empty) */
+		netif_wake_queue(ndev);
 
 		return 0;
 	}
@@ -368,7 +374,7 @@ static int pucan_handle_status(struct peak_canfd_priv *priv,
 		priv->can.state = CAN_STATE_ERROR_PASSIVE;
 		priv->can.can_stats.error_passive++;
 		if (skb) {
-			cf->can_id |= CAN_ERR_CRTL;
+			cf->can_id |= CAN_ERR_CRTL | CAN_ERR_CNT;
 			cf->data[1] = (priv->bec.txerr > priv->bec.rxerr) ?
 					CAN_ERR_CRTL_TX_PASSIVE :
 					CAN_ERR_CRTL_RX_PASSIVE;
@@ -381,7 +387,7 @@ static int pucan_handle_status(struct peak_canfd_priv *priv,
 		priv->can.state = CAN_STATE_ERROR_WARNING;
 		priv->can.can_stats.error_warning++;
 		if (skb) {
-			cf->can_id |= CAN_ERR_CRTL;
+			cf->can_id |= CAN_ERR_CRTL | CAN_ERR_CNT;
 			cf->data[1] = (priv->bec.txerr > priv->bec.rxerr) ?
 					CAN_ERR_CRTL_TX_WARNING :
 					CAN_ERR_CRTL_RX_WARNING;
@@ -404,8 +410,6 @@ static int pucan_handle_status(struct peak_canfd_priv *priv,
 		return -ENOMEM;
 	}
 
-	stats->rx_packets++;
-	stats->rx_bytes += cf->can_dlc;
 	pucan_netif_rx(skb, msg->ts_low, msg->ts_high);
 
 	return 0;
@@ -427,14 +431,12 @@ static int pucan_handle_cache_critical(struct peak_canfd_priv *priv)
 		return -ENOMEM;
 	}
 
-	cf->can_id |= CAN_ERR_CRTL;
+	cf->can_id |= CAN_ERR_CRTL | CAN_ERR_CNT;
 	cf->data[1] = CAN_ERR_CRTL_RX_OVERFLOW;
 
 	cf->data[6] = priv->bec.txerr;
 	cf->data[7] = priv->bec.rxerr;
 
-	stats->rx_bytes += cf->can_dlc;
-	stats->rx_packets++;
 	netif_rx(skb);
 
 	return 0;
@@ -647,9 +649,9 @@ static netdev_tx_t peak_canfd_start_xmit(struct sk_buff *skb,
 	unsigned long flags;
 	bool should_stop_tx_queue;
 	int room_left;
-	u8 can_dlc;
+	u8 len;
 
-	if (can_dropped_invalid_skb(ndev, skb))
+	if (can_dev_dropped_skb(ndev, skb))
 		return NETDEV_TX_OK;
 
 	msg_size = ALIGN(sizeof(*msg) + cf->len, 4);
@@ -677,7 +679,7 @@ static netdev_tx_t peak_canfd_start_xmit(struct sk_buff *skb,
 
 	if (can_is_canfd_skb(skb)) {
 		/* CAN FD frame format */
-		can_dlc = can_len2dlc(cf->len);
+		len = can_fd_len2dlc(cf->len);
 
 		msg_flags |= PUCAN_MSG_EXT_DATA_LEN;
 
@@ -688,7 +690,7 @@ static netdev_tx_t peak_canfd_start_xmit(struct sk_buff *skb,
 			msg_flags |= PUCAN_MSG_ERROR_STATE_IND;
 	} else {
 		/* CAN 2.0 frame format */
-		can_dlc = cf->len;
+		len = cf->len;
 
 		if (cf->can_id & CAN_RTR_FLAG)
 			msg_flags |= PUCAN_MSG_RTR;
@@ -702,7 +704,7 @@ static netdev_tx_t peak_canfd_start_xmit(struct sk_buff *skb,
 		msg_flags |= PUCAN_MSG_SELF_RECEIVE;
 
 	msg->flags = cpu_to_le16(msg_flags);
-	msg->channel_dlc = PUCAN_MSG_CHANNEL_DLC(priv->index, can_dlc);
+	msg->channel_dlc = PUCAN_MSG_CHANNEL_DLC(priv->index, len);
 	memcpy(msg->d, cf->data, cf->len);
 
 	/* struct msg client field is used as an index in the echo skbs ring */
@@ -711,7 +713,7 @@ static netdev_tx_t peak_canfd_start_xmit(struct sk_buff *skb,
 	spin_lock_irqsave(&priv->echo_lock, flags);
 
 	/* prepare and save echo skb in internal slot */
-	can_put_echo_skb(skb, ndev, priv->echo_idx);
+	can_put_echo_skb(skb, ndev, priv->echo_idx, 0);
 
 	/* move echo index to the next slot */
 	priv->echo_idx = (priv->echo_idx + 1) % priv->can.echo_skb_max;
@@ -741,11 +743,57 @@ static netdev_tx_t peak_canfd_start_xmit(struct sk_buff *skb,
 	return NETDEV_TX_OK;
 }
 
+static int peak_eth_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
+{
+	struct hwtstamp_config hwts_cfg = { 0 };
+
+	switch (cmd) {
+	case SIOCSHWTSTAMP: /* set */
+		if (copy_from_user(&hwts_cfg, ifr->ifr_data, sizeof(hwts_cfg)))
+			return -EFAULT;
+		if (hwts_cfg.tx_type == HWTSTAMP_TX_OFF &&
+		    hwts_cfg.rx_filter == HWTSTAMP_FILTER_ALL)
+			return 0;
+		return -ERANGE;
+
+	case SIOCGHWTSTAMP: /* get */
+		hwts_cfg.tx_type = HWTSTAMP_TX_OFF;
+		hwts_cfg.rx_filter = HWTSTAMP_FILTER_ALL;
+		if (copy_to_user(ifr->ifr_data, &hwts_cfg, sizeof(hwts_cfg)))
+			return -EFAULT;
+		return 0;
+
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+
 static const struct net_device_ops peak_canfd_netdev_ops = {
 	.ndo_open = peak_canfd_open,
 	.ndo_stop = peak_canfd_close,
+	.ndo_eth_ioctl = peak_eth_ioctl,
 	.ndo_start_xmit = peak_canfd_start_xmit,
 	.ndo_change_mtu = can_change_mtu,
+};
+
+static int peak_get_ts_info(struct net_device *dev,
+			    struct ethtool_ts_info *info)
+{
+	info->so_timestamping =
+		SOF_TIMESTAMPING_TX_SOFTWARE |
+		SOF_TIMESTAMPING_RX_SOFTWARE |
+		SOF_TIMESTAMPING_SOFTWARE |
+		SOF_TIMESTAMPING_RX_HARDWARE |
+		SOF_TIMESTAMPING_RAW_HARDWARE;
+	info->phc_index = -1;
+	info->tx_types = BIT(HWTSTAMP_TX_OFF);
+	info->rx_filters = BIT(HWTSTAMP_FILTER_ALL);
+
+	return 0;
+}
+
+static const struct ethtool_ops peak_canfd_ethtool_ops = {
+	.get_ts_info = peak_get_ts_info,
 };
 
 struct net_device *alloc_peak_canfd_dev(int sizeof_priv, int index,
@@ -788,6 +836,7 @@ struct net_device *alloc_peak_canfd_dev(int sizeof_priv, int index,
 
 	ndev->flags |= IFF_ECHO;
 	ndev->netdev_ops = &peak_canfd_netdev_ops;
+	ndev->ethtool_ops = &peak_canfd_ethtool_ops;
 	ndev->dev_id = index;
 
 	return ndev;

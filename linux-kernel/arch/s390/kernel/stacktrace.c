@@ -3,7 +3,6 @@
  * Stack trace management functions
  *
  *  Copyright IBM Corp. 2006
- *  Author(s): Heiko Carstens <heiko.carstens@de.ibm.com>
  */
 
 #include <linux/stacktrace.h>
@@ -19,17 +18,11 @@ void arch_stack_walk(stack_trace_consume_fn consume_entry, void *cookie,
 
 	unwind_for_each_frame(&state, task, regs, 0) {
 		addr = unwind_get_return_address(&state);
-		if (!addr || !consume_entry(cookie, addr, false))
+		if (!addr || !consume_entry(cookie, addr))
 			break;
 	}
 }
 
-/*
- * This function returns an error if it detects any unreliable features of the
- * stack.  Otherwise it guarantees that the stack trace is reliable.
- *
- * If the task is not 'current', the caller *must* ensure the task is inactive.
- */
 int arch_stack_walk_reliable(stack_trace_consume_fn consume_entry,
 			     void *cookie, struct task_struct *task)
 {
@@ -47,16 +40,16 @@ int arch_stack_walk_reliable(stack_trace_consume_fn consume_entry,
 		if (!addr)
 			return -EINVAL;
 
-#ifdef CONFIG_KPROBES
+#ifdef CONFIG_RETHOOK
 		/*
-		 * Mark stacktraces with kretprobed functions on them
+		 * Mark stacktraces with krethook functions on them
 		 * as unreliable.
 		 */
-		if (state.ip == (unsigned long)kretprobe_trampoline)
+		if (state.ip == (unsigned long)arch_rethook_trampoline)
 			return -EINVAL;
 #endif
 
-		if (!consume_entry(cookie, addr, false))
+		if (!consume_entry(cookie, addr))
 			return -EINVAL;
 	}
 

@@ -31,7 +31,7 @@ static int __init irq_affinity_setup(char *str)
 	cpulist_parse(str, irq_default_affinity);
 	/*
 	 * Set at least the boot cpu. We don't want to end up with
-	 * bugreports caused by random comandline masks
+	 * bugreports caused by random commandline masks
 	 */
 	cpumask_set_cpu(smp_processor_id(), irq_default_affinity);
 	return 1;
@@ -147,12 +147,12 @@ static ssize_t per_cpu_count_show(struct kobject *kobj,
 				  struct kobj_attribute *attr, char *buf)
 {
 	struct irq_desc *desc = container_of(kobj, struct irq_desc, kobj);
-	int cpu, irq = desc->irq_data.irq;
 	ssize_t ret = 0;
 	char *p = "";
+	int cpu;
 
 	for_each_possible_cpu(cpu) {
-		unsigned int c = kstat_irqs_cpu(irq, cpu);
+		unsigned int c = irq_desc_kstat_cpu(desc, cpu);
 
 		ret += scnprintf(buf + ret, PAGE_SIZE - ret, "%s%u", p, c);
 		p = ",";
@@ -188,7 +188,7 @@ static ssize_t hwirq_show(struct kobject *kobj,
 
 	raw_spin_lock_irq(&desc->lock);
 	if (desc->irq_data.domain)
-		ret = sprintf(buf, "%d\n", (int)desc->irq_data.hwirq);
+		ret = sprintf(buf, "%lu\n", desc->irq_data.hwirq);
 	raw_spin_unlock_irq(&desc->lock);
 
 	return ret;
@@ -251,7 +251,7 @@ static ssize_t actions_show(struct kobject *kobj,
 	char *p = "";
 
 	raw_spin_lock_irq(&desc->lock);
-	for (action = desc->action; action != NULL; action = action->next) {
+	for_each_action_of_desc(desc, action) {
 		ret += scnprintf(buf + ret, PAGE_SIZE - ret, "%s%s",
 				 p, action->name);
 		p = ",";
@@ -277,7 +277,7 @@ static struct attribute *irq_attrs[] = {
 };
 ATTRIBUTE_GROUPS(irq);
 
-static struct kobj_type irq_kobj_type = {
+static const struct kobj_type irq_kobj_type = {
 	.release	= irq_kobj_release,
 	.sysfs_ops	= &kobj_sysfs_ops,
 	.default_groups = irq_groups,
@@ -288,22 +288,25 @@ static void irq_sysfs_add(int irq, struct irq_desc *desc)
 	if (irq_kobj_base) {
 		/*
 		 * Continue even in case of failure as this is nothing
-		 * crucial.
+		 * crucial and failures in the late irq_sysfs_init()
+		 * cannot be rolled back.
 		 */
 		if (kobject_add(&desc->kobj, irq_kobj_base, "%d", irq))
 			pr_warn("Failed to add kobject for irq %d\n", irq);
+		else
+			desc->istate |= IRQS_SYSFS;
 	}
 }
 
 static void irq_sysfs_del(struct irq_desc *desc)
 {
 	/*
-	 * If irq_sysfs_init() has not yet been invoked (early boot), then
-	 * irq_kobj_base is NULL and the descriptor was never added.
-	 * kobject_del() complains about a object with no parent, so make
-	 * it conditional.
+	 * Only invoke kobject_del() when kobject_add() was successfully
+	 * invoked for the descriptor. This covers both early boot, where
+	 * sysfs is not initialized yet, and the case of a failed
+	 * kobject_add() invocation.
 	 */
-	if (irq_kobj_base)
+	if (desc->istate & IRQS_SYSFS)
 		kobject_del(&desc->kobj);
 }
 
@@ -332,7 +335,7 @@ postcore_initcall(irq_sysfs_init);
 
 #else /* !CONFIG_SYSFS */
 
-static struct kobj_type irq_kobj_type = {
+static const struct kobj_type irq_kobj_type = {
 	.release	= irq_kobj_release,
 };
 
@@ -352,7 +355,9 @@ struct irq_desc *irq_to_desc(unsigned int irq)
 {
 	return radix_tree_lookup(&irq_desc_tree, irq);
 }
-EXPORT_SYMBOL(irq_to_desc);
+#ifdef CONFIG_KVM_BOOK3S_64_HV_MODULE
+EXPORT_SYMBOL_GPL(irq_to_desc);
+#endif
 
 static void delete_irq_desc(unsigned int irq)
 {
@@ -405,6 +410,7 @@ static struct irq_desc *alloc_desc(int irq, int node, unsigned int flags,
 	lockdep_set_class(&desc->lock, &irq_desc_lock_class);
 	mutex_init(&desc->request_mutex);
 	init_rcu_head(&desc->rcu);
+	init_waitqueue_head(&desc->wait_for_threads);
 
 	desc_set_defaults(irq, desc, node, affinity, owner);
 	irqd_set(&desc->irq_data, flags);
@@ -573,6 +579,7 @@ int __init early_irq_init(void)
 		raw_spin_lock_init(&desc[i].lock);
 		lockdep_set_class(&desc[i].lock, &irq_desc_lock_class);
 		mutex_init(&desc[i].request_mutex);
+		init_waitqueue_head(&desc[i].wait_for_threads);
 		desc_set_defaults(i, &desc[i], node, NULL, NULL);
 	}
 	return arch_early_irq_init();
@@ -630,100 +637,117 @@ void irq_init_desc(unsigned int irq)
 
 #endif /* !CONFIG_SPARSE_IRQ */
 
+int handle_irq_desc(struct irq_desc *desc)
+{
+	struct irq_data *data;
+
+	if (!desc)
+		return -EINVAL;
+
+	data = irq_desc_get_irq_data(desc);
+	if (WARN_ON_ONCE(!in_hardirq() && handle_enforce_irqctx(data)))
+		return -EPERM;
+
+	generic_handle_irq_desc(desc);
+	return 0;
+}
+
 /**
  * generic_handle_irq - Invoke the handler for a particular irq
  * @irq:	The irq number to handle
  *
- */
+ * Returns:	0 on success, or -EINVAL if conversion has failed
+ *
+ * 		This function must be called from an IRQ context with irq regs
+ * 		initialized.
+  */
 int generic_handle_irq(unsigned int irq)
 {
-	struct irq_desc *desc = irq_to_desc(irq);
-
-	if (!desc)
-		return -EINVAL;
-	generic_handle_irq_desc(desc);
-	return 0;
+	return handle_irq_desc(irq_to_desc(irq));
 }
 EXPORT_SYMBOL_GPL(generic_handle_irq);
 
-#ifdef CONFIG_HANDLE_DOMAIN_IRQ
 /**
- * __handle_domain_irq - Invoke the handler for a HW irq belonging to a domain
- * @domain:	The domain where to perform the lookup
- * @hwirq:	The HW irq number to convert to a logical one
- * @lookup:	Whether to perform the domain lookup or not
- * @regs:	Register file coming from the low-level handling code
+ * generic_handle_irq_safe - Invoke the handler for a particular irq from any
+ *			     context.
+ * @irq:	The irq number to handle
  *
- * Returns:	0 on success, or -EINVAL if conversion has failed
+ * Returns:	0 on success, a negative value on error.
+ *
+ * This function can be called from any context (IRQ or process context). It
+ * will report an error if not invoked from IRQ context and the irq has been
+ * marked to enforce IRQ-context only.
  */
-int __handle_domain_irq(struct irq_domain *domain, unsigned int hwirq,
-			bool lookup, struct pt_regs *regs)
+int generic_handle_irq_safe(unsigned int irq)
 {
-	struct pt_regs *old_regs = set_irq_regs(regs);
-	unsigned int irq = hwirq;
-	int ret = 0;
+	unsigned long flags;
+	int ret;
 
-	irq_enter();
-
-#ifdef CONFIG_IRQ_DOMAIN
-	if (lookup)
-		irq = irq_find_mapping(domain, hwirq);
-#endif
-
-	/*
-	 * Some hardware gives randomly wrong interrupts.  Rather
-	 * than crashing, do something sensible.
-	 */
-	if (unlikely(!irq || irq >= nr_irqs)) {
-		ack_bad_irq(irq);
-		ret = -EINVAL;
-	} else {
-		generic_handle_irq(irq);
-	}
-
-	irq_exit();
-	set_irq_regs(old_regs);
+	local_irq_save(flags);
+	ret = handle_irq_desc(irq_to_desc(irq));
+	local_irq_restore(flags);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(generic_handle_irq_safe);
 
 #ifdef CONFIG_IRQ_DOMAIN
 /**
- * handle_domain_nmi - Invoke the handler for a HW irq belonging to a domain
+ * generic_handle_domain_irq - Invoke the handler for a HW irq belonging
+ *                             to a domain.
  * @domain:	The domain where to perform the lookup
  * @hwirq:	The HW irq number to convert to a logical one
- * @regs:	Register file coming from the low-level handling code
- *
- *		This function must be called from an NMI context.
  *
  * Returns:	0 on success, or -EINVAL if conversion has failed
+ *
+ * 		This function must be called from an IRQ context with irq regs
+ * 		initialized.
  */
-int handle_domain_nmi(struct irq_domain *domain, unsigned int hwirq,
-		      struct pt_regs *regs)
+int generic_handle_domain_irq(struct irq_domain *domain, unsigned int hwirq)
 {
-	struct pt_regs *old_regs = set_irq_regs(regs);
-	unsigned int irq;
-	int ret = 0;
+	return handle_irq_desc(irq_resolve_mapping(domain, hwirq));
+}
+EXPORT_SYMBOL_GPL(generic_handle_domain_irq);
 
-	/*
-	 * NMI context needs to be setup earlier in order to deal with tracing.
-	 */
-	WARN_ON(!in_nmi());
+ /**
+ * generic_handle_irq_safe - Invoke the handler for a HW irq belonging
+ *			     to a domain from any context.
+ * @domain:	The domain where to perform the lookup
+ * @hwirq:	The HW irq number to convert to a logical one
+ *
+ * Returns:	0 on success, a negative value on error.
+ *
+ * This function can be called from any context (IRQ or process
+ * context). If the interrupt is marked as 'enforce IRQ-context only' then
+ * the function must be invoked from hard interrupt context.
+ */
+int generic_handle_domain_irq_safe(struct irq_domain *domain, unsigned int hwirq)
+{
+	unsigned long flags;
+	int ret;
 
-	irq = irq_find_mapping(domain, hwirq);
-
-	/*
-	 * ack_bad_irq is not NMI-safe, just report
-	 * an invalid interrupt.
-	 */
-	if (likely(irq))
-		generic_handle_irq(irq);
-	else
-		ret = -EINVAL;
-
-	set_irq_regs(old_regs);
+	local_irq_save(flags);
+	ret = handle_irq_desc(irq_resolve_mapping(domain, hwirq));
+	local_irq_restore(flags);
 	return ret;
 }
-#endif
+EXPORT_SYMBOL_GPL(generic_handle_domain_irq_safe);
+
+/**
+ * generic_handle_domain_nmi - Invoke the handler for a HW nmi belonging
+ *                             to a domain.
+ * @domain:	The domain where to perform the lookup
+ * @hwirq:	The HW irq number to convert to a logical one
+ *
+ * Returns:	0 on success, or -EINVAL if conversion has failed
+ *
+ * 		This function must be called from an NMI context with irq regs
+ * 		initialized.
+ **/
+int generic_handle_domain_nmi(struct irq_domain *domain, unsigned int hwirq)
+{
+	WARN_ON_ONCE(!in_nmi());
+	return handle_irq_desc(irq_resolve_mapping(domain, hwirq));
+}
 #endif
 
 /* Dynamic interrupt handling */
@@ -803,57 +827,6 @@ unlock:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(__irq_alloc_descs);
-
-#ifdef CONFIG_GENERIC_IRQ_LEGACY_ALLOC_HWIRQ
-/**
- * irq_alloc_hwirqs - Allocate an irq descriptor and initialize the hardware
- * @cnt:	number of interrupts to allocate
- * @node:	node on which to allocate
- *
- * Returns an interrupt number > 0 or 0, if the allocation fails.
- */
-unsigned int irq_alloc_hwirqs(int cnt, int node)
-{
-	int i, irq = __irq_alloc_descs(-1, 0, cnt, node, NULL, NULL);
-
-	if (irq < 0)
-		return 0;
-
-	for (i = irq; cnt > 0; i++, cnt--) {
-		if (arch_setup_hwirq(i, node))
-			goto err;
-		irq_clear_status_flags(i, _IRQ_NOREQUEST);
-	}
-	return irq;
-
-err:
-	for (i--; i >= irq; i--) {
-		irq_set_status_flags(i, _IRQ_NOREQUEST | _IRQ_NOPROBE);
-		arch_teardown_hwirq(i);
-	}
-	irq_free_descs(irq, cnt);
-	return 0;
-}
-EXPORT_SYMBOL_GPL(irq_alloc_hwirqs);
-
-/**
- * irq_free_hwirqs - Free irq descriptor and cleanup the hardware
- * @from:	Free from irq number
- * @cnt:	number of interrupts to free
- *
- */
-void irq_free_hwirqs(unsigned int from, int cnt)
-{
-	int i, j;
-
-	for (i = from, j = cnt; j > 0; i++, j--) {
-		irq_set_status_flags(i, _IRQ_NOREQUEST | _IRQ_NOPROBE);
-		arch_teardown_hwirq(i);
-	}
-	irq_free_descs(from, cnt);
-}
-EXPORT_SYMBOL_GPL(irq_free_hwirqs);
-#endif
 
 /**
  * irq_get_next_irq - get next allocated irq number
@@ -969,15 +942,7 @@ static bool irq_is_nmi(struct irq_desc *desc)
 	return desc->istate & IRQS_NMI;
 }
 
-/**
- * kstat_irqs - Get the statistics for an interrupt
- * @irq:	The interrupt number
- *
- * Returns the sum of interrupt counts on all cpus since boot for
- * @irq. The caller must ensure that the interrupt is not removed
- * concurrently.
- */
-unsigned int kstat_irqs(unsigned int irq)
+static unsigned int kstat_irqs(unsigned int irq)
 {
 	struct irq_desc *desc = irq_to_desc(irq);
 	unsigned int sum = 0;
@@ -988,21 +953,22 @@ unsigned int kstat_irqs(unsigned int irq)
 	if (!irq_settings_is_per_cpu_devid(desc) &&
 	    !irq_settings_is_per_cpu(desc) &&
 	    !irq_is_nmi(desc))
-	    return desc->tot_count;
+		return data_race(desc->tot_count);
 
 	for_each_possible_cpu(cpu)
-		sum += *per_cpu_ptr(desc->kstat_irqs, cpu);
+		sum += data_race(*per_cpu_ptr(desc->kstat_irqs, cpu));
 	return sum;
 }
 
 /**
- * kstat_irqs_usr - Get the statistics for an interrupt
+ * kstat_irqs_usr - Get the statistics for an interrupt from thread context
  * @irq:	The interrupt number
  *
  * Returns the sum of interrupt counts on all cpus since boot for @irq.
- * Contrary to kstat_irqs() this can be called from any context.
- * It uses rcu since a concurrent removal of an interrupt descriptor is
- * observing an rcu grace period before delayed_free_desc()/irq_kobj_release().
+ *
+ * It uses rcu to protect the access since a concurrent removal of an
+ * interrupt descriptor is observing an rcu grace period before
+ * delayed_free_desc()/irq_kobj_release().
  */
 unsigned int kstat_irqs_usr(unsigned int irq)
 {
@@ -1013,3 +979,17 @@ unsigned int kstat_irqs_usr(unsigned int irq)
 	rcu_read_unlock();
 	return sum;
 }
+
+#ifdef CONFIG_LOCKDEP
+void __irq_set_lockdep_class(unsigned int irq, struct lock_class_key *lock_class,
+			     struct lock_class_key *request_class)
+{
+	struct irq_desc *desc = irq_to_desc(irq);
+
+	if (desc) {
+		lockdep_set_class(&desc->lock, lock_class);
+		lockdep_set_class(&desc->request_mutex, request_class);
+	}
+}
+EXPORT_SYMBOL_GPL(__irq_set_lockdep_class);
+#endif

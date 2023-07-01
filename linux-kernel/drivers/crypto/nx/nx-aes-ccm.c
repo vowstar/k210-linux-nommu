@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/**
+/*
  * AES CCM routines supporting the Power 7+ Nest Accelerators driver
  *
  * Copyright (C) 2012 International Business Machines Inc.
@@ -134,7 +134,6 @@ static int generate_b0(u8 *iv, unsigned int assoclen, unsigned int authsize,
 		       unsigned int cryptlen, u8 *b0)
 {
 	unsigned int l, lp, m = authsize;
-	int rc;
 
 	memcpy(b0, iv, 16);
 
@@ -148,9 +147,7 @@ static int generate_b0(u8 *iv, unsigned int assoclen, unsigned int authsize,
 	if (assoclen)
 		*b0 |= 64;
 
-	rc = set_msg_len(b0 + 16 - l, cryptlen, l);
-
-	return rc;
+	return set_msg_len(b0 + 16 - l, cryptlen, l);
 }
 
 static int generate_pat(u8                   *iv,
@@ -391,7 +388,7 @@ static int ccm_nx_decrypt(struct aead_request   *req,
 
 		/* update stats */
 		atomic_inc(&(nx_ctx->stats->aes_ops));
-		atomic64_add(csbcpb->csb.processed_byte_count,
+		atomic64_add(be32_to_cpu(csbcpb->csb.processed_byte_count),
 			     &(nx_ctx->stats->aes_bytes));
 
 		processed += to_process;
@@ -460,7 +457,7 @@ static int ccm_nx_encrypt(struct aead_request   *req,
 
 		/* update stats */
 		atomic_inc(&(nx_ctx->stats->aes_ops));
-		atomic64_add(csbcpb->csb.processed_byte_count,
+		atomic64_add(be32_to_cpu(csbcpb->csb.processed_byte_count),
 			     &(nx_ctx->stats->aes_bytes));
 
 		processed += to_process;

@@ -11,7 +11,9 @@
 #include <linux/mod_devicetable.h>
 #include <linux/soundwire/sdw.h>
 #include <linux/soundwire/sdw_type.h>
+#include <linux/soundwire/sdw_registers.h>
 #include <linux/module.h>
+#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <sound/soc.h>
 #include "rt711.h"
@@ -337,10 +339,15 @@ static int rt711_update_status(struct sdw_slave *slave,
 static int rt711_read_prop(struct sdw_slave *slave)
 {
 	struct sdw_slave_prop *prop = &slave->prop;
-	int nval, i, num_of_ports = 1;
+	int nval;
+	int i, j;
 	u32 bit;
 	unsigned long addr;
 	struct sdw_dpn_prop *dpn;
+
+	prop->scp_int1_mask = SDW_SCP_INT1_IMPL_DEF | SDW_SCP_INT1_BUS_CLASH |
+		SDW_SCP_INT1_PARITY;
+	prop->quirks = SDW_SLAVE_QUIRKS_INVALID_INITIAL_PARITY;
 
 	prop->paging_support = false;
 
@@ -349,7 +356,6 @@ static int rt711_read_prop(struct sdw_slave *slave)
 	prop->sink_ports = 0x8; /* BITMAP:  00001000 */
 
 	nval = hweight32(prop->source_ports);
-	num_of_ports += nval;
 	prop->src_dpn_prop = devm_kcalloc(&slave->dev, nval,
 						sizeof(*prop->src_dpn_prop),
 						GFP_KERNEL);
@@ -369,34 +375,22 @@ static int rt711_read_prop(struct sdw_slave *slave)
 
 	/* do this again for sink now */
 	nval = hweight32(prop->sink_ports);
-	num_of_ports += nval;
 	prop->sink_dpn_prop = devm_kcalloc(&slave->dev, nval,
 						sizeof(*prop->sink_dpn_prop),
 						GFP_KERNEL);
 	if (!prop->sink_dpn_prop)
 		return -ENOMEM;
 
-	i = 0;
+	j = 0;
 	dpn = prop->sink_dpn_prop;
 	addr = prop->sink_ports;
 	for_each_set_bit(bit, &addr, 32) {
-		dpn[i].num = bit;
-		dpn[i].type = SDW_DPN_FULL;
-		dpn[i].simple_ch_prep_sm = true;
-		dpn[i].ch_prep_timeout = 10;
-		i++;
+		dpn[j].num = bit;
+		dpn[j].type = SDW_DPN_FULL;
+		dpn[j].simple_ch_prep_sm = true;
+		dpn[j].ch_prep_timeout = 10;
+		j++;
 	}
-
-	/* Allocate port_ready based on num_of_ports */
-	slave->port_ready = devm_kcalloc(&slave->dev, num_of_ports,
-					sizeof(*slave->port_ready),
-					GFP_KERNEL);
-	if (!slave->port_ready)
-		return -ENOMEM;
-
-	/* Initialize completion */
-	for (i = 0; i < num_of_ports; i++)
-		init_completion(&slave->port_ready[i]);
 
 	/* set the timeout values */
 	prop->clk_stop_timeout = 20;
@@ -430,15 +424,17 @@ static int rt711_interrupt_callback(struct sdw_slave *slave,
 	dev_dbg(&slave->dev,
 		"%s control_port_stat=%x", __func__, status->control_port);
 
-	if (status->control_port & 0x4) {
+	mutex_lock(&rt711->disable_irq_lock);
+	if (status->control_port & 0x4 && !rt711->disable_irq) {
 		mod_delayed_work(system_power_efficient_wq,
 			&rt711->jack_detect_work, msecs_to_jiffies(250));
 	}
+	mutex_unlock(&rt711->disable_irq_lock);
 
 	return 0;
 }
 
-static struct sdw_slave_ops rt711_slave_ops = {
+static const struct sdw_slave_ops rt711_slave_ops = {
 	.read_prop = rt711_read_prop,
 	.interrupt_callback = rt711_interrupt_callback,
 	.update_status = rt711_update_status,
@@ -450,13 +446,10 @@ static int rt711_sdw_probe(struct sdw_slave *slave,
 {
 	struct regmap *sdw_regmap, *regmap;
 
-	/* Assign ops */
-	slave->ops = &rt711_slave_ops;
-
 	/* Regmap Initialization */
 	sdw_regmap = devm_regmap_init_sdw(slave, &rt711_sdw_regmap);
-	if (!sdw_regmap)
-		return -EINVAL;
+	if (IS_ERR(sdw_regmap))
+		return PTR_ERR(sdw_regmap);
 
 	regmap = devm_regmap_init(&slave->dev, NULL,
 		&slave->dev, &rt711_regmap);
@@ -472,17 +465,23 @@ static int rt711_sdw_remove(struct sdw_slave *slave)
 {
 	struct rt711_priv *rt711 = dev_get_drvdata(&slave->dev);
 
-	if (rt711 && rt711->hw_init) {
-		cancel_delayed_work(&rt711->jack_detect_work);
-		cancel_delayed_work(&rt711->jack_btn_check_work);
+	if (rt711->hw_init) {
+		cancel_delayed_work_sync(&rt711->jack_detect_work);
+		cancel_delayed_work_sync(&rt711->jack_btn_check_work);
 		cancel_work_sync(&rt711->calibration_work);
 	}
+
+	if (rt711->first_hw_init)
+		pm_runtime_disable(&slave->dev);
+
+	mutex_destroy(&rt711->calibrate_mutex);
+	mutex_destroy(&rt711->disable_irq_lock);
 
 	return 0;
 }
 
 static const struct sdw_device_id rt711_id[] = {
-	SDW_SLAVE_ENTRY(0x025d, 0x711, 0),
+	SDW_SLAVE_ENTRY_EXT(0x025d, 0x711, 0x2, 0, 0),
 	{},
 };
 MODULE_DEVICE_TABLE(sdw, rt711_id);
@@ -494,12 +493,44 @@ static int __maybe_unused rt711_dev_suspend(struct device *dev)
 	if (!rt711->hw_init)
 		return 0;
 
+	cancel_delayed_work_sync(&rt711->jack_detect_work);
+	cancel_delayed_work_sync(&rt711->jack_btn_check_work);
+	cancel_work_sync(&rt711->calibration_work);
+
 	regcache_cache_only(rt711->regmap, true);
 
 	return 0;
 }
 
-#define RT711_PROBE_TIMEOUT 2000
+static int __maybe_unused rt711_dev_system_suspend(struct device *dev)
+{
+	struct rt711_priv *rt711 = dev_get_drvdata(dev);
+	struct sdw_slave *slave = dev_to_sdw_dev(dev);
+	int ret;
+
+	if (!rt711->hw_init)
+		return 0;
+
+	/*
+	 * prevent new interrupts from being handled after the
+	 * deferred work completes and before the parent disables
+	 * interrupts on the link
+	 */
+	mutex_lock(&rt711->disable_irq_lock);
+	rt711->disable_irq = true;
+	ret = sdw_update_no_pm(slave, SDW_SCP_INTMASK1,
+			       SDW_SCP_INT1_IMPL_DEF, 0);
+	mutex_unlock(&rt711->disable_irq_lock);
+
+	if (ret < 0) {
+		/* log but don't prevent suspend from happening */
+		dev_dbg(&slave->dev, "%s: could not disable imp-def interrupts\n:", __func__);
+	}
+
+	return rt711_dev_suspend(dev);
+}
+
+#define RT711_PROBE_TIMEOUT 5000
 
 static int __maybe_unused rt711_dev_resume(struct device *dev)
 {
@@ -507,7 +538,7 @@ static int __maybe_unused rt711_dev_resume(struct device *dev)
 	struct rt711_priv *rt711 = dev_get_drvdata(dev);
 	unsigned long time;
 
-	if (!rt711->hw_init)
+	if (!rt711->first_hw_init)
 		return 0;
 
 	if (!slave->unattach_request)
@@ -530,7 +561,7 @@ regmap_sync:
 }
 
 static const struct dev_pm_ops rt711_pm = {
-	SET_SYSTEM_SLEEP_PM_OPS(rt711_dev_suspend, rt711_dev_resume)
+	SET_SYSTEM_SLEEP_PM_OPS(rt711_dev_system_suspend, rt711_dev_resume)
 	SET_RUNTIME_PM_OPS(rt711_dev_suspend, rt711_dev_resume, NULL)
 };
 

@@ -28,7 +28,6 @@
 #include <sound/soc.h>
 #include <sound/soc-acpi.h>
 #include "../atom/sst-atom-controls.h"
-#include "../common/sst-dsp.h"
 #include "../common/soc-intel-quirks.h"
 
 /* jd-inv + terminating entry */
@@ -38,6 +37,7 @@ struct byt_cht_es8316_private {
 	struct clk *mclk;
 	struct snd_soc_jack jack;
 	struct gpio_desc *speaker_en_gpio;
+	struct device *codec_dev;
 	bool speaker_en;
 };
 
@@ -157,7 +157,7 @@ static struct snd_soc_jack_pin byt_cht_es8316_jack_pins[] = {
 
 static int byt_cht_es8316_init(struct snd_soc_pcm_runtime *runtime)
 {
-	struct snd_soc_component *codec = runtime->codec_dai->component;
+	struct snd_soc_component *codec = asoc_rtd_to_codec(runtime, 0)->component;
 	struct snd_soc_card *card = runtime->card;
 	struct byt_cht_es8316_private *priv = snd_soc_card_get_drvdata(card);
 	const struct snd_soc_dapm_route *custom_map;
@@ -212,17 +212,17 @@ static int byt_cht_es8316_init(struct snd_soc_pcm_runtime *runtime)
 	if (ret)
 		dev_err(card->dev, "unable to enable MCLK\n");
 
-	ret = snd_soc_dai_set_sysclk(runtime->codec_dai, 0, 19200000,
+	ret = snd_soc_dai_set_sysclk(asoc_rtd_to_codec(runtime, 0), 0, 19200000,
 				     SND_SOC_CLOCK_IN);
 	if (ret < 0) {
 		dev_err(card->dev, "can't set codec clock %d\n", ret);
 		return ret;
 	}
 
-	ret = snd_soc_card_jack_new(card, "Headset",
-				    SND_JACK_HEADSET | SND_JACK_BTN_0,
-				    &priv->jack, byt_cht_es8316_jack_pins,
-				    ARRAY_SIZE(byt_cht_es8316_jack_pins));
+	ret = snd_soc_card_jack_new_pins(card, "Headset",
+					 SND_JACK_HEADSET | SND_JACK_BTN_0,
+					 &priv->jack, byt_cht_es8316_jack_pins,
+					 ARRAY_SIZE(byt_cht_es8316_jack_pins));
 	if (ret) {
 		dev_err(card->dev, "jack creation failed %d\n", ret);
 		return ret;
@@ -243,7 +243,7 @@ static int byt_cht_es8316_codec_fixup(struct snd_soc_pcm_runtime *rtd,
 						SNDRV_PCM_HW_PARAM_CHANNELS);
 	int ret, bits;
 
-	/* The DSP will covert the FE rate to 48k, stereo */
+	/* The DSP will convert the FE rate to 48k, stereo */
 	rate->min = rate->max = 48000;
 	channels->min = channels->max = 2;
 
@@ -262,17 +262,17 @@ static int byt_cht_es8316_codec_fixup(struct snd_soc_pcm_runtime *rtd,
 	 * with explicit setting to I2S 2ch 24-bit. The word length is set with
 	 * dai_set_tdm_slot() since there is no other API exposed
 	 */
-	ret = snd_soc_dai_set_fmt(rtd->cpu_dai,
+	ret = snd_soc_dai_set_fmt(asoc_rtd_to_cpu(rtd, 0),
 				SND_SOC_DAIFMT_I2S     |
 				SND_SOC_DAIFMT_NB_NF   |
-				SND_SOC_DAIFMT_CBS_CFS
+				SND_SOC_DAIFMT_BP_FP
 		);
 	if (ret < 0) {
 		dev_err(rtd->dev, "can't set format to I2S, err %d\n", ret);
 		return ret;
 	}
 
-	ret = snd_soc_dai_set_tdm_slot(rtd->cpu_dai, 0x3, 0x3, 2, bits);
+	ret = snd_soc_dai_set_tdm_slot(asoc_rtd_to_cpu(rtd, 0), 0x3, 0x3, 2, bits);
 	if (ret < 0) {
 		dev_err(rtd->dev, "can't set I2S config, err %d\n", ret);
 		return ret;
@@ -332,16 +332,12 @@ static struct snd_soc_dai_link byt_cht_es8316_dais[] = {
 
 		/* back ends */
 	{
-		/* Only SSP2 has been tested here, so BYT-CR platforms that
-		 * require SSP0 will not work.
-		 */
 		.name = "SSP2-Codec",
 		.id = 0,
 		.no_pcm = 1,
 		.dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_NB_NF
-						| SND_SOC_DAIFMT_CBS_CFS,
+						| SND_SOC_DAIFMT_CBC_CFC,
 		.be_hw_params_fixup = byt_cht_es8316_codec_fixup,
-		.nonatomic = true,
 		.dpcm_playback = 1,
 		.dpcm_capture = 1,
 		.init = byt_cht_es8316_init,
@@ -407,8 +403,14 @@ static int byt_cht_es8316_resume(struct snd_soc_card *card)
 	return 0;
 }
 
+/* use space before codec name to simplify card ID, and simplify driver name */
+#define SOF_CARD_NAME "bytcht es8316" /* card name will be 'sof-bytcht es8316' */
+#define SOF_DRIVER_NAME "SOF"
+
+#define CARD_NAME "bytcht-es8316"
+#define DRIVER_NAME NULL /* card name will be used for driver name */
+
 static struct snd_soc_card byt_cht_es8316_card = {
-	.name = "bytcht-es8316",
 	.owner = THIS_MODULE,
 	.dai_link = byt_cht_es8316_dais,
 	.num_links = ARRAY_SIZE(byt_cht_es8316_dais),
@@ -441,6 +443,13 @@ static const struct dmi_system_id byt_cht_es8316_quirk_table[] = {
 					| BYT_CHT_ES8316_INTMIC_IN2_MAP
 					| BYT_CHT_ES8316_JD_INVERTED),
 	},
+	{	/* Nanote UMPC-01 */
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "RWC CO.,LTD"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "UMPC-01"),
+		},
+		.driver_data = (void *)BYT_CHT_ES8316_INTMIC_IN1_MAP,
+	},
 	{	/* Teclast X98 Plus II */
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "TECLAST"),
@@ -454,15 +463,17 @@ static const struct dmi_system_id byt_cht_es8316_quirk_table[] = {
 
 static int snd_byt_cht_es8316_mc_probe(struct platform_device *pdev)
 {
+	struct device *dev = &pdev->dev;
 	static const char * const mic_name[] = { "in1", "in2" };
+	struct snd_soc_acpi_mach *mach = dev_get_platdata(dev);
 	struct property_entry props[MAX_NO_PROPS] = {};
 	struct byt_cht_es8316_private *priv;
 	const struct dmi_system_id *dmi_id;
-	struct device *dev = &pdev->dev;
-	struct snd_soc_acpi_mach *mach;
+	struct fwnode_handle *fwnode;
 	const char *platform_name;
 	struct acpi_device *adev;
 	struct device *codec_dev;
+	bool sof_parent;
 	unsigned int cnt = 0;
 	int dai_index = 0;
 	int i;
@@ -472,7 +483,6 @@ static int snd_byt_cht_es8316_mc_probe(struct platform_device *pdev)
 	if (!priv)
 		return -ENOMEM;
 
-	mach = dev->platform_data;
 	/* fix index of codec dai */
 	for (i = 0; i < ARRAY_SIZE(byt_cht_es8316_dais); i++) {
 		if (!strcmp(byt_cht_es8316_dais[i].codecs->name,
@@ -487,18 +497,28 @@ static int snd_byt_cht_es8316_mc_probe(struct platform_device *pdev)
 	if (adev) {
 		snprintf(codec_name, sizeof(codec_name),
 			 "i2c-%s", acpi_dev_name(adev));
-		put_device(&adev->dev);
 		byt_cht_es8316_dais[dai_index].codecs->name = codec_name;
+	} else {
+		dev_err(dev, "Error cannot find '%s' dev\n", mach->id);
+		return -ENXIO;
 	}
 
-	/* override plaform name, if required */
+	codec_dev = acpi_get_first_physical_node(adev);
+	acpi_dev_put(adev);
+	if (!codec_dev)
+		return -EPROBE_DEFER;
+	priv->codec_dev = get_device(codec_dev);
+
+	/* override platform name, if required */
 	byt_cht_es8316_card.dev = dev;
 	platform_name = mach->mach_params.platform;
 
 	ret = snd_soc_fixup_dai_links_platform_name(&byt_cht_es8316_card,
 						    platform_name);
-	if (ret)
+	if (ret) {
+		put_device(codec_dev);
 		return ret;
+	}
 
 	/* Check for BYTCR or other platform and setup quirks */
 	dmi_id = dmi_first_match(byt_cht_es8316_quirk_table);
@@ -515,9 +535,8 @@ static int snd_byt_cht_es8316_mc_probe(struct platform_device *pdev)
 			BYT_CHT_ES8316_MONO_SPEAKER;
 	}
 	if (quirk_override != -1) {
-		dev_info(dev, "Overriding quirk 0x%x => 0x%x\n",
-			 (unsigned int)quirk,
-			 quirk_override);
+		dev_info(dev, "Overriding quirk 0x%lx => 0x%x\n",
+			 quirk, quirk_override);
 		quirk = quirk_override;
 	}
 	log_quirks(dev);
@@ -528,44 +547,40 @@ static int snd_byt_cht_es8316_mc_probe(struct platform_device *pdev)
 	/* get the clock */
 	priv->mclk = devm_clk_get(dev, "pmc_plt_clk_3");
 	if (IS_ERR(priv->mclk)) {
-		ret = PTR_ERR(priv->mclk);
-		dev_err(dev, "clk_get pmc_plt_clk_3 failed: %d\n", ret);
-		return ret;
+		put_device(codec_dev);
+		return dev_err_probe(dev, PTR_ERR(priv->mclk), "clk_get pmc_plt_clk_3 failed\n");
 	}
-
-	/* get speaker enable GPIO */
-	codec_dev = bus_find_device_by_name(&i2c_bus_type, NULL, codec_name);
-	if (!codec_dev)
-		return -EPROBE_DEFER;
 
 	if (quirk & BYT_CHT_ES8316_JD_INVERTED)
 		props[cnt++] = PROPERTY_ENTRY_BOOL("everest,jack-detect-inverted");
 
 	if (cnt) {
-		ret = device_add_properties(codec_dev, props);
-		if (ret)
-			return ret;
-	}
+		fwnode = fwnode_create_software_node(props, NULL);
+		if (IS_ERR(fwnode)) {
+			put_device(codec_dev);
+			return PTR_ERR(fwnode);
+		}
 
-	devm_acpi_dev_add_driver_gpios(codec_dev, byt_cht_es8316_gpios);
-	priv->speaker_en_gpio =
-		gpiod_get_index(codec_dev, "speaker-enable", 0,
-				/* see comment in byt_cht_es8316_resume */
-				GPIOD_OUT_LOW | GPIOD_FLAGS_BIT_NONEXCLUSIVE);
-	put_device(codec_dev);
+		ret = device_add_software_node(codec_dev, to_software_node(fwnode));
 
-	if (IS_ERR(priv->speaker_en_gpio)) {
-		ret = PTR_ERR(priv->speaker_en_gpio);
-		switch (ret) {
-		case -ENOENT:
-			priv->speaker_en_gpio = NULL;
-			break;
-		default:
-			dev_err(dev, "get speaker GPIO failed: %d\n", ret);
-			/* fall through */
-		case -EPROBE_DEFER:
+		fwnode_handle_put(fwnode);
+
+		if (ret) {
+			put_device(codec_dev);
 			return ret;
 		}
+	}
+
+	/* get speaker enable GPIO */
+	devm_acpi_dev_add_driver_gpios(codec_dev, byt_cht_es8316_gpios);
+	priv->speaker_en_gpio =
+		gpiod_get_optional(codec_dev, "speaker-enable",
+				   /* see comment in byt_cht_es8316_resume() */
+				   GPIOD_OUT_LOW | GPIOD_FLAGS_BIT_NONEXCLUSIVE);
+	if (IS_ERR(priv->speaker_en_gpio)) {
+		ret = dev_err_probe(dev, PTR_ERR(priv->speaker_en_gpio),
+				    "get speaker GPIO failed\n");
+		goto err_put_codec;
 	}
 
 	snprintf(components_string, sizeof(components_string),
@@ -580,6 +595,21 @@ static int snd_byt_cht_es8316_mc_probe(struct platform_device *pdev)
 	byt_cht_es8316_card.long_name = long_name;
 #endif
 
+	sof_parent = snd_soc_acpi_sof_parent(dev);
+
+	/* set card and driver name */
+	if (sof_parent) {
+		byt_cht_es8316_card.name = SOF_CARD_NAME;
+		byt_cht_es8316_card.driver_name = SOF_DRIVER_NAME;
+	} else {
+		byt_cht_es8316_card.name = CARD_NAME;
+		byt_cht_es8316_card.driver_name = DRIVER_NAME;
+	}
+
+	/* set pm ops */
+	if (sof_parent)
+		dev->driver->pm = &snd_soc_pm_ops;
+
 	/* register the soc card */
 	snd_soc_card_set_drvdata(&byt_cht_es8316_card, priv);
 
@@ -587,10 +617,15 @@ static int snd_byt_cht_es8316_mc_probe(struct platform_device *pdev)
 	if (ret) {
 		gpiod_put(priv->speaker_en_gpio);
 		dev_err(dev, "snd_soc_register_card failed: %d\n", ret);
-		return ret;
+		goto err_put_codec;
 	}
 	platform_set_drvdata(pdev, &byt_cht_es8316_card);
 	return 0;
+
+err_put_codec:
+	device_remove_software_node(priv->codec_dev);
+	put_device(priv->codec_dev);
+	return ret;
 }
 
 static int snd_byt_cht_es8316_mc_remove(struct platform_device *pdev)
@@ -599,6 +634,8 @@ static int snd_byt_cht_es8316_mc_remove(struct platform_device *pdev)
 	struct byt_cht_es8316_private *priv = snd_soc_card_get_drvdata(card);
 
 	gpiod_put(priv->speaker_en_gpio);
+	device_remove_software_node(priv->codec_dev);
+	put_device(priv->codec_dev);
 	return 0;
 }
 

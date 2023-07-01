@@ -56,7 +56,7 @@ static const u8 DS620_REG_TEMP[3] = {
 struct ds620_data {
 	struct i2c_client *client;
 	struct mutex update_lock;
-	char valid;		/* !=0 if following fields are valid */
+	bool valid;		/* true if following fields are valid */
 	unsigned long last_updated;	/* In jiffies */
 
 	s16 temp[3];		/* Register values, word */
@@ -118,7 +118,7 @@ static struct ds620_data *ds620_update_client(struct device *dev)
 		}
 
 		data->last_updated = jiffies;
-		data->valid = 1;
+		data->valid = true;
 	}
 abort:
 	mutex_unlock(&data->update_lock);
@@ -211,8 +211,7 @@ static struct attribute *ds620_attrs[] = {
 
 ATTRIBUTE_GROUPS(ds620);
 
-static int ds620_probe(struct i2c_client *client,
-		       const struct i2c_device_id *id)
+static int ds620_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct device *hwmon_dev;
@@ -246,7 +245,7 @@ static struct i2c_driver ds620_driver = {
 	.driver = {
 		   .name = "ds620",
 	},
-	.probe = ds620_probe,
+	.probe_new = ds620_probe,
 	.id_table = ds620_id,
 };
 

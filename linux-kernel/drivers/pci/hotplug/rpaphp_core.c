@@ -11,6 +11,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/of.h>
 #include <linux/pci.h>
 #include <linux/pci_hotplug.h>
 #include <linux/smp.h>
@@ -20,6 +21,7 @@
 #include <asm/eeh.h>       /* for eeh_add_device() */
 #include <asm/rtas.h>		/* rtas_call */
 #include <asm/pci-bridge.h>	/* for pci_controller */
+#include <asm/prom.h>
 #include "../pci.h"		/* for pci_add_new_bus */
 				/* and pci_do_scan_bus */
 #include "rpaphp.h"
@@ -288,11 +290,10 @@ EXPORT_SYMBOL_GPL(rpaphp_check_drc_props);
 
 static int is_php_type(char *drc_type)
 {
-	unsigned long value;
 	char *endptr;
 
 	/* PCI Hotplug nodes have an integer for drc_type */
-	value = simple_strtoul(drc_type, &endptr, 10);
+	simple_strtoul(drc_type, &endptr, 10);
 	if (endptr == drc_type)
 		return 0;
 
@@ -436,7 +437,7 @@ static int rpaphp_drc_add_slot(struct device_node *dn)
  */
 int rpaphp_add_slot(struct device_node *dn)
 {
-	if (!dn->name || strcmp(dn->name, "pci"))
+	if (!of_node_name_eq(dn, "pci"))
 		return 0;
 
 	if (of_find_property(dn, "ibm,drc-info", NULL))
@@ -494,6 +495,8 @@ static int enable_slot(struct hotplug_slot *hotplug_slot)
 		return retval;
 
 	if (state == PRESENT) {
+		pseries_eeh_init_edev_recursive(PCI_DN(slot->dn));
+
 		pci_lock_rescan_remove();
 		pci_hp_add_devices(slot->bus);
 		pci_unlock_rescan_remove();

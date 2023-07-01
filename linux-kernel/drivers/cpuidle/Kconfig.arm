@@ -3,7 +3,8 @@
 # ARM CPU Idle drivers
 #
 config ARM_CPUIDLE
-	bool "Generic ARM/ARM64 CPU idle Driver"
+	bool "Generic ARM CPU idle Driver"
+	depends on ARM
 	select DT_IDLE_STATES
 	select CPU_IDLE_MULTIPLE_DRIVERS
 	help
@@ -22,6 +23,25 @@ config ARM_PSCI_CPUIDLE
 	  Select this to enable PSCI firmware based CPUidle driver for ARM.
 	  It provides an idle driver that is capable of detecting and
 	  managing idle states through the PSCI firmware interface.
+
+	  The driver has limitations when used with PREEMPT_RT:
+	  - If the idle states are described with the non-hierarchical layout,
+	    all idle states are still available.
+
+	  - If the idle states are described with the hierarchical layout,
+	    only the idle states defined per CPU are available, but not the ones
+	    being shared among a group of CPUs (aka cluster idle states).
+
+config ARM_PSCI_CPUIDLE_DOMAIN
+	bool "PSCI CPU idle Domain"
+	depends on ARM_PSCI_CPUIDLE
+	depends on PM_GENERIC_DOMAINS_OF
+	select DT_IDLE_GENPD
+	default y
+	help
+	  Select this to enable the PSCI based CPUidle driver to use PM domains,
+	  which is needed to support the hierarchical DT based layout of the
+	  idle states.
 
 config ARM_BIG_LITTLE_CPUIDLE
 	bool "Support for ARM big.LITTLE processors"
@@ -86,3 +106,27 @@ config ARM_MVEBU_V7_CPUIDLE
 	depends on (ARCH_MVEBU || COMPILE_TEST) && !ARM64
 	help
 	  Select this to enable cpuidle on Armada 370, 38x and XP processors.
+
+config ARM_TEGRA_CPUIDLE
+	bool "CPU Idle Driver for NVIDIA Tegra SoCs"
+	depends on (ARCH_TEGRA || COMPILE_TEST) && !ARM64 && MMU
+	depends on ARCH_SUSPEND_POSSIBLE
+	select ARCH_NEEDS_CPU_IDLE_COUPLED if SMP
+	select ARM_CPU_SUSPEND
+	help
+	  Select this to enable cpuidle for NVIDIA Tegra20/30/114/124 SoCs.
+
+config ARM_QCOM_SPM_CPUIDLE
+	bool "CPU Idle Driver for Qualcomm Subsystem Power Manager (SPM)"
+	depends on (ARCH_QCOM || COMPILE_TEST) && !ARM64 && MMU
+	depends on ARCH_SUSPEND_POSSIBLE
+	select ARM_CPU_SUSPEND
+	select CPU_IDLE_MULTIPLE_DRIVERS
+	select DT_IDLE_STATES
+	select QCOM_SCM
+	select QCOM_SPM
+	help
+	  Select this to enable cpuidle for Qualcomm processors.
+	  The Subsystem Power Manager (SPM) controls low power modes for the
+	  CPU and L2 cores. It interface with various system drivers to put
+	  the cores in low power modes.

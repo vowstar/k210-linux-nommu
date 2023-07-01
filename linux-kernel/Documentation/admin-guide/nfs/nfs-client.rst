@@ -36,10 +36,9 @@ administrative requirements that require particular behavior that does not
 work well as part of an nfs_client_id4 string.
 
 The nfs.nfs4_unique_id boot parameter specifies a unique string that can be
-used instead of a system's node name when an NFS client identifies itself to
-a server.  Thus, if the system's node name is not unique, or it changes, its
-nfs.nfs4_unique_id stays the same, preventing collision with other clients
-or loss of state during NFS reboot recovery or transparent state migration.
+used together with  a system's node name when an NFS client identifies itself to
+a server.  Thus, if the system's node name is not unique, its
+nfs.nfs4_unique_id can help prevent collisions with other clients.
 
 The nfs.nfs4_unique_id string is typically a UUID, though it can contain
 anything that is believed to be unique across all NFS clients.  An
@@ -53,8 +52,12 @@ outstanding NFSv4 state has expired, to prevent loss of NFSv4 state.
 
 This string can be stored in an NFS client's grub.conf, or it can be provided
 via a net boot facility such as PXE.  It may also be specified as an nfs.ko
-module parameter.  Specifying a uniquifier string is not support for NFS
-clients running in containers.
+module parameter.
+
+This uniquifier string will be the same for all NFS clients running in
+containers unless it is overridden by a value written to
+/sys/fs/nfs/net/nfs_client/identifier which will be local to the network
+namespace of the process which writes.
 
 
 The DNS resolver
@@ -65,8 +68,8 @@ migrated onto another server by means of the special "fs_locations"
 attribute. See `RFC3530 Section 6: Filesystem Migration and Replication`_ and
 `Implementation Guide for Referrals in NFSv4`_.
 
-.. _RFC3530 Section 6\: Filesystem Migration and Replication: http://tools.ietf.org/html/rfc3530#section-6
-.. _Implementation Guide for Referrals in NFSv4: http://tools.ietf.org/html/draft-ietf-nfsv4-referrals-00
+.. _RFC3530 Section 6\: Filesystem Migration and Replication: https://tools.ietf.org/html/rfc3530#section-6
+.. _Implementation Guide for Referrals in NFSv4: https://tools.ietf.org/html/draft-ietf-nfsv4-referrals-00
 
 The fs_locations information can take the form of either an ip address and
 a path, or a DNS hostname and a path. The latter requires the NFS client to

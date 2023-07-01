@@ -30,6 +30,7 @@
 
 #include "audio_types.h"
 #include "hw_shared.h"
+#include "dc_link.h"
 
 struct dc_bios;
 struct dc_context;
@@ -71,18 +72,28 @@ enum dynamic_metadata_mode {
 	dmdata_dolby_vision
 };
 
+struct enc_sdp_line_num {
+	/* Adaptive Sync SDP */
+	bool adaptive_sync_line_num_valid;
+	uint32_t adaptive_sync_line_num;
+};
+
 struct encoder_info_frame {
 	/* auxiliary video information */
 	struct dc_info_packet avi;
 	struct dc_info_packet gamut;
 	struct dc_info_packet vendor;
 	struct dc_info_packet hfvsif;
+	struct dc_info_packet vtem;
 	/* source product description */
 	struct dc_info_packet spd;
 	/* video stream configuration */
 	struct dc_info_packet vsc;
 	/* HDR Static MetaData */
 	struct dc_info_packet hdrsmd;
+	/* Adaptive Sync SDP*/
+	struct dc_info_packet adaptive_sync;
+	struct enc_sdp_line_num sdp_line_num;
 };
 
 struct encoder_unblank_param {
@@ -103,6 +114,9 @@ struct stream_encoder {
 	struct dc_context *ctx;
 	struct dc_bios *bp;
 	enum engine_id id;
+	uint32_t stream_enc_inst;
+	struct vpg *vpg;
+	struct afmt *afmt;
 };
 
 struct enc_state {
@@ -138,7 +152,7 @@ struct stream_encoder_funcs {
 		struct stream_encoder *enc,
 		struct dc_crtc_timing *crtc_timing);
 
-	void (*set_mst_bandwidth)(
+	void (*set_throttled_vcp_size)(
 		struct stream_encoder *enc,
 		struct fixed31_32 avg_time_slots_per_mtp);
 
@@ -148,6 +162,10 @@ struct stream_encoder_funcs {
 
 	void (*stop_hdmi_info_packets)(
 		struct stream_encoder *enc);
+
+	void (*update_dp_info_packets_sdp_line_num)(
+		struct stream_encoder *enc,
+		struct encoder_info_frame *info_frame);
 
 	void (*update_dp_info_packets)(
 		struct stream_encoder *enc,
@@ -161,10 +179,16 @@ struct stream_encoder_funcs {
 	void (*stop_dp_info_packets)(
 		struct stream_encoder *enc);
 
+	void (*reset_fifo)(
+		struct stream_encoder *enc
+	);
+
 	void (*dp_blank)(
+		struct dc_link *link,
 		struct stream_encoder *enc);
 
 	void (*dp_unblank)(
+		struct dc_link *link,
 		struct stream_encoder *enc,
 		const struct encoder_unblank_param *param);
 
@@ -224,16 +248,113 @@ struct stream_encoder_funcs {
 
 	void (*dp_set_dsc_pps_info_packet)(struct stream_encoder *enc,
 				bool enable,
-				uint8_t *dsc_packed_pps);
+				uint8_t *dsc_packed_pps,
+				bool immediate_update);
 
 	void (*set_dynamic_metadata)(struct stream_encoder *enc,
 			bool enable,
 			uint32_t hubp_requestor_id,
 			enum dynamic_metadata_mode dmdata_mode);
 
+	/**
+	 * @dp_set_odm_combine: Sets up DP stream encoder for ODM.
+	 */
 	void (*dp_set_odm_combine)(
 		struct stream_encoder *enc,
 		bool odm_combine);
+
+	uint32_t (*get_fifo_cal_average_level)(
+		struct stream_encoder *enc);
+
+	void (*set_input_mode)(
+		struct stream_encoder *enc, unsigned int pix_per_container);
+	void (*enable_fifo)(struct stream_encoder *enc);
+	void (*disable_fifo)(struct stream_encoder *enc);
+};
+
+struct hpo_dp_stream_encoder_state {
+	uint32_t stream_enc_enabled;
+	uint32_t vid_stream_enabled;
+	uint32_t otg_inst;
+	uint32_t pixel_encoding;
+	uint32_t component_depth;
+	uint32_t compressed_format;
+	uint32_t sdp_enabled;
+	uint32_t mapped_to_link_enc;
+};
+
+struct hpo_dp_stream_encoder {
+	const struct hpo_dp_stream_encoder_funcs *funcs;
+	struct dc_context *ctx;
+	struct dc_bios *bp;
+	uint32_t inst;
+	enum engine_id id;
+	struct vpg *vpg;
+	struct apg *apg;
+};
+
+struct hpo_dp_stream_encoder_funcs {
+	void (*enable_stream)(
+			struct hpo_dp_stream_encoder *enc);
+
+	void (*dp_unblank)(
+			struct hpo_dp_stream_encoder *enc,
+			uint32_t stream_source);
+
+	void (*dp_blank)(
+			struct hpo_dp_stream_encoder *enc);
+
+	void (*disable)(
+			struct hpo_dp_stream_encoder *enc);
+
+	void (*set_stream_attribute)(
+		struct hpo_dp_stream_encoder *enc,
+		struct dc_crtc_timing *crtc_timing,
+		enum dc_color_space output_color_space,
+		bool use_vsc_sdp_for_colorimetry,
+		bool compressed_format,
+		bool double_buffer_en);
+
+	void (*update_dp_info_packets_sdp_line_num)(
+		struct hpo_dp_stream_encoder *enc,
+		struct encoder_info_frame *info_frame);
+
+	void (*update_dp_info_packets)(
+		struct hpo_dp_stream_encoder *enc,
+		const struct encoder_info_frame *info_frame);
+
+	void (*stop_dp_info_packets)(
+		struct hpo_dp_stream_encoder *enc);
+
+	void (*dp_set_dsc_pps_info_packet)(
+			struct hpo_dp_stream_encoder *enc,
+			bool enable,
+			uint8_t *dsc_packed_pps,
+			bool immediate_update);
+
+	void (*map_stream_to_link)(
+			struct hpo_dp_stream_encoder *enc,
+			uint32_t stream_enc_inst,
+			uint32_t link_enc_inst);
+
+	void (*dp_audio_setup)(
+			struct hpo_dp_stream_encoder *enc,
+			unsigned int az_inst,
+			struct audio_info *info);
+
+	void (*dp_audio_enable)(
+			struct hpo_dp_stream_encoder *enc);
+
+	void (*dp_audio_disable)(
+			struct hpo_dp_stream_encoder *enc);
+
+	void (*read_state)(
+			struct hpo_dp_stream_encoder *enc,
+			struct hpo_dp_stream_encoder_state *state);
+
+	void (*set_hblank_min_symbol_width)(
+			struct hpo_dp_stream_encoder *enc,
+			uint16_t width);
 };
 
 #endif /* STREAM_ENCODER_H_ */

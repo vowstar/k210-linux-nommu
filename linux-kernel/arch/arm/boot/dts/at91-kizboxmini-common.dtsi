@@ -16,7 +16,7 @@
 		stdout-path = &dbgu;
 	};
 
-	memory {
+	memory@20000000 {
 		reg = <0x20000000 0x8000000>;
 	};
 
@@ -36,17 +36,15 @@
 
 	gpio_keys {
 		compatible = "gpio-keys";
-		#address-cells = <1>;
-		#size-cells = <0>;
 
-		prog {
+		key-prog {
 			label = "PB_PROG";
 			gpios = <&pioC 17 GPIO_ACTIVE_LOW>;
 			linux,code = <0x102>;
 			wakeup-source;
 		};
 
-		reset {
+		key-reset {
 			label = "PB_RST";
 			gpios = <&pioC 16 GPIO_ACTIVE_LOW>;
 			linux,code = <0x100>;
@@ -54,10 +52,10 @@
 		};
 	};
 
-	leds: pwm_leds {
+	leds: led-controller-1 {
 		compatible = "pwm-leds";
 
-		led_blue: pwm_blue {
+		led_blue: led-1 {
 			label = "pwm:blue:user";
 			pwms = <&pwm0 2 10000000 0>;
 			max-brightness = <255>;
@@ -65,14 +63,14 @@
 			status = "disabled";
 		};
 
-		led_green: pwm_green {
+		led_green: led-2 {
 			label = "pwm:green:user";
 			pwms = <&pwm0 0 10000000 0>;
 			max-brightness = <255>;
 			linux,default-trigger = "default-on";
 		};
 
-		led_red: pwm_red {
+		led_red: led-3 {
 			label = "pwm:red:user";
 			pwms = <&pwm0 1 10000000 0>;
 			max-brightness = <255>;

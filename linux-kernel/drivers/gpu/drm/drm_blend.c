@@ -80,7 +80,7 @@
  *
  * Note that the source rectangle must fully lie within the bounds of the
  * &drm_framebuffer. The destination rectangle can lie outside of the visible
- * area of the current mode of the CRTC. It must be apprpriately clipped by the
+ * area of the current mode of the CRTC. It must be appropriately clipped by the
  * driver, which can be done by calling drm_plane_helper_check_update(). Drivers
  * are also allowed to round the subpixel sampling positions appropriately, but
  * only to the next full pixel. No pixel outside of the source rectangle may
@@ -135,7 +135,9 @@
  *	are underneath planes with higher Z position values. Two planes with the
  *	same Z position value have undefined ordering. Note that the Z position
  *	value can also be immutable, to inform userspace about the hard-coded
- *	stacking of planes, see drm_plane_create_zpos_immutable_property().
+ *	stacking of planes, see drm_plane_create_zpos_immutable_property(). If
+ *	any plane has a zpos property (either mutable or immutable), then all
+ *	planes shall have a zpos property.
  *
  * pixel blend mode:
  *	Pixel blend mode is set up with drm_plane_create_blend_mode_property().
@@ -186,6 +188,19 @@
  * Note that all the property extensions described here apply either to the
  * plane or the CRTC (e.g. for the background color, which currently is not
  * exposed and assumed to be black).
+ *
+ * SCALING_FILTER:
+ *     Indicates scaling filter to be used for plane scaler
+ *
+ *     The value of this property can be one of the following:
+ *
+ *     Default:
+ *             Driver's default scaling filter
+ *     Nearest Neighbor:
+ *             Nearest Neighbor scaling filter
+ *
+ * Drivers can set up this property for a plane by calling
+ * drm_plane_create_scaling_filter_property
  */
 
 /**
@@ -302,7 +317,7 @@ EXPORT_SYMBOL(drm_plane_create_rotation_property);
  *                       DRM_MODE_ROTATE_90 | DRM_MODE_ROTATE_180 |
  *                       DRM_MODE_ROTATE_270 | DRM_MODE_REFLECT_Y);
  *
- * to eliminate the DRM_MODE_ROTATE_X flag. Depending on what kind of
+ * to eliminate the DRM_MODE_REFLECT_X flag. Depending on what kind of
  * transforms the hardware supports, this function may not
  * be able to produce a supported transform, so the caller should
  * check the result afterwards.
@@ -313,8 +328,8 @@ unsigned int drm_rotation_simplify(unsigned int rotation,
 	if (rotation & ~supported_rotations) {
 		rotation ^= DRM_MODE_REFLECT_X | DRM_MODE_REFLECT_Y;
 		rotation = (rotation & DRM_MODE_REFLECT_MASK) |
-		           BIT((ffs(rotation & DRM_MODE_ROTATE_MASK) + 1)
-		           % 4);
+			    BIT((ffs(rotation & DRM_MODE_ROTATE_MASK) + 1)
+			    % 4);
 	}
 
 	return rotation;
@@ -338,10 +353,10 @@ EXPORT_SYMBOL(drm_rotation_simplify);
  * should be set to 0 and max to maximal number of planes for given crtc - 1.
  *
  * If zpos of some planes cannot be changed (like fixed background or
- * cursor/topmost planes), driver should adjust min/max values and assign those
- * planes immutable zpos property with lower or higher values (for more
+ * cursor/topmost planes), drivers shall adjust the min/max values and assign
+ * those planes immutable zpos properties with lower or higher values (for more
  * information, see drm_plane_create_zpos_immutable_property() function). In such
- * case driver should also assign proper initial zpos values for all planes in
+ * case drivers shall also assign proper initial zpos values for all planes in
  * its plane_reset() callback, so the planes will be always sorted properly.
  *
  * See also drm_atomic_normalize_zpos().
@@ -435,8 +450,8 @@ static int drm_atomic_helper_crtc_normalize_zpos(struct drm_crtc *crtc,
 	int i, n = 0;
 	int ret = 0;
 
-	DRM_DEBUG_ATOMIC("[CRTC:%d:%s] calculating normalized zpos values\n",
-			 crtc->base.id, crtc->name);
+	drm_dbg_atomic(dev, "[CRTC:%d:%s] calculating normalized zpos values\n",
+		       crtc->base.id, crtc->name);
 
 	states = kmalloc_array(total_planes, sizeof(*states), GFP_KERNEL);
 	if (!states)
@@ -454,9 +469,8 @@ static int drm_atomic_helper_crtc_normalize_zpos(struct drm_crtc *crtc,
 			goto done;
 		}
 		states[n++] = plane_state;
-		DRM_DEBUG_ATOMIC("[PLANE:%d:%s] processing zpos value %d\n",
-				 plane->base.id, plane->name,
-				 plane_state->zpos);
+		drm_dbg_atomic(dev, "[PLANE:%d:%s] processing zpos value %d\n",
+			       plane->base.id, plane->name, plane_state->zpos);
 	}
 
 	sort(states, n, sizeof(*states), drm_atomic_state_zpos_cmp, NULL);
@@ -465,8 +479,8 @@ static int drm_atomic_helper_crtc_normalize_zpos(struct drm_crtc *crtc,
 		plane = states[i]->plane;
 
 		states[i]->normalized_zpos = i;
-		DRM_DEBUG_ATOMIC("[PLANE:%d:%s] normalized zpos value %d\n",
-				 plane->base.id, plane->name, i);
+		drm_dbg_atomic(dev, "[PLANE:%d:%s] normalized zpos value %d\n",
+			       plane->base.id, plane->name, i);
 	}
 	crtc_state->zpos_changed = true;
 

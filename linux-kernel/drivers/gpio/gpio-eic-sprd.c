@@ -91,7 +91,6 @@ enum sprd_eic_type {
 
 struct sprd_eic {
 	struct gpio_chip chip;
-	struct irq_chip intc;
 	void __iomem *base[SPRD_EIC_MAX_BANK];
 	enum sprd_eic_type type;
 	spinlock_t lock;
@@ -255,6 +254,8 @@ static void sprd_eic_irq_mask(struct irq_data *data)
 	default:
 		dev_err(chip->parent, "Unsupported EIC type.\n");
 	}
+
+	gpiochip_disable_irq(chip, offset);
 }
 
 static void sprd_eic_irq_unmask(struct irq_data *data)
@@ -262,6 +263,8 @@ static void sprd_eic_irq_unmask(struct irq_data *data)
 	struct gpio_chip *chip = irq_data_get_irq_chip_data(data);
 	struct sprd_eic *sprd_eic = gpiochip_get_data(chip);
 	u32 offset = irqd_to_hwirq(data);
+
+	gpiochip_enable_irq(chip, offset);
 
 	switch (sprd_eic->type) {
 	case SPRD_EIC_DEBOUNCE:
@@ -564,11 +567,21 @@ static void sprd_eic_irq_handler(struct irq_desc *desc)
 	chained_irq_exit(ic, desc);
 }
 
+static const struct irq_chip sprd_eic_irq = {
+	.name		= "sprd-eic",
+	.irq_ack	= sprd_eic_irq_ack,
+	.irq_mask	= sprd_eic_irq_mask,
+	.irq_unmask	= sprd_eic_irq_unmask,
+	.irq_set_type	= sprd_eic_irq_set_type,
+	.flags		= IRQCHIP_SKIP_SET_WAKE | IRQCHIP_IMMUTABLE,
+	GPIOCHIP_IRQ_RESOURCE_HELPERS,
+};
 static int sprd_eic_probe(struct platform_device *pdev)
 {
 	const struct sprd_eic_variant_data *pdata;
 	struct gpio_irq_chip *irq;
 	struct sprd_eic *sprd_eic;
+	struct resource *res;
 	int ret, i;
 
 	pdata = of_device_get_match_data(&pdev->dev);
@@ -595,16 +608,19 @@ static int sprd_eic_probe(struct platform_device *pdev)
 		 * have one bank EIC, thus base[1] and base[2] can be
 		 * optional.
 		 */
-		sprd_eic->base[i] = devm_platform_ioremap_resource(pdev, i);
+		res = platform_get_resource(pdev, IORESOURCE_MEM, i);
+		if (!res)
+			break;
+
+		sprd_eic->base[i] = devm_ioremap_resource(&pdev->dev, res);
 		if (IS_ERR(sprd_eic->base[i]))
-			continue;
+			return PTR_ERR(sprd_eic->base[i]);
 	}
 
 	sprd_eic->chip.label = sprd_eic_label_name[sprd_eic->type];
 	sprd_eic->chip.ngpio = pdata->num_eics;
 	sprd_eic->chip.base = -1;
 	sprd_eic->chip.parent = &pdev->dev;
-	sprd_eic->chip.of_node = pdev->dev.of_node;
 	sprd_eic->chip.direction_input = sprd_eic_direction_input;
 	switch (sprd_eic->type) {
 	case SPRD_EIC_DEBOUNCE:
@@ -612,27 +628,18 @@ static int sprd_eic_probe(struct platform_device *pdev)
 		sprd_eic->chip.free = sprd_eic_free;
 		sprd_eic->chip.set_config = sprd_eic_set_config;
 		sprd_eic->chip.set = sprd_eic_set;
-		/* fall-through */
+		fallthrough;
 	case SPRD_EIC_ASYNC:
-		/* fall-through */
 	case SPRD_EIC_SYNC:
 		sprd_eic->chip.get = sprd_eic_get;
 		break;
 	case SPRD_EIC_LATCH:
-		/* fall-through */
 	default:
 		break;
 	}
 
-	sprd_eic->intc.name = dev_name(&pdev->dev);
-	sprd_eic->intc.irq_ack = sprd_eic_irq_ack;
-	sprd_eic->intc.irq_mask = sprd_eic_irq_mask;
-	sprd_eic->intc.irq_unmask = sprd_eic_irq_unmask;
-	sprd_eic->intc.irq_set_type = sprd_eic_irq_set_type;
-	sprd_eic->intc.flags = IRQCHIP_SKIP_SET_WAKE;
-
 	irq = &sprd_eic->chip.irq;
-	irq->chip = &sprd_eic->intc;
+	gpio_irq_chip_set_chip(irq, &sprd_eic_irq);
 	irq->handler = handle_bad_irq;
 	irq->default_type = IRQ_TYPE_NONE;
 	irq->parent_handler = sprd_eic_irq_handler;

@@ -23,15 +23,19 @@ ARM Architecture
    vlocks
    porting
 
+   features
+
 SoC-specific documents
 ======================
 
 .. toctree::
    :maxdepth: 1
 
+   google/chromebook-boot-flow
+
    ixp4xx
 
-   marvel
+   marvell
    microchip
 
    netwinder
@@ -50,14 +54,16 @@ SoC-specific documents
    stm32/stm32f746-overview
    stm32/overview
    stm32/stm32h743-overview
+   stm32/stm32h750-overview
    stm32/stm32f769-overview
    stm32/stm32f429-overview
+   stm32/stm32mp13-overview
    stm32/stm32mp157-overview
+   stm32/stm32-dma-mdma-chaining
 
    sunxi
 
    samsung/index
-   samsung-s3c24xx/index
 
    sunxi/clocks
 

@@ -12,6 +12,7 @@
 
 #include <linux/clk.h>
 #include <linux/regmap.h>
+#include <linux/regulator/consumer.h>
 #include <sound/da7213.h>
 
 /*
@@ -194,6 +195,8 @@
 #define DA7213_DAI_WORD_LENGTH_S24_LE				(0x2 << 2)
 #define DA7213_DAI_WORD_LENGTH_S32_LE				(0x3 << 2)
 #define DA7213_DAI_WORD_LENGTH_MASK				(0x3 << 2)
+#define DA7213_DAI_MONO_MODE_EN					(0x1 << 4)
+#define DA7213_DAI_MONO_MODE_MASK				(0x1 << 4)
 #define DA7213_DAI_EN_SHIFT					7
 
 /* DA7213_DIG_ROUTING_DAI = 0x21 */
@@ -521,16 +524,27 @@ enum da7213_sys_clk {
 	DA7213_SYSCLK_PLL_32KHZ
 };
 
+/* Regulators */
+enum da7213_supplies {
+	DA7213_SUPPLY_VDDA = 0,
+	DA7213_SUPPLY_VDDIO,
+	DA7213_NUM_SUPPLIES,
+};
+
 /* Codec private data */
 struct da7213_priv {
 	struct regmap *regmap;
+	struct regulator_bulk_data supplies[DA7213_NUM_SUPPLIES];
 	struct clk *mclk;
 	unsigned int mclk_rate;
+	unsigned int out_rate;
 	int clk_src;
 	bool master;
 	bool alc_calib_auto;
 	bool alc_en;
+	bool fixed_clk_auto_pll;
 	struct da7213_platform_data *pdata;
+	int fmt;
 };
 
 #endif /* _DA7213_H */

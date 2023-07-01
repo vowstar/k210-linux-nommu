@@ -30,12 +30,14 @@
 #define PWM45DWIDTH_FIXUP	0x30
 #define PWMTHRES		0x30
 #define PWM45THRES_FIXUP	0x34
+#define PWM_CK_26M_SEL		0x210
 
 #define PWM_CLK_DIV_MAX		7
 
 struct pwm_mediatek_of_data {
 	unsigned int num_pwms;
 	bool pwm45_fixup;
+	bool has_ck_26m_sel;
 };
 
 /**
@@ -46,6 +48,7 @@ struct pwm_mediatek_of_data {
  * @clk_main: the clock used by PWM core
  * @clk_pwms: the clock used by each PWM channel
  * @clk_freq: the fix clock frequency of legacy MIPS SoC
+ * @soc: pointer to chip's platform data
  */
 struct pwm_mediatek_chip {
 	struct pwm_chip chip;
@@ -104,12 +107,6 @@ static void pwm_mediatek_clk_disable(struct pwm_chip *chip,
 	clk_disable_unprepare(pc->clk_top);
 }
 
-static inline u32 pwm_mediatek_readl(struct pwm_mediatek_chip *chip,
-				     unsigned int num, unsigned int offset)
-{
-	return readl(chip->regs + pwm_mediatek_reg_offset[num] + offset);
-}
-
 static inline void pwm_mediatek_writel(struct pwm_mediatek_chip *chip,
 				       unsigned int num, unsigned int offset,
 				       u32 value)
@@ -131,6 +128,10 @@ static int pwm_mediatek_config(struct pwm_chip *chip, struct pwm_device *pwm,
 	if (ret < 0)
 		return ret;
 
+	/* Make sure we use the bus clock and not the 26MHz clock */
+	if (pc->soc->has_ck_26m_sel)
+		writel(0, pc->regs + PWM_CK_26M_SEL);
+
 	/* Using resolution in picosecond gets accuracy higher */
 	resolution = (u64)NSEC_PER_SEC * 1000;
 	do_div(resolution, clk_get_rate(pc->clk_pwms[pwm->hwpwm]));
@@ -145,7 +146,7 @@ static int pwm_mediatek_config(struct pwm_chip *chip, struct pwm_device *pwm,
 
 	if (clkdiv > PWM_CLK_DIV_MAX) {
 		pwm_mediatek_clk_disable(chip, pwm);
-		dev_err(chip->dev, "period %d not supported\n", period_ns);
+		dev_err(chip->dev, "period of %d ns not supported\n", period_ns);
 		return -EINVAL;
 	}
 
@@ -197,17 +198,39 @@ static void pwm_mediatek_disable(struct pwm_chip *chip, struct pwm_device *pwm)
 	pwm_mediatek_clk_disable(chip, pwm);
 }
 
+static int pwm_mediatek_apply(struct pwm_chip *chip, struct pwm_device *pwm,
+			      const struct pwm_state *state)
+{
+	int err;
+
+	if (state->polarity != PWM_POLARITY_NORMAL)
+		return -EINVAL;
+
+	if (!state->enabled) {
+		if (pwm->state.enabled)
+			pwm_mediatek_disable(chip, pwm);
+
+		return 0;
+	}
+
+	err = pwm_mediatek_config(pwm->chip, pwm, state->duty_cycle, state->period);
+	if (err)
+		return err;
+
+	if (!pwm->state.enabled)
+		err = pwm_mediatek_enable(chip, pwm);
+
+	return err;
+}
+
 static const struct pwm_ops pwm_mediatek_ops = {
-	.config = pwm_mediatek_config,
-	.enable = pwm_mediatek_enable,
-	.disable = pwm_mediatek_disable,
+	.apply = pwm_mediatek_apply,
 	.owner = THIS_MODULE,
 };
 
 static int pwm_mediatek_probe(struct platform_device *pdev)
 {
 	struct pwm_mediatek_chip *pc;
-	struct resource *res;
 	unsigned int i;
 	int ret;
 
@@ -217,29 +240,24 @@ static int pwm_mediatek_probe(struct platform_device *pdev)
 
 	pc->soc = of_device_get_match_data(&pdev->dev);
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	pc->regs = devm_ioremap_resource(&pdev->dev, res);
+	pc->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(pc->regs))
 		return PTR_ERR(pc->regs);
 
-	pc->clk_pwms = devm_kcalloc(&pdev->dev, pc->soc->num_pwms,
+	pc->clk_pwms = devm_kmalloc_array(&pdev->dev, pc->soc->num_pwms,
 				    sizeof(*pc->clk_pwms), GFP_KERNEL);
 	if (!pc->clk_pwms)
 		return -ENOMEM;
 
 	pc->clk_top = devm_clk_get(&pdev->dev, "top");
-	if (IS_ERR(pc->clk_top)) {
-		dev_err(&pdev->dev, "clock: top fail: %ld\n",
-			PTR_ERR(pc->clk_top));
-		return PTR_ERR(pc->clk_top);
-	}
+	if (IS_ERR(pc->clk_top))
+		return dev_err_probe(&pdev->dev, PTR_ERR(pc->clk_top),
+				     "Failed to get top clock\n");
 
 	pc->clk_main = devm_clk_get(&pdev->dev, "main");
-	if (IS_ERR(pc->clk_main)) {
-		dev_err(&pdev->dev, "clock: main fail: %ld\n",
-			PTR_ERR(pc->clk_main));
-		return PTR_ERR(pc->clk_main);
-	}
+	if (IS_ERR(pc->clk_main))
+		return dev_err_probe(&pdev->dev, PTR_ERR(pc->clk_main),
+				     "Failed to get main clock\n");
 
 	for (i = 0; i < pc->soc->num_pwms; i++) {
 		char name[8];
@@ -247,72 +265,92 @@ static int pwm_mediatek_probe(struct platform_device *pdev)
 		snprintf(name, sizeof(name), "pwm%d", i + 1);
 
 		pc->clk_pwms[i] = devm_clk_get(&pdev->dev, name);
-		if (IS_ERR(pc->clk_pwms[i])) {
-			dev_err(&pdev->dev, "clock: %s fail: %ld\n",
-				name, PTR_ERR(pc->clk_pwms[i]));
-			return PTR_ERR(pc->clk_pwms[i]);
-		}
+		if (IS_ERR(pc->clk_pwms[i]))
+			return dev_err_probe(&pdev->dev, PTR_ERR(pc->clk_pwms[i]),
+					     "Failed to get %s clock\n", name);
 	}
-
-	platform_set_drvdata(pdev, pc);
 
 	pc->chip.dev = &pdev->dev;
 	pc->chip.ops = &pwm_mediatek_ops;
-	pc->chip.base = -1;
 	pc->chip.npwm = pc->soc->num_pwms;
 
-	ret = pwmchip_add(&pc->chip);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "pwmchip_add() failed: %d\n", ret);
-		return ret;
-	}
+	ret = devm_pwmchip_add(&pdev->dev, &pc->chip);
+	if (ret < 0)
+		return dev_err_probe(&pdev->dev, ret, "pwmchip_add() failed\n");
 
 	return 0;
-}
-
-static int pwm_mediatek_remove(struct platform_device *pdev)
-{
-	struct pwm_mediatek_chip *pc = platform_get_drvdata(pdev);
-
-	return pwmchip_remove(&pc->chip);
 }
 
 static const struct pwm_mediatek_of_data mt2712_pwm_data = {
 	.num_pwms = 8,
 	.pwm45_fixup = false,
+	.has_ck_26m_sel = false,
+};
+
+static const struct pwm_mediatek_of_data mt6795_pwm_data = {
+	.num_pwms = 7,
+	.pwm45_fixup = false,
+	.has_ck_26m_sel = false,
 };
 
 static const struct pwm_mediatek_of_data mt7622_pwm_data = {
 	.num_pwms = 6,
 	.pwm45_fixup = false,
+	.has_ck_26m_sel = true,
 };
 
 static const struct pwm_mediatek_of_data mt7623_pwm_data = {
 	.num_pwms = 5,
 	.pwm45_fixup = true,
+	.has_ck_26m_sel = false,
 };
 
 static const struct pwm_mediatek_of_data mt7628_pwm_data = {
 	.num_pwms = 4,
 	.pwm45_fixup = true,
+	.has_ck_26m_sel = false,
 };
 
 static const struct pwm_mediatek_of_data mt7629_pwm_data = {
 	.num_pwms = 1,
 	.pwm45_fixup = false,
+	.has_ck_26m_sel = false,
+};
+
+static const struct pwm_mediatek_of_data mt8183_pwm_data = {
+	.num_pwms = 4,
+	.pwm45_fixup = false,
+	.has_ck_26m_sel = true,
+};
+
+static const struct pwm_mediatek_of_data mt8365_pwm_data = {
+	.num_pwms = 3,
+	.pwm45_fixup = false,
+	.has_ck_26m_sel = true,
+};
+
+static const struct pwm_mediatek_of_data mt7986_pwm_data = {
+	.num_pwms = 2,
+	.pwm45_fixup = false,
+	.has_ck_26m_sel = true,
 };
 
 static const struct pwm_mediatek_of_data mt8516_pwm_data = {
 	.num_pwms = 5,
 	.pwm45_fixup = false,
+	.has_ck_26m_sel = true,
 };
 
 static const struct of_device_id pwm_mediatek_of_match[] = {
 	{ .compatible = "mediatek,mt2712-pwm", .data = &mt2712_pwm_data },
+	{ .compatible = "mediatek,mt6795-pwm", .data = &mt6795_pwm_data },
 	{ .compatible = "mediatek,mt7622-pwm", .data = &mt7622_pwm_data },
 	{ .compatible = "mediatek,mt7623-pwm", .data = &mt7623_pwm_data },
 	{ .compatible = "mediatek,mt7628-pwm", .data = &mt7628_pwm_data },
 	{ .compatible = "mediatek,mt7629-pwm", .data = &mt7629_pwm_data },
+	{ .compatible = "mediatek,mt7986-pwm", .data = &mt7986_pwm_data },
+	{ .compatible = "mediatek,mt8183-pwm", .data = &mt8183_pwm_data },
+	{ .compatible = "mediatek,mt8365-pwm", .data = &mt8365_pwm_data },
 	{ .compatible = "mediatek,mt8516-pwm", .data = &mt8516_pwm_data },
 	{ },
 };
@@ -324,7 +362,6 @@ static struct platform_driver pwm_mediatek_driver = {
 		.of_match_table = pwm_mediatek_of_match,
 	},
 	.probe = pwm_mediatek_probe,
-	.remove = pwm_mediatek_remove,
 };
 module_platform_driver(pwm_mediatek_driver);
 

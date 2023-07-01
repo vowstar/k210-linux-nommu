@@ -315,11 +315,15 @@ indeed the normal API is implemented in terms of the advanced API.  The
 advanced API is only available to modules with a GPL-compatible license.
 
 The advanced API is based around the xa_state.  This is an opaque data
-structure which you declare on the stack using the XA_STATE()
-macro.  This macro initialises the xa_state ready to start walking
-around the XArray.  It is used as a cursor to maintain the position
-in the XArray and let you compose various operations together without
-having to restart from the top every time.
+structure which you declare on the stack using the XA_STATE() macro.
+This macro initialises the xa_state ready to start walking around the
+XArray.  It is used as a cursor to maintain the position in the XArray
+and let you compose various operations together without having to restart
+from the top every time.  The contents of the xa_state are protected by
+the rcu_read_lock() or the xas_lock().  If you need to drop whichever of
+those locks is protecting your state and tree, you must call xas_pause()
+so that future calls do not rely on the parts of the state which were
+left unprotected.
 
 The xa_state is also used to store errors.  You can call
 xas_error() to retrieve the error.  All operations check whether
@@ -475,13 +479,15 @@ or iterations will move the index to the first index in the range.
 Each entry will only be returned once, no matter how many indices it
 occupies.
 
-Using xas_next() or xas_prev() with a multi-index xa_state
-is not supported.  Using either of these functions on a multi-index entry
-will reveal sibling entries; these should be skipped over by the caller.
+Using xas_next() or xas_prev() with a multi-index xa_state is not
+supported.  Using either of these functions on a multi-index entry will
+reveal sibling entries; these should be skipped over by the caller.
 
-Storing ``NULL`` into any index of a multi-index entry will set the entry
-at every index to ``NULL`` and dissolve the tie.  Splitting a multi-index
-entry into entries occupying smaller ranges is not yet supported.
+Storing ``NULL`` into any index of a multi-index entry will set the
+entry at every index to ``NULL`` and dissolve the tie.  A multi-index
+entry can be split into entries occupying smaller ranges by calling
+xas_split_alloc() without the xa_lock held, followed by taking the lock
+and calling xas_split().
 
 Functions and structures
 ========================

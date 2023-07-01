@@ -60,27 +60,27 @@
 	leds {
 		compatible = "gpio-leds";
 
-		status {
+		led-0 {
 			label = "nanopi:blue:status";
 			gpios = <&pio 0 10 GPIO_ACTIVE_HIGH>;
 			linux,default-trigger = "heartbeat";
 		};
 
-		pwr {
+		led-1 {
 			label = "nanopi:green:pwr";
 			gpios = <&r_pio 0 10 GPIO_ACTIVE_HIGH>;
 			default-state = "on";
 		};
 	};
 
-	r_gpio_keys {
+	gpio-keys {
 		compatible = "gpio-keys";
-		input-name = "k1";
 
-		k1 {
+		key-0 {
 			label = "k1";
 			linux,code = <KEY_POWER>;
 			gpios = <&r_pio 0 3 GPIO_ACTIVE_LOW>;
+			wakeup-source;
 		};
 	};
 };

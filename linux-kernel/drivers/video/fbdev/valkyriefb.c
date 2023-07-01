@@ -54,10 +54,9 @@
 #include <linux/nvram.h>
 #include <linux/adb.h>
 #include <linux/cuda.h>
+#include <linux/of_address.h>
 #ifdef CONFIG_MAC
 #include <asm/macintosh.h>
-#else
-#include <asm/prom.h>
 #endif
 
 #include "macmodes.h"
@@ -91,11 +90,7 @@ struct fb_info_valkyrie {
 	u32			pseudo_palette[16];
 };
 
-/*
- * Exported functions
- */
-int valkyriefb_init(void);
-int valkyriefb_setup(char*);
+static int valkyriefb_setup(char*);
 
 static int valkyriefb_check_var(struct fb_var_screeninfo *var,
 				struct fb_info *info);
@@ -303,7 +298,7 @@ static void __init valkyrie_choose_mode(struct fb_info_valkyrie *p)
 	       default_vmode, default_cmode);
 }
 
-int __init valkyriefb_init(void)
+static int __init valkyriefb_init(void)
 {
 	struct fb_info_valkyrie	*p;
 	unsigned long frame_buffer_phys, cmap_regs_phys;
@@ -331,7 +326,7 @@ int __init valkyriefb_init(void)
 		struct resource r;
 
 		dp = of_find_node_by_name(NULL, "valkyrie");
-		if (dp == 0)
+		if (!dp)
 			return 0;
 
 		if (of_address_to_resource(dp, 0, &r)) {
@@ -345,7 +340,7 @@ int __init valkyriefb_init(void)
 #endif /* ppc (!CONFIG_MAC) */
 
 	p = kzalloc(sizeof(*p), GFP_ATOMIC);
-	if (p == 0)
+	if (!p)
 		return -ENOMEM;
 
 	/* Map in frame buffer and registers */
@@ -550,7 +545,7 @@ static int __init valkyrie_init_info(struct fb_info *info,
 /*
  * Parse user specified options (`video=valkyriefb:')
  */
-int __init valkyriefb_setup(char *options)
+static int __init valkyriefb_setup(char *options)
 {
 	char *this_opt;
 

@@ -153,6 +153,7 @@ static int get_adapter_status(struct hotplug_slot *hotplug_slot, u8 *value)
 
 /**
  * pciehp_check_presence() - synthesize event if presence has changed
+ * @ctrl: controller to check
  *
  * On probe and resume, an explicit presence check is necessary to bring up an
  * occupied slot or bring down an unoccupied slot.  This can't be triggered by
@@ -165,7 +166,7 @@ static void pciehp_check_presence(struct controller *ctrl)
 {
 	int occupied;
 
-	down_read(&ctrl->reset_lock);
+	down_read_nested(&ctrl->reset_lock, ctrl->depth);
 	mutex_lock(&ctrl->state_lock);
 
 	occupied = pciehp_card_present_or_link_active(ctrl);
@@ -275,7 +276,7 @@ static int pciehp_suspend(struct pcie_device *dev)
 	 * If the port is already runtime suspended we can keep it that
 	 * way.
 	 */
-	if (dev_pm_smart_suspend_and_suspended(&dev->port->dev))
+	if (dev_pm_skip_suspend(&dev->port->dev))
 		return 0;
 
 	pciehp_disable_interrupt(dev);
@@ -350,6 +351,8 @@ static struct pcie_port_service_driver hpdriver_portdrv = {
 	.runtime_suspend = pciehp_runtime_suspend,
 	.runtime_resume	= pciehp_runtime_resume,
 #endif	/* PM */
+
+	.slot_reset	= pciehp_slot_reset,
 };
 
 int __init pcie_hp_init(void)

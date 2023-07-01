@@ -87,7 +87,7 @@ struct omap_des_ctx {
 	struct omap_des_dev *dd;
 
 	int		keylen;
-	u32		key[(3 * DES_KEY_SIZE) / sizeof(u32)];
+	__le32		key[(3 * DES_KEY_SIZE) / sizeof(u32)];
 	unsigned long	flags;
 };
 
@@ -229,9 +229,8 @@ static int omap_des_hw_init(struct omap_des_dev *dd)
 	 * It may be long delays between requests.
 	 * Device might go to off mode to save power.
 	 */
-	err = pm_runtime_get_sync(dd->dev);
+	err = pm_runtime_resume_and_get(dd->dev);
 	if (err < 0) {
-		pm_runtime_put_noidle(dd->dev);
 		dev_err(dd->dev, "%s: failed to get_sync(%d)\n", __func__, err);
 		return err;
 	}
@@ -461,7 +460,7 @@ static int omap_des_crypt_dma_start(struct omap_des_dev *dd)
 					crypto_skcipher_reqtfm(dd->req));
 	int err;
 
-	pr_debug("total: %d\n", dd->total);
+	pr_debug("total: %zd\n", dd->total);
 
 	if (!dd->pio_only) {
 		err = dma_map_sg(dd->dev, dd->in_sg, dd->in_sg_len,
@@ -504,7 +503,7 @@ static void omap_des_finish_req(struct omap_des_dev *dd, int err)
 
 static int omap_des_crypt_dma_stop(struct omap_des_dev *dd)
 {
-	pr_debug("total: %d\n", dd->total);
+	pr_debug("total: %zd\n", dd->total);
 
 	omap_des_dma_stop(dd);
 
@@ -736,7 +735,7 @@ static struct skcipher_alg algs_ecb_cbc[] = {
 {
 	.base.cra_name		= "ecb(des)",
 	.base.cra_driver_name	= "ecb-des-omap",
-	.base.cra_priority	= 100,
+	.base.cra_priority	= 300,
 	.base.cra_flags		= CRYPTO_ALG_KERN_DRIVER_ONLY |
 				  CRYPTO_ALG_ASYNC,
 	.base.cra_blocksize	= DES_BLOCK_SIZE,
@@ -753,7 +752,7 @@ static struct skcipher_alg algs_ecb_cbc[] = {
 {
 	.base.cra_name		= "cbc(des)",
 	.base.cra_driver_name	= "cbc-des-omap",
-	.base.cra_priority	= 100,
+	.base.cra_priority	= 300,
 	.base.cra_flags		= CRYPTO_ALG_KERN_DRIVER_ONLY |
 				  CRYPTO_ALG_ASYNC,
 	.base.cra_blocksize	= DES_BLOCK_SIZE,
@@ -771,7 +770,7 @@ static struct skcipher_alg algs_ecb_cbc[] = {
 {
 	.base.cra_name		= "ecb(des3_ede)",
 	.base.cra_driver_name	= "ecb-des3-omap",
-	.base.cra_priority	= 100,
+	.base.cra_priority	= 300,
 	.base.cra_flags		= CRYPTO_ALG_KERN_DRIVER_ONLY |
 				  CRYPTO_ALG_ASYNC,
 	.base.cra_blocksize	= DES3_EDE_BLOCK_SIZE,
@@ -788,7 +787,7 @@ static struct skcipher_alg algs_ecb_cbc[] = {
 {
 	.base.cra_name		= "cbc(des3_ede)",
 	.base.cra_driver_name	= "cbc-des3-omap",
-	.base.cra_priority	= 100,
+	.base.cra_priority	= 300,
 	.base.cra_flags		= CRYPTO_ALG_KERN_DRIVER_ONLY |
 				  CRYPTO_ALG_ASYNC,
 	.base.cra_blocksize	= DES3_EDE_BLOCK_SIZE,
@@ -994,9 +993,8 @@ static int omap_des_probe(struct platform_device *pdev)
 	pm_runtime_set_autosuspend_delay(dev, DEFAULT_AUTOSUSPEND_DELAY);
 
 	pm_runtime_enable(dev);
-	err = pm_runtime_get_sync(dev);
+	err = pm_runtime_resume_and_get(dev);
 	if (err < 0) {
-		pm_runtime_put_noidle(dev);
 		dev_err(dd->dev, "%s: failed to get_sync(%d)\n", __func__, err);
 		goto err_get;
 	}
@@ -1035,9 +1033,9 @@ static int omap_des_probe(struct platform_device *pdev)
 
 
 	INIT_LIST_HEAD(&dd->list);
-	spin_lock(&list_lock);
+	spin_lock_bh(&list_lock);
 	list_add_tail(&dd->list, &dev_list);
-	spin_unlock(&list_lock);
+	spin_unlock_bh(&list_lock);
 
 	/* Initialize des crypto engine */
 	dd->engine = crypto_engine_alloc_init(dev, 1);
@@ -1093,12 +1091,9 @@ static int omap_des_remove(struct platform_device *pdev)
 	struct omap_des_dev *dd = platform_get_drvdata(pdev);
 	int i, j;
 
-	if (!dd)
-		return -ENODEV;
-
-	spin_lock(&list_lock);
+	spin_lock_bh(&list_lock);
 	list_del(&dd->list);
-	spin_unlock(&list_lock);
+	spin_unlock_bh(&list_lock);
 
 	for (i = dd->pdata->algs_info_size - 1; i >= 0; i--)
 		for (j = dd->pdata->algs_info[i].registered - 1; j >= 0; j--)
@@ -1108,7 +1103,6 @@ static int omap_des_remove(struct platform_device *pdev)
 	tasklet_kill(&dd->done_task);
 	omap_des_dma_cleanup(dd);
 	pm_runtime_disable(dd->dev);
-	dd = NULL;
 
 	return 0;
 }
@@ -1124,9 +1118,8 @@ static int omap_des_resume(struct device *dev)
 {
 	int err;
 
-	err = pm_runtime_get_sync(dev);
+	err = pm_runtime_resume_and_get(dev);
 	if (err < 0) {
-		pm_runtime_put_noidle(dev);
 		dev_err(dev, "%s: failed to get_sync(%d)\n", __func__, err);
 		return err;
 	}

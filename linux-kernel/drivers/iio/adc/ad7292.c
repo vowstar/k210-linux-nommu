@@ -80,7 +80,7 @@ struct ad7292_state {
 	struct regulator *reg;
 	unsigned short vref_mv;
 
-	__be16 d16 ____cacheline_aligned;
+	__be16 d16 __aligned(IIO_DMA_MINALIGN);
 	u8 d8[2];
 };
 
@@ -122,7 +122,10 @@ static int ad7292_single_conversion(struct ad7292_state *st,
 		{
 			.tx_buf = &st->d8,
 			.len = 4,
-			.delay_usecs = 6,
+			.delay = {
+				.value = 6,
+				.unit = SPI_DELAY_UNIT_USECS
+			},
 		}, {
 			.rx_buf = &st->d16,
 			.len = 2,
@@ -257,7 +260,7 @@ static int ad7292_probe(struct spi_device *spi)
 	struct ad7292_state *st;
 	struct iio_dev *indio_dev;
 	struct device_node *child;
-	bool diff_channels = 0;
+	bool diff_channels = false;
 	int ret;
 
 	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*st));
@@ -273,8 +276,6 @@ static int ad7292_probe(struct spi_device *spi)
 		return -EINVAL;
 	}
 
-	spi_set_drvdata(spi, indio_dev);
-
 	st->reg = devm_regulator_get_optional(&spi->dev, "vref");
 	if (!IS_ERR(st->reg)) {
 		ret = regulator_enable(st->reg);
@@ -286,10 +287,8 @@ static int ad7292_probe(struct spi_device *spi)
 
 		ret = devm_add_action_or_reset(&spi->dev,
 					       ad7292_regulator_disable, st);
-		if (ret) {
-			regulator_disable(st->reg);
+		if (ret)
 			return ret;
-		}
 
 		ret = regulator_get_voltage(st->reg);
 		if (ret < 0)
@@ -301,15 +300,16 @@ static int ad7292_probe(struct spi_device *spi)
 		st->vref_mv = 1250;
 	}
 
-	indio_dev->dev.parent = &spi->dev;
 	indio_dev->name = spi_get_device_id(spi)->name;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->info = &ad7292_info;
 
 	for_each_available_child_of_node(spi->dev.of_node, child) {
 		diff_channels = of_property_read_bool(child, "diff-channels");
-		if (diff_channels)
+		if (diff_channels) {
+			of_node_put(child);
 			break;
+		}
 	}
 
 	if (diff_channels) {

@@ -29,6 +29,7 @@ struct kernel_pkey_params;
  * clear the contents.
  */
 struct key_preparsed_payload {
+	const char	*orig_description; /* Actual or proposed description (maybe NULL) */
 	char		*description;	/* Proposed key description (or NULL) */
 	union key_payload payload;	/* Proposed payload */
 	const void	*data;		/* Raw data */
@@ -127,7 +128,7 @@ struct key_type {
 	 *   much is copied into the buffer
 	 * - shouldn't do the copy if the buffer is NULL
 	 */
-	long (*read)(const struct key *key, char __user *buffer, size_t buflen);
+	long (*read)(const struct key *key, char *buffer, size_t buflen);
 
 	/* handle request_key() for this type instead of invoking
 	 * /sbin/request-key (optional)

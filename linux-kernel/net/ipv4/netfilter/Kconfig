@@ -58,14 +58,6 @@ config NF_TABLES_ARP
 
 endif # NF_TABLES
 
-config NF_FLOW_TABLE_IPV4
-	tristate "Netfilter flow table IPv4 module"
-	depends on NF_FLOW_TABLE
-	help
-	  This option adds the flow table IPv4 support.
-
-	  To compile it as a module, choose M here.
-
 config NF_DUP_IPV4
 	tristate "Netfilter IPv4 packet duplication to alternate destination"
 	depends on !NF_CONNTRACK || NF_CONNTRACK
@@ -76,12 +68,18 @@ config NF_DUP_IPV4
 config NF_LOG_ARP
 	tristate "ARP packet logging"
 	default m if NETFILTER_ADVANCED=n
-	select NF_LOG_COMMON
+	select NF_LOG_SYSLOG
+	help
+	This is a backwards-compat option for the user's convenience
+	(e.g. when running oldconfig). It selects CONFIG_NF_LOG_SYSLOG.
 
 config NF_LOG_IPV4
 	tristate "IPv4 packet logging"
 	default m if NETFILTER_ADVANCED=n
-	select NF_LOG_COMMON
+	select NF_LOG_SYSLOG
+	help
+	This is a backwards-compat option for the user's convenience
+	(e.g. when running oldconfig). It selects CONFIG_NF_LOG_SYSLOG.
 
 config NF_REJECT_IPV4
 	tristate "IPv4 packet rejection"
@@ -94,7 +92,7 @@ config NF_NAT_SNMP_BASIC
 	depends on NETFILTER_ADVANCED
 	default NF_NAT && NF_CONNTRACK_SNMP
 	select ASN1
-	---help---
+	help
 
 	  This module implements an Application Layer Gateway (ALG) for
 	  SNMP payloads.  In conjunction with NAT, it allows a network
@@ -146,7 +144,7 @@ config IP_NF_MATCH_ECN
 	tristate '"ecn" match support'
 	depends on NETFILTER_ADVANCED
 	select NETFILTER_XT_MATCH_ECN
-	---help---
+	help
 	This is a backwards-compat option for the user's convenience
 	(e.g. when running oldconfig). It selects
 	CONFIG_NETFILTER_XT_MATCH_ECN.
@@ -155,7 +153,7 @@ config IP_NF_MATCH_RPFILTER
 	tristate '"rpfilter" reverse path filter match support'
 	depends on NETFILTER_ADVANCED
 	depends on IP_NF_MANGLE || IP_NF_RAW
-	---help---
+	help
 	  This option allows you to match packets whose replies would
 	  go out via the interface the packet came in.
 
@@ -166,7 +164,7 @@ config IP_NF_MATCH_TTL
 	tristate '"ttl" match support'
 	depends on NETFILTER_ADVANCED
 	select NETFILTER_XT_MATCH_HL
-	---help---
+	help
 	This is a backwards-compat option for the user's convenience
 	(e.g. when running oldconfig). It selects
 	CONFIG_NETFILTER_XT_MATCH_HL.
@@ -234,7 +232,7 @@ config IP_NF_TARGET_NETMAP
 	tristate "NETMAP target support"
 	depends on NETFILTER_ADVANCED
 	select NETFILTER_XT_TARGET_NETMAP
-	---help---
+	help
 	This is a backwards-compat option for the user's convenience
 	(e.g. when running oldconfig). It selects
 	CONFIG_NETFILTER_XT_TARGET_NETMAP.
@@ -243,7 +241,7 @@ config IP_NF_TARGET_REDIRECT
 	tristate "REDIRECT target support"
 	depends on NETFILTER_ADVANCED
 	select NETFILTER_XT_TARGET_REDIRECT
-	---help---
+	help
 	This is a backwards-compat option for the user's convenience
 	(e.g. when running oldconfig). It selects
 	CONFIG_NETFILTER_XT_TARGET_REDIRECT.
@@ -261,25 +259,11 @@ config IP_NF_MANGLE
 
 	  To compile it as a module, choose M here.  If unsure, say N.
 
-config IP_NF_TARGET_CLUSTERIP
-	tristate "CLUSTERIP target support"
-	depends on IP_NF_MANGLE
-	depends on NF_CONNTRACK
-	depends on NETFILTER_ADVANCED
-	select NF_CONNTRACK_MARK
-	select NETFILTER_FAMILY_ARP
-	help
-	  The CLUSTERIP target allows you to build load-balancing clusters of
-	  network servers without having a dedicated load-balancing
-	  router/server/switch.
-
-	  To compile it as a module, choose M here.  If unsure, say N.
-
 config IP_NF_TARGET_ECN
 	tristate "ECN target support"
 	depends on IP_NF_MANGLE
 	depends on NETFILTER_ADVANCED
-	---help---
+	help
 	  This option adds a `ECN' target, which can be used in the iptables mangle
 	  table.
 
@@ -294,7 +278,7 @@ config IP_NF_TARGET_TTL
 	tristate '"TTL" target support'
 	depends on NETFILTER_ADVANCED && IP_NF_MANGLE
 	select NETFILTER_XT_TARGET_HL
-	---help---
+	help
 	This is a backwards-compatible option for the user's convenience
 	(e.g. when running oldconfig). It selects
 	CONFIG_NETFILTER_XT_TARGET_HL.

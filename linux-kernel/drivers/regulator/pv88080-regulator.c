@@ -334,13 +334,10 @@ static irqreturn_t pv88080_irq_handler(int irq, void *data)
 
 	if (reg_val & PV88080_E_VDD_FLT) {
 		for (i = 0; i < PV88080_MAX_REGULATORS; i++) {
-			if (chip->rdev[i] != NULL) {
-			        regulator_lock(chip->rdev[i]);
+			if (chip->rdev[i] != NULL)
 				regulator_notifier_call_chain(chip->rdev[i],
 					REGULATOR_EVENT_UNDER_VOLTAGE,
 					NULL);
-			        regulator_unlock(chip->rdev[i]);
-			}
 		}
 
 		err = regmap_write(chip->regmap, PV88080_REG_EVENT_A,
@@ -353,13 +350,10 @@ static irqreturn_t pv88080_irq_handler(int irq, void *data)
 
 	if (reg_val & PV88080_E_OVER_TEMP) {
 		for (i = 0; i < PV88080_MAX_REGULATORS; i++) {
-			if (chip->rdev[i] != NULL) {
-			        regulator_lock(chip->rdev[i]);
+			if (chip->rdev[i] != NULL)
 				regulator_notifier_call_chain(chip->rdev[i],
 					REGULATOR_EVENT_OVER_TEMP,
 					NULL);
-			        regulator_unlock(chip->rdev[i]);
-			}
 		}
 
 		err = regmap_write(chip->regmap, PV88080_REG_EVENT_A,
@@ -380,9 +374,9 @@ error_i2c:
 /*
  * I2C driver interface functions
  */
-static int pv88080_i2c_probe(struct i2c_client *i2c,
-		const struct i2c_device_id *id)
+static int pv88080_i2c_probe(struct i2c_client *i2c)
 {
+	const struct i2c_device_id *id = i2c_client_get_device_id(i2c);
 	struct regulator_init_data *init_data = dev_get_platdata(&i2c->dev);
 	struct pv88080 *chip;
 	const struct pv88080_compatible_regmap *regmap_config;
@@ -565,7 +559,7 @@ static struct i2c_driver pv88080_regulator_driver = {
 		.name = "pv88080",
 		.of_match_table = of_match_ptr(pv88080_dt_ids),
 	},
-	.probe = pv88080_i2c_probe,
+	.probe_new = pv88080_i2c_probe,
 	.id_table = pv88080_i2c_id,
 };
 

@@ -9,7 +9,8 @@
 
 #include <crypto/internal/hash.h>
 #include <crypto/padlock.h>
-#include <crypto/sha.h>
+#include <crypto/sha1.h>
+#include <crypto/sha2.h>
 #include <linux/err.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -490,7 +491,7 @@ static struct shash_alg sha256_alg_nano = {
 };
 
 static const struct x86_cpu_id padlock_sha_ids[] = {
-	X86_FEATURE_MATCH(X86_FEATURE_PHE),
+	X86_MATCH_FEATURE(X86_FEATURE_PHE, NULL),
 	{}
 };
 MODULE_DEVICE_TABLE(x86cpu, padlock_sha_ids);

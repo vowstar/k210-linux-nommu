@@ -16,6 +16,10 @@
 #include <linux/uaccess.h>
 #include <linux/errno.h>
 
+#define arch_futex_atomic_op_inuser arch_futex_atomic_op_inuser
+#define futex_atomic_cmpxchg_inatomic futex_atomic_cmpxchg_inatomic
+#include <asm-generic/futex.h>
+
 #if XCHAL_HAVE_EXCLUSIVE
 #define __futex_atomic_op(insn, ret, old, uaddr, arg)	\
 	__asm__ __volatile(				\
@@ -72,7 +76,8 @@ static inline int arch_futex_atomic_op_inuser(int op, int oparg, int *oval,
 #if XCHAL_HAVE_S32C1I || XCHAL_HAVE_EXCLUSIVE
 	int oldval = 0, ret;
 
-	pagefault_disable();
+	if (!access_ok(uaddr, sizeof(u32)))
+		return -EFAULT;
 
 	switch (op) {
 	case FUTEX_OP_SET:
@@ -99,14 +104,12 @@ static inline int arch_futex_atomic_op_inuser(int op, int oparg, int *oval,
 		ret = -ENOSYS;
 	}
 
-	pagefault_enable();
-
 	if (!ret)
 		*oval = oldval;
 
 	return ret;
 #else
-	return -ENOSYS;
+	return futex_atomic_op_inuser_local(op, oparg, oval, uaddr);
 #endif
 }
 
@@ -157,7 +160,7 @@ futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *uaddr,
 
 	return ret;
 #else
-	return -ENOSYS;
+	return futex_atomic_cmpxchg_inatomic_local(uval, uaddr, oldval, newval);
 #endif
 }
 

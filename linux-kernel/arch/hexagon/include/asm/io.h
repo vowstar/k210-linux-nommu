@@ -64,7 +64,6 @@ static inline void *phys_to_virt(unsigned long address)
  * convert a physical pointer to a virtual kernel pointer for
  * /dev/mem access.
  */
-#define xlate_dev_kmem_ptr(p)    __va(p)
 #define xlate_dev_mem_ptr(p)    __va(p)
 
 /*
@@ -308,6 +307,31 @@ static inline void outsl(unsigned long port, const void *buffer, int count)
 		} while (--count);
 	}
 }
+
+/*
+ * These defines are necessary to use the generic io.h for filling in
+ * the missing parts of the API contract. This is because the platform
+ * uses (inline) functions rather than defines and the generic helper
+ * fills in the undefined.
+ */
+#define virt_to_phys virt_to_phys
+#define phys_to_virt phys_to_virt
+#define memset_io memset_io
+#define memcpy_fromio memcpy_fromio
+#define memcpy_toio memcpy_toio
+#define readb readb
+#define readw readw
+#define readl readl
+#define writeb writeb
+#define writew writew
+#define writel writel
+#define insb insb
+#define insw insw
+#define insl insl
+#define outsb outsb
+#define outsw outsw
+#define outsl outsl
+#include <asm-generic/io.h>
 
 #endif /* __KERNEL__ */
 

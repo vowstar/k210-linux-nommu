@@ -7,7 +7,23 @@
 
 #include "pcie-cadence.h"
 
-void cdns_pcie_set_outbound_region(struct cdns_pcie *pcie, u8 fn,
+void cdns_pcie_detect_quiet_min_delay_set(struct cdns_pcie *pcie)
+{
+	u32 delay = 0x3;
+	u32 ltssm_control_cap;
+
+	/*
+	 * Set the LTSSM Detect Quiet state min. delay to 2ms.
+	 */
+	ltssm_control_cap = cdns_pcie_readl(pcie, CDNS_PCIE_LTSSM_CONTROL_CAP);
+	ltssm_control_cap = ((ltssm_control_cap &
+			    ~CDNS_PCIE_DETECT_QUIET_MIN_DELAY_MASK) |
+			    CDNS_PCIE_DETECT_QUIET_MIN_DELAY(delay));
+
+	cdns_pcie_writel(pcie, CDNS_PCIE_LTSSM_CONTROL_CAP, ltssm_control_cap);
+}
+
+void cdns_pcie_set_outbound_region(struct cdns_pcie *pcie, u8 busnr, u8 fn,
 				   u32 r, bool is_io,
 				   u64 cpu_addr, u64 pci_addr, size_t size)
 {
@@ -60,7 +76,7 @@ void cdns_pcie_set_outbound_region(struct cdns_pcie *pcie, u8 fn,
 		/* The device and function numbers are always 0. */
 		desc0 |= CDNS_PCIE_AT_OB_REGION_DESC0_HARDCODED_RID |
 			 CDNS_PCIE_AT_OB_REGION_DESC0_DEVFN(0);
-		desc1 |= CDNS_PCIE_AT_OB_REGION_DESC1_BUS(pcie->bus);
+		desc1 |= CDNS_PCIE_AT_OB_REGION_DESC1_BUS(busnr);
 	} else {
 		/*
 		 * Use captured values for bus and device numbers but still
@@ -73,7 +89,9 @@ void cdns_pcie_set_outbound_region(struct cdns_pcie *pcie, u8 fn,
 	cdns_pcie_writel(pcie, CDNS_PCIE_AT_OB_REGION_DESC1(r), desc1);
 
 	/* Set the CPU address */
-	cpu_addr -= pcie->mem_res->start;
+	if (pcie->ops->cpu_addr_fixup)
+		cpu_addr = pcie->ops->cpu_addr_fixup(pcie, cpu_addr);
+
 	addr0 = CDNS_PCIE_AT_OB_REGION_CPU_ADDR0_NBITS(nbits) |
 		(lower_32_bits(cpu_addr) & GENMASK(31, 8));
 	addr1 = upper_32_bits(cpu_addr);
@@ -82,7 +100,8 @@ void cdns_pcie_set_outbound_region(struct cdns_pcie *pcie, u8 fn,
 	cdns_pcie_writel(pcie, CDNS_PCIE_AT_OB_REGION_CPU_ADDR1(r), addr1);
 }
 
-void cdns_pcie_set_outbound_region_for_normal_msg(struct cdns_pcie *pcie, u8 fn,
+void cdns_pcie_set_outbound_region_for_normal_msg(struct cdns_pcie *pcie,
+						  u8 busnr, u8 fn,
 						  u32 r, u64 cpu_addr)
 {
 	u32 addr0, addr1, desc0, desc1;
@@ -94,13 +113,15 @@ void cdns_pcie_set_outbound_region_for_normal_msg(struct cdns_pcie *pcie, u8 fn,
 	if (pcie->is_rc) {
 		desc0 |= CDNS_PCIE_AT_OB_REGION_DESC0_HARDCODED_RID |
 			 CDNS_PCIE_AT_OB_REGION_DESC0_DEVFN(0);
-		desc1 |= CDNS_PCIE_AT_OB_REGION_DESC1_BUS(pcie->bus);
+		desc1 |= CDNS_PCIE_AT_OB_REGION_DESC1_BUS(busnr);
 	} else {
 		desc0 |= CDNS_PCIE_AT_OB_REGION_DESC0_DEVFN(fn);
 	}
 
 	/* Set the CPU address */
-	cpu_addr -= pcie->mem_res->start;
+	if (pcie->ops->cpu_addr_fixup)
+		cpu_addr = pcie->ops->cpu_addr_fixup(pcie, cpu_addr);
+
 	addr0 = CDNS_PCIE_AT_OB_REGION_CPU_ADDR0_NBITS(17) |
 		(lower_32_bits(cpu_addr) & GENMASK(31, 8));
 	addr1 = upper_32_bits(cpu_addr);
@@ -222,7 +243,6 @@ err_phy:
 	return ret;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int cdns_pcie_suspend_noirq(struct device *dev)
 {
 	struct cdns_pcie *pcie = dev_get_drvdata(dev);
@@ -245,9 +265,8 @@ static int cdns_pcie_resume_noirq(struct device *dev)
 
 	return 0;
 }
-#endif
 
 const struct dev_pm_ops cdns_pcie_pm_ops = {
-	SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(cdns_pcie_suspend_noirq,
-				      cdns_pcie_resume_noirq)
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(cdns_pcie_suspend_noirq,
+				  cdns_pcie_resume_noirq)
 };

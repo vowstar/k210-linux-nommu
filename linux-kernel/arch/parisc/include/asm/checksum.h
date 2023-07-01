@@ -19,21 +19,6 @@
 extern __wsum csum_partial(const void *, int, __wsum);
 
 /*
- * The same as csum_partial, but copies from src while it checksums.
- *
- * Here even more important to align src and dst on a 32-bit (or even
- * better 64-bit) boundary
- */
-extern __wsum csum_partial_copy_nocheck(const void *, void *, int, __wsum);
-
-/*
- * this is a new version of the above that records errors it finds in *errp,
- * but continues and zeros the rest of the buffer.
- */
-extern __wsum csum_partial_copy_from_user(const void __user *src,
-		void *dst, int len, __wsum sum, int *errp);
-
-/*
  *	Optimized for IP headers, which always checksum on 4 octet boundaries.
  *
  *	Written by Randolph Chung <tausq@debian.org>, and then mucked with by
@@ -186,26 +171,6 @@ static __inline__ __sum16 csum_ipv6_magic(const struct in6_addr *saddr,
 	: "0" (sum), "1" (saddr), "2" (daddr), "3" (len)
 	: "memory");
 	return csum_fold(sum);
-}
-
-/* 
- *	Copy and checksum to user
- */
-#define HAVE_CSUM_COPY_USER
-static __inline__ __wsum csum_and_copy_to_user(const void *src,
-						      void __user *dst,
-						      int len, __wsum sum,
-						      int *err_ptr)
-{
-	/* code stolen from include/asm-mips64 */
-	sum = csum_partial(src, len, sum);
-	 
-	if (copy_to_user(dst, src, len)) {
-		*err_ptr = -EFAULT;
-		return (__force __wsum)-1;
-	}
-
-	return sum;
 }
 
 #endif

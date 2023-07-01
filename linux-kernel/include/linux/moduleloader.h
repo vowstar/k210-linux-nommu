@@ -13,6 +13,9 @@
  * must be implemented by each architecture.
  */
 
+/* arch may override to do additional checking of ELF header architecture */
+bool module_elf_check_arch(Elf_Ehdr *hdr);
+
 /* Adjust arch-specific sections.  Return 0 on success.  */
 int module_frob_arch_sections(Elf_Ehdr *hdr,
 			      Elf_Shdr *sechdrs,
@@ -28,6 +31,11 @@ void *module_alloc(unsigned long size);
 
 /* Free memory returned from module_alloc. */
 void module_memfree(void *module_region);
+
+/* Determines if the section name is an init section (that is only used during
+ * module loading).
+ */
+bool module_init_section(const char *name);
 
 /* Determines if the section name is an exit section (that is only used during
  * module unloading)
@@ -67,6 +75,23 @@ int apply_relocate_add(Elf_Shdr *sechdrs,
 		       unsigned int symindex,
 		       unsigned int relsec,
 		       struct module *mod);
+#ifdef CONFIG_LIVEPATCH
+/*
+ * Some architectures (namely x86_64 and ppc64) perform sanity checks when
+ * applying relocations.  If a patched module gets unloaded and then later
+ * reloaded (and re-patched), klp re-applies relocations to the replacement
+ * function(s).  Any leftover relocations from the previous loading of the
+ * patched module might trigger the sanity checks.
+ *
+ * To prevent that, when unloading a patched module, clear out any relocations
+ * that might trigger arch-specific sanity checks on a future module reload.
+ */
+void clear_relocate_add(Elf_Shdr *sechdrs,
+		   const char *strtab,
+		   unsigned int symindex,
+		   unsigned int relsec,
+		   struct module *me);
+#endif
 #else
 static inline int apply_relocate_add(Elf_Shdr *sechdrs,
 				     const char *strtab,
@@ -91,7 +116,8 @@ void module_arch_cleanup(struct module *mod);
 /* Any cleanup before freeing mod->module_init */
 void module_arch_freeing_init(struct module *mod);
 
-#if defined(CONFIG_KASAN) && !defined(CONFIG_KASAN_VMALLOC)
+#if (defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS)) && \
+		!defined(CONFIG_KASAN_VMALLOC)
 #include <linux/kasan.h>
 #define MODULE_ALIGN (PAGE_SIZE << KASAN_SHADOW_SCALE_SHIFT)
 #else

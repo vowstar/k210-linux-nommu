@@ -24,7 +24,7 @@
 		reg = <0xf4000000 0x3ff0000>;
 		ranges;
 
-		lan9220@f4000000 {
+		ethernet@f4000000 {
 			compatible = "smsc,lan9220", "smsc,lan9115";
 			reg = <0xf4000000 0x2000000>;
 			phy-mode = "mii";
@@ -61,34 +61,34 @@
 	gpio-keys {
 		compatible = "gpio-keys";
 
-		home {
+		key-home {
 			label = "Home";
 			gpios = <&gpio5 10 0>;
 			linux,code = <KEY_HOME>;
 			wakeup-source;
 		};
 
-		back {
+		key-back {
 			label = "Back";
 			gpios = <&gpio5 11 0>;
 			linux,code = <KEY_BACK>;
 			wakeup-source;
 		};
 
-		program {
+		key-program {
 			label = "Program";
 			gpios = <&gpio5 12 0>;
 			linux,code = <KEY_PROGRAM >;
 			wakeup-source;
 		};
 
-		volume-up {
+		key-volume-up {
 			label = "Volume Up";
 			gpios = <&gpio5 13 0>;
 			linux,code = <KEY_VOLUMEUP>;
 		};
 
-		volume-down {
+		key-volume-down {
 			label = "Volume Down";
 			gpios = <&gpio4 0 0>;
 			linux,code = <KEY_VOLUMEDOWN>;

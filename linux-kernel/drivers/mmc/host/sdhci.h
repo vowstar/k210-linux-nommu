@@ -9,6 +9,7 @@
 #ifndef __SDHCI_HW_H
 #define __SDHCI_HW_H
 
+#include <linux/bits.h>
 #include <linux/scatterlist.h>
 #include <linux/compiler.h>
 #include <linux/types.h>
@@ -199,12 +200,12 @@
 #define  SDHCI_CTRL_PRESET_VAL_ENABLE	0x8000
 
 #define SDHCI_CAPABILITIES	0x40
-#define  SDHCI_TIMEOUT_CLK_MASK	0x0000003F
+#define  SDHCI_TIMEOUT_CLK_MASK		GENMASK(5, 0)
 #define  SDHCI_TIMEOUT_CLK_SHIFT 0
 #define  SDHCI_TIMEOUT_CLK_UNIT	0x00000080
-#define  SDHCI_CLOCK_BASE_MASK	0x00003F00
-#define  SDHCI_CLOCK_V3_BASE_MASK	0x0000FF00
+#define  SDHCI_CLOCK_BASE_MASK		GENMASK(13, 8)
 #define  SDHCI_CLOCK_BASE_SHIFT	8
+#define  SDHCI_CLOCK_V3_BASE_MASK	GENMASK(15, 8)
 #define  SDHCI_MAX_BLOCK_MASK	0x00030000
 #define  SDHCI_MAX_BLOCK_SHIFT  16
 #define  SDHCI_CAN_DO_8BIT	0x00040000
@@ -219,32 +220,25 @@
 #define  SDHCI_CAN_64BIT_V4	0x08000000
 #define  SDHCI_CAN_64BIT	0x10000000
 
+#define SDHCI_CAPABILITIES_1	0x44
 #define  SDHCI_SUPPORT_SDR50	0x00000001
 #define  SDHCI_SUPPORT_SDR104	0x00000002
 #define  SDHCI_SUPPORT_DDR50	0x00000004
 #define  SDHCI_DRIVER_TYPE_A	0x00000010
 #define  SDHCI_DRIVER_TYPE_C	0x00000020
 #define  SDHCI_DRIVER_TYPE_D	0x00000040
-#define  SDHCI_RETUNING_TIMER_COUNT_MASK	0x00000F00
-#define  SDHCI_RETUNING_TIMER_COUNT_SHIFT	8
+#define  SDHCI_RETUNING_TIMER_COUNT_MASK	GENMASK(11, 8)
 #define  SDHCI_USE_SDR50_TUNING			0x00002000
-#define  SDHCI_RETUNING_MODE_MASK		0x0000C000
-#define  SDHCI_RETUNING_MODE_SHIFT		14
-#define  SDHCI_CLOCK_MUL_MASK	0x00FF0000
-#define  SDHCI_CLOCK_MUL_SHIFT	16
+#define  SDHCI_RETUNING_MODE_MASK		GENMASK(15, 14)
+#define  SDHCI_CLOCK_MUL_MASK			GENMASK(23, 16)
 #define  SDHCI_CAN_DO_ADMA3	0x08000000
 #define  SDHCI_SUPPORT_HS400	0x80000000 /* Non-standard */
 
-#define SDHCI_CAPABILITIES_1	0x44
-
 #define SDHCI_MAX_CURRENT		0x48
-#define  SDHCI_MAX_CURRENT_LIMIT	0xFF
-#define  SDHCI_MAX_CURRENT_330_MASK	0x0000FF
-#define  SDHCI_MAX_CURRENT_330_SHIFT	0
-#define  SDHCI_MAX_CURRENT_300_MASK	0x00FF00
-#define  SDHCI_MAX_CURRENT_300_SHIFT	8
-#define  SDHCI_MAX_CURRENT_180_MASK	0xFF0000
-#define  SDHCI_MAX_CURRENT_180_SHIFT	16
+#define  SDHCI_MAX_CURRENT_LIMIT	GENMASK(7, 0)
+#define  SDHCI_MAX_CURRENT_330_MASK	GENMASK(7, 0)
+#define  SDHCI_MAX_CURRENT_300_MASK	GENMASK(15, 8)
+#define  SDHCI_MAX_CURRENT_180_MASK	GENMASK(23, 16)
 #define   SDHCI_MAX_CURRENT_MULTIPLIER	4
 
 /* 4C-4F reserved for more max current */
@@ -261,18 +255,16 @@
 
 /* 60-FB reserved */
 
+#define SDHCI_PRESET_FOR_HIGH_SPEED	0x64
 #define SDHCI_PRESET_FOR_SDR12 0x66
 #define SDHCI_PRESET_FOR_SDR25 0x68
 #define SDHCI_PRESET_FOR_SDR50 0x6A
 #define SDHCI_PRESET_FOR_SDR104        0x6C
 #define SDHCI_PRESET_FOR_DDR50 0x6E
 #define SDHCI_PRESET_FOR_HS400 0x74 /* Non-standard */
-#define SDHCI_PRESET_DRV_MASK  0xC000
-#define SDHCI_PRESET_DRV_SHIFT  14
-#define SDHCI_PRESET_CLKGEN_SEL_MASK   0x400
-#define SDHCI_PRESET_CLKGEN_SEL_SHIFT	10
-#define SDHCI_PRESET_SDCLK_FREQ_MASK   0x3FF
-#define SDHCI_PRESET_SDCLK_FREQ_SHIFT	0
+#define SDHCI_PRESET_DRV_MASK		GENMASK(15, 14)
+#define SDHCI_PRESET_CLKGEN_SEL		BIT(10)
+#define SDHCI_PRESET_SDCLK_FREQ_MASK	GENMASK(9, 0)
 
 #define SDHCI_SLOT_INT_STATUS	0xFC
 
@@ -348,11 +340,12 @@ struct sdhci_adma2_64_desc {
 
 /*
  * Maximum segments assuming a 512KiB maximum requisition size and a minimum
- * 4KiB page size.
+ * 4KiB page size. Note this also allows enough for multiple descriptors in
+ * case of PAGE_SIZE >= 64KiB.
  */
 #define SDHCI_MAX_SEGS		128
 
-/* Allow for a a command request and a data request at the same time */
+/* Allow for a command request and a data request at the same time */
 #define SDHCI_MAX_MRQS		2
 
 /*
@@ -362,6 +355,9 @@ struct sdhci_adma2_64_desc {
  * not known, set the command transfer time to 10ms.
  */
 #define MMC_CMD_TRANSFER_TIME	(10 * NSEC_PER_MSEC) /* max 10 ms */
+
+#define sdhci_err_stats_inc(host, err_name) \
+	mmc_debugfs_err_stats_inc((host)->mmc, MMC_ERR_##err_name)
 
 enum sdhci_cookie {
 	COOKIE_UNMAPPED,
@@ -383,8 +379,6 @@ struct sdhci_host {
 #define SDHCI_QUIRK_NO_CARD_NO_RESET			(1<<2)
 /* Controller doesn't like clearing the power reg before a change */
 #define SDHCI_QUIRK_SINGLE_POWER_WRITE			(1<<3)
-/* Controller has flaky internal state so reset it on each ios change */
-#define SDHCI_QUIRK_RESET_CMD_DATA_ON_IOS		(1<<4)
 /* Controller has an unusable DMA engine */
 #define SDHCI_QUIRK_BROKEN_DMA				(1<<5)
 /* Controller has an unusable ADMA engine */
@@ -429,8 +423,6 @@ struct sdhci_host {
 #define SDHCI_QUIRK_CAP_CLOCK_BASE_BROKEN		(1<<25)
 /* Controller cannot support End Attribute in NOP ADMA descriptor */
 #define SDHCI_QUIRK_NO_ENDATTR_IN_NOPDESC		(1<<26)
-/* Controller is missing device caps. Use caps provided by host */
-#define SDHCI_QUIRK_MISSING_CAPS			(1<<27)
 /* Controller uses Auto CMD12 command to stop the transfer */
 #define SDHCI_QUIRK_MULTIBLOCK_READ_ACMD12		(1<<28)
 /* Controller doesn't have HISPD bit field in HI-SPEED SD card */
@@ -484,6 +476,8 @@ struct sdhci_host {
  * block count.
  */
 #define SDHCI_QUIRK2_USE_32BIT_BLK_CNT			(1<<18)
+/* Issue CMD and DATA reset together */
+#define SDHCI_QUIRK2_ISSUE_CMD_DAT_RESET_TOGETHER	(1<<19)
 
 	int irq;		/* Device IRQ */
 	void __iomem *ioaddr;	/* Mapped address */
@@ -525,10 +519,13 @@ struct sdhci_host {
 
 	unsigned int max_clk;	/* Max possible freq (MHz) */
 	unsigned int timeout_clk;	/* Timeout freq (KHz) */
+	u8 max_timeout_count;	/* Vendor specific max timeout count */
 	unsigned int clk_mul;	/* Clock Muliplier value */
 
 	unsigned int clock;	/* Current clock (MHz) */
 	u8 pwr;			/* Current voltage */
+	u8 drv_type;		/* Current UHS-I driver type */
+	bool reinit_uhs;	/* Force UHS-related re-initialization */
 
 	bool runtime_suspended;	/* Host is runtime suspended */
 	bool bus_on;		/* Bus power prevents runtime suspend */
@@ -537,10 +534,12 @@ struct sdhci_host {
 	bool irq_wake_enabled;	/* IRQ wakeup is enabled */
 	bool v4_mode;		/* Host Version 4 Enable */
 	bool use_external_dma;	/* Host selects to use external DMA */
+	bool always_defer_done;	/* Always defer to complete requests */
 
 	struct mmc_request *mrqs_done[SDHCI_MAX_MRQS];	/* Requests done */
 	struct mmc_command *cmd;	/* Current command */
 	struct mmc_command *data_cmd;	/* Current data command */
+	struct mmc_command *deferred_cmd;	/* Deferred command */
 	struct mmc_data *data;	/* Current data request */
 	unsigned int data_early:1;	/* Data finished before cmd */
 
@@ -548,6 +547,7 @@ struct sdhci_host {
 	unsigned int blocks;	/* remaining PIO blocks */
 
 	int sg_count;		/* Mapped sg entries */
+	int max_adma;		/* Max. length in ADMA descriptor */
 
 	void *adma_table;	/* ADMA descriptor table */
 	void *align_buffer;	/* Bounce buffer */
@@ -576,6 +576,7 @@ struct sdhci_host {
 	u32 caps1;		/* CAPABILITY_1 */
 	bool read_caps;		/* Capability flags have been read */
 
+	bool sdhci_core_to_disable_vqmmc;  /* sdhci core can disable vqmmc */
 	unsigned int            ocr_avail_sdio;	/* OCR bit masks */
 	unsigned int            ocr_avail_sd;
 	unsigned int            ocr_avail_mmc;
@@ -613,7 +614,7 @@ struct sdhci_host {
 
 	u64			data_timeout;
 
-	unsigned long private[0] ____cacheline_aligned;
+	unsigned long private[] ____cacheline_aligned;
 };
 
 struct sdhci_ops {
@@ -654,6 +655,12 @@ struct sdhci_ops {
 	void	(*voltage_switch)(struct sdhci_host *host);
 	void	(*adma_write_desc)(struct sdhci_host *host, void **desc,
 				   dma_addr_t addr, int len, unsigned int cmd);
+	void	(*copy_to_bounce_buffer)(struct sdhci_host *host,
+					 struct mmc_data *data,
+					 unsigned int length);
+	void	(*request_done)(struct sdhci_host *host,
+				struct mmc_request *mrq);
+	void    (*dump_vendor_regs)(struct sdhci_host *host);
 };
 
 #ifdef CONFIG_MMC_SDHCI_IO_ACCESSORS
@@ -748,7 +755,6 @@ static inline void *sdhci_priv(struct sdhci_host *host)
 	return host->private;
 }
 
-void sdhci_card_detect(struct sdhci_host *host);
 void __sdhci_read_caps(struct sdhci_host *host, const u16 *ver,
 		       const u32 *caps, const u32 *caps1);
 int sdhci_setup_host(struct sdhci_host *host);
@@ -756,7 +762,6 @@ void sdhci_cleanup_host(struct sdhci_host *host);
 int __sdhci_add_host(struct sdhci_host *host);
 int sdhci_add_host(struct sdhci_host *host);
 void sdhci_remove_host(struct sdhci_host *host, int dead);
-void sdhci_send_command(struct sdhci_host *host, struct mmc_command *cmd);
 
 static inline void sdhci_read_caps(struct sdhci_host *host)
 {
@@ -769,9 +774,14 @@ void sdhci_set_clock(struct sdhci_host *host, unsigned int clock);
 void sdhci_enable_clk(struct sdhci_host *host, u16 clk);
 void sdhci_set_power(struct sdhci_host *host, unsigned char mode,
 		     unsigned short vdd);
+void sdhci_set_power_and_bus_voltage(struct sdhci_host *host,
+				     unsigned char mode,
+				     unsigned short vdd);
 void sdhci_set_power_noreg(struct sdhci_host *host, unsigned char mode,
 			   unsigned short vdd);
+int sdhci_get_cd_nogpio(struct mmc_host *mmc);
 void sdhci_request(struct mmc_host *mmc, struct mmc_request *mrq);
+int sdhci_request_atomic(struct mmc_host *mmc, struct mmc_request *mrq);
 void sdhci_set_bus_width(struct sdhci_host *host, int width);
 void sdhci_reset(struct sdhci_host *host, u8 mask);
 void sdhci_set_uhs_signaling(struct sdhci_host *host, unsigned timing);

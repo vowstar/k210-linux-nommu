@@ -19,7 +19,7 @@
 #define BRCMF_ARP_OL_PEER_AUTO_REPLY	0x00000008
 
 #define	BRCMF_BSS_INFO_VERSION	109 /* curr ver of brcmf_bss_info_le struct */
-#define BRCMF_BSS_RSSI_ON_CHANNEL	0x0002
+#define BRCMF_BSS_RSSI_ON_CHANNEL	0x0004
 
 #define BRCMF_STA_BRCM			0x00000001	/* Running a Broadcom driver */
 #define BRCMF_STA_WME			0x00000002	/* WMM association */
@@ -135,7 +135,7 @@
 /* Link Down indication in WoWL mode: */
 #define BRCMF_WOWL_LINKDOWN		(1 << 31)
 
-#define BRCMF_WOWL_MAXPATTERNS		8
+#define BRCMF_WOWL_MAXPATTERNS		16
 #define BRCMF_WOWL_MAXPATTERNSIZE	128
 
 #define BRCMF_COUNTRY_BUF_SZ		4
@@ -753,6 +753,34 @@ struct brcmf_assoclist_le {
 };
 
 /**
+ * struct brcmf_rssi_be - RSSI threshold event format
+ *
+ * @rssi: receive signal strength (in dBm)
+ * @snr: signal-noise ratio
+ * @noise: noise (in dBm)
+ */
+struct brcmf_rssi_be {
+	__be32 rssi;
+	__be32 snr;
+	__be32 noise;
+};
+
+#define BRCMF_MAX_RSSI_LEVELS 8
+
+/**
+ * struct brcm_rssi_event_le - rssi_event IOVAR format
+ *
+ * @rate_limit_msec: RSSI event rate limit
+ * @rssi_level_num: number of supplied RSSI levels
+ * @rssi_levels: RSSI levels in ascending order
+ */
+struct brcmf_rssi_event_le {
+	__le32 rate_limit_msec;
+	s8 rssi_level_num;
+	s8 rssi_levels[BRCMF_MAX_RSSI_LEVELS];
+};
+
+/**
  * struct brcmf_wowl_wakeind_le - Wakeup indicators
  *	Note: note both fields contain same information.
  *
@@ -915,7 +943,7 @@ struct brcmf_dload_data_le {
 	__le16 dload_type;
 	__le32 len;
 	__le32 crc;
-	u8 data[1];
+	u8 data[];
 };
 
 /**
@@ -1021,7 +1049,26 @@ struct brcmf_gscan_config {
 	u8 count_of_channel_buckets;
 	u8 retry_threshold;
 	__le16  lost_ap_window;
-	struct brcmf_gscan_bucket_config bucket[1];
+	struct brcmf_gscan_bucket_config bucket[];
 };
+
+/**
+ * struct brcmf_mkeep_alive_pkt_le - configuration data for keep-alive frame.
+ *
+ * @version: version for mkeep_alive
+ * @length: length of fixed parameters in the structure.
+ * @period_msec: keep-alive period in milliseconds.
+ * @len_bytes: size of the data.
+ * @keep_alive_id: ID  (0 - 3).
+ * @data: keep-alive frame data.
+ */
+struct brcmf_mkeep_alive_pkt_le {
+	__le16  version;
+	__le16  length;
+	__le32  period_msec;
+	__le16  len_bytes;
+	u8   keep_alive_id;
+	u8   data[];
+} __packed;
 
 #endif /* FWIL_TYPES_H_ */

@@ -4,6 +4,7 @@
 
 #include <linux/types.h>
 #include <linux/percpu.h>
+#include <linux/memcontrol.h>
 
 /*
  * pcpu_block_md is the metadata block struct.
@@ -48,12 +49,17 @@ struct pcpu_chunk {
 
 	void			*data;		/* chunk data */
 	bool			immutable;	/* no [de]population allowed */
+	bool			isolated;	/* isolated from active chunk
+						   slots */
 	int			start_offset;	/* the overlap with the previous
 						   region to have a page aligned
 						   base_addr */
 	int			end_offset;	/* additional area required to
 						   have the region end page
 						   aligned */
+#ifdef CONFIG_MEMCG_KMEM
+	struct obj_cgroup	**obj_cgroups;	/* vector of object cgroups */
+#endif
 
 	int			nr_pages;	/* # of pages served by this chunk */
 	int			nr_populated;	/* # of populated pages */
@@ -63,8 +69,10 @@ struct pcpu_chunk {
 
 extern spinlock_t pcpu_lock;
 
-extern struct list_head *pcpu_slot;
+extern struct list_head *pcpu_chunk_lists;
 extern int pcpu_nr_slots;
+extern int pcpu_sidelined_slot;
+extern int pcpu_to_depopulate_slot;
 extern int pcpu_nr_empty_pop_pages;
 
 extern struct pcpu_chunk *pcpu_first_chunk;
@@ -106,6 +114,25 @@ static inline int pcpu_chunk_map_bits(struct pcpu_chunk *chunk)
 	return pcpu_nr_pages_to_map_bits(chunk->nr_pages);
 }
 
+/**
+ * pcpu_obj_full_size - helper to calculate size of each accounted object
+ * @size: size of area to allocate in bytes
+ *
+ * For each accounted object there is an extra space which is used to store
+ * obj_cgroup membership if kmemcg is not disabled. Charge it too.
+ */
+static inline size_t pcpu_obj_full_size(size_t size)
+{
+	size_t extra_size = 0;
+
+#ifdef CONFIG_MEMCG_KMEM
+	if (!mem_cgroup_kmem_disabled())
+		extra_size += size / PCPU_MIN_ALLOC_SIZE * sizeof(struct obj_cgroup *);
+#endif
+
+	return size * num_possible_cpus() + extra_size;
+}
+
 #ifdef CONFIG_PERCPU_STATS
 
 #include <linux/spinlock.h>
@@ -117,7 +144,7 @@ struct percpu_stats {
 	u64 nr_max_alloc;	/* max # of live allocations */
 	u32 nr_chunks;		/* current # of live chunks */
 	u32 nr_max_chunks;	/* max # of live chunks */
-	size_t min_alloc_size;	/* min allocaiton size */
+	size_t min_alloc_size;	/* min allocation size */
 	size_t max_alloc_size;	/* max allocation size */
 };
 

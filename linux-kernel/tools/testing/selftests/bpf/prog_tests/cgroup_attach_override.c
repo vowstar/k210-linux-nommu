@@ -8,7 +8,7 @@
 #define BAR		"/foo/bar/"
 #define PING_CMD	"ping -q -c1 -w1 127.0.0.1 > /dev/null"
 
-char bpf_log_buf[BPF_LOG_BUF_SIZE];
+static char bpf_log_buf[BPF_LOG_BUF_SIZE];
 
 static int prog_load(int verdict)
 {
@@ -16,14 +16,14 @@ static int prog_load(int verdict)
 		BPF_MOV64_IMM(BPF_REG_0, verdict), /* r0 = verdict */
 		BPF_EXIT_INSN(),
 	};
-	size_t insns_cnt = sizeof(prog) / sizeof(struct bpf_insn);
+	size_t insns_cnt = ARRAY_SIZE(prog);
 
-	return bpf_load_program(BPF_PROG_TYPE_CGROUP_SKB,
+	return bpf_test_load_program(BPF_PROG_TYPE_CGROUP_SKB,
 			       prog, insns_cnt, "GPL", 0,
 			       bpf_log_buf, BPF_LOG_BUF_SIZE);
 }
 
-void test_cgroup_attach_override(void)
+void serial_test_cgroup_attach_override(void)
 {
 	int drop_prog = -1, allow_prog = -1, foo = -1, bar = -1;
 	__u32 duration = 0;

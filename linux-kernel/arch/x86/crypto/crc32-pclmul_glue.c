@@ -24,7 +24,7 @@
 /*
  * Copyright 2012 Xyratex Technology Limited
  *
- * Wrappers for kernel crypto shash api to pclmulqdq crc32 imlementation.
+ * Wrappers for kernel crypto shash api to pclmulqdq crc32 implementation.
  */
 #include <linux/init.h>
 #include <linux/module.h>
@@ -170,7 +170,7 @@ static struct shash_alg alg = {
 };
 
 static const struct x86_cpu_id crc32pclmul_cpu_id[] = {
-	X86_FEATURE_MATCH(X86_FEATURE_PCLMULQDQ),
+	X86_MATCH_FEATURE(X86_FEATURE_PCLMULQDQ, NULL),
 	{}
 };
 MODULE_DEVICE_TABLE(x86cpu, crc32pclmul_cpu_id);

@@ -18,6 +18,10 @@
 #include <linux/buffer_head.h>
 #include <linux/falloc.h>
 #include <linux/sched/signal.h>
+#include <linux/fiemap.h>
+#include <linux/mount.h>
+#include <linux/fscrypt.h>
+#include <linux/fileattr.h>
 
 #include "internal.h"
 
@@ -55,6 +59,7 @@ EXPORT_SYMBOL(vfs_ioctl);
 static int ioctl_fibmap(struct file *filp, int __user *p)
 {
 	struct inode *inode = file_inode(filp);
+	struct super_block *sb = inode->i_sb;
 	int error, ur_block;
 	sector_t block;
 
@@ -70,6 +75,13 @@ static int ioctl_fibmap(struct file *filp, int __user *p)
 
 	block = ur_block;
 	error = bmap(inode, &block);
+
+	if (block > INT_MAX) {
+		error = -ERANGE;
+		pr_warn_ratelimited("[%s/%d] FS: %s File: %pD4 would truncate fibmap result\n",
+				    current->comm, task_pid_nr(current),
+				    sb->s_id, filp);
+	}
 
 	if (error)
 		ur_block = 0;
@@ -140,61 +152,55 @@ int fiemap_fill_next_extent(struct fiemap_extent_info *fieinfo, u64 logical,
 EXPORT_SYMBOL(fiemap_fill_next_extent);
 
 /**
- * fiemap_check_flags - check validity of requested flags for fiemap
+ * fiemap_prep - check validity of requested flags for fiemap
+ * @inode:	Inode to operate on
  * @fieinfo:	Fiemap context passed into ->fiemap
- * @fs_flags:	Set of fiemap flags that the file system understands
+ * @start:	Start of the mapped range
+ * @len:	Length of the mapped range, can be truncated by this function.
+ * @supported_flags:	Set of fiemap flags that the file system understands
  *
- * Called from file system ->fiemap callback. This will compute the
- * intersection of valid fiemap flags and those that the fs supports. That
- * value is then compared against the user supplied flags. In case of bad user
- * flags, the invalid values will be written into the fieinfo structure, and
- * -EBADR is returned, which tells ioctl_fiemap() to return those values to
- * userspace. For this reason, a return code of -EBADR should be preserved.
+ * This function must be called from each ->fiemap instance to validate the
+ * fiemap request against the file system parameters.
  *
- * Returns 0 on success, -EBADR on bad flags.
+ * Returns 0 on success, or a negative error on failure.
  */
-int fiemap_check_flags(struct fiemap_extent_info *fieinfo, u32 fs_flags)
+int fiemap_prep(struct inode *inode, struct fiemap_extent_info *fieinfo,
+		u64 start, u64 *len, u32 supported_flags)
 {
+	u64 maxbytes = inode->i_sb->s_maxbytes;
 	u32 incompat_flags;
+	int ret = 0;
 
-	incompat_flags = fieinfo->fi_flags & ~(FIEMAP_FLAGS_COMPAT & fs_flags);
-	if (incompat_flags) {
-		fieinfo->fi_flags = incompat_flags;
-		return -EBADR;
-	}
-	return 0;
-}
-EXPORT_SYMBOL(fiemap_check_flags);
-
-static int fiemap_check_ranges(struct super_block *sb,
-			       u64 start, u64 len, u64 *new_len)
-{
-	u64 maxbytes = (u64) sb->s_maxbytes;
-
-	*new_len = len;
-
-	if (len == 0)
+	if (*len == 0)
 		return -EINVAL;
-
-	if (start > maxbytes)
+	if (start >= maxbytes)
 		return -EFBIG;
 
 	/*
 	 * Shrink request scope to what the fs can actually handle.
 	 */
-	if (len > maxbytes || (maxbytes - len) < start)
-		*new_len = maxbytes - start;
+	if (*len > maxbytes || (maxbytes - *len) < start)
+		*len = maxbytes - start;
 
-	return 0;
+	supported_flags |= FIEMAP_FLAG_SYNC;
+	supported_flags &= FIEMAP_FLAGS_COMPAT;
+	incompat_flags = fieinfo->fi_flags & ~supported_flags;
+	if (incompat_flags) {
+		fieinfo->fi_flags = incompat_flags;
+		return -EBADR;
+	}
+
+	if (fieinfo->fi_flags & FIEMAP_FLAG_SYNC)
+		ret = filemap_write_and_wait(inode->i_mapping);
+	return ret;
 }
+EXPORT_SYMBOL(fiemap_prep);
 
 static int ioctl_fiemap(struct file *filp, struct fiemap __user *ufiemap)
 {
 	struct fiemap fiemap;
 	struct fiemap_extent_info fieinfo = { 0, };
 	struct inode *inode = file_inode(filp);
-	struct super_block *sb = inode->i_sb;
-	u64 len;
 	int error;
 
 	if (!inode->i_op->fiemap)
@@ -206,24 +212,13 @@ static int ioctl_fiemap(struct file *filp, struct fiemap __user *ufiemap)
 	if (fiemap.fm_extent_count > FIEMAP_MAX_EXTENTS)
 		return -EINVAL;
 
-	error = fiemap_check_ranges(sb, fiemap.fm_start, fiemap.fm_length,
-				    &len);
-	if (error)
-		return error;
-
 	fieinfo.fi_flags = fiemap.fm_flags;
 	fieinfo.fi_extents_max = fiemap.fm_extent_count;
 	fieinfo.fi_extents_start = ufiemap->fm_extents;
 
-	if (fiemap.fm_extent_count != 0 &&
-	    !access_ok(fieinfo.fi_extents_start,
-		       fieinfo.fi_extents_max * sizeof(struct fiemap_extent)))
-		return -EFAULT;
+	error = inode->i_op->fiemap(inode, &fieinfo, fiemap.fm_start,
+			fiemap.fm_length);
 
-	if (fieinfo.fi_flags & FIEMAP_FLAG_SYNC)
-		filemap_write_and_wait(inode->i_mapping);
-
-	error = inode->i_op->fiemap(inode, &fieinfo, fiemap.fm_start, len);
 	fiemap.fm_flags = fieinfo.fi_flags;
 	fiemap.fm_mapped_extents = fieinfo.fi_extents_mapped;
 	if (copy_to_user(ufiemap, &fiemap, sizeof(fiemap)))
@@ -241,9 +236,6 @@ static long ioctl_file_clone(struct file *dst_file, unsigned long srcfd,
 
 	if (!src_file.file)
 		return -EBADF;
-	ret = -EXDEV;
-	if (src_file.file->f_path.mnt != dst_file->f_path.mnt)
-		goto fdput;
 	cloned = vfs_clone_file_range(src_file.file, off, dst_file, destoff,
 				      olen, 0);
 	if (cloned < 0)
@@ -252,7 +244,6 @@ static long ioctl_file_clone(struct file *dst_file, unsigned long srcfd,
 		ret = -EINVAL;
 	else
 		ret = 0;
-fdput:
 	fdput(src_file);
 	return ret;
 }
@@ -267,211 +258,6 @@ static long ioctl_file_clone_range(struct file *file,
 	return ioctl_file_clone(file, args.src_fd, args.src_offset,
 				args.src_length, args.dest_offset);
 }
-
-#ifdef CONFIG_BLOCK
-
-static inline sector_t logical_to_blk(struct inode *inode, loff_t offset)
-{
-	return (offset >> inode->i_blkbits);
-}
-
-static inline loff_t blk_to_logical(struct inode *inode, sector_t blk)
-{
-	return (blk << inode->i_blkbits);
-}
-
-/**
- * __generic_block_fiemap - FIEMAP for block based inodes (no locking)
- * @inode: the inode to map
- * @fieinfo: the fiemap info struct that will be passed back to userspace
- * @start: where to start mapping in the inode
- * @len: how much space to map
- * @get_block: the fs's get_block function
- *
- * This does FIEMAP for block based inodes.  Basically it will just loop
- * through get_block until we hit the number of extents we want to map, or we
- * go past the end of the file and hit a hole.
- *
- * If it is possible to have data blocks beyond a hole past @inode->i_size, then
- * please do not use this function, it will stop at the first unmapped block
- * beyond i_size.
- *
- * If you use this function directly, you need to do your own locking. Use
- * generic_block_fiemap if you want the locking done for you.
- */
-
-int __generic_block_fiemap(struct inode *inode,
-			   struct fiemap_extent_info *fieinfo, loff_t start,
-			   loff_t len, get_block_t *get_block)
-{
-	struct buffer_head map_bh;
-	sector_t start_blk, last_blk;
-	loff_t isize = i_size_read(inode);
-	u64 logical = 0, phys = 0, size = 0;
-	u32 flags = FIEMAP_EXTENT_MERGED;
-	bool past_eof = false, whole_file = false;
-	int ret = 0;
-
-	ret = fiemap_check_flags(fieinfo, FIEMAP_FLAG_SYNC);
-	if (ret)
-		return ret;
-
-	/*
-	 * Either the i_mutex or other appropriate locking needs to be held
-	 * since we expect isize to not change at all through the duration of
-	 * this call.
-	 */
-	if (len >= isize) {
-		whole_file = true;
-		len = isize;
-	}
-
-	/*
-	 * Some filesystems can't deal with being asked to map less than
-	 * blocksize, so make sure our len is at least block length.
-	 */
-	if (logical_to_blk(inode, len) == 0)
-		len = blk_to_logical(inode, 1);
-
-	start_blk = logical_to_blk(inode, start);
-	last_blk = logical_to_blk(inode, start + len - 1);
-
-	do {
-		/*
-		 * we set b_size to the total size we want so it will map as
-		 * many contiguous blocks as possible at once
-		 */
-		memset(&map_bh, 0, sizeof(struct buffer_head));
-		map_bh.b_size = len;
-
-		ret = get_block(inode, start_blk, &map_bh, 0);
-		if (ret)
-			break;
-
-		/* HOLE */
-		if (!buffer_mapped(&map_bh)) {
-			start_blk++;
-
-			/*
-			 * We want to handle the case where there is an
-			 * allocated block at the front of the file, and then
-			 * nothing but holes up to the end of the file properly,
-			 * to make sure that extent at the front gets properly
-			 * marked with FIEMAP_EXTENT_LAST
-			 */
-			if (!past_eof &&
-			    blk_to_logical(inode, start_blk) >= isize)
-				past_eof = 1;
-
-			/*
-			 * First hole after going past the EOF, this is our
-			 * last extent
-			 */
-			if (past_eof && size) {
-				flags = FIEMAP_EXTENT_MERGED|FIEMAP_EXTENT_LAST;
-				ret = fiemap_fill_next_extent(fieinfo, logical,
-							      phys, size,
-							      flags);
-			} else if (size) {
-				ret = fiemap_fill_next_extent(fieinfo, logical,
-							      phys, size, flags);
-				size = 0;
-			}
-
-			/* if we have holes up to/past EOF then we're done */
-			if (start_blk > last_blk || past_eof || ret)
-				break;
-		} else {
-			/*
-			 * We have gone over the length of what we wanted to
-			 * map, and it wasn't the entire file, so add the extent
-			 * we got last time and exit.
-			 *
-			 * This is for the case where say we want to map all the
-			 * way up to the second to the last block in a file, but
-			 * the last block is a hole, making the second to last
-			 * block FIEMAP_EXTENT_LAST.  In this case we want to
-			 * see if there is a hole after the second to last block
-			 * so we can mark it properly.  If we found data after
-			 * we exceeded the length we were requesting, then we
-			 * are good to go, just add the extent to the fieinfo
-			 * and break
-			 */
-			if (start_blk > last_blk && !whole_file) {
-				ret = fiemap_fill_next_extent(fieinfo, logical,
-							      phys, size,
-							      flags);
-				break;
-			}
-
-			/*
-			 * if size != 0 then we know we already have an extent
-			 * to add, so add it.
-			 */
-			if (size) {
-				ret = fiemap_fill_next_extent(fieinfo, logical,
-							      phys, size,
-							      flags);
-				if (ret)
-					break;
-			}
-
-			logical = blk_to_logical(inode, start_blk);
-			phys = blk_to_logical(inode, map_bh.b_blocknr);
-			size = map_bh.b_size;
-			flags = FIEMAP_EXTENT_MERGED;
-
-			start_blk += logical_to_blk(inode, size);
-
-			/*
-			 * If we are past the EOF, then we need to make sure as
-			 * soon as we find a hole that the last extent we found
-			 * is marked with FIEMAP_EXTENT_LAST
-			 */
-			if (!past_eof && logical + size >= isize)
-				past_eof = true;
-		}
-		cond_resched();
-		if (fatal_signal_pending(current)) {
-			ret = -EINTR;
-			break;
-		}
-
-	} while (1);
-
-	/* If ret is 1 then we just hit the end of the extent array */
-	if (ret == 1)
-		ret = 0;
-
-	return ret;
-}
-EXPORT_SYMBOL(__generic_block_fiemap);
-
-/**
- * generic_block_fiemap - FIEMAP for block based inodes
- * @inode: The inode to map
- * @fieinfo: The mapping information
- * @start: The initial block to map
- * @len: The length of the extect to attempt to map
- * @get_block: The block mapping function for the fs
- *
- * Calls __generic_block_fiemap to map the inode, after taking
- * the inode's mutex lock.
- */
-
-int generic_block_fiemap(struct inode *inode,
-			 struct fiemap_extent_info *fieinfo, u64 start,
-			 u64 len, get_block_t *get_block)
-{
-	int ret;
-	inode_lock(inode);
-	ret = __generic_block_fiemap(inode, fieinfo, start, len, get_block);
-	inode_unlock(inode);
-	return ret;
-}
-EXPORT_SYMBOL(generic_block_fiemap);
-
-#endif  /*  CONFIG_BLOCK  */
 
 /*
  * This provides compatibility with legacy XFS pre-allocation ioctls
@@ -640,7 +426,7 @@ static int ioctl_file_dedupe_range(struct file *file,
 		goto out;
 	}
 
-	size = offsetof(struct file_dedupe_range __user, info[count]);
+	size = offsetof(struct file_dedupe_range, info[count]);
 	if (size > PAGE_SIZE) {
 		ret = -ENOMEM;
 		goto out;
@@ -665,6 +451,315 @@ static int ioctl_file_dedupe_range(struct file *file,
 out:
 	kfree(same);
 	return ret;
+}
+
+/**
+ * fileattr_fill_xflags - initialize fileattr with xflags
+ * @fa:		fileattr pointer
+ * @xflags:	FS_XFLAG_* flags
+ *
+ * Set ->fsx_xflags, ->fsx_valid and ->flags (translated xflags).  All
+ * other fields are zeroed.
+ */
+void fileattr_fill_xflags(struct fileattr *fa, u32 xflags)
+{
+	memset(fa, 0, sizeof(*fa));
+	fa->fsx_valid = true;
+	fa->fsx_xflags = xflags;
+	if (fa->fsx_xflags & FS_XFLAG_IMMUTABLE)
+		fa->flags |= FS_IMMUTABLE_FL;
+	if (fa->fsx_xflags & FS_XFLAG_APPEND)
+		fa->flags |= FS_APPEND_FL;
+	if (fa->fsx_xflags & FS_XFLAG_SYNC)
+		fa->flags |= FS_SYNC_FL;
+	if (fa->fsx_xflags & FS_XFLAG_NOATIME)
+		fa->flags |= FS_NOATIME_FL;
+	if (fa->fsx_xflags & FS_XFLAG_NODUMP)
+		fa->flags |= FS_NODUMP_FL;
+	if (fa->fsx_xflags & FS_XFLAG_DAX)
+		fa->flags |= FS_DAX_FL;
+	if (fa->fsx_xflags & FS_XFLAG_PROJINHERIT)
+		fa->flags |= FS_PROJINHERIT_FL;
+}
+EXPORT_SYMBOL(fileattr_fill_xflags);
+
+/**
+ * fileattr_fill_flags - initialize fileattr with flags
+ * @fa:		fileattr pointer
+ * @flags:	FS_*_FL flags
+ *
+ * Set ->flags, ->flags_valid and ->fsx_xflags (translated flags).
+ * All other fields are zeroed.
+ */
+void fileattr_fill_flags(struct fileattr *fa, u32 flags)
+{
+	memset(fa, 0, sizeof(*fa));
+	fa->flags_valid = true;
+	fa->flags = flags;
+	if (fa->flags & FS_SYNC_FL)
+		fa->fsx_xflags |= FS_XFLAG_SYNC;
+	if (fa->flags & FS_IMMUTABLE_FL)
+		fa->fsx_xflags |= FS_XFLAG_IMMUTABLE;
+	if (fa->flags & FS_APPEND_FL)
+		fa->fsx_xflags |= FS_XFLAG_APPEND;
+	if (fa->flags & FS_NODUMP_FL)
+		fa->fsx_xflags |= FS_XFLAG_NODUMP;
+	if (fa->flags & FS_NOATIME_FL)
+		fa->fsx_xflags |= FS_XFLAG_NOATIME;
+	if (fa->flags & FS_DAX_FL)
+		fa->fsx_xflags |= FS_XFLAG_DAX;
+	if (fa->flags & FS_PROJINHERIT_FL)
+		fa->fsx_xflags |= FS_XFLAG_PROJINHERIT;
+}
+EXPORT_SYMBOL(fileattr_fill_flags);
+
+/**
+ * vfs_fileattr_get - retrieve miscellaneous file attributes
+ * @dentry:	the object to retrieve from
+ * @fa:		fileattr pointer
+ *
+ * Call i_op->fileattr_get() callback, if exists.
+ *
+ * Return: 0 on success, or a negative error on failure.
+ */
+int vfs_fileattr_get(struct dentry *dentry, struct fileattr *fa)
+{
+	struct inode *inode = d_inode(dentry);
+
+	if (!inode->i_op->fileattr_get)
+		return -ENOIOCTLCMD;
+
+	return inode->i_op->fileattr_get(dentry, fa);
+}
+EXPORT_SYMBOL(vfs_fileattr_get);
+
+/**
+ * copy_fsxattr_to_user - copy fsxattr to userspace.
+ * @fa:		fileattr pointer
+ * @ufa:	fsxattr user pointer
+ *
+ * Return: 0 on success, or -EFAULT on failure.
+ */
+int copy_fsxattr_to_user(const struct fileattr *fa, struct fsxattr __user *ufa)
+{
+	struct fsxattr xfa;
+
+	memset(&xfa, 0, sizeof(xfa));
+	xfa.fsx_xflags = fa->fsx_xflags;
+	xfa.fsx_extsize = fa->fsx_extsize;
+	xfa.fsx_nextents = fa->fsx_nextents;
+	xfa.fsx_projid = fa->fsx_projid;
+	xfa.fsx_cowextsize = fa->fsx_cowextsize;
+
+	if (copy_to_user(ufa, &xfa, sizeof(xfa)))
+		return -EFAULT;
+
+	return 0;
+}
+EXPORT_SYMBOL(copy_fsxattr_to_user);
+
+static int copy_fsxattr_from_user(struct fileattr *fa,
+				  struct fsxattr __user *ufa)
+{
+	struct fsxattr xfa;
+
+	if (copy_from_user(&xfa, ufa, sizeof(xfa)))
+		return -EFAULT;
+
+	fileattr_fill_xflags(fa, xfa.fsx_xflags);
+	fa->fsx_extsize = xfa.fsx_extsize;
+	fa->fsx_nextents = xfa.fsx_nextents;
+	fa->fsx_projid = xfa.fsx_projid;
+	fa->fsx_cowextsize = xfa.fsx_cowextsize;
+
+	return 0;
+}
+
+/*
+ * Generic function to check FS_IOC_FSSETXATTR/FS_IOC_SETFLAGS values and reject
+ * any invalid configurations.
+ *
+ * Note: must be called with inode lock held.
+ */
+static int fileattr_set_prepare(struct inode *inode,
+			      const struct fileattr *old_ma,
+			      struct fileattr *fa)
+{
+	int err;
+
+	/*
+	 * The IMMUTABLE and APPEND_ONLY flags can only be changed by
+	 * the relevant capability.
+	 */
+	if ((fa->flags ^ old_ma->flags) & (FS_APPEND_FL | FS_IMMUTABLE_FL) &&
+	    !capable(CAP_LINUX_IMMUTABLE))
+		return -EPERM;
+
+	err = fscrypt_prepare_setflags(inode, old_ma->flags, fa->flags);
+	if (err)
+		return err;
+
+	/*
+	 * Project Quota ID state is only allowed to change from within the init
+	 * namespace. Enforce that restriction only if we are trying to change
+	 * the quota ID state. Everything else is allowed in user namespaces.
+	 */
+	if (current_user_ns() != &init_user_ns) {
+		if (old_ma->fsx_projid != fa->fsx_projid)
+			return -EINVAL;
+		if ((old_ma->fsx_xflags ^ fa->fsx_xflags) &
+				FS_XFLAG_PROJINHERIT)
+			return -EINVAL;
+	} else {
+		/*
+		 * Caller is allowed to change the project ID. If it is being
+		 * changed, make sure that the new value is valid.
+		 */
+		if (old_ma->fsx_projid != fa->fsx_projid &&
+		    !projid_valid(make_kprojid(&init_user_ns, fa->fsx_projid)))
+			return -EINVAL;
+	}
+
+	/* Check extent size hints. */
+	if ((fa->fsx_xflags & FS_XFLAG_EXTSIZE) && !S_ISREG(inode->i_mode))
+		return -EINVAL;
+
+	if ((fa->fsx_xflags & FS_XFLAG_EXTSZINHERIT) &&
+			!S_ISDIR(inode->i_mode))
+		return -EINVAL;
+
+	if ((fa->fsx_xflags & FS_XFLAG_COWEXTSIZE) &&
+	    !S_ISREG(inode->i_mode) && !S_ISDIR(inode->i_mode))
+		return -EINVAL;
+
+	/*
+	 * It is only valid to set the DAX flag on regular files and
+	 * directories on filesystems.
+	 */
+	if ((fa->fsx_xflags & FS_XFLAG_DAX) &&
+	    !(S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode)))
+		return -EINVAL;
+
+	/* Extent size hints of zero turn off the flags. */
+	if (fa->fsx_extsize == 0)
+		fa->fsx_xflags &= ~(FS_XFLAG_EXTSIZE | FS_XFLAG_EXTSZINHERIT);
+	if (fa->fsx_cowextsize == 0)
+		fa->fsx_xflags &= ~FS_XFLAG_COWEXTSIZE;
+
+	return 0;
+}
+
+/**
+ * vfs_fileattr_set - change miscellaneous file attributes
+ * @idmap:	idmap of the mount
+ * @dentry:	the object to change
+ * @fa:		fileattr pointer
+ *
+ * After verifying permissions, call i_op->fileattr_set() callback, if
+ * exists.
+ *
+ * Verifying attributes involves retrieving current attributes with
+ * i_op->fileattr_get(), this also allows initializing attributes that have
+ * not been set by the caller to current values.  Inode lock is held
+ * thoughout to prevent racing with another instance.
+ *
+ * Return: 0 on success, or a negative error on failure.
+ */
+int vfs_fileattr_set(struct mnt_idmap *idmap, struct dentry *dentry,
+		     struct fileattr *fa)
+{
+	struct inode *inode = d_inode(dentry);
+	struct fileattr old_ma = {};
+	int err;
+
+	if (!inode->i_op->fileattr_set)
+		return -ENOIOCTLCMD;
+
+	if (!inode_owner_or_capable(idmap, inode))
+		return -EPERM;
+
+	inode_lock(inode);
+	err = vfs_fileattr_get(dentry, &old_ma);
+	if (!err) {
+		/* initialize missing bits from old_ma */
+		if (fa->flags_valid) {
+			fa->fsx_xflags |= old_ma.fsx_xflags & ~FS_XFLAG_COMMON;
+			fa->fsx_extsize = old_ma.fsx_extsize;
+			fa->fsx_nextents = old_ma.fsx_nextents;
+			fa->fsx_projid = old_ma.fsx_projid;
+			fa->fsx_cowextsize = old_ma.fsx_cowextsize;
+		} else {
+			fa->flags |= old_ma.flags & ~FS_COMMON_FL;
+		}
+		err = fileattr_set_prepare(inode, &old_ma, fa);
+		if (!err)
+			err = inode->i_op->fileattr_set(idmap, dentry, fa);
+	}
+	inode_unlock(inode);
+
+	return err;
+}
+EXPORT_SYMBOL(vfs_fileattr_set);
+
+static int ioctl_getflags(struct file *file, unsigned int __user *argp)
+{
+	struct fileattr fa = { .flags_valid = true }; /* hint only */
+	int err;
+
+	err = vfs_fileattr_get(file->f_path.dentry, &fa);
+	if (!err)
+		err = put_user(fa.flags, argp);
+	return err;
+}
+
+static int ioctl_setflags(struct file *file, unsigned int __user *argp)
+{
+	struct mnt_idmap *idmap = file_mnt_idmap(file);
+	struct dentry *dentry = file->f_path.dentry;
+	struct fileattr fa;
+	unsigned int flags;
+	int err;
+
+	err = get_user(flags, argp);
+	if (!err) {
+		err = mnt_want_write_file(file);
+		if (!err) {
+			fileattr_fill_flags(&fa, flags);
+			err = vfs_fileattr_set(idmap, dentry, &fa);
+			mnt_drop_write_file(file);
+		}
+	}
+	return err;
+}
+
+static int ioctl_fsgetxattr(struct file *file, void __user *argp)
+{
+	struct fileattr fa = { .fsx_valid = true }; /* hint only */
+	int err;
+
+	err = vfs_fileattr_get(file->f_path.dentry, &fa);
+	if (!err)
+		err = copy_fsxattr_to_user(&fa, argp);
+
+	return err;
+}
+
+static int ioctl_fssetxattr(struct file *file, void __user *argp)
+{
+	struct mnt_idmap *idmap = file_mnt_idmap(file);
+	struct dentry *dentry = file->f_path.dentry;
+	struct fileattr fa;
+	int err;
+
+	err = copy_fsxattr_from_user(&fa, argp);
+	if (!err) {
+		err = mnt_want_write_file(file);
+		if (!err) {
+			err = vfs_fileattr_set(idmap, dentry, &fa);
+			mnt_drop_write_file(file);
+		}
+	}
+	return err;
 }
 
 /*
@@ -737,6 +832,18 @@ static int do_vfs_ioctl(struct file *filp, unsigned int fd,
 		return put_user(i_size_read(inode) - filp->f_pos,
 				(int __user *)argp);
 
+	case FS_IOC_GETFLAGS:
+		return ioctl_getflags(filp, argp);
+
+	case FS_IOC_SETFLAGS:
+		return ioctl_setflags(filp, argp);
+
+	case FS_IOC_FSGETXATTR:
+		return ioctl_fsgetxattr(filp, argp);
+
+	case FS_IOC_FSSETXATTR:
+		return ioctl_fssetxattr(filp, argp);
+
 	default:
 		if (S_ISREG(inode->i_mode))
 			return file_ioctl(filp, cmd, argp);
@@ -746,7 +853,7 @@ static int do_vfs_ioctl(struct file *filp, unsigned int fd,
 	return -ENOIOCTLCMD;
 }
 
-int ksys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
+SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd, unsigned long, arg)
 {
 	struct fd f = fdget(fd);
 	int error;
@@ -765,11 +872,6 @@ int ksys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 out:
 	fdput(f);
 	return error;
-}
-
-SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd, unsigned long, arg)
-{
-	return ksys_ioctl(fd, cmd, arg);
 }
 
 #ifdef CONFIG_COMPAT
@@ -842,6 +944,15 @@ COMPAT_SYSCALL_DEFINE3(ioctl, unsigned int, fd, unsigned int, cmd,
 		break;
 #endif
 
+	/*
+	 * These access 32-bit values anyway so no further handling is
+	 * necessary.
+	 */
+	case FS_IOC32_GETFLAGS:
+	case FS_IOC32_SETFLAGS:
+		cmd = (cmd == FS_IOC32_GETFLAGS) ?
+			FS_IOC_GETFLAGS : FS_IOC_SETFLAGS;
+		fallthrough;
 	/*
 	 * everything else in do_vfs_ioctl() takes either a compatible
 	 * pointer argument or no argument -- call it with a modified

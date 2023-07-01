@@ -1,5 +1,5 @@
 /*
- * Copyright 2016 Advanced Micro Devices, Inc.
+ * Copyright 2016-2020 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -28,12 +28,17 @@
 #include "dcn20/dcn20_hwseq.h"
 #include "dcn21_hwseq.h"
 
+#include "dcn21_init.h"
+
 static const struct hw_sequencer_funcs dcn21_funcs = {
 	.program_gamut_remap = dcn10_program_gamut_remap,
 	.init_hw = dcn10_init_hw,
+	.power_down_on_boot = dcn10_power_down_on_boot,
 	.apply_ctx_to_hw = dce110_apply_ctx_to_hw,
 	.apply_ctx_for_surface = NULL,
 	.program_front_end_for_ctx = dcn20_program_front_end_for_ctx,
+	.wait_for_pending_cleared = dcn10_wait_for_pending_cleared,
+	.post_unlock_program_front_end = dcn20_post_unlock_program_front_end,
 	.update_plane_addr = dcn20_update_plane_addr,
 	.update_dchub = dcn10_update_dchub,
 	.update_pending_status = dcn10_update_pending_status,
@@ -51,7 +56,8 @@ static const struct hw_sequencer_funcs dcn21_funcs = {
 	.disable_audio_stream = dce110_disable_audio_stream,
 	.disable_plane = dcn20_disable_plane,
 	.pipe_control_lock = dcn20_pipe_control_lock,
-	.pipe_control_lock_global = dcn20_pipe_control_lock_global,
+	.interdependent_update_lock = dcn10_lock_all_pipes,
+	.cursor_lock = dcn10_cursor_lock,
 	.prepare_bandwidth = dcn20_prepare_bandwidth,
 	.optimize_bandwidth = dcn20_optimize_bandwidth,
 	.update_bandwidth = dcn20_update_bandwidth,
@@ -64,6 +70,7 @@ static const struct hw_sequencer_funcs dcn21_funcs = {
 	.get_hw_state = dcn10_get_hw_state,
 	.clear_status_bits = dcn10_clear_status_bits,
 	.wait_for_mpcc_disconnect = dcn10_wait_for_mpcc_disconnect,
+	.edp_backlight_control = dce110_edp_backlight_control,
 	.edp_power_control = dce110_edp_power_control,
 	.edp_wait_for_hpd_ready = dce110_edp_wait_for_hpd_ready,
 	.set_cursor_position = dcn10_set_cursor_position,
@@ -84,11 +91,22 @@ static const struct hw_sequencer_funcs dcn21_funcs = {
 	.optimize_pwr_state = dcn21_optimize_pwr_state,
 	.exit_optimized_pwr_state = dcn21_exit_optimized_pwr_state,
 	.get_vupdate_offset_from_vsync = dcn10_get_vupdate_offset_from_vsync,
-	.set_cursor_position = dcn10_set_cursor_position,
-	.set_cursor_attribute = dcn10_set_cursor_attribute,
-	.set_cursor_sdr_white_level = dcn10_set_cursor_sdr_white_level,
-	.optimize_pwr_state = dcn21_optimize_pwr_state,
-	.exit_optimized_pwr_state = dcn21_exit_optimized_pwr_state,
+	.calc_vupdate_position = dcn10_calc_vupdate_position,
+	.power_down = dce110_power_down,
+	.set_backlight_level = dcn21_set_backlight_level,
+	.set_abm_immediate_disable = dcn21_set_abm_immediate_disable,
+	.set_pipe = dcn21_set_pipe,
+#ifndef TRIM_FSFT
+	.optimize_timing_for_fsft = dcn20_optimize_timing_for_fsft,
+#endif
+	.enable_lvds_link_output = dce110_enable_lvds_link_output,
+	.enable_tmds_link_output = dce110_enable_tmds_link_output,
+	.enable_dp_link_output = dce110_enable_dp_link_output,
+	.disable_link_output = dce110_disable_link_output,
+	.is_abm_supported = dcn21_is_abm_supported,
+	.set_disp_pattern_generator = dcn20_set_disp_pattern_generator,
+	.get_dcc_en_bits = dcn10_get_dcc_en_bits,
+	.update_visual_confirm_color = dcn20_update_visual_confirm_color,
 };
 
 static const struct hwseq_private_funcs dcn21_private_funcs = {
@@ -116,11 +134,8 @@ static const struct hwseq_private_funcs dcn21_private_funcs = {
 	.enable_power_gating_plane = dcn20_enable_power_gating_plane,
 	.dpp_pg_control = dcn20_dpp_pg_control,
 	.hubp_pg_control = dcn20_hubp_pg_control,
-	.dsc_pg_control = NULL,
 	.update_odm = dcn20_update_odm,
 	.dsc_pg_control = dcn20_dsc_pg_control,
-	.get_surface_visual_confirm_color = dcn10_get_surface_visual_confirm_color,
-	.get_hdr_visual_confirm_color = dcn10_get_hdr_visual_confirm_color,
 	.set_hdr_multiplier = dcn10_set_hdr_multiplier,
 	.verify_allow_pstate_change_high = dcn10_verify_allow_pstate_change_high,
 	.s0i3_golden_init_wa = dcn21_s0i3_golden_init_wa,
@@ -128,6 +143,7 @@ static const struct hwseq_private_funcs dcn21_private_funcs = {
 	.dccg_init = dcn20_dccg_init,
 	.set_blend_lut = dcn20_set_blend_lut,
 	.set_shaper_3dlut = dcn20_set_shaper_3dlut,
+	.PLAT_58856_wa = dcn21_PLAT_58856_wa,
 };
 
 void dcn21_hw_sequencer_construct(struct dc *dc)

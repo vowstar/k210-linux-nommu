@@ -17,9 +17,13 @@
  * blocks below. Those offsets must be multiplied by 4 before adding them to
  * the base address to get the right value
  *
- * [0] http://dn.odroid.com/S805/Datasheet/S805_Datasheet%20V0.8%2020150126.pdf
+ * [0] https://dn.odroid.com/S805/Datasheet/S805_Datasheet%20V0.8%2020150126.pdf
  */
 #define HHI_GP_PLL_CNTL			0x40  /* 0x10 offset in data sheet */
+#define HHI_GP_PLL_CNTL2		0x44  /* 0x11 offset in data sheet */
+#define HHI_GP_PLL_CNTL3		0x48  /* 0x12 offset in data sheet */
+#define HHI_GP_PLL_CNTL4		0x4C  /* 0x13 offset in data sheet */
+#define HHI_GP_PLL_CNTL5		0x50  /* 0x14 offset in data sheet */
 #define HHI_VIID_CLK_DIV		0x128 /* 0x4a offset in data sheet */
 #define HHI_VIID_CLK_CNTL		0x12c /* 0x4b offset in data sheet */
 #define HHI_GCLK_MPEG0			0x140 /* 0x50 offset in data sheet */
@@ -47,6 +51,16 @@
 #define HHI_SYS_PLL_CNTL		0x300 /* 0xc0 offset in data sheet */
 #define HHI_VID_PLL_CNTL		0x320 /* 0xc8 offset in data sheet */
 #define HHI_VID_PLL_CNTL2		0x324 /* 0xc9 offset in data sheet */
+#define HHI_VID_PLL_CNTL3		0x328 /* 0xca offset in data sheet */
+#define HHI_VID_PLL_CNTL4		0x32c /* 0xcb offset in data sheet */
+#define HHI_VID_PLL_CNTL5		0x330 /* 0xcc offset in data sheet */
+#define HHI_VID_PLL_CNTL6		0x334 /* 0xcd offset in data sheet */
+#define HHI_VID2_PLL_CNTL		0x380 /* 0xe0 offset in data sheet */
+#define HHI_VID2_PLL_CNTL2		0x384 /* 0xe1 offset in data sheet */
+#define HHI_VID2_PLL_CNTL3		0x388 /* 0xe2 offset in data sheet */
+#define HHI_VID2_PLL_CNTL4		0x38c /* 0xe3 offset in data sheet */
+#define HHI_VID2_PLL_CNTL5		0x390 /* 0xe4 offset in data sheet */
+#define HHI_VID2_PLL_CNTL6		0x394 /* 0xe5 offset in data sheet */
 
 /*
  * MPLL register offeset taken from the S905 datasheet. Vendor kernel source
@@ -103,14 +117,11 @@
 #define CLKID_PERIPH_SEL	125
 #define CLKID_AXI_SEL		127
 #define CLKID_L2_DRAM_SEL	129
-#define CLKID_HDMI_PLL_LVDS_OUT	131
-#define CLKID_HDMI_PLL_HDMI_OUT	132
+#define CLKID_HDMI_PLL_LVDS_OUT 131
 #define CLKID_VID_PLL_IN_SEL	133
 #define CLKID_VID_PLL_IN_EN	134
 #define CLKID_VID_PLL_PRE_DIV	135
 #define CLKID_VID_PLL_POST_DIV	136
-#define CLKID_VID_PLL_FINAL_DIV	137
-#define CLKID_VCLK_IN_SEL	138
 #define CLKID_VCLK_IN_EN	139
 #define CLKID_VCLK_DIV1		140
 #define CLKID_VCLK_DIV2_DIV	141
@@ -121,7 +132,6 @@
 #define CLKID_VCLK_DIV6		146
 #define CLKID_VCLK_DIV12_DIV	147
 #define CLKID_VCLK_DIV12	148
-#define CLKID_VCLK2_IN_SEL	149
 #define CLKID_VCLK2_IN_EN	150
 #define CLKID_VCLK2_DIV1	151
 #define CLKID_VCLK2_DIV2_DIV	152
@@ -133,20 +143,13 @@
 #define CLKID_VCLK2_DIV12_DIV	158
 #define CLKID_VCLK2_DIV12	159
 #define CLKID_CTS_ENCT_SEL	160
-#define CLKID_CTS_ENCT		161
 #define CLKID_CTS_ENCP_SEL	162
-#define CLKID_CTS_ENCP		163
 #define CLKID_CTS_ENCI_SEL	164
-#define CLKID_CTS_ENCI		165
 #define CLKID_HDMI_TX_PIXEL_SEL	166
-#define CLKID_HDMI_TX_PIXEL	167
 #define CLKID_CTS_ENCL_SEL	168
-#define CLKID_CTS_ENCL		169
 #define CLKID_CTS_VDAC0_SEL	170
-#define CLKID_CTS_VDAC0		171
 #define CLKID_HDMI_SYS_SEL	172
 #define CLKID_HDMI_SYS_DIV	173
-#define CLKID_HDMI_SYS		174
 #define CLKID_MALI_0_SEL	175
 #define CLKID_MALI_0_DIV	176
 #define CLKID_MALI_0		177
@@ -177,8 +180,12 @@
 #define CLKID_CTS_AMCLK_DIV	208
 #define CLKID_CTS_MCLK_I958_SEL	210
 #define CLKID_CTS_MCLK_I958_DIV	211
+#define CLKID_VCLK_EN		214
+#define CLKID_VCLK2_EN		215
+#define CLKID_VID_PLL_LVDS_EN	216
+#define CLKID_HDMI_PLL_DCO_IN   217
 
-#define CLK_NR_CLKS		214
+#define CLK_NR_CLKS		218
 
 /*
  * include the CLKID and RESETID that have

@@ -84,9 +84,10 @@ int dlm_recover_directory(struct dlm_ls *ls)
 
 		for (;;) {
 			int left;
-			error = dlm_recovery_stopped(ls);
-			if (error)
+			if (dlm_recovery_stopped(ls)) {
+				error = -EINTR;
 				goto out_free;
+			}
 
 			error = dlm_rcom_names(ls, memb->nodeid,
 					       last_name, last_len);
@@ -100,7 +101,7 @@ int dlm_recover_directory(struct dlm_ls *ls)
 			 */
 
 			b = ls->ls_recover_buf->rc_buf;
-			left = ls->ls_recover_buf->rc_header.h_length;
+			left = le16_to_cpu(ls->ls_recover_buf->rc_header.h_length);
 			left -= sizeof(struct dlm_rcom);
 
 			for (;;) {

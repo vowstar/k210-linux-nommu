@@ -12,40 +12,73 @@
 #include <linux/signal.h>
 #include <linux/kdebug.h>
 #include <linux/uaccess.h>
+#include <linux/kprobes.h>
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/irq.h>
+#include <linux/kexec.h>
 
+#include <asm/asm-prototypes.h>
+#include <asm/bug.h>
+#include <asm/csr.h>
 #include <asm/processor.h>
 #include <asm/ptrace.h>
-#include <asm/csr.h>
+#include <asm/thread_info.h>
 
 int show_unhandled_signals = 1;
 
-extern asmlinkage void handle_exception(void);
-
 static DEFINE_SPINLOCK(die_lock);
+
+static void dump_kernel_instr(const char *loglvl, struct pt_regs *regs)
+{
+	char str[sizeof("0000 ") * 12 + 2 + 1], *p = str;
+	const u16 *insns = (u16 *)instruction_pointer(regs);
+	long bad;
+	u16 val;
+	int i;
+
+	for (i = -10; i < 2; i++) {
+		bad = get_kernel_nofault(val, &insns[i]);
+		if (!bad) {
+			p += sprintf(p, i == 0 ? "(%04hx) " : "%04hx ", val);
+		} else {
+			printk("%sCode: Unable to access instruction at 0x%px.\n",
+			       loglvl, &insns[i]);
+			return;
+		}
+	}
+	printk("%sCode: %s\n", loglvl, str);
+}
 
 void die(struct pt_regs *regs, const char *str)
 {
 	static int die_counter;
 	int ret;
+	long cause;
+	unsigned long flags;
 
 	oops_enter();
 
-	spin_lock_irq(&die_lock);
+	spin_lock_irqsave(&die_lock, flags);
 	console_verbose();
 	bust_spinlocks(1);
 
 	pr_emerg("%s [#%d]\n", str, ++die_counter);
 	print_modules();
-	show_regs(regs);
+	if (regs) {
+		show_regs(regs);
+		dump_kernel_instr(KERN_EMERG, regs);
+	}
 
-	ret = notify_die(DIE_OOPS, str, regs, 0, regs->cause, SIGSEGV);
+	cause = regs ? regs->cause : -1;
+	ret = notify_die(DIE_OOPS, str, regs, 0, cause, SIGSEGV);
+
+	if (kexec_should_crash(current))
+		crash_kexec(regs);
 
 	bust_spinlocks(0);
 	add_taint(TAINT_DIE, LOCKDEP_NOW_UNRELIABLE);
-	spin_unlock_irq(&die_lock);
+	spin_unlock_irqrestore(&die_lock, flags);
 	oops_exit();
 
 	if (in_interrupt())
@@ -53,7 +86,7 @@ void die(struct pt_regs *regs, const char *str)
 	if (panic_on_oops)
 		panic("Fatal exception");
 	if (ret != NOTIFY_STOP)
-		do_exit(SIGSEGV);
+		make_task_dead(SIGSEGV);
 }
 
 void do_trap(struct pt_regs *regs, int signo, int code, unsigned long addr)
@@ -66,7 +99,7 @@ void do_trap(struct pt_regs *regs, int signo, int code, unsigned long addr)
 			tsk->comm, task_pid_nr(tsk), signo, code, addr);
 		print_vma_addr(KERN_CONT " in ", instruction_pointer(regs));
 		pr_cont("\n");
-		show_regs(regs);
+		__show_regs(regs);
 	}
 
 	force_sig_fault(signo, code, (void __user *)addr);
@@ -75,6 +108,8 @@ void do_trap(struct pt_regs *regs, int signo, int code, unsigned long addr)
 static void do_trap_error(struct pt_regs *regs, int signo, int code,
 	unsigned long addr, const char *str)
 {
+	current->thread.bad_cause = regs->cause;
+
 	if (user_mode(regs)) {
 		do_trap(regs, signo, code, addr);
 	} else {
@@ -83,8 +118,13 @@ static void do_trap_error(struct pt_regs *regs, int signo, int code,
 	}
 }
 
+#if defined(CONFIG_XIP_KERNEL) && defined(CONFIG_RISCV_ALTERNATIVE)
+#define __trap_section		__section(".xip.traps")
+#else
+#define __trap_section
+#endif
 #define DO_ERROR_INFO(name, signo, code, str)				\
-asmlinkage __visible void name(struct pt_regs *regs)			\
+asmlinkage __visible __trap_section void name(struct pt_regs *regs)	\
 {									\
 	do_trap_error(regs, signo, code, regs->epc, "Oops - " str);	\
 }
@@ -108,7 +148,7 @@ DO_ERROR_INFO(do_trap_store_misaligned,
 int handle_misaligned_load(struct pt_regs *regs);
 int handle_misaligned_store(struct pt_regs *regs);
 
-asmlinkage void do_trap_load_misaligned(struct pt_regs *regs)
+asmlinkage void __trap_section do_trap_load_misaligned(struct pt_regs *regs)
 {
 	if (!handle_misaligned_load(regs))
 		return;
@@ -116,7 +156,7 @@ asmlinkage void do_trap_load_misaligned(struct pt_regs *regs)
 		      "Oops - load address misaligned");
 }
 
-asmlinkage void do_trap_store_misaligned(struct pt_regs *regs)
+asmlinkage void __trap_section do_trap_store_misaligned(struct pt_regs *regs)
 {
 	if (!handle_misaligned_store(regs))
 		return;
@@ -137,20 +177,43 @@ static inline unsigned long get_break_insn_length(unsigned long pc)
 {
 	bug_insn_t insn;
 
-	if (probe_kernel_address((bug_insn_t *)pc, insn))
+	if (get_kernel_nofault(insn, (bug_insn_t *)pc))
 		return 0;
-	return (((insn & __INSN_LENGTH_MASK) == __INSN_LENGTH_32) ? 4UL : 2UL);
+
+	return GET_INSN_LENGTH(insn);
 }
 
-asmlinkage __visible void do_trap_break(struct pt_regs *regs)
+asmlinkage __visible __trap_section void do_trap_break(struct pt_regs *regs)
 {
+#ifdef CONFIG_KPROBES
+	if (kprobe_single_step_handler(regs))
+		return;
+
+	if (kprobe_breakpoint_handler(regs))
+		return;
+#endif
+#ifdef CONFIG_UPROBES
+	if (uprobe_single_step_handler(regs))
+		return;
+
+	if (uprobe_breakpoint_handler(regs))
+		return;
+#endif
+	current->thread.bad_cause = regs->cause;
+
 	if (user_mode(regs))
 		force_sig_fault(SIGTRAP, TRAP_BRKPT, (void __user *)regs->epc);
+#ifdef CONFIG_KGDB
+	else if (notify_die(DIE_TRAP, "EBREAK", regs, 0, regs->cause, SIGTRAP)
+								== NOTIFY_STOP)
+		return;
+#endif
 	else if (report_bug(regs->epc, regs) == BUG_TRAP_TYPE_WARN)
 		regs->epc += get_break_insn_length(regs->epc);
 	else
 		die(regs, "Kernel BUG");
 }
+NOKPROBE_SYMBOL(do_trap_break);
 
 #ifdef CONFIG_GENERIC_BUG
 int is_valid_bugaddr(unsigned long pc)
@@ -159,7 +222,7 @@ int is_valid_bugaddr(unsigned long pc)
 
 	if (pc < VMALLOC_START)
 		return 0;
-	if (probe_kernel_address((bug_insn_t *)pc, insn))
+	if (get_kernel_nofault(insn, (bug_insn_t *)pc))
 		return 0;
 	if ((insn & __INSN_LENGTH_MASK) == __INSN_LENGTH_32)
 		return (insn == __BUG_INSN_32);
@@ -168,15 +231,61 @@ int is_valid_bugaddr(unsigned long pc)
 }
 #endif /* CONFIG_GENERIC_BUG */
 
-void __init trap_init(void)
+#ifdef CONFIG_VMAP_STACK
+/*
+ * Extra stack space that allows us to provide panic messages when the kernel
+ * has overflowed its stack.
+ */
+static DEFINE_PER_CPU(unsigned long [OVERFLOW_STACK_SIZE/sizeof(long)],
+		overflow_stack)__aligned(16);
+/*
+ * A temporary stack for use by handle_kernel_stack_overflow.  This is used so
+ * we can call into C code to get the per-hart overflow stack.  Usage of this
+ * stack must be protected by spin_shadow_stack.
+ */
+long shadow_stack[SHADOW_OVERFLOW_STACK_SIZE/sizeof(long)] __aligned(16);
+
+/*
+ * A pseudo spinlock to protect the shadow stack from being used by multiple
+ * harts concurrently.  This isn't a real spinlock because the lock side must
+ * be taken without a valid stack and only a single register, it's only taken
+ * while in the process of panicing anyway so the performance and error
+ * checking a proper spinlock gives us doesn't matter.
+ */
+unsigned long spin_shadow_stack;
+
+asmlinkage unsigned long get_overflow_stack(void)
 {
-	/*
-	 * Set sup0 scratch register to 0, indicating to exception vector
-	 * that we are presently executing in the kernel
-	 */
-	csr_write(CSR_SCRATCH, 0);
-	/* Set the exception vector address */
-	csr_write(CSR_TVEC, &handle_exception);
-	/* Enable all interrupts */
-	csr_write(CSR_IE, -1);
+	return (unsigned long)this_cpu_ptr(overflow_stack) +
+		OVERFLOW_STACK_SIZE;
 }
+
+asmlinkage void handle_bad_stack(struct pt_regs *regs)
+{
+	unsigned long tsk_stk = (unsigned long)current->stack;
+	unsigned long ovf_stk = (unsigned long)this_cpu_ptr(overflow_stack);
+
+	/*
+	 * We're done with the shadow stack by this point, as we're on the
+	 * overflow stack.  Tell any other concurrent overflowing harts that
+	 * they can proceed with panicing by releasing the pseudo-spinlock.
+	 *
+	 * This pairs with an amoswap.aq in handle_kernel_stack_overflow.
+	 */
+	smp_store_release(&spin_shadow_stack, 0);
+
+	console_verbose();
+
+	pr_emerg("Insufficient stack space to handle exception!\n");
+	pr_emerg("Task stack:     [0x%016lx..0x%016lx]\n",
+			tsk_stk, tsk_stk + THREAD_SIZE);
+	pr_emerg("Overflow stack: [0x%016lx..0x%016lx]\n",
+			ovf_stk, ovf_stk + OVERFLOW_STACK_SIZE);
+
+	__show_regs(regs);
+	panic("Kernel stack overflow");
+
+	for (;;)
+		wait_for_interrupt();
+}
+#endif

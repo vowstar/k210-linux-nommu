@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2017-2019 Broadcom. All Rights Reserved. The term *
+ * Copyright (C) 2017-2023 Broadcom. All Rights Reserved. The term *
  * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.     *
  * Copyright (C) 2009-2016 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
@@ -19,6 +19,9 @@
  * more details, a copy of which can be found in the file COPYING  *
  * included with this package.                                     *
  *******************************************************************/
+
+#include <linux/irq_poll.h>
+#include <linux/cpufreq.h>
 
 #if defined(CONFIG_DEBUG_FS) && !defined(CONFIG_SCSI_LPFC_DEBUG_FS)
 #define CONFIG_SCSI_LPFC_DEBUG_FS
@@ -133,6 +136,16 @@ struct lpfc_rqb {
 				  /* Callback for HBQ buffer free */
 	void               (*rqb_free_buffer)(struct lpfc_hba *,
 					       struct rqb_dmabuf *);
+};
+
+enum lpfc_poll_mode {
+	LPFC_QUEUE_WORK,
+	LPFC_IRQ_POLL
+};
+
+struct lpfc_idle_stat {
+	u64 prev_idle;
+	u64 prev_wall;
 };
 
 struct lpfc_queue {
@@ -265,6 +278,10 @@ struct lpfc_queue {
 	struct lpfc_queue *assoc_qp;
 	struct list_head _poll_list;
 	void **q_pgs;	/* array to index entries per page */
+
+#define LPFC_IRQ_POLL_WEIGHT 256
+	struct irq_poll iop;
+	enum lpfc_poll_mode poll_mode;
 };
 
 struct lpfc_sli4_link {
@@ -274,8 +291,9 @@ struct lpfc_sli4_link {
 	uint8_t type;
 	uint8_t number;
 	uint8_t fault;
-	uint32_t logical_speed;
+	uint8_t link_status;
 	uint16_t topology;
+	uint32_t logical_speed;
 };
 
 struct lpfc_fcf_rec {
@@ -472,7 +490,7 @@ struct lpfc_hba;
 #define LPFC_SLI4_HANDLER_NAME_SZ	16
 struct lpfc_hba_eq_hdl {
 	uint32_t idx;
-	uint16_t irq;
+	int irq;
 	char handler_name[LPFC_SLI4_HANDLER_NAME_SZ];
 	struct lpfc_hba *phba;
 	struct lpfc_queue *eq;
@@ -532,6 +550,16 @@ struct lpfc_pc_sli4_params {
 	uint32_t hdr_pp_align;
 	uint32_t sgl_pages_max;
 	uint32_t sgl_pp_align;
+	uint32_t mib_size;
+	uint16_t mi_ver;
+#define LPFC_MIB1_SUPPORT	1
+#define LPFC_MIB2_SUPPORT	2
+#define LPFC_MIB3_SUPPORT	3
+	uint16_t mi_value;
+#define LPFC_DFLT_MIB_VAL	2
+	uint8_t mi_cap;
+	uint8_t mib_bde_cnt;
+	uint8_t cmf;
 	uint8_t cqv;
 	uint8_t mqv;
 	uint8_t wqv;
@@ -584,6 +612,8 @@ struct lpfc_vector_map_info {
 #define LPFC_CPU_FIRST_IRQ	0x4
 };
 #define LPFC_VECTOR_MAP_EMPTY	0xffff
+
+#define LPFC_IRQ_EMPTY 0xffffffff
 
 /* Multi-XRI pool */
 #define XRI_BATCH               8
@@ -697,13 +727,6 @@ struct lpfc_sli4_hdw_queue {
 	struct lpfc_lock_stat lock_conflict;
 #endif
 
-#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
-#define LPFC_CHECK_CPU_CNT    128
-	uint32_t cpucheck_rcv_io[LPFC_CHECK_CPU_CNT];
-	uint32_t cpucheck_xmt_io[LPFC_CHECK_CPU_CNT];
-	uint32_t cpucheck_cmpl_io[LPFC_CHECK_CPU_CNT];
-#endif
-
 	/* Per HDWQ pool resources */
 	struct list_head sgl_list;
 	struct list_head cmd_rsp_buf_list;
@@ -738,6 +761,15 @@ struct lpfc_sli4_hdw_queue {
 #define lpfc_qp_spin_lock_irqsave(lock, flag, qp, lstat) \
 	spin_lock_irqsave(lock, flag)
 #define lpfc_qp_spin_lock(lock, qp, lstat) spin_lock(lock)
+#endif
+
+#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
+struct lpfc_hdwq_stat {
+	u32 hdwq_no;
+	u32 rcv_io;
+	u32 xmt_io;
+	u32 cmpl_io;
+};
 #endif
 
 struct lpfc_sli4_hba {
@@ -901,8 +933,9 @@ struct lpfc_sli4_hba {
 	struct list_head sp_queue_event;
 	struct list_head sp_cqe_event_pool;
 	struct list_head sp_asynce_work_queue;
-	struct list_head sp_fcp_xri_aborted_work_queue;
+	spinlock_t asynce_list_lock; /* protect sp_asynce_work_queue list */
 	struct list_head sp_els_xri_aborted_work_queue;
+	spinlock_t els_xri_abrt_list_lock; /* protect els_xri_aborted list */
 	struct list_head sp_unsol_work_queue;
 	struct lpfc_sli4_link link_state;
 	struct lpfc_sli4_lnk_info lnk_info;
@@ -918,9 +951,13 @@ struct lpfc_sli4_hba {
 	struct lpfc_vector_map_info *cpu_map;
 	uint16_t num_possible_cpu;
 	uint16_t num_present_cpu;
-	struct cpumask numa_mask;
+	struct cpumask irq_aff_mask;
 	uint16_t curr_disp_cpu;
 	struct lpfc_eq_intr_info __percpu *eq_info;
+#ifdef CONFIG_SCSI_LPFC_DEBUG_FS
+	struct lpfc_hdwq_stat __percpu *c_stat;
+#endif
+	struct lpfc_idle_stat *idle_stat;
 	uint32_t conf_trunk;
 #define lpfc_conf_trunk_port0_WORD	conf_trunk
 #define lpfc_conf_trunk_port0_SHIFT	0
@@ -946,6 +983,11 @@ struct lpfc_sli4_hba {
 #define lpfc_conf_trunk_port3_nd_WORD	conf_trunk
 #define lpfc_conf_trunk_port3_nd_SHIFT	7
 #define lpfc_conf_trunk_port3_nd_MASK	0x1
+	uint8_t flash_id;
+	uint8_t asic_rev;
+	uint16_t fawwpn_flag;	/* FA-WWPN support state */
+#define LPFC_FAWWPN_CONFIG	0x1 /* FA-PWWN is configured */
+#define LPFC_FAWWPN_FABRIC	0x2 /* FA-PWWN success with Fabric */
 };
 
 enum lpfc_sge_type {
@@ -1080,8 +1122,9 @@ void lpfc_sli4_async_event_proc(struct lpfc_hba *);
 void lpfc_sli4_fcf_redisc_event_proc(struct lpfc_hba *);
 int lpfc_sli4_resume_rpi(struct lpfc_nodelist *,
 			void (*)(struct lpfc_hba *, LPFC_MBOXQ_t *), void *);
-void lpfc_sli4_fcp_xri_abort_event_proc(struct lpfc_hba *);
-void lpfc_sli4_els_xri_abort_event_proc(struct lpfc_hba *);
+void lpfc_sli4_els_xri_abort_event_proc(struct lpfc_hba *phba);
+void lpfc_sli4_nvme_pci_offline_aborted(struct lpfc_hba *phba,
+					struct lpfc_io_buf *lpfc_ncmd);
 void lpfc_sli4_nvme_xri_aborted(struct lpfc_hba *phba,
 				struct sli4_wcqe_xri_aborted *axri,
 				struct lpfc_io_buf *lpfc_ncmd);

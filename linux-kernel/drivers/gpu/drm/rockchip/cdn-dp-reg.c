@@ -601,7 +601,7 @@ static int cdn_dp_get_msa_misc(struct video_info *video,
 	case YCBCR_4_2_0:
 		val[0] = 5;
 		break;
-	};
+	}
 
 	switch (video->color_depth) {
 	case 6:
@@ -619,7 +619,7 @@ static int cdn_dp_get_msa_misc(struct video_info *video,
 	case 16:
 		val[1] = 4;
 		break;
-	};
+	}
 
 	msa_misc = 2 * val[0] + 32 * val[1] +
 		   ((video->color_fmt == Y_ONLY) ? (1 << 14) : 0);
@@ -658,7 +658,7 @@ int cdn_dp_config_video(struct cdn_dp_device *dp)
 	 */
 	do {
 		tu_size_reg += 2;
-		symbol = tu_size_reg * mode->clock * bit_per_pix;
+		symbol = (u64)tu_size_reg * mode->clock * bit_per_pix;
 		do_div(symbol, dp->max_lanes * link_rate * 8);
 		rem = do_div(symbol, 1000);
 		if (tu_size_reg > 64) {
@@ -700,7 +700,7 @@ int cdn_dp_config_video(struct cdn_dp_device *dp)
 	case 16:
 		val = BCS_16;
 		break;
-	};
+	}
 
 	val += video->color_fmt << 8;
 	ret = cdn_dp_reg_write(dp, DP_FRAMER_PXL_REPR, val);

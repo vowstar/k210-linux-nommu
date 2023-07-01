@@ -465,19 +465,18 @@ static int isl12026_probe_new(struct i2c_client *client)
 
 	priv->rtc->ops = &isl12026_rtc_ops;
 	nvm_cfg.priv = priv;
-	ret = rtc_nvmem_register(priv->rtc, &nvm_cfg);
+	ret = devm_rtc_nvmem_register(priv->rtc, &nvm_cfg);
 	if (ret)
 		return ret;
 
-	return rtc_register_device(priv->rtc);
+	return devm_rtc_register_device(priv->rtc);
 }
 
-static int isl12026_remove(struct i2c_client *client)
+static void isl12026_remove(struct i2c_client *client)
 {
 	struct isl12026 *priv = i2c_get_clientdata(client);
 
 	i2c_unregister_device(priv->nvm_client);
-	return 0;
 }
 
 static const struct of_device_id isl12026_dt_match[] = {

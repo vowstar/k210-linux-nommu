@@ -52,9 +52,9 @@ static void early_out(struct uart_port *port, int offset, uint8_t value)
 	writel(value, port->membase + (offset << 2));
 }
 
-static void ingenic_early_console_putc(struct uart_port *port, int c)
+static void ingenic_early_console_putc(struct uart_port *port, unsigned char c)
 {
-	uint8_t lsr;
+	u16 lsr;
 
 	do {
 		lsr = early_in(port, UART_LSR);
@@ -87,7 +87,7 @@ static void __init ingenic_early_console_setup_clock(struct earlycon_device *dev
 	dev->port.uartclk = be32_to_cpup(prop);
 }
 
-static int __init ingenic_early_console_setup(struct earlycon_device *dev,
+static int __init ingenic_earlycon_setup_tail(struct earlycon_device *dev,
 					      const char *opt)
 {
 	struct uart_port *port = &dev->port;
@@ -102,8 +102,6 @@ static int __init ingenic_early_console_setup(struct earlycon_device *dev,
 
 		uart_parse_options(opt, &baud, &parity, &bits, &flow);
 	}
-
-	ingenic_early_console_setup_clock(dev);
 
 	if (dev->baud)
 		baud = dev->baud;
@@ -129,8 +127,35 @@ static int __init ingenic_early_console_setup(struct earlycon_device *dev,
 	return 0;
 }
 
+static int __init ingenic_early_console_setup(struct earlycon_device *dev,
+					      const char *opt)
+{
+	ingenic_early_console_setup_clock(dev);
+
+	return ingenic_earlycon_setup_tail(dev, opt);
+}
+
+static int __init jz4750_early_console_setup(struct earlycon_device *dev,
+					     const char *opt)
+{
+	/*
+	 * JZ4750/55/60 have an optional /2 divider between the EXT
+	 * oscillator and some peripherals including UART, which will
+	 * be enabled if using a 24 MHz oscillator, and disabled when
+	 * using a 12 MHz oscillator.
+	 */
+	ingenic_early_console_setup_clock(dev);
+	if (dev->port.uartclk >= 16000000)
+		dev->port.uartclk /= 2;
+
+	return ingenic_earlycon_setup_tail(dev, opt);
+}
+
 OF_EARLYCON_DECLARE(jz4740_uart, "ingenic,jz4740-uart",
 		    ingenic_early_console_setup);
+
+OF_EARLYCON_DECLARE(jz4750_uart, "ingenic,jz4750-uart",
+		    jz4750_early_console_setup);
 
 OF_EARLYCON_DECLARE(jz4770_uart, "ingenic,jz4770-uart",
 		    ingenic_early_console_setup);
@@ -207,22 +232,24 @@ static unsigned int ingenic_uart_serial_in(struct uart_port *p, int offset)
 static int ingenic_uart_probe(struct platform_device *pdev)
 {
 	struct uart_8250_port uart = {};
-	struct resource *regs = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	struct resource *irq = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
 	struct ingenic_uart_data *data;
 	const struct ingenic_uart_config *cdata;
-	const struct of_device_id *match;
-	int err, line;
+	struct resource *regs;
+	int irq, err, line;
 
-	match = of_match_device(of_match, &pdev->dev);
-	if (!match) {
+	cdata = of_device_get_match_data(&pdev->dev);
+	if (!cdata) {
 		dev_err(&pdev->dev, "Error: No device match found\n");
 		return -ENODEV;
 	}
-	cdata = match->data;
 
-	if (!regs || !irq) {
-		dev_err(&pdev->dev, "no registers/irq defined\n");
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0)
+		return irq;
+
+	regs = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!regs) {
+		dev_err(&pdev->dev, "no registers defined\n");
 		return -EINVAL;
 	}
 
@@ -238,7 +265,7 @@ static int ingenic_uart_probe(struct platform_device *pdev)
 	uart.port.regshift = 2;
 	uart.port.serial_out = ingenic_uart_serial_out;
 	uart.port.serial_in = ingenic_uart_serial_in;
-	uart.port.irq = irq->start;
+	uart.port.irq = irq;
 	uart.port.dev = &pdev->dev;
 	uart.port.fifosize = cdata->fifosize;
 	uart.tx_loadsz = cdata->tx_loadsz;
@@ -255,22 +282,14 @@ static int ingenic_uart_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	data->clk_module = devm_clk_get(&pdev->dev, "module");
-	if (IS_ERR(data->clk_module)) {
-		err = PTR_ERR(data->clk_module);
-		if (err != -EPROBE_DEFER)
-			dev_err(&pdev->dev,
-				"unable to get module clock: %d\n", err);
-		return err;
-	}
+	if (IS_ERR(data->clk_module))
+		return dev_err_probe(&pdev->dev, PTR_ERR(data->clk_module),
+				     "unable to get module clock\n");
 
 	data->clk_baud = devm_clk_get(&pdev->dev, "baud");
-	if (IS_ERR(data->clk_baud)) {
-		err = PTR_ERR(data->clk_baud);
-		if (err != -EPROBE_DEFER)
-			dev_err(&pdev->dev,
-				"unable to get baud clock: %d\n", err);
-		return err;
-	}
+	if (IS_ERR(data->clk_baud))
+		return dev_err_probe(&pdev->dev, PTR_ERR(data->clk_baud),
+				     "unable to get baud clock\n");
 
 	err = clk_prepare_enable(data->clk_module);
 	if (err) {
@@ -334,6 +353,7 @@ static const struct ingenic_uart_config x1000_uart_config = {
 
 static const struct of_device_id of_match[] = {
 	{ .compatible = "ingenic,jz4740-uart", .data = &jz4740_uart_config },
+	{ .compatible = "ingenic,jz4750-uart", .data = &jz4760_uart_config },
 	{ .compatible = "ingenic,jz4760-uart", .data = &jz4760_uart_config },
 	{ .compatible = "ingenic,jz4770-uart", .data = &jz4760_uart_config },
 	{ .compatible = "ingenic,jz4775-uart", .data = &jz4760_uart_config },

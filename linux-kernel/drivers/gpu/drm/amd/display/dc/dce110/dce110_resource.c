@@ -23,8 +23,6 @@
  *
  */
 
-#include <linux/slab.h>
-
 #include "dm_services.h"
 
 #include "link_encoder.h"
@@ -53,6 +51,7 @@
 #include "dce/dce_abm.h"
 #include "dce/dce_dmcu.h"
 #include "dce/dce_i2c.h"
+#include "dce/dce_panel_cntl.h"
 
 #define DC_LOGGER \
 		dc->ctx->logger
@@ -275,6 +274,18 @@ static const struct dce_stream_encoder_mask se_mask = {
 		SE_COMMON_MASK_SH_LIST_DCE110(_MASK)
 };
 
+static const struct dce_panel_cntl_registers panel_cntl_regs[] = {
+	{ DCE_PANEL_CNTL_REG_LIST() }
+};
+
+static const struct dce_panel_cntl_shift panel_cntl_shift = {
+	DCE_PANEL_CNTL_MASK_SH_LIST(__SHIFT)
+};
+
+static const struct dce_panel_cntl_mask panel_cntl_mask = {
+	DCE_PANEL_CNTL_MASK_SH_LIST(_MASK)
+};
+
 static const struct dce110_aux_registers_shift aux_shift = {
 	DCE_AUX_MASK_SH_LIST(__SHIFT)
 };
@@ -397,7 +408,7 @@ static const struct dc_plane_cap plane_cap = {
 		.pixel_format_support = {
 				.argb8888 = true,
 				.nv12 = false,
-				.fp16 = false
+				.fp16 = true
 		},
 
 		.max_upscale_factor = {
@@ -410,7 +421,9 @@ static const struct dc_plane_cap plane_cap = {
 				.argb8888 = 250,
 				.nv12 = 1,
 				.fp16 = 1
-		}
+		},
+		64,
+		64
 };
 
 static const struct dc_plane_cap underlay_plane_cap = {
@@ -434,7 +447,9 @@ static const struct dc_plane_cap underlay_plane_cap = {
 				.argb8888 = 1,
 				.nv12 = 250,
 				.fp16 = 1
-		}
+		},
+		64,
+		64
 };
 
 #define CTX  ctx
@@ -454,25 +469,18 @@ static int map_transmitter_id_to_phy_instance(
 	switch (transmitter) {
 	case TRANSMITTER_UNIPHY_A:
 		return 0;
-	break;
 	case TRANSMITTER_UNIPHY_B:
 		return 1;
-	break;
 	case TRANSMITTER_UNIPHY_C:
 		return 2;
-	break;
 	case TRANSMITTER_UNIPHY_D:
 		return 3;
-	break;
 	case TRANSMITTER_UNIPHY_E:
 		return 4;
-	break;
 	case TRANSMITTER_UNIPHY_F:
 		return 5;
-	break;
 	case TRANSMITTER_UNIPHY_G:
 		return 6;
-	break;
 	default:
 		ASSERT(0);
 		return 0;
@@ -652,6 +660,7 @@ static const struct encoder_feature_support link_enc_feature = {
 };
 
 static struct link_encoder *dce110_link_encoder_create(
+	struct dc_context *ctx,
 	const struct encoder_init_data *enc_init_data)
 {
 	struct dce110_link_encoder *enc110 =
@@ -673,6 +682,23 @@ static struct link_encoder *dce110_link_encoder_create(
 	return &enc110->base;
 }
 
+static struct panel_cntl *dce110_panel_cntl_create(const struct panel_cntl_init_data *init_data)
+{
+	struct dce_panel_cntl *panel_cntl =
+		kzalloc(sizeof(struct dce_panel_cntl), GFP_KERNEL);
+
+	if (!panel_cntl)
+		return NULL;
+
+	dce_panel_cntl_construct(panel_cntl,
+			init_data,
+			&panel_cntl_regs[init_data->inst],
+			&panel_cntl_shift,
+			&panel_cntl_mask);
+
+	return &panel_cntl->base;
+}
+
 static struct output_pixel_processor *dce110_opp_create(
 	struct dc_context *ctx,
 	uint32_t inst)
@@ -688,7 +714,7 @@ static struct output_pixel_processor *dce110_opp_create(
 	return &opp->base;
 }
 
-struct dce_aux *dce110_aux_engine_create(
+static struct dce_aux *dce110_aux_engine_create(
 	struct dc_context *ctx,
 	uint32_t inst)
 {
@@ -726,7 +752,7 @@ static const struct dce_i2c_mask i2c_masks = {
 		I2C_COMMON_MASK_SH_LIST_DCE110(_MASK)
 };
 
-struct dce_i2c_hw *dce110_i2c_hw_create(
+static struct dce_i2c_hw *dce110_i2c_hw_create(
 	struct dc_context *ctx,
 	uint32_t inst)
 {
@@ -741,7 +767,7 @@ struct dce_i2c_hw *dce110_i2c_hw_create(
 
 	return dce_i2c_hw;
 }
-struct clock_source *dce110_clock_source_create(
+static struct clock_source *dce110_clock_source_create(
 	struct dc_context *ctx,
 	struct dc_bios *bios,
 	enum clock_source_id id,
@@ -765,7 +791,7 @@ struct clock_source *dce110_clock_source_create(
 	return NULL;
 }
 
-void dce110_clock_source_destroy(struct clock_source **clk_src)
+static void dce110_clock_source_destroy(struct clock_source **clk_src)
 {
 	struct dce110_clk_src *dce110_clk_src;
 
@@ -1007,8 +1033,8 @@ static bool dce110_validate_bandwidth(
 	return result;
 }
 
-enum dc_status dce110_validate_plane(const struct dc_plane_state *plane_state,
-				     struct dc_caps *caps)
+static enum dc_status dce110_validate_plane(const struct dc_plane_state *plane_state,
+					    struct dc_caps *caps)
 {
 	if (((plane_state->dst_rect.width * 2) < plane_state->src_rect.width) ||
 	    ((plane_state->dst_rect.height * 2) < plane_state->src_rect.height))
@@ -1062,7 +1088,7 @@ static bool dce110_validate_surface_sets(
 	return true;
 }
 
-enum dc_status dce110_validate_global(
+static enum dc_status dce110_validate_global(
 		struct dc *dc,
 		struct dc_state *context)
 {
@@ -1203,6 +1229,7 @@ struct stream_encoder *dce110_find_first_free_match_stream_enc_for_link(
 static const struct resource_funcs dce110_res_pool_funcs = {
 	.destroy = dce110_destroy_resource_pool,
 	.link_enc_create = dce110_link_encoder_create,
+	.panel_cntl_create = dce110_panel_cntl_create,
 	.validate_bandwidth = dce110_validate_bandwidth,
 	.validate_plane = dce110_validate_plane,
 	.acquire_idle_pipe_for_layer = dce110_acquire_underlay,
@@ -1244,7 +1271,8 @@ static bool underlay_create(struct dc_context *ctx, struct resource_pool *pool)
 
 	/* update the public caps to indicate an underlay is available */
 	ctx->dc->caps.max_slave_planes = 1;
-	ctx->dc->caps.max_slave_planes = 1;
+	ctx->dc->caps.max_slave_yuv_planes = 1;
+	ctx->dc->caps.max_slave_rgb_planes = 0;
 
 	return true;
 }
@@ -1305,7 +1333,7 @@ static void bw_calcs_data_update_from_pplib(struct dc *dc)
 		1000);
 }
 
-const struct resource_caps *dce110_resource_cap(
+static const struct resource_caps *dce110_resource_cap(
 	struct hw_asic_id *asic_id)
 {
 	if (ASIC_REV_IS_STONEY(asic_id->hw_internal_rev))
@@ -1337,8 +1365,10 @@ static bool dce110_resource_construct(
 	pool->base.underlay_pipe_index = pool->base.pipe_count;
 	pool->base.timing_generator_count = pool->base.res_cap->num_timing_generator;
 	dc->caps.max_downscale_ratio = 150;
-	dc->caps.i2c_speed_in_khz = 100;
+	dc->caps.i2c_speed_in_khz = 40;
+	dc->caps.i2c_speed_in_khz_hdcp = 40;
 	dc->caps.max_cursor_size = 128;
+	dc->caps.min_horizontal_blanking_period = 80;
 	dc->caps.is_apu = true;
 	dc->caps.extended_aux_timeout_support = false;
 

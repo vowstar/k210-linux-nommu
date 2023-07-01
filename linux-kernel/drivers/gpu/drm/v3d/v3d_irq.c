@@ -72,7 +72,7 @@ v3d_overflow_mem_work(struct work_struct *work)
 	V3D_CORE_WRITE(0, V3D_PTB_BPOS, obj->size);
 
 out:
-	drm_gem_object_put_unlocked(obj);
+	drm_gem_object_put(obj);
 }
 
 static irqreturn_t
@@ -128,7 +128,7 @@ v3d_irq(int irq, void *arg)
 	 * always-allowed mode.
 	 */
 	if (intsts & V3D_INT_GMPV)
-		dev_err(v3d->dev, "GMP violation\n");
+		dev_err(v3d->drm.dev, "GMP violation\n");
 
 	/* V3D 4.2 wires the hub and core IRQs together, so if we &
 	 * didn't see the common one then check hub for MMU IRQs.
@@ -178,10 +178,7 @@ v3d_hub_irq(int irq, void *arg)
 		};
 		const char *client = "?";
 
-		V3D_WRITE(V3D_MMU_CTL,
-			  V3D_READ(V3D_MMU_CTL) & (V3D_MMU_CTL_CAP_EXCEEDED |
-						   V3D_MMU_CTL_PT_INVALID |
-						   V3D_MMU_CTL_WRITE_VIOLATION));
+		V3D_WRITE(V3D_MMU_CTL, V3D_READ(V3D_MMU_CTL));
 
 		if (v3d->ver >= 41) {
 			axi_id = axi_id >> 5;
@@ -189,7 +186,7 @@ v3d_hub_irq(int irq, void *arg)
 				client = v3d41_axi_ids[axi_id];
 		}
 
-		dev_err(v3d->dev, "MMU error from client %s (%d) at 0x%llx%s%s%s\n",
+		dev_err(v3d->drm.dev, "MMU error from client %s (%d) at 0x%llx%s%s%s\n",
 			client, axi_id, (long long)vio_addr,
 			((intsts & V3D_HUB_INT_MMU_WRV) ?
 			 ", write violation" : ""),
@@ -217,16 +214,17 @@ v3d_irq_init(struct v3d_dev *v3d)
 		V3D_CORE_WRITE(core, V3D_CTL_INT_CLR, V3D_CORE_IRQS);
 	V3D_WRITE(V3D_HUB_INT_CLR, V3D_HUB_IRQS);
 
-	irq1 = platform_get_irq(v3d->pdev, 1);
+	irq1 = platform_get_irq_optional(v3d_to_pdev(v3d), 1);
 	if (irq1 == -EPROBE_DEFER)
 		return irq1;
 	if (irq1 > 0) {
-		ret = devm_request_irq(v3d->dev, irq1,
+		ret = devm_request_irq(v3d->drm.dev, irq1,
 				       v3d_irq, IRQF_SHARED,
 				       "v3d_core0", v3d);
 		if (ret)
 			goto fail;
-		ret = devm_request_irq(v3d->dev, platform_get_irq(v3d->pdev, 0),
+		ret = devm_request_irq(v3d->drm.dev,
+				       platform_get_irq(v3d_to_pdev(v3d), 0),
 				       v3d_hub_irq, IRQF_SHARED,
 				       "v3d_hub", v3d);
 		if (ret)
@@ -234,7 +232,8 @@ v3d_irq_init(struct v3d_dev *v3d)
 	} else {
 		v3d->single_irq_line = true;
 
-		ret = devm_request_irq(v3d->dev, platform_get_irq(v3d->pdev, 0),
+		ret = devm_request_irq(v3d->drm.dev,
+				       platform_get_irq(v3d_to_pdev(v3d), 0),
 				       v3d_irq, IRQF_SHARED,
 				       "v3d", v3d);
 		if (ret)
@@ -246,7 +245,7 @@ v3d_irq_init(struct v3d_dev *v3d)
 
 fail:
 	if (ret != -EPROBE_DEFER)
-		dev_err(v3d->dev, "IRQ setup failed: %d\n", ret);
+		dev_err(v3d->drm.dev, "IRQ setup failed: %d\n", ret);
 	return ret;
 }
 

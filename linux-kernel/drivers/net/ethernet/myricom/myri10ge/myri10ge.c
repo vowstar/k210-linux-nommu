@@ -552,8 +552,7 @@ myri10ge_validate_firmware(struct myri10ge_priv *mgp,
 	}
 
 	/* save firmware version for ethtool */
-	strncpy(mgp->fw_version, hdr->version, sizeof(mgp->fw_version));
-	mgp->fw_version[sizeof(mgp->fw_version) - 1] = '\0';
+	strscpy(mgp->fw_version, hdr->version, sizeof(mgp->fw_version));
 
 	sscanf(mgp->fw_version, "%d.%d.%d", &mgp->fw_ver_major,
 	       &mgp->fw_ver_minor, &mgp->fw_ver_tiny);
@@ -579,7 +578,7 @@ static int myri10ge_load_hotplug_firmware(struct myri10ge_priv *mgp, u32 * size)
 	int status;
 	unsigned i;
 
-	if ((status = request_firmware(&fw, mgp->fw_name, dev)) < 0) {
+	if (request_firmware(&fw, mgp->fw_name, dev) < 0) {
 		dev_err(dev, "Unable to load %s firmware image via hotplug\n",
 			mgp->fw_name);
 		status = -EINVAL;
@@ -796,7 +795,8 @@ static int myri10ge_load_firmware(struct myri10ge_priv *mgp, int adopt)
 	return status;
 }
 
-static int myri10ge_update_mac_address(struct myri10ge_priv *mgp, u8 * addr)
+static int myri10ge_update_mac_address(struct myri10ge_priv *mgp,
+				       const u8 * addr)
 {
 	struct myri10ge_cmd cmd;
 	int status;
@@ -850,9 +850,9 @@ static int myri10ge_dma_test(struct myri10ge_priv *mgp, int test_type)
 	dmatest_page = alloc_page(GFP_KERNEL);
 	if (!dmatest_page)
 		return -ENOMEM;
-	dmatest_bus = pci_map_page(mgp->pdev, dmatest_page, 0, PAGE_SIZE,
-				   DMA_BIDIRECTIONAL);
-	if (unlikely(pci_dma_mapping_error(mgp->pdev, dmatest_bus))) {
+	dmatest_bus = dma_map_page(&mgp->pdev->dev, dmatest_page, 0,
+				   PAGE_SIZE, DMA_BIDIRECTIONAL);
+	if (unlikely(dma_mapping_error(&mgp->pdev->dev, dmatest_bus))) {
 		__free_page(dmatest_page);
 		return -ENOMEM;
 	}
@@ -899,7 +899,8 @@ static int myri10ge_dma_test(struct myri10ge_priv *mgp, int test_type)
 	    (cmd.data0 & 0xffff);
 
 abort:
-	pci_unmap_page(mgp->pdev, dmatest_bus, PAGE_SIZE, DMA_BIDIRECTIONAL);
+	dma_unmap_page(&mgp->pdev->dev, dmatest_bus, PAGE_SIZE,
+		       DMA_BIDIRECTIONAL);
 	put_page(dmatest_page);
 
 	if (status != 0 && test_type != MXGEFW_CMD_UNALIGNED_TEST)
@@ -1174,18 +1175,6 @@ myri10ge_submit_8rx(struct mcp_kreq_ether_recv __iomem * dst,
 	mb();
 }
 
-static inline void myri10ge_vlan_ip_csum(struct sk_buff *skb, __wsum hw_csum)
-{
-	struct vlan_hdr *vh = (struct vlan_hdr *)(skb->data);
-
-	if ((skb->protocol == htons(ETH_P_8021Q)) &&
-	    (vh->h_vlan_encapsulated_proto == htons(ETH_P_IP) ||
-	     vh->h_vlan_encapsulated_proto == htons(ETH_P_IPV6))) {
-		skb->csum = hw_csum;
-		skb->ip_summed = CHECKSUM_COMPLETE;
-	}
-}
-
 static void
 myri10ge_alloc_rx_pages(struct myri10ge_priv *mgp, struct myri10ge_rx_buf *rx,
 			int bytes, int watchdog)
@@ -1217,10 +1206,10 @@ myri10ge_alloc_rx_pages(struct myri10ge_priv *mgp, struct myri10ge_rx_buf *rx,
 				return;
 			}
 
-			bus = pci_map_page(mgp->pdev, page, 0,
+			bus = dma_map_page(&mgp->pdev->dev, page, 0,
 					   MYRI10GE_ALLOC_SIZE,
-					   PCI_DMA_FROMDEVICE);
-			if (unlikely(pci_dma_mapping_error(mgp->pdev, bus))) {
+					   DMA_FROM_DEVICE);
+			if (unlikely(dma_mapping_error(&mgp->pdev->dev, bus))) {
 				__free_pages(page, MYRI10GE_ALLOC_ORDER);
 				if (rx->fill_cnt - rx->cnt < 16)
 					rx->watchdog_needed = 1;
@@ -1268,9 +1257,9 @@ myri10ge_unmap_rx_page(struct pci_dev *pdev,
 	/* unmap the recvd page if we're the only or last user of it */
 	if (bytes >= MYRI10GE_ALLOC_SIZE / 2 ||
 	    (info->page_offset + 2 * bytes) > MYRI10GE_ALLOC_SIZE) {
-		pci_unmap_page(pdev, (dma_unmap_addr(info, bus)
-				      & ~(MYRI10GE_ALLOC_SIZE - 1)),
-			       MYRI10GE_ALLOC_SIZE, PCI_DMA_FROMDEVICE);
+		dma_unmap_page(&pdev->dev, (dma_unmap_addr(info, bus)
+					    & ~(MYRI10GE_ALLOC_SIZE - 1)),
+			       MYRI10GE_ALLOC_SIZE, DMA_FROM_DEVICE);
 	}
 }
 
@@ -1410,16 +1399,16 @@ myri10ge_tx_done(struct myri10ge_slice_state *ss, int mcp_index)
 			ss->stats.tx_packets++;
 			dev_consume_skb_irq(skb);
 			if (len)
-				pci_unmap_single(pdev,
+				dma_unmap_single(&pdev->dev,
 						 dma_unmap_addr(&tx->info[idx],
 								bus), len,
-						 PCI_DMA_TODEVICE);
+						 DMA_TO_DEVICE);
 		} else {
 			if (len)
-				pci_unmap_page(pdev,
+				dma_unmap_page(&pdev->dev,
 					       dma_unmap_addr(&tx->info[idx],
 							      bus), len,
-					       PCI_DMA_TODEVICE);
+					       DMA_TO_DEVICE);
 		}
 	}
 
@@ -1657,14 +1646,16 @@ myri10ge_get_drvinfo(struct net_device *netdev, struct ethtool_drvinfo *info)
 {
 	struct myri10ge_priv *mgp = netdev_priv(netdev);
 
-	strlcpy(info->driver, "myri10ge", sizeof(info->driver));
-	strlcpy(info->version, MYRI10GE_VERSION_STR, sizeof(info->version));
-	strlcpy(info->fw_version, mgp->fw_version, sizeof(info->fw_version));
-	strlcpy(info->bus_info, pci_name(mgp->pdev), sizeof(info->bus_info));
+	strscpy(info->driver, "myri10ge", sizeof(info->driver));
+	strscpy(info->version, MYRI10GE_VERSION_STR, sizeof(info->version));
+	strscpy(info->fw_version, mgp->fw_version, sizeof(info->fw_version));
+	strscpy(info->bus_info, pci_name(mgp->pdev), sizeof(info->bus_info));
 }
 
-static int
-myri10ge_get_coalesce(struct net_device *netdev, struct ethtool_coalesce *coal)
+static int myri10ge_get_coalesce(struct net_device *netdev,
+				 struct ethtool_coalesce *coal,
+				 struct kernel_ethtool_coalesce *kernel_coal,
+				 struct netlink_ext_ack *extack)
 {
 	struct myri10ge_priv *mgp = netdev_priv(netdev);
 
@@ -1672,8 +1663,10 @@ myri10ge_get_coalesce(struct net_device *netdev, struct ethtool_coalesce *coal)
 	return 0;
 }
 
-static int
-myri10ge_set_coalesce(struct net_device *netdev, struct ethtool_coalesce *coal)
+static int myri10ge_set_coalesce(struct net_device *netdev,
+				 struct ethtool_coalesce *coal,
+				 struct kernel_ethtool_coalesce *kernel_coal,
+				 struct netlink_ext_ack *extack)
 {
 	struct myri10ge_priv *mgp = netdev_priv(netdev);
 
@@ -1710,7 +1703,9 @@ myri10ge_set_pauseparam(struct net_device *netdev,
 
 static void
 myri10ge_get_ringparam(struct net_device *netdev,
-		       struct ethtool_ringparam *ring)
+		       struct ethtool_ringparam *ring,
+		       struct kernel_ethtool_ringparam *kernel_ring,
+		       struct netlink_ext_ack *extack)
 {
 	struct myri10ge_priv *mgp = netdev_priv(netdev);
 
@@ -1920,6 +1915,7 @@ myri10ge_phys_id(struct net_device *netdev, enum ethtool_phys_id_state state)
 }
 
 static const struct ethtool_ops myri10ge_ethtool_ops = {
+	.supported_coalesce_params = ETHTOOL_COALESCE_RX_USECS,
 	.get_drvinfo = myri10ge_get_drvinfo,
 	.get_coalesce = myri10ge_get_coalesce,
 	.set_coalesce = myri10ge_set_coalesce,
@@ -2121,16 +2117,16 @@ static void myri10ge_free_rings(struct myri10ge_slice_state *ss)
 			ss->stats.tx_dropped++;
 			dev_kfree_skb_any(skb);
 			if (len)
-				pci_unmap_single(mgp->pdev,
+				dma_unmap_single(&mgp->pdev->dev,
 						 dma_unmap_addr(&tx->info[idx],
 								bus), len,
-						 PCI_DMA_TODEVICE);
+						 DMA_TO_DEVICE);
 		} else {
 			if (len)
-				pci_unmap_page(mgp->pdev,
+				dma_unmap_page(&mgp->pdev->dev,
 					       dma_unmap_addr(&tx->info[idx],
 							      bus), len,
-					       PCI_DMA_TODEVICE);
+					       DMA_TO_DEVICE);
 		}
 	}
 	kfree(ss->rx_big.info);
@@ -2595,15 +2591,15 @@ static void myri10ge_unmap_tx_dma(struct myri10ge_priv *mgp,
 		len = dma_unmap_len(&tx->info[idx], len);
 		if (len) {
 			if (tx->info[idx].skb != NULL)
-				pci_unmap_single(mgp->pdev,
+				dma_unmap_single(&mgp->pdev->dev,
 						 dma_unmap_addr(&tx->info[idx],
 								bus), len,
-						 PCI_DMA_TODEVICE);
+						 DMA_TO_DEVICE);
 			else
-				pci_unmap_page(mgp->pdev,
+				dma_unmap_page(&mgp->pdev->dev,
 					       dma_unmap_addr(&tx->info[idx],
 							      bus), len,
-					       PCI_DMA_TODEVICE);
+					       DMA_TO_DEVICE);
 			dma_unmap_len_set(&tx->info[idx], len, 0);
 			tx->info[idx].skb = NULL;
 		}
@@ -2695,7 +2691,7 @@ again:
 		 * send loop that we are still in the
 		 * header portion of the TSO packet.
 		 * TSO header can be at most 1KB long */
-		cum_len = -(skb_transport_offset(skb) + tcp_hdrlen(skb));
+		cum_len = -skb_tcp_all_headers(skb);
 
 		/* for IPv6 TSO, the checksum offset stores the
 		 * TCP header length, to save the firmware from
@@ -2726,8 +2722,8 @@ again:
 
 	/* map the skb for DMA */
 	len = skb_headlen(skb);
-	bus = pci_map_single(mgp->pdev, skb->data, len, PCI_DMA_TODEVICE);
-	if (unlikely(pci_dma_mapping_error(mgp->pdev, bus)))
+	bus = dma_map_single(&mgp->pdev->dev, skb->data, len, DMA_TO_DEVICE);
+	if (unlikely(dma_mapping_error(&mgp->pdev->dev, bus)))
 		goto drop;
 
 	idx = tx->req & tx->mask;
@@ -2835,7 +2831,7 @@ again:
 		len = skb_frag_size(frag);
 		bus = skb_frag_dma_map(&mgp->pdev->dev, frag, 0, len,
 				       DMA_TO_DEVICE);
-		if (unlikely(pci_dma_mapping_error(mgp->pdev, bus))) {
+		if (unlikely(dma_mapping_error(&mgp->pdev->dev, bus))) {
 			myri10ge_unmap_tx_dma(mgp, tx, idx);
 			goto drop;
 		}
@@ -2906,11 +2902,9 @@ static netdev_tx_t myri10ge_sw_tso(struct sk_buff *skb,
 		status = myri10ge_xmit(curr, dev);
 		if (status != 0) {
 			dev_kfree_skb_any(curr);
-			if (segs != NULL) {
-				curr = segs;
-				segs = segs->next;
+			skb_list_walk_safe(next, curr, next) {
 				curr->next = NULL;
-				dev_kfree_skb_any(segs);
+				dev_kfree_skb_any(curr);
 			}
 			goto drop;
 		}
@@ -3028,7 +3022,7 @@ static int myri10ge_set_mac_address(struct net_device *dev, void *addr)
 	}
 
 	/* change the dev structure */
-	memcpy(dev->dev_addr, sa->sa_data, ETH_ALEN);
+	eth_hw_addr_set(dev, sa->sa_data);
 	return 0;
 }
 
@@ -3268,13 +3262,12 @@ static void myri10ge_mask_surprise_down(struct pci_dev *pdev)
 	}
 }
 
-#ifdef CONFIG_PM
-static int myri10ge_suspend(struct pci_dev *pdev, pm_message_t state)
+static int __maybe_unused myri10ge_suspend(struct device *dev)
 {
 	struct myri10ge_priv *mgp;
 	struct net_device *netdev;
 
-	mgp = pci_get_drvdata(pdev);
+	mgp = dev_get_drvdata(dev);
 	if (mgp == NULL)
 		return -EINVAL;
 	netdev = mgp->dev;
@@ -3287,14 +3280,13 @@ static int myri10ge_suspend(struct pci_dev *pdev, pm_message_t state)
 		rtnl_unlock();
 	}
 	myri10ge_dummy_rdma(mgp, 0);
-	pci_save_state(pdev);
-	pci_disable_device(pdev);
 
-	return pci_set_power_state(pdev, pci_choose_state(pdev, state));
+	return 0;
 }
 
-static int myri10ge_resume(struct pci_dev *pdev)
+static int __maybe_unused myri10ge_resume(struct device *dev)
 {
+	struct pci_dev *pdev = to_pci_dev(dev);
 	struct myri10ge_priv *mgp;
 	struct net_device *netdev;
 	int status;
@@ -3304,7 +3296,6 @@ static int myri10ge_resume(struct pci_dev *pdev)
 	if (mgp == NULL)
 		return -EINVAL;
 	netdev = mgp->dev;
-	pci_set_power_state(pdev, PCI_D0);	/* zeros conf space as a side effect */
 	msleep(5);		/* give card time to respond */
 	pci_read_config_word(mgp->pdev, PCI_VENDOR_ID, &vendor);
 	if (vendor == 0xffff) {
@@ -3312,22 +3303,8 @@ static int myri10ge_resume(struct pci_dev *pdev)
 		return -EIO;
 	}
 
-	pci_restore_state(pdev);
-
-	status = pci_enable_device(pdev);
-	if (status) {
-		dev_err(&pdev->dev, "failed to enable device\n");
-		return status;
-	}
-
-	pci_set_master(pdev);
-
 	myri10ge_reset(mgp);
 	myri10ge_dummy_rdma(mgp, 1);
-
-	/* Save configuration space to be restored if the
-	 * nic resets due to a parity error */
-	pci_save_state(pdev);
 
 	if (netif_running(netdev)) {
 		rtnl_lock();
@@ -3342,11 +3319,8 @@ static int myri10ge_resume(struct pci_dev *pdev)
 	return 0;
 
 abort_with_enabled:
-	pci_disable_device(pdev);
 	return -EIO;
-
 }
-#endif				/* CONFIG_PM */
 
 static u32 myri10ge_read_reboot(struct myri10ge_priv *mgp)
 {
@@ -3574,11 +3548,10 @@ static void myri10ge_free_slices(struct myri10ge_priv *mgp)
 					  ss->fw_stats, ss->fw_stats_bus);
 			ss->fw_stats = NULL;
 		}
-		napi_hash_del(&ss->napi);
-		netif_napi_del(&ss->napi);
+		__netif_napi_del(&ss->napi);
 	}
 	/* Wait till napi structs are no longer used, and then free ss. */
-	synchronize_rcu();
+	synchronize_net();
 	kfree(mgp->ss);
 	mgp->ss = NULL;
 }
@@ -3612,8 +3585,8 @@ static int myri10ge_alloc_slices(struct myri10ge_priv *mgp)
 			goto abort;
 		ss->mgp = mgp;
 		ss->dev = mgp->dev;
-		netif_napi_add(ss->dev, &ss->napi, myri10ge_poll,
-			       myri10ge_napi_weight);
+		netif_napi_add_weight(ss->dev, &ss->napi, myri10ge_poll,
+				      myri10ge_napi_weight);
 	}
 	return 0;
 abort:
@@ -3765,9 +3738,7 @@ static int myri10ge_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	struct net_device *netdev;
 	struct myri10ge_priv *mgp;
 	struct device *dev = &pdev->dev;
-	int i;
 	int status = -ENXIO;
-	int dac_enabled;
 	unsigned hdr_offset, ss_offset;
 	static int board_number;
 
@@ -3807,20 +3778,11 @@ static int myri10ge_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	myri10ge_mask_surprise_down(pdev);
 	pci_set_master(pdev);
-	dac_enabled = 1;
-	status = pci_set_dma_mask(pdev, DMA_BIT_MASK(64));
-	if (status != 0) {
-		dac_enabled = 0;
-		dev_err(&pdev->dev,
-			"64-bit pci address mask was refused, "
-			"trying 32-bit\n");
-		status = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
-	}
+	status = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (status != 0) {
 		dev_err(&pdev->dev, "Error %d setting DMA mask\n", status);
 		goto abort_with_enabled;
 	}
-	(void)pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(64));
 	mgp->cmd = dma_alloc_coherent(&pdev->dev, sizeof(*mgp->cmd),
 				      &mgp->cmd_bus, GFP_KERNEL);
 	if (!mgp->cmd) {
@@ -3847,6 +3809,7 @@ static int myri10ge_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		dev_err(&pdev->dev,
 			"invalid sram_size %dB or board span %ldB\n",
 			mgp->sram_size, mgp->board_span);
+		status = -EINVAL;
 		goto abort_with_ioremap;
 	}
 	memcpy_fromio(mgp->eeprom_strings,
@@ -3856,8 +3819,7 @@ static int myri10ge_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (status)
 		goto abort_with_ioremap;
 
-	for (i = 0; i < ETH_ALEN; i++)
-		netdev->dev_addr[i] = mgp->mac_addr[i];
+	eth_hw_addr_set(netdev, mgp->mac_addr);
 
 	myri10ge_select_firmware(mgp);
 
@@ -3901,10 +3863,7 @@ static int myri10ge_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	/* fake NETIF_F_HW_VLAN_CTAG_RX for good GRO performance */
 	netdev->hw_features |= NETIF_F_HW_VLAN_CTAG_RX;
 
-	netdev->features = netdev->hw_features;
-
-	if (dac_enabled)
-		netdev->features |= NETIF_F_HIGHDMA;
+	netdev->features = netdev->hw_features | NETIF_F_HIGHDMA;
 
 	netdev->vlan_features |= mgp->features;
 	if (mgp->fw_ver_tiny < 37)
@@ -3953,6 +3912,7 @@ abort_with_slices:
 	myri10ge_free_slices(mgp);
 
 abort_with_firmware:
+	kfree(mgp->msix_vectors);
 	myri10ge_dummy_rdma(mgp, 0);
 
 abort_with_ioremap:
@@ -4028,15 +3988,14 @@ static const struct pci_device_id myri10ge_pci_tbl[] = {
 
 MODULE_DEVICE_TABLE(pci, myri10ge_pci_tbl);
 
+static SIMPLE_DEV_PM_OPS(myri10ge_pm_ops, myri10ge_suspend, myri10ge_resume);
+
 static struct pci_driver myri10ge_driver = {
 	.name = "myri10ge",
 	.probe = myri10ge_probe,
 	.remove = myri10ge_remove,
 	.id_table = myri10ge_pci_tbl,
-#ifdef CONFIG_PM
-	.suspend = myri10ge_suspend,
-	.resume = myri10ge_resume,
-#endif
+	.driver.pm = &myri10ge_pm_ops,
 };
 
 #ifdef CONFIG_MYRI10GE_DCA

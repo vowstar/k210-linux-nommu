@@ -22,7 +22,6 @@
 #include <linux/ioport.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
-#include <linux/of_gpio.h>
 #include <linux/platform_device.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -32,7 +31,7 @@
 #include <linux/clk.h>
 #include <linux/err.h>
 #include <linux/completion.h>
-#include <linux/gpio.h>
+#include <linux/pinctrl/consumer.h>
 #include <linux/regulator/consumer.h>
 #include <linux/pm_runtime.h>
 #include <linux/module.h>
@@ -606,7 +605,7 @@ static int mxs_spi_probe(struct platform_device *pdev)
 		}
 	}
 
-	ret = pm_runtime_get_sync(ssp->dev);
+	ret = pm_runtime_resume_and_get(ssp->dev);
 	if (ret < 0) {
 		dev_err(ssp->dev, "runtime_get_sync failed\n");
 		goto out_pm_runtime_disable;

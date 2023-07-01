@@ -34,9 +34,7 @@
 #ifndef _HNS_ROCE_HEM_H
 #define _HNS_ROCE_HEM_H
 
-#define HW_SYNC_SLEEP_TIME_INTERVAL	20
-#define HW_SYNC_TIMEOUT_MSECS           (25 * HW_SYNC_SLEEP_TIME_INTERVAL)
-#define BT_CMD_SYNC_SHIFT		31
+#define HEM_HOP_STEP_DIRECT 0xff
 
 enum {
 	/* MAP HEM(Hardware Entry Memory) */
@@ -47,6 +45,7 @@ enum {
 	HEM_TYPE_SCCC,
 	HEM_TYPE_QPC_TIMER,
 	HEM_TYPE_CQC_TIMER,
+	HEM_TYPE_GMV,
 
 	 /* UNMAP HEM */
 	HEM_TYPE_MTT,
@@ -73,11 +72,6 @@ enum {
 	(type >= HEM_TYPE_MTT && hop_num == 1) || \
 	(type >= HEM_TYPE_MTT && hop_num == HNS_ROCE_HOP_NUM_0))
 
-enum {
-	 HNS_ROCE_HEM_PAGE_SHIFT = 12,
-	 HNS_ROCE_HEM_PAGE_SIZE  = 1 << HNS_ROCE_HEM_PAGE_SHIFT,
-};
-
 struct hns_roce_hem_chunk {
 	struct list_head	 list;
 	int			 npages;
@@ -87,8 +81,8 @@ struct hns_roce_hem_chunk {
 };
 
 struct hns_roce_hem {
-	struct list_head	 chunk_list;
-	int			 refcount;
+	struct list_head chunk_list;
+	refcount_t refcount;
 };
 
 struct hns_roce_hem_iter {
@@ -115,16 +109,9 @@ void hns_roce_table_put(struct hns_roce_dev *hr_dev,
 void *hns_roce_table_find(struct hns_roce_dev *hr_dev,
 			  struct hns_roce_hem_table *table, unsigned long obj,
 			  dma_addr_t *dma_handle);
-int hns_roce_table_get_range(struct hns_roce_dev *hr_dev,
-			     struct hns_roce_hem_table *table,
-			     unsigned long start, unsigned long end);
-void hns_roce_table_put_range(struct hns_roce_dev *hr_dev,
-			      struct hns_roce_hem_table *table,
-			      unsigned long start, unsigned long end);
 int hns_roce_init_hem_table(struct hns_roce_dev *hr_dev,
 			    struct hns_roce_hem_table *table, u32 type,
-			    unsigned long obj_size, unsigned long nobj,
-			    int use_lowmem);
+			    unsigned long obj_size, unsigned long nobj);
 void hns_roce_cleanup_hem_table(struct hns_roce_dev *hr_dev,
 				struct hns_roce_hem_table *table);
 void hns_roce_cleanup_hem(struct hns_roce_dev *hr_dev);
@@ -133,19 +120,18 @@ int hns_roce_calc_hem_mhop(struct hns_roce_dev *hr_dev,
 			   struct hns_roce_hem_mhop *mhop);
 bool hns_roce_check_whether_mhop(struct hns_roce_dev *hr_dev, u32 type);
 
-void hns_roce_hem_list_init(struct hns_roce_hem_list *hem_list,
-			    int bt_page_order);
+void hns_roce_hem_list_init(struct hns_roce_hem_list *hem_list);
 int hns_roce_hem_list_calc_root_ba(const struct hns_roce_buf_region *regions,
 				   int region_cnt, int unit);
 int hns_roce_hem_list_request(struct hns_roce_dev *hr_dev,
 			      struct hns_roce_hem_list *hem_list,
 			      const struct hns_roce_buf_region *regions,
-			      int region_cnt);
+			      int region_cnt, unsigned int bt_pg_shift);
 void hns_roce_hem_list_release(struct hns_roce_dev *hr_dev,
 			       struct hns_roce_hem_list *hem_list);
 void *hns_roce_hem_list_find_mtt(struct hns_roce_dev *hr_dev,
 				 struct hns_roce_hem_list *hem_list,
-				 int offset, int *mtt_cnt, u64 *phy_addr);
+				 int offset, int *mtt_cnt);
 
 static inline void hns_roce_hem_first(struct hns_roce_hem *hem,
 				      struct hns_roce_hem_iter *iter)
@@ -181,4 +167,4 @@ static inline dma_addr_t hns_roce_hem_addr(struct hns_roce_hem_iter *iter)
 	return sg_dma_address(&iter->chunk->mem[iter->page_idx]);
 }
 
-#endif /*_HNS_ROCE_HEM_H*/
+#endif /* _HNS_ROCE_HEM_H */

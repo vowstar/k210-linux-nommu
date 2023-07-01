@@ -37,7 +37,7 @@ struct cs47l92 {
 	struct madera_fll fll[2];
 };
 
-static const struct wm_adsp_region cs47l92_dsp1_regions[] = {
+static const struct cs_dsp_region cs47l92_dsp1_regions[] = {
 	{ .type = WMFW_ADSP2_PM, .base = 0x080000 },
 	{ .type = WMFW_ADSP2_ZM, .base = 0x0e0000 },
 	{ .type = WMFW_ADSP2_XM, .base = 0x0a0000 },
@@ -119,7 +119,13 @@ static int cs47l92_put_demux(struct snd_kcontrol *kcontrol,
 end:
 	snd_soc_dapm_mutex_unlock(dapm);
 
-	return snd_soc_dapm_mux_update_power(dapm, kcontrol, mux, e, NULL);
+	ret = snd_soc_dapm_mux_update_power(dapm, kcontrol, mux, e, NULL);
+	if (ret < 0) {
+		dev_err(madera->dev, "Failed to update demux power state: %d\n", ret);
+		return ret;
+	}
+
+	return change;
 }
 
 static SOC_ENUM_SINGLE_DECL(cs47l92_outdemux_enum,
@@ -201,6 +207,7 @@ static int cs47l92_outclk_ev(struct snd_soc_dapm_widget *w,
 		default:
 			break;
 		}
+		break;
 	default:
 		break;
 	}
@@ -790,70 +797,70 @@ SND_SOC_DAPM_PGA("PWM2 Driver", MADERA_PWM_DRIVE_1, MADERA_PWM2_ENA_SHIFT,
 
 SND_SOC_DAPM_AIF_OUT("AIF1TX1", NULL, 0,
 		     MADERA_AIF1_TX_ENABLES, MADERA_AIF1TX1_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF1TX2", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF1TX2", NULL, 1,
 		     MADERA_AIF1_TX_ENABLES, MADERA_AIF1TX2_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF1TX3", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF1TX3", NULL, 2,
 		     MADERA_AIF1_TX_ENABLES, MADERA_AIF1TX3_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF1TX4", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF1TX4", NULL, 3,
 		     MADERA_AIF1_TX_ENABLES, MADERA_AIF1TX4_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF1TX5", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF1TX5", NULL, 4,
 		     MADERA_AIF1_TX_ENABLES, MADERA_AIF1TX5_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF1TX6", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF1TX6", NULL, 5,
 		     MADERA_AIF1_TX_ENABLES, MADERA_AIF1TX6_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF1TX7", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF1TX7", NULL, 6,
 		     MADERA_AIF1_TX_ENABLES, MADERA_AIF1TX7_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF1TX8", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF1TX8", NULL, 7,
 		     MADERA_AIF1_TX_ENABLES, MADERA_AIF1TX8_ENA_SHIFT, 0),
 
 SND_SOC_DAPM_AIF_OUT("AIF2TX1", NULL, 0,
 		     MADERA_AIF2_TX_ENABLES, MADERA_AIF2TX1_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF2TX2", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF2TX2", NULL, 1,
 		     MADERA_AIF2_TX_ENABLES, MADERA_AIF2TX2_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF2TX3", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF2TX3", NULL, 2,
 		     MADERA_AIF2_TX_ENABLES, MADERA_AIF2TX3_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF2TX4", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF2TX4", NULL, 3,
 		     MADERA_AIF2_TX_ENABLES, MADERA_AIF2TX4_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF2TX5", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF2TX5", NULL, 4,
 		     MADERA_AIF2_TX_ENABLES, MADERA_AIF2TX5_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF2TX6", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF2TX6", NULL, 5,
 		     MADERA_AIF2_TX_ENABLES, MADERA_AIF2TX6_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF2TX7", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF2TX7", NULL, 6,
 		     MADERA_AIF2_TX_ENABLES, MADERA_AIF2TX7_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF2TX8", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF2TX8", NULL, 7,
 		     MADERA_AIF2_TX_ENABLES, MADERA_AIF2TX8_ENA_SHIFT, 0),
 
 SND_SOC_DAPM_AIF_OUT("SLIMTX1", NULL, 0,
 		     MADERA_SLIMBUS_TX_CHANNEL_ENABLE,
 		     MADERA_SLIMTX1_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("SLIMTX2", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("SLIMTX2", NULL, 1,
 		     MADERA_SLIMBUS_TX_CHANNEL_ENABLE,
 		     MADERA_SLIMTX2_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("SLIMTX3", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("SLIMTX3", NULL, 2,
 		     MADERA_SLIMBUS_TX_CHANNEL_ENABLE,
 		     MADERA_SLIMTX3_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("SLIMTX4", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("SLIMTX4", NULL, 3,
 		     MADERA_SLIMBUS_TX_CHANNEL_ENABLE,
 		     MADERA_SLIMTX4_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("SLIMTX5", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("SLIMTX5", NULL, 4,
 		     MADERA_SLIMBUS_TX_CHANNEL_ENABLE,
 		     MADERA_SLIMTX5_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("SLIMTX6", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("SLIMTX6", NULL, 5,
 		     MADERA_SLIMBUS_TX_CHANNEL_ENABLE,
 		     MADERA_SLIMTX6_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("SLIMTX7", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("SLIMTX7", NULL, 6,
 		     MADERA_SLIMBUS_TX_CHANNEL_ENABLE,
 		     MADERA_SLIMTX7_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("SLIMTX8", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("SLIMTX8", NULL, 7,
 		     MADERA_SLIMBUS_TX_CHANNEL_ENABLE,
 		     MADERA_SLIMTX8_ENA_SHIFT, 0),
 
 SND_SOC_DAPM_AIF_OUT("AIF3TX1", NULL, 0,
 		     MADERA_AIF3_TX_ENABLES, MADERA_AIF3TX1_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF3TX2", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF3TX2", NULL, 1,
 		     MADERA_AIF3_TX_ENABLES, MADERA_AIF3TX2_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF3TX3", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF3TX3", NULL, 2,
 		     MADERA_AIF3_TX_ENABLES, MADERA_AIF3TX3_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_OUT("AIF3TX4", NULL, 0,
+SND_SOC_DAPM_AIF_OUT("AIF3TX4", NULL, 3,
 		     MADERA_AIF3_TX_ENABLES, MADERA_AIF3TX4_ENA_SHIFT, 0),
 
 SND_SOC_DAPM_PGA_E("OUT1L", SND_SOC_NOPM,
@@ -948,62 +955,62 @@ SND_SOC_DAPM_PGA_E("IN4R", MADERA_INPUT_ENABLES, MADERA_IN4R_ENA_SHIFT,
 
 SND_SOC_DAPM_AIF_IN("AIF1RX1", NULL, 0,
 		    MADERA_AIF1_RX_ENABLES, MADERA_AIF1RX1_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF1RX2", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF1RX2", NULL, 1,
 		    MADERA_AIF1_RX_ENABLES, MADERA_AIF1RX2_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF1RX3", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF1RX3", NULL, 2,
 		    MADERA_AIF1_RX_ENABLES, MADERA_AIF1RX3_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF1RX4", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF1RX4", NULL, 3,
 		    MADERA_AIF1_RX_ENABLES, MADERA_AIF1RX4_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF1RX5", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF1RX5", NULL, 4,
 		    MADERA_AIF1_RX_ENABLES, MADERA_AIF1RX5_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF1RX6", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF1RX6", NULL, 5,
 		    MADERA_AIF1_RX_ENABLES, MADERA_AIF1RX6_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF1RX7", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF1RX7", NULL, 6,
 		    MADERA_AIF1_RX_ENABLES, MADERA_AIF1RX7_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF1RX8", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF1RX8", NULL, 7,
 		    MADERA_AIF1_RX_ENABLES, MADERA_AIF1RX8_ENA_SHIFT, 0),
 
 SND_SOC_DAPM_AIF_IN("AIF2RX1", NULL, 0,
 		    MADERA_AIF2_RX_ENABLES, MADERA_AIF2RX1_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF2RX2", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF2RX2", NULL, 1,
 		    MADERA_AIF2_RX_ENABLES, MADERA_AIF2RX2_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF2RX3", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF2RX3", NULL, 2,
 		    MADERA_AIF2_RX_ENABLES, MADERA_AIF2RX3_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF2RX4", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF2RX4", NULL, 3,
 		    MADERA_AIF2_RX_ENABLES, MADERA_AIF2RX4_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF2RX5", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF2RX5", NULL, 4,
 		    MADERA_AIF2_RX_ENABLES, MADERA_AIF2RX5_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF2RX6", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF2RX6", NULL, 5,
 		    MADERA_AIF2_RX_ENABLES, MADERA_AIF2RX6_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF2RX7", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF2RX7", NULL, 6,
 		    MADERA_AIF2_RX_ENABLES, MADERA_AIF2RX7_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF2RX8", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF2RX8", NULL, 7,
 		    MADERA_AIF2_RX_ENABLES, MADERA_AIF2RX8_ENA_SHIFT, 0),
 
 SND_SOC_DAPM_AIF_IN("AIF3RX1", NULL, 0,
 		    MADERA_AIF3_RX_ENABLES, MADERA_AIF3RX1_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF3RX2", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF3RX2", NULL, 1,
 		    MADERA_AIF3_RX_ENABLES, MADERA_AIF3RX2_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF3RX3", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF3RX3", NULL, 2,
 		    MADERA_AIF3_RX_ENABLES, MADERA_AIF3RX3_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("AIF3RX4", NULL, 0,
+SND_SOC_DAPM_AIF_IN("AIF3RX4", NULL, 3,
 		    MADERA_AIF3_RX_ENABLES, MADERA_AIF3RX4_ENA_SHIFT, 0),
 
 SND_SOC_DAPM_AIF_IN("SLIMRX1", NULL, 0, MADERA_SLIMBUS_RX_CHANNEL_ENABLE,
 		    MADERA_SLIMRX1_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("SLIMRX2", NULL, 0, MADERA_SLIMBUS_RX_CHANNEL_ENABLE,
+SND_SOC_DAPM_AIF_IN("SLIMRX2", NULL, 1, MADERA_SLIMBUS_RX_CHANNEL_ENABLE,
 		    MADERA_SLIMRX2_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("SLIMRX3", NULL, 0, MADERA_SLIMBUS_RX_CHANNEL_ENABLE,
+SND_SOC_DAPM_AIF_IN("SLIMRX3", NULL, 2, MADERA_SLIMBUS_RX_CHANNEL_ENABLE,
 		    MADERA_SLIMRX3_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("SLIMRX4", NULL, 0, MADERA_SLIMBUS_RX_CHANNEL_ENABLE,
+SND_SOC_DAPM_AIF_IN("SLIMRX4", NULL, 3, MADERA_SLIMBUS_RX_CHANNEL_ENABLE,
 		    MADERA_SLIMRX4_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("SLIMRX5", NULL, 0, MADERA_SLIMBUS_RX_CHANNEL_ENABLE,
+SND_SOC_DAPM_AIF_IN("SLIMRX5", NULL, 4, MADERA_SLIMBUS_RX_CHANNEL_ENABLE,
 		    MADERA_SLIMRX5_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("SLIMRX6", NULL, 0, MADERA_SLIMBUS_RX_CHANNEL_ENABLE,
+SND_SOC_DAPM_AIF_IN("SLIMRX6", NULL, 5, MADERA_SLIMBUS_RX_CHANNEL_ENABLE,
 		    MADERA_SLIMRX6_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("SLIMRX7", NULL, 0, MADERA_SLIMBUS_RX_CHANNEL_ENABLE,
+SND_SOC_DAPM_AIF_IN("SLIMRX7", NULL, 6, MADERA_SLIMBUS_RX_CHANNEL_ENABLE,
 		    MADERA_SLIMRX7_ENA_SHIFT, 0),
-SND_SOC_DAPM_AIF_IN("SLIMRX8", NULL, 0, MADERA_SLIMBUS_RX_CHANNEL_ENABLE,
+SND_SOC_DAPM_AIF_IN("SLIMRX8", NULL, 7, MADERA_SLIMBUS_RX_CHANNEL_ENABLE,
 		    MADERA_SLIMRX8_ENA_SHIFT, 0),
 
 SND_SOC_DAPM_PGA("EQ1", MADERA_EQ1_1, MADERA_EQ1_ENA_SHIFT, 0, NULL, 0),
@@ -1703,8 +1710,8 @@ static struct snd_soc_dai_driver cs47l92_dai[] = {
 			.formats = MADERA_FORMATS,
 		 },
 		.ops = &madera_dai_ops,
-		.symmetric_rates = 1,
-		.symmetric_samplebits = 1,
+		.symmetric_rate = 1,
+		.symmetric_sample_bits = 1,
 	},
 	{
 		.name = "cs47l92-aif2",
@@ -1725,8 +1732,8 @@ static struct snd_soc_dai_driver cs47l92_dai[] = {
 			.formats = MADERA_FORMATS,
 		 },
 		.ops = &madera_dai_ops,
-		.symmetric_rates = 1,
-		.symmetric_samplebits = 1,
+		.symmetric_rate = 1,
+		.symmetric_sample_bits = 1,
 	},
 	{
 		.name = "cs47l92-aif3",
@@ -1747,8 +1754,8 @@ static struct snd_soc_dai_driver cs47l92_dai[] = {
 			.formats = MADERA_FORMATS,
 		 },
 		.ops = &madera_dai_ops,
-		.symmetric_rates = 1,
-		.symmetric_samplebits = 1,
+		.symmetric_rate = 1,
+		.symmetric_sample_bits = 1,
 	},
 	{
 		.name = "cs47l92-slim1",
@@ -1830,22 +1837,21 @@ static struct snd_soc_dai_driver cs47l92_dai[] = {
 	},
 };
 
-static int cs47l92_open(struct snd_compr_stream *stream)
+static int cs47l92_open(struct snd_soc_component *component,
+			struct snd_compr_stream *stream)
 {
 	struct snd_soc_pcm_runtime *rtd = stream->private_data;
-	struct snd_soc_component *component =
-		snd_soc_rtdcom_lookup(rtd, DRV_NAME);
 	struct cs47l92 *cs47l92 = snd_soc_component_get_drvdata(component);
 	struct madera_priv *priv = &cs47l92->core;
 	struct madera *madera = priv->madera;
 	int n_adsp;
 
-	if (strcmp(rtd->codec_dai->name, "cs47l92-dsp-trace") == 0) {
+	if (strcmp(asoc_rtd_to_codec(rtd, 0)->name, "cs47l92-dsp-trace") == 0) {
 		n_adsp = 0;
 	} else {
 		dev_err(madera->dev,
 			"No suitable compressed stream for DAI '%s'\n",
-			rtd->codec_dai->name);
+			asoc_rtd_to_codec(rtd, 0)->name);
 		return -EINVAL;
 	}
 
@@ -1933,7 +1939,7 @@ static unsigned int cs47l92_digital_vu[] = {
 	MADERA_DAC_DIGITAL_VOLUME_5R,
 };
 
-static const struct snd_compr_ops cs47l92_compr_ops = {
+static const struct snd_compress_ops cs47l92_compress_ops = {
 	.open = &cs47l92_open,
 	.free = &wm_adsp_compr_free,
 	.set_params = &wm_adsp_compr_set_params,
@@ -1949,7 +1955,7 @@ static const struct snd_soc_component_driver soc_component_dev_cs47l92 = {
 	.set_sysclk		= &madera_set_sysclk,
 	.set_pll		= &cs47l92_set_fll,
 	.name			= DRV_NAME,
-	.compr_ops		= &cs47l92_compr_ops,
+	.compress_ops		= &cs47l92_compress_ops,
 	.controls		= cs47l92_snd_controls,
 	.num_controls		= ARRAY_SIZE(cs47l92_snd_controls),
 	.dapm_widgets		= cs47l92_dapm_widgets,
@@ -1958,7 +1964,6 @@ static const struct snd_soc_component_driver soc_component_dev_cs47l92 = {
 	.num_dapm_routes	= ARRAY_SIZE(cs47l92_dapm_routes),
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 static int cs47l92_probe(struct platform_device *pdev)
@@ -2002,17 +2007,17 @@ static int cs47l92_probe(struct platform_device *pdev)
 		dev_warn(&pdev->dev, "Failed to set DSP IRQ wake: %d\n", ret);
 
 	cs47l92->core.adsp[0].part = "cs47l92";
-	cs47l92->core.adsp[0].num = 1;
-	cs47l92->core.adsp[0].type = WMFW_ADSP2;
-	cs47l92->core.adsp[0].rev = 2;
-	cs47l92->core.adsp[0].dev = madera->dev;
-	cs47l92->core.adsp[0].regmap = madera->regmap_32bit;
+	cs47l92->core.adsp[0].cs_dsp.num = 1;
+	cs47l92->core.adsp[0].cs_dsp.type = WMFW_ADSP2;
+	cs47l92->core.adsp[0].cs_dsp.rev = 2;
+	cs47l92->core.adsp[0].cs_dsp.dev = madera->dev;
+	cs47l92->core.adsp[0].cs_dsp.regmap = madera->regmap_32bit;
 
-	cs47l92->core.adsp[0].base = MADERA_DSP1_CONFIG_1;
-	cs47l92->core.adsp[0].mem = cs47l92_dsp1_regions;
-	cs47l92->core.adsp[0].num_mems = ARRAY_SIZE(cs47l92_dsp1_regions);
+	cs47l92->core.adsp[0].cs_dsp.base = MADERA_DSP1_CONFIG_1;
+	cs47l92->core.adsp[0].cs_dsp.mem = cs47l92_dsp1_regions;
+	cs47l92->core.adsp[0].cs_dsp.num_mems = ARRAY_SIZE(cs47l92_dsp1_regions);
 
-	cs47l92->core.adsp[0].lock_regions = WM_ADSP2_REGION_1_9;
+	cs47l92->core.adsp[0].cs_dsp.lock_regions = CS_ADSP2_REGION_1_9;
 
 	ret = wm_adsp2_init(&cs47l92->core.adsp[0]);
 	if (ret != 0)

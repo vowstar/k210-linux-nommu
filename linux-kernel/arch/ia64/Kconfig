@@ -8,10 +8,16 @@ menu "Processor type and features"
 
 config IA64
 	bool
+	select ARCH_BINFMT_ELF_EXTRA_PHDRS
+	select ARCH_HAS_DMA_MARK_CLEAN
+	select ARCH_HAS_STRNCPY_FROM_USER
+	select ARCH_HAS_STRNLEN_USER
 	select ARCH_MIGHT_HAVE_PC_PARPORT
 	select ARCH_MIGHT_HAVE_PC_SERIO
 	select ACPI
 	select ACPI_NUMA if NUMA
+	select ARCH_ENABLE_MEMORY_HOTPLUG
+	select ARCH_ENABLE_MEMORY_HOTREMOVE
 	select ARCH_SUPPORTS_ACPI
 	select ACPI_SYSTEM_POWER_STATES_SUPPORT if ACPI
 	select ARCH_MIGHT_HAVE_ACPI_PDC if ACPI
@@ -22,20 +28,17 @@ config IA64
 	select HAVE_ASM_MODVERSIONS
 	select HAVE_UNSTABLE_SCHED_CLOCK
 	select HAVE_EXIT_THREAD
-	select HAVE_IDE
-	select HAVE_OPROFILE
 	select HAVE_KPROBES
 	select HAVE_KRETPROBES
 	select HAVE_FTRACE_MCOUNT_RECORD
 	select HAVE_DYNAMIC_FTRACE if (!ITANIUM)
 	select HAVE_FUNCTION_TRACER
+	select HAVE_SETUP_PER_CPU_AREA
 	select TTY
 	select HAVE_ARCH_TRACEHOOK
-	select HAVE_MEMBLOCK_NODE_MAP
+	select HAVE_FUNCTION_DESCRIPTORS
 	select HAVE_VIRT_CPU_ACCOUNTING
-	select DMA_NONCOHERENT_MMAP
-	select ARCH_HAS_SYNC_DMA_FOR_CPU
-	select VIRT_TO_BUS
+	select HUGETLB_PAGE_SIZE_VARIABLE if HUGETLB_PAGE
 	select GENERIC_IRQ_PROBE
 	select GENERIC_PENDING_IRQ if SMP
 	select GENERIC_IRQ_SHOW
@@ -48,6 +51,7 @@ config IA64
 	select ARCH_THREAD_STACK_ALLOCATOR
 	select ARCH_CLOCKSOURCE_DATA
 	select GENERIC_TIME_VSYSCALL
+	select LEGACY_TIMER_TICK
 	select SWIOTLB
 	select SYSCTL_ARCH_UNALIGN_NO_WARN
 	select HAVE_MOD_ARCH_SPECIFIC
@@ -57,6 +61,9 @@ config IA64
 	select NEED_DMA_MAP_STATE
 	select NEED_SG_DMA_LENGTH
 	select NUMA if !FLATMEM
+	select PCI_MSI_ARCH_FALLBACKS if PCI_MSI
+	select ZONE_DMA32
+	select FUNCTION_ALIGNMENT_32B
 	default y
 	help
 	  The Itanium Processor Family is Intel's 64-bit successor to
@@ -69,9 +76,6 @@ config 64BIT
 	select ATA_NONSTANDARD if ATA
 	default y
 
-config ZONE_DMA32
-	def_bool y
-
 config MMU
 	bool
 	default y
@@ -82,17 +86,9 @@ config STACKTRACE_SUPPORT
 config GENERIC_LOCKBREAK
 	def_bool n
 
-config HUGETLB_PAGE_SIZE_VARIABLE
-	bool
-	depends on HUGETLB_PAGE
-	default y
-
 config GENERIC_CALIBRATE_DELAY
 	bool
 	default y
-
-config HAVE_SETUP_PER_CPU_AREA
-	def_bool y
 
 config DMI
 	bool
@@ -193,6 +189,7 @@ config IA64_SGI_UV
 
 config IA64_HP_SBA_IOMMU
 	bool "HP SBA IOMMU support"
+	select DMA_OPS
 	default y
 	help
 	  Say Y here to add support for the SBA IOMMU found on HP zx1 and
@@ -204,7 +201,7 @@ config IA64_CYCLONE
 	  Say Y here to enable support for IBM EXA Cyclone time source.
 	  If you're unsure, answer N.
 
-config FORCE_MAX_ZONEORDER
+config ARCH_FORCE_MAX_ORDER
 	int "MAX_ORDER (11 - 17)"  if !HUGETLB_PAGE
 	range 11 17  if !HUGETLB_PAGE
 	default "17" if HUGETLB_PAGE
@@ -244,16 +241,10 @@ config HOTPLUG_CPU
 	bool "Support for hot-pluggable CPUs"
 	depends on SMP
 	default n
-	---help---
+	help
 	  Say Y here to experiment with turning CPUs off and on.  CPUs
 	  can be controlled through /sys/devices/system/cpu/cpu#.
 	  Say N if you want to disable CPU hotplug.
-
-config ARCH_ENABLE_MEMORY_HOTPLUG
-	def_bool y
-
-config ARCH_ENABLE_MEMORY_HOTREMOVE
-	def_bool y
 
 config SCHED_SMT
 	bool "SMT scheduler support"
@@ -267,7 +258,7 @@ config PERMIT_BSP_REMOVE
 	bool "Support removal of Bootstrap Processor"
 	depends on HOTPLUG_CPU
 	default n
-	---help---
+	help
 	Say Y here if your platform SAL will support removal of BSP with HOTPLUG_CPU
 	support. 
 
@@ -275,7 +266,7 @@ config FORCE_CPEI_RETARGET
 	bool "Force assumption that CPEI can be re-targeted"
 	depends on PERMIT_BSP_REMOVE
 	default n
-	---help---
+	help
 	Say Y if you need to force the assumption that CPEI can be re-targeted to
 	any cpu in the system. This hint is available via ACPI 3.0 specifications.
 	Tiger4 systems are capable of re-directing CPEI to any CPU other than BSP.
@@ -285,30 +276,22 @@ config FORCE_CPEI_RETARGET
 config ARCH_SELECT_MEMORY_MODEL
 	def_bool y
 
-config ARCH_DISCONTIGMEM_ENABLE
-	def_bool y
-	help
-	  Say Y to support efficient handling of discontiguous physical memory,
-	  for architectures which are either NUMA (Non-Uniform Memory Access)
-	  or have huge holes in the physical address space for other reasons.
-	  See <file:Documentation/vm/numa.rst> for more.
-
 config ARCH_FLATMEM_ENABLE
 	def_bool y
 
 config ARCH_SPARSEMEM_ENABLE
 	def_bool y
-	depends on ARCH_DISCONTIGMEM_ENABLE
 	select SPARSEMEM_VMEMMAP_ENABLE
 
-config ARCH_DISCONTIGMEM_DEFAULT
+config ARCH_SPARSEMEM_DEFAULT
 	def_bool y
-	depends on ARCH_DISCONTIGMEM_ENABLE
+	depends on ARCH_SPARSEMEM_ENABLE
 
 config NUMA
 	bool "NUMA support"
 	depends on !FLATMEM
 	select SMP
+	select USE_PERCPU_NUMA_NODE_ID
 	help
 	  Say Y to compile the kernel to support NUMA (Non-Uniform Memory
 	  Access).  This option is for configuring high-end multiprocessor
@@ -318,37 +301,13 @@ config NODES_SHIFT
 	int "Max num nodes shift(3-10)"
 	range 3 10
 	default "10"
-	depends on NEED_MULTIPLE_NODES
+	depends on NUMA
 	help
 	  This option specifies the maximum number of nodes in your SSI system.
 	  MAX_NUMNODES will be 2^(This value).
 	  If in doubt, use the default.
 
-# VIRTUAL_MEM_MAP and FLAT_NODE_MEM_MAP are functionally equivalent.
-# VIRTUAL_MEM_MAP has been retained for historical reasons.
-config VIRTUAL_MEM_MAP
-	bool "Virtual mem map"
-	depends on !SPARSEMEM
-	default y
-	help
-	  Say Y to compile the kernel with support for a virtual mem map.
-	  This code also only takes effect if a memory hole of greater than
-	  1 Gb is found during boot.  You must turn this option on if you
-	  require the DISCONTIGMEM option for your machine. If you are
-	  unsure, say Y.
-
-config HOLES_IN_ZONE
-	bool
-	default y if VIRTUAL_MEM_MAP
-
-config HAVE_ARCH_EARLY_PFN_TO_NID
-	def_bool NUMA && SPARSEMEM
-
 config HAVE_ARCH_NODEDATA_EXTENSION
-	def_bool y
-	depends on NUMA
-
-config USE_PERCPU_NUMA_NODE_ID
 	def_bool y
 	depends on NUMA
 
@@ -360,16 +319,7 @@ config ARCH_PROC_KCORE_TEXT
 	depends on PROC_KCORE
 
 config IA64_MCA_RECOVERY
-	tristate "MCA recovery from errors other than TLB."
-
-config PERFMON
-	bool "Performance monitor support"
-	depends on BROKEN
-	help
-	  Selects whether support for the IA-64 performance monitor hardware
-	  is included in the kernel.  This makes some kernel data-structures a
-	  little bigger and slows down execution a bit, but it is generally
-	  a good idea to turn this on.  If you're unsure, say Y.
+	bool "MCA recovery from errors other than TLB."
 
 config IA64_PALINFO
 	tristate "/proc/pal support"
@@ -433,8 +383,6 @@ config CRASH_DUMP
 	  depends on IA64_MCA_RECOVERY && (!SMP || HOTPLUG_CPU)
 	  help
 	    Generate crash dump after being started by kexec.
-
-source "drivers/firmware/Kconfig"
 
 endmenu
 

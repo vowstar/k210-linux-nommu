@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/display/allwinner,sun8i-r40-tcon-top.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Allwinner R40 TCON TOP Device Tree Bindings
+title: Allwinner R40 TCON TOP
 
 maintainers:
   - Chen-Yu Tsai <wens@csie.org>
@@ -41,6 +41,7 @@ properties:
   compatible:
     enum:
       - allwinner,sun8i-r40-tcon-top
+      - allwinner,sun20i-d1-tcon-top
       - allwinner,sun50i-h6-tcon-top
 
   reg:
@@ -49,171 +50,57 @@ properties:
   clocks:
     minItems: 2
     maxItems: 6
-    items:
-      - description: The TCON TOP interface clock
-      - description: The TCON TOP TV0 clock
-      - description: The TCON TOP TVE0 clock
-      - description: The TCON TOP TV1 clock
-      - description: The TCON TOP TVE1 clock
-      - description: The TCON TOP MIPI DSI clock
 
   clock-names:
     minItems: 2
     maxItems: 6
-    items:
-      - const: bus
-      - const: tcon-tv0
-      - const: tve0
-      - const: tcon-tv1
-      - const: tve1
-      - const: dsi
 
   clock-output-names:
     minItems: 1
     maxItems: 3
-    description: >
-      The first item is the name of the clock created for the TV0
-      channel, the second item is the name of the TCON TV1 channel
-      clock and the third one is the name of the DSI channel clock.
 
   resets:
     maxItems: 1
 
   ports:
-    type: object
-    description: |
-      A ports node with endpoint definitions as defined in
-      Documentation/devicetree/bindings/media/video-interfaces.txt.
-      All ports should have only one endpoint connected to
-      remote endpoint.
+    $ref: /schemas/graph.yaml#/properties/ports
 
     properties:
-      "#address-cells":
-        const: 1
-
-      "#size-cells":
-        const: 0
-
       port@0:
-        type: object
+        $ref: /schemas/graph.yaml#/properties/port
         description: |
           Input endpoint for Mixer 0 mux.
 
       port@1:
-        type: object
+        $ref: /schemas/graph.yaml#/properties/port
         description: |
           Output endpoint for Mixer 0 mux
 
-        properties:
-          "#address-cells":
-            const: 1
-
-          "#size-cells":
-            const: 0
-
-          reg: true
-
-        patternProperties:
-          "^endpoint@[0-9]$":
-            type: object
-
-            properties:
-              reg:
-                description: |
-                  ID of the target TCON
-
-            required:
-              - reg
-
-        required:
-          - "#address-cells"
-          - "#size-cells"
-
-        additionalProperties: false
-
       port@2:
-        type: object
+        $ref: /schemas/graph.yaml#/properties/port
         description: |
           Input endpoint for Mixer 1 mux.
 
       port@3:
-        type: object
+        $ref: /schemas/graph.yaml#/properties/port
         description: |
           Output endpoint for Mixer 1 mux
 
-        properties:
-          "#address-cells":
-            const: 1
-
-          "#size-cells":
-            const: 0
-
-          reg: true
-
-        patternProperties:
-          "^endpoint@[0-9]$":
-            type: object
-
-            properties:
-              reg:
-                description: |
-                  ID of the target TCON
-
-            required:
-              - reg
-
-        required:
-          - "#address-cells"
-          - "#size-cells"
-
-        additionalProperties: false
-
       port@4:
-        type: object
+        $ref: /schemas/graph.yaml#/properties/port
         description: |
           Input endpoint for HDMI mux.
 
-        properties:
-          "#address-cells":
-            const: 1
-
-          "#size-cells":
-            const: 0
-
-          reg: true
-
-        patternProperties:
-          "^endpoint@[0-9]$":
-            type: object
-
-            properties:
-              reg:
-                description: |
-                  ID of the target TCON
-
-            required:
-              - reg
-
-        required:
-          - "#address-cells"
-          - "#size-cells"
-
-        additionalProperties: false
-
       port@5:
-        type: object
+        $ref: /schemas/graph.yaml#/properties/port
         description: |
           Output endpoint for HDMI mux
 
     required:
-      - "#address-cells"
-      - "#size-cells"
       - port@0
       - port@1
       - port@4
       - port@5
-
-    additionalProperties: false
 
 required:
   - "#clock-cells"
@@ -227,32 +114,92 @@ required:
 
 additionalProperties: false
 
-if:
-  properties:
-    compatible:
-      contains:
-        const: allwinner,sun50i-h6-tcon-top
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: allwinner,sun8i-r40-tcon-top
 
-then:
-  properties:
-    clocks:
-      maxItems: 2
+    then:
+      properties:
+        clocks:
+          items:
+            - description: The TCON TOP interface clock
+            - description: The TCON TOP TV0 clock
+            - description: The TCON TOP TVE0 clock
+            - description: The TCON TOP TV1 clock
+            - description: The TCON TOP TVE1 clock
+            - description: The TCON TOP MIPI DSI clock
 
-    clock-output-names:
-      maxItems: 1
+        clock-names:
+          items:
+            - const: bus
+            - const: tcon-tv0
+            - const: tve0
+            - const: tcon-tv1
+            - const: tve1
+            - const: dsi
 
-else:
-  properties:
-    clocks:
-      minItems: 6
+        clock-output-names:
+          items:
+            - description: TCON TV0 output clock name
+            - description: TCON TV1 output clock name
+            - description: DSI output clock name
 
-    clock-output-names:
-      minItems: 3
+        ports:
+          required:
+            - port@2
+            - port@3
 
-    ports:
-      required:
-        - port@2
-        - port@3
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: allwinner,sun20i-d1-tcon-top
+
+    then:
+      properties:
+        clocks:
+          items:
+            - description: The TCON TOP interface clock
+            - description: The TCON TOP TV0 clock
+            - description: The TCON TOP TVE0 clock
+            - description: The TCON TOP MIPI DSI clock
+
+        clock-names:
+          items:
+            - const: bus
+            - const: tcon-tv0
+            - const: tve0
+            - const: dsi
+
+        clock-output-names:
+          items:
+            - description: TCON TV0 output clock name
+            - description: DSI output clock name
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: allwinner,sun50i-h6-tcon-top
+
+    then:
+      properties:
+        clocks:
+          items:
+            - description: The TCON TOP interface clock
+            - description: The TCON TOP TV0 clock
+
+        clock-names:
+          items:
+            - const: bus
+            - const: tcon-tv0
+
+        clock-output-names:
+          items:
+            - description: TCON TV0 output clock name
 
 examples:
   - |

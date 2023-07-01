@@ -114,6 +114,7 @@ static void vmw_resource_release(struct kref *kref)
 	    container_of(kref, struct vmw_resource, kref);
 	struct vmw_private *dev_priv = res->dev_priv;
 	int id;
+	int ret;
 	struct idr *idr = &dev_priv->res_idr[res->func->res_type];
 
 	spin_lock(&dev_priv->resource_lock);
@@ -122,7 +123,8 @@ static void vmw_resource_release(struct kref *kref)
 	if (res->backup) {
 		struct ttm_buffer_object *bo = &res->backup->base;
 
-		ttm_bo_reserve(bo, false, false, NULL);
+		ret = ttm_bo_reserve(bo, false, false, NULL);
+		BUG_ON(ret);
 		if (vmw_resource_mob_attached(res) &&
 		    res->func->unbind != NULL) {
 			struct ttm_validate_buffer val_buf;
@@ -202,7 +204,6 @@ int vmw_resource_alloc_id(struct vmw_resource *res)
  *
  * @dev_priv:       Pointer to a device private struct.
  * @res:            The struct vmw_resource to initialize.
- * @obj_type:       Resource object type.
  * @delay_id:       Boolean whether to defer device id allocation until
  *                  the first validation.
  * @res_free:       Resource destructor.
@@ -280,52 +281,18 @@ out_bad_resource:
 	return ret;
 }
 
-/**
- * vmw_user_resource_lookup_handle - lookup a struct resource from a
- * TTM user-space handle and perform basic type checks
- *
- * @dev_priv:     Pointer to a device private struct
- * @tfile:        Pointer to a struct ttm_object_file identifying the caller
- * @handle:       The TTM user-space handle
- * @converter:    Pointer to an object describing the resource type
- * @p_res:        On successful return the location pointed to will contain
- *                a pointer to a refcounted struct vmw_resource.
- *
- * If the handle can't be found or is associated with an incorrect resource
- * type, -EINVAL will be returned.
- */
-struct vmw_resource *
-vmw_user_resource_noref_lookup_handle(struct vmw_private *dev_priv,
-				      struct ttm_object_file *tfile,
-				      uint32_t handle,
-				      const struct vmw_user_resource_conv
-				      *converter)
-{
-	struct ttm_base_object *base;
-
-	base = ttm_base_object_noref_lookup(tfile, handle);
-	if (!base)
-		return ERR_PTR(-ESRCH);
-
-	if (unlikely(ttm_base_object_type(base) != converter->object_type)) {
-		ttm_base_object_noref_release();
-		return ERR_PTR(-EINVAL);
-	}
-
-	return converter->base_obj_to_res(base);
-}
-
-/**
+/*
  * Helper function that looks either a surface or bo.
  *
  * The pointer this pointed at by out_surf and out_buf needs to be null.
  */
 int vmw_user_lookup_handle(struct vmw_private *dev_priv,
-			   struct ttm_object_file *tfile,
+			   struct drm_file *filp,
 			   uint32_t handle,
 			   struct vmw_surface **out_surf,
 			   struct vmw_buffer_object **out_buf)
 {
+	struct ttm_object_file *tfile = vmw_fpriv(filp)->tfile;
 	struct vmw_resource *res;
 	int ret;
 
@@ -340,7 +307,7 @@ int vmw_user_lookup_handle(struct vmw_private *dev_priv,
 	}
 
 	*out_surf = NULL;
-	ret = vmw_user_bo_lookup(tfile, handle, out_buf, NULL);
+	ret = vmw_user_bo_lookup(filp, handle, out_buf);
 	return ret;
 }
 
@@ -354,24 +321,19 @@ int vmw_user_lookup_handle(struct vmw_private *dev_priv,
 static int vmw_resource_buf_alloc(struct vmw_resource *res,
 				  bool interruptible)
 {
-	unsigned long size =
-		(res->backup_size + PAGE_SIZE - 1) & PAGE_MASK;
+	unsigned long size = PFN_ALIGN(res->backup_size);
 	struct vmw_buffer_object *backup;
 	int ret;
 
 	if (likely(res->backup)) {
-		BUG_ON(res->backup->base.num_pages * PAGE_SIZE < size);
+		BUG_ON(res->backup->base.base.size < size);
 		return 0;
 	}
 
-	backup = kzalloc(sizeof(*backup), GFP_KERNEL);
-	if (unlikely(!backup))
-		return -ENOMEM;
-
-	ret = vmw_bo_init(res->dev_priv, backup, res->backup_size,
-			      res->func->backup_placement,
-			      interruptible,
-			      &vmw_bo_bo_free);
+	ret = vmw_bo_create(res->dev_priv, res->backup_size,
+			    res->func->backup_placement,
+			    interruptible, false,
+			    &vmw_bo_bo_free, &backup);
 	if (unlikely(ret != 0))
 		goto out_no_bo;
 
@@ -388,6 +350,7 @@ out_no_bo:
  * @res:            The resource to make visible to the device.
  * @val_buf:        Information about a buffer possibly
  *                  containing backup data if a bind operation is needed.
+ * @dirtying:       Transfer dirty regions.
  *
  * On hardware resource shortage, this function returns -EBUSY and
  * should be retried once resources have been freed up.
@@ -529,7 +492,7 @@ void vmw_resource_unreserve(struct vmw_resource *res,
  *                             for a resource and in that case, allocate
  *                             one, reserve and validate it.
  *
- * @ticket:         The ww aqcquire context to use, or NULL if trylocking.
+ * @ticket:         The ww acquire context to use, or NULL if trylocking.
  * @res:            The resource for which to allocate a backup buffer.
  * @interruptible:  Whether any sleeps during allocation should be
  *                  performed while interruptible.
@@ -586,7 +549,7 @@ out_no_reserve:
 	return ret;
 }
 
-/**
+/*
  * vmw_resource_reserve - Reserve a resource for command submission
  *
  * @res:            The resource to reserve.
@@ -690,7 +653,7 @@ out_no_unbind:
  * @intr: Perform waits interruptible if possible.
  * @dirtying: Pending GPU operation will dirty the resource
  *
- * On succesful return, any backup DMA buffer pointed to by @res->backup will
+ * On successful return, any backup DMA buffer pointed to by @res->backup will
  * be reserved and validated.
  * On hardware resource shortage, this function will repeatedly evict
  * resources of the same type until the validation succeeds.
@@ -808,7 +771,7 @@ void vmw_resource_unbind_list(struct vmw_buffer_object *vbo)
  * @dx_query_mob: Buffer containing the DX query MOB
  *
  * Read back cached states from the device if they exist.  This function
- * assumings binding_mutex is held.
+ * assumes binding_mutex is held.
  */
 int vmw_query_readback_all(struct vmw_buffer_object *dx_query_mob)
 {
@@ -827,7 +790,7 @@ int vmw_query_readback_all(struct vmw_buffer_object *dx_query_mob)
 	dx_query_ctx = dx_query_mob->dx_query_ctx;
 	dev_priv     = dx_query_ctx->dev_priv;
 
-	cmd = VMW_FIFO_RESERVE_DX(dev_priv, sizeof(*cmd), dx_query_ctx->id);
+	cmd = VMW_CMD_CTX_RESERVE(dev_priv, sizeof(*cmd), dx_query_ctx->id);
 	if (unlikely(cmd == NULL))
 		return -ENOMEM;
 
@@ -835,7 +798,7 @@ int vmw_query_readback_all(struct vmw_buffer_object *dx_query_mob)
 	cmd->header.size = sizeof(cmd->body);
 	cmd->body.cid    = dx_query_ctx->id;
 
-	vmw_fifo_commit(dev_priv, sizeof(*cmd));
+	vmw_cmd_commit(dev_priv, sizeof(*cmd));
 
 	/* Triggers a rebind the next time affected context is bound */
 	dx_query_mob->dx_query_ctx = NULL;
@@ -849,32 +812,34 @@ int vmw_query_readback_all(struct vmw_buffer_object *dx_query_mob)
  * vmw_query_move_notify - Read back cached query states
  *
  * @bo: The TTM buffer object about to move.
- * @mem: The memory region @bo is moving to.
+ * @old_mem: The memory region @bo is moving from.
+ * @new_mem: The memory region @bo is moving to.
  *
  * Called before the query MOB is swapped out to read back cached query
  * states from the device.
  */
 void vmw_query_move_notify(struct ttm_buffer_object *bo,
-			   struct ttm_mem_reg *mem)
+			   struct ttm_resource *old_mem,
+			   struct ttm_resource *new_mem)
 {
 	struct vmw_buffer_object *dx_query_mob;
-	struct ttm_bo_device *bdev = bo->bdev;
+	struct ttm_device *bdev = bo->bdev;
 	struct vmw_private *dev_priv;
-
 
 	dev_priv = container_of(bdev, struct vmw_private, bdev);
 
 	mutex_lock(&dev_priv->binding_mutex);
 
-	dx_query_mob = container_of(bo, struct vmw_buffer_object, base);
-	if (mem == NULL || !dx_query_mob || !dx_query_mob->dx_query_ctx) {
-		mutex_unlock(&dev_priv->binding_mutex);
-		return;
-	}
-
 	/* If BO is being moved from MOB to system memory */
-	if (mem->mem_type == TTM_PL_SYSTEM && bo->mem.mem_type == VMW_PL_MOB) {
+	if (new_mem->mem_type == TTM_PL_SYSTEM &&
+	    old_mem->mem_type == VMW_PL_MOB) {
 		struct vmw_fence_obj *fence;
+
+		dx_query_mob = container_of(bo, struct vmw_buffer_object, base);
+		if (!dx_query_mob || !dx_query_mob->dx_query_ctx) {
+			mutex_unlock(&dev_priv->binding_mutex);
+			return;
+		}
 
 		(void) vmw_query_readback_all(dx_query_mob);
 		mutex_unlock(&dev_priv->binding_mutex);
@@ -889,7 +854,6 @@ void vmw_query_move_notify(struct ttm_buffer_object *bo,
 		(void) ttm_bo_wait(bo, false, false);
 	} else
 		mutex_unlock(&dev_priv->binding_mutex);
-
 }
 
 /**
@@ -973,7 +937,7 @@ void vmw_resource_evict_all(struct vmw_private *dev_priv)
 	mutex_unlock(&dev_priv->cmdbuf_mutex);
 }
 
-/**
+/*
  * vmw_resource_pin - Add a pin reference on a resource
  *
  * @res: The resource to add a pin reference on
@@ -989,7 +953,6 @@ int vmw_resource_pin(struct vmw_resource *res, bool interruptible)
 	struct vmw_private *dev_priv = res->dev_priv;
 	int ret;
 
-	ttm_write_lock(&dev_priv->reservation_sem, interruptible);
 	mutex_lock(&dev_priv->cmdbuf_mutex);
 	ret = vmw_resource_reserve(res, interruptible, false);
 	if (ret)
@@ -1001,8 +964,10 @@ int vmw_resource_pin(struct vmw_resource *res, bool interruptible)
 		if (res->backup) {
 			vbo = res->backup;
 
-			ttm_bo_reserve(&vbo->base, interruptible, false, NULL);
-			if (!vbo->pin_count) {
+			ret = ttm_bo_reserve(&vbo->base, interruptible, false, NULL);
+			if (ret)
+				goto out_no_validate;
+			if (!vbo->base.pin_count) {
 				ret = ttm_bo_validate
 					(&vbo->base,
 					 res->func->backup_placement,
@@ -1028,7 +993,6 @@ out_no_validate:
 	vmw_resource_unreserve(res, false, false, false, NULL, 0UL);
 out_no_reserve:
 	mutex_unlock(&dev_priv->cmdbuf_mutex);
-	ttm_write_unlock(&dev_priv->reservation_sem);
 
 	return ret;
 }
@@ -1046,7 +1010,6 @@ void vmw_resource_unpin(struct vmw_resource *res)
 	struct vmw_private *dev_priv = res->dev_priv;
 	int ret;
 
-	(void) ttm_read_lock(&dev_priv->reservation_sem, false);
 	mutex_lock(&dev_priv->cmdbuf_mutex);
 
 	ret = vmw_resource_reserve(res, false, true);
@@ -1064,7 +1027,6 @@ void vmw_resource_unpin(struct vmw_resource *res)
 	vmw_resource_unreserve(res, false, false, false, NULL, 0UL);
 
 	mutex_unlock(&dev_priv->cmdbuf_mutex);
-	ttm_read_unlock(&dev_priv->reservation_sem);
 }
 
 /**
@@ -1078,7 +1040,7 @@ enum vmw_res_type vmw_res_type(const struct vmw_resource *res)
 }
 
 /**
- * vmw_resource_update_dirty - Update a resource's dirty tracker with a
+ * vmw_resource_dirty_update - Update a resource's dirty tracker with a
  * sequential range of touched backing store memory.
  * @res: The resource.
  * @start: The first page touched.
@@ -1130,7 +1092,7 @@ int vmw_resources_clean(struct vmw_buffer_object *vbo, pgoff_t start,
 	}
 
 	/*
-	 * In order of increasing backup_offset, clean dirty resorces
+	 * In order of increasing backup_offset, clean dirty resources
 	 * intersecting the range.
 	 */
 	while (found) {
@@ -1166,10 +1128,6 @@ int vmw_resources_clean(struct vmw_buffer_object *vbo, pgoff_t start,
 		*num_prefault = __KERNEL_DIV_ROUND_UP(last_cleaned - res_start,
 						      PAGE_SIZE);
 		vmw_bo_fence_single(bo, NULL);
-		if (bo->moving)
-			dma_fence_put(bo->moving);
-		bo->moving = dma_fence_get
-			(dma_resv_get_excl(bo->base.resv));
 	}
 
 	return 0;

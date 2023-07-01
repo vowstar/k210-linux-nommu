@@ -59,8 +59,8 @@ struct class {
 	const struct attribute_group	**dev_groups;
 	struct kobject			*dev_kobj;
 
-	int (*dev_uevent)(struct device *dev, struct kobj_uevent_env *env);
-	char *(*devnode)(struct device *dev, umode_t *mode);
+	int (*dev_uevent)(const struct device *dev, struct kobj_uevent_env *env);
+	char *(*devnode)(const struct device *dev, umode_t *mode);
 
 	void (*class_release)(struct class *class);
 	void (*dev_release)(struct device *dev);
@@ -68,9 +68,9 @@ struct class {
 	int (*shutdown_pre)(struct device *dev);
 
 	const struct kobj_ns_type_operations *ns_type;
-	const void *(*namespace)(struct device *dev);
+	const void *(*namespace)(const struct device *dev);
 
-	void (*get_ownership)(struct device *dev, kuid_t *uid, kgid_t *gid);
+	void (*get_ownership)(const struct device *dev, kuid_t *uid, kgid_t *gid);
 
 	const struct dev_pm_ops *pm;
 
@@ -256,6 +256,20 @@ extern void class_destroy(struct class *cls);
 
 /* This is a #define to keep the compiler from merging different
  * instances of the __key variable */
+
+/**
+ * class_create - create a struct class structure
+ * @owner: pointer to the module that is to "own" this struct class
+ * @name: pointer to a string for the name of this class.
+ *
+ * This is used to create a struct class pointer that can then be used
+ * in calls to device_create().
+ *
+ * Returns &struct class pointer on success, or ERR_PTR() on error.
+ *
+ * Note, the pointer created here is to be destroyed when finished by
+ * making a call to class_destroy().
+ */
 #define class_create(owner, name)		\
 ({						\
 	static struct lock_class_key __key;	\

@@ -8,6 +8,7 @@
 #define INTEL_WAKEREF_H
 
 #include <linux/atomic.h>
+#include <linux/bitfield.h>
 #include <linux/bits.h>
 #include <linux/lockdep.h>
 #include <linux/mutex.h>
@@ -41,7 +42,7 @@ struct intel_wakeref {
 	struct intel_runtime_pm *rpm;
 	const struct intel_wakeref_ops *ops;
 
-	struct work_struct work;
+	struct delayed_work work;
 };
 
 struct intel_wakeref_lockclass {
@@ -67,11 +68,12 @@ void __intel_wakeref_put_last(struct intel_wakeref *wf, unsigned long flags);
  * @wf: the wakeref
  *
  * Acquire a hold on the wakeref. The first user to do so, will acquire
- * the runtime pm wakeref and then call the @fn underneath the wakeref
- * mutex.
+ * the runtime pm wakeref and then call the intel_wakeref_ops->get()
+ * underneath the wakeref mutex.
  *
- * Note that @fn is allowed to fail, in which case the runtime-pm wakeref
- * will be released and the acquisition unwound, and an error reported.
+ * Note that intel_wakeref_ops->get() is allowed to fail, in which case
+ * the runtime-pm wakeref will be released and the acquisition unwound,
+ * and an error reported.
  *
  * Returns: 0 if the wakeref was acquired successfully, or a negative error
  * code otherwise.
@@ -117,24 +119,35 @@ intel_wakeref_get_if_active(struct intel_wakeref *wf)
 	return atomic_inc_not_zero(&wf->count);
 }
 
+enum {
+	INTEL_WAKEREF_PUT_ASYNC_BIT = 0,
+	__INTEL_WAKEREF_PUT_LAST_BIT__
+};
+
+static inline void
+intel_wakeref_might_get(struct intel_wakeref *wf)
+{
+	might_lock(&wf->mutex);
+}
+
 /**
- * intel_wakeref_put_flags: Release the wakeref
+ * __intel_wakeref_put: Release the wakeref
  * @wf: the wakeref
  * @flags: control flags
  *
  * Release our hold on the wakeref. When there are no more users,
- * the runtime pm wakeref will be released after the @fn callback is called
- * underneath the wakeref mutex.
+ * the runtime pm wakeref will be released after the intel_wakeref_ops->put()
+ * callback is called underneath the wakeref mutex.
  *
- * Note that @fn is allowed to fail, in which case the runtime-pm wakeref
- * is retained and an error reported.
+ * Note that intel_wakeref_ops->put() is allowed to fail, in which case the
+ * runtime-pm wakeref is retained.
  *
- * Returns: 0 if the wakeref was released successfully, or a negative error
- * code otherwise.
  */
 static inline void
 __intel_wakeref_put(struct intel_wakeref *wf, unsigned long flags)
-#define INTEL_WAKEREF_PUT_ASYNC BIT(0)
+#define INTEL_WAKEREF_PUT_ASYNC BIT(INTEL_WAKEREF_PUT_ASYNC_BIT)
+#define INTEL_WAKEREF_PUT_DELAY \
+	GENMASK(BITS_PER_LONG - 1, __INTEL_WAKEREF_PUT_LAST_BIT__)
 {
 	INTEL_WAKEREF_BUG_ON(atomic_read(&wf->count) <= 0);
 	if (unlikely(!atomic_add_unless(&wf->count, -1, 1)))
@@ -152,6 +165,20 @@ static inline void
 intel_wakeref_put_async(struct intel_wakeref *wf)
 {
 	__intel_wakeref_put(wf, INTEL_WAKEREF_PUT_ASYNC);
+}
+
+static inline void
+intel_wakeref_put_delay(struct intel_wakeref *wf, unsigned long delay)
+{
+	__intel_wakeref_put(wf,
+			    INTEL_WAKEREF_PUT_ASYNC |
+			    FIELD_PREP(INTEL_WAKEREF_PUT_DELAY, delay));
+}
+
+static inline void
+intel_wakeref_might_put(struct intel_wakeref *wf)
+{
+	might_lock(&wf->mutex);
 }
 
 /**
@@ -194,7 +221,7 @@ intel_wakeref_unlock_wait(struct intel_wakeref *wf)
 {
 	mutex_lock(&wf->mutex);
 	mutex_unlock(&wf->mutex);
-	flush_work(&wf->work);
+	flush_delayed_work(&wf->work);
 }
 
 /**

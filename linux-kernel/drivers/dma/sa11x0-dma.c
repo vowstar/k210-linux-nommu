@@ -78,7 +78,7 @@ struct sa11x0_dma_desc {
 	bool			cyclic;
 
 	unsigned		sglen;
-	struct sa11x0_dma_sg	sg[0];
+	struct sa11x0_dma_sg	sg[];
 };
 
 struct sa11x0_dma_phy;
@@ -323,9 +323,9 @@ static void sa11x0_dma_start_txd(struct sa11x0_dma_chan *c)
 	}
 }
 
-static void sa11x0_dma_tasklet(unsigned long arg)
+static void sa11x0_dma_tasklet(struct tasklet_struct *t)
 {
-	struct sa11x0_dma_dev *d = (struct sa11x0_dma_dev *)arg;
+	struct sa11x0_dma_dev *d = from_tasklet(d, t, task);
 	struct sa11x0_dma_phy *p;
 	struct sa11x0_dma_chan *c;
 	unsigned pch, pch_alloc = 0;
@@ -928,7 +928,7 @@ static int sa11x0_dma_probe(struct platform_device *pdev)
 		goto err_ioremap;
 	}
 
-	tasklet_init(&d->task, sa11x0_dma_tasklet, (unsigned long)d);
+	tasklet_setup(&d->task, sa11x0_dma_tasklet);
 
 	for (i = 0; i < NR_PHY_CHAN; i++) {
 		struct sa11x0_dma_phy *p = &d->phy[i];
@@ -1001,7 +1001,7 @@ static int sa11x0_dma_remove(struct platform_device *pdev)
 	return 0;
 }
 
-static int sa11x0_dma_suspend(struct device *dev)
+static __maybe_unused int sa11x0_dma_suspend(struct device *dev)
 {
 	struct sa11x0_dma_dev *d = dev_get_drvdata(dev);
 	unsigned pch;
@@ -1039,7 +1039,7 @@ static int sa11x0_dma_suspend(struct device *dev)
 	return 0;
 }
 
-static int sa11x0_dma_resume(struct device *dev)
+static __maybe_unused int sa11x0_dma_resume(struct device *dev)
 {
 	struct sa11x0_dma_dev *d = dev_get_drvdata(dev);
 	unsigned pch;
@@ -1072,12 +1072,7 @@ static int sa11x0_dma_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops sa11x0_dma_pm_ops = {
-	.suspend_noirq = sa11x0_dma_suspend,
-	.resume_noirq = sa11x0_dma_resume,
-	.freeze_noirq = sa11x0_dma_suspend,
-	.thaw_noirq = sa11x0_dma_resume,
-	.poweroff_noirq = sa11x0_dma_suspend,
-	.restore_noirq = sa11x0_dma_resume,
+	SET_NOIRQ_SYSTEM_SLEEP_PM_OPS(sa11x0_dma_suspend, sa11x0_dma_resume)
 };
 
 static struct platform_driver sa11x0_dma_driver = {

@@ -8,6 +8,7 @@
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <syscall.h>
@@ -26,6 +27,8 @@
 #define CHILD_THREAD_MIN_WAIT 3 /* seconds */
 
 #define MAX_EVENTS 5
+
+static bool have_pidfd_send_signal;
 
 static pid_t pidfd_clone(int flags, int *pidfd, int (*fn)(void *))
 {
@@ -56,6 +59,13 @@ static int test_pidfd_send_signal_simple_success(void)
 	int pidfd, ret;
 	const char *test_name = "pidfd_send_signal send SIGUSR1";
 
+	if (!have_pidfd_send_signal) {
+		ksft_test_result_skip(
+			"%s test: pidfd_send_signal() syscall not supported\n",
+			test_name);
+		return 0;
+	}
+
 	pidfd = open("/proc/self", O_DIRECTORY | O_CLOEXEC);
 	if (pidfd < 0)
 		ksft_exit_fail_msg(
@@ -85,6 +95,13 @@ static int test_pidfd_send_signal_exited_fail(void)
 	char buf[256];
 	pid_t pid;
 	const char *test_name = "pidfd_send_signal signal exited process";
+
+	if (!have_pidfd_send_signal) {
+		ksft_test_result_skip(
+			"%s test: pidfd_send_signal() syscall not supported\n",
+			test_name);
+		return 0;
+	}
 
 	pid = fork();
 	if (pid < 0)
@@ -137,16 +154,34 @@ static int test_pidfd_send_signal_recycled_pid_fail(void)
 	pid_t pid1;
 	const char *test_name = "pidfd_send_signal signal recycled pid";
 
+	if (!have_pidfd_send_signal) {
+		ksft_test_result_skip(
+			"%s test: pidfd_send_signal() syscall not supported\n",
+			test_name);
+		return 0;
+	}
+
 	ret = unshare(CLONE_NEWPID);
-	if (ret < 0)
+	if (ret < 0) {
+		if (errno == EPERM) {
+			ksft_test_result_skip("%s test: Unsharing pid namespace not permitted\n",
+					      test_name);
+			return 0;
+		}
 		ksft_exit_fail_msg("%s test: Failed to unshare pid namespace\n",
 				   test_name);
+	}
 
 	ret = unshare(CLONE_NEWNS);
-	if (ret < 0)
-		ksft_exit_fail_msg(
-			"%s test: Failed to unshare mount namespace\n",
-			test_name);
+	if (ret < 0) {
+		if (errno == EPERM) {
+			ksft_test_result_skip("%s test: Unsharing mount namespace not permitted\n",
+					      test_name);
+			return 0;
+		}
+		ksft_exit_fail_msg("%s test: Failed to unshare mount namespace\n",
+				   test_name);
+	}
 
 	ret = mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, 0);
 	if (ret < 0)
@@ -295,7 +330,7 @@ static int test_pidfd_send_signal_recycled_pid_fail(void)
 		ksft_exit_fail_msg("%s test: Failed to recycle pid %d\n",
 				   test_name, PID_RECYCLE);
 	case PIDFD_SKIP:
-		ksft_print_msg("%s test: Skipping test\n", test_name);
+		ksft_test_result_skip("%s test: Skipping test\n", test_name);
 		ret = 0;
 		break;
 	case PIDFD_XFAIL:
@@ -325,15 +360,17 @@ static int test_pidfd_send_signal_syscall_support(void)
 
 	ret = sys_pidfd_send_signal(pidfd, 0, NULL, 0);
 	if (ret < 0) {
-		if (errno == ENOSYS)
-			ksft_exit_skip(
+		if (errno == ENOSYS) {
+			ksft_test_result_skip(
 				"%s test: pidfd_send_signal() syscall not supported\n",
 				test_name);
-
+			return 0;
+		}
 		ksft_exit_fail_msg("%s test: Failed to send signal\n",
 				   test_name);
 	}
 
+	have_pidfd_send_signal = true;
 	close(pidfd);
 	ksft_test_result_pass(
 		"%s test: pidfd_send_signal() syscall is supported. Tests can be executed\n",
@@ -376,7 +413,7 @@ static void poll_pidfd(const char *test_name, int pidfd)
 
 	c = epoll_wait(epoll_fd, events, MAX_EVENTS, 5000);
 	if (c != 1 || !(events[0].events & EPOLLIN))
-		ksft_exit_fail_msg("%s test: Unexpected epoll_wait result (c=%d, events=%x) ",
+		ksft_exit_fail_msg("%s test: Unexpected epoll_wait result (c=%d, events=%x) "
 				   "(errno %d)\n",
 				   test_name, c, events[0].events, errno);
 
@@ -398,13 +435,14 @@ static int child_poll_exec_test(void *args)
 	 */
 	while (1)
 		sleep(1);
+
+	return 0;
 }
 
 static void test_pidfd_poll_exec(int use_waitpid)
 {
 	int pid, pidfd = 0;
 	int status, ret;
-	pthread_t t1;
 	time_t prog_start = time(NULL);
 	const char *test_name = "pidfd_poll check for premature notification on child thread exec";
 
@@ -463,13 +501,14 @@ static int child_poll_leader_exit_test(void *args)
 	 */
 	*child_exit_secs = time(NULL);
 	syscall(SYS_exit, 0);
+	/* Never reached, but appeases compiler thinking we should return. */
+	exit(0);
 }
 
 static void test_pidfd_poll_leader_exit(int use_waitpid)
 {
 	int pid, pidfd = 0;
-	int status, ret;
-	time_t prog_start = time(NULL);
+	int status, ret = 0;
 	const char *test_name = "pidfd_poll check for premature notification on non-empty"
 				"group leader exit";
 
@@ -521,7 +560,7 @@ static void test_pidfd_poll_leader_exit(int use_waitpid)
 int main(int argc, char **argv)
 {
 	ksft_print_header();
-	ksft_set_plan(4);
+	ksft_set_plan(8);
 
 	test_pidfd_poll_exec(0);
 	test_pidfd_poll_exec(1);

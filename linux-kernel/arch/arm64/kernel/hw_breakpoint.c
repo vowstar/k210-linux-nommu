@@ -257,7 +257,7 @@ static int hw_breakpoint_control(struct perf_event *bp,
 		 * level.
 		 */
 		enable_debug_monitors(dbg_el);
-		/* Fall through */
+		fallthrough;
 	case HW_BREAKPOINT_RESTORE:
 		/* Setup the address register. */
 		write_wb_reg(val_reg, i, info->address);
@@ -541,13 +541,13 @@ int hw_breakpoint_arch_parse(struct perf_event *bp,
 			if (hw->ctrl.len == ARM_BREAKPOINT_LEN_2)
 				break;
 
-			/* Fallthrough */
+			fallthrough;
 		case 3:
 			/* Allow single byte watchpoint. */
 			if (hw->ctrl.len == ARM_BREAKPOINT_LEN_1)
 				break;
 
-			/* Fallthrough */
+			fallthrough;
 		default:
 			return -EINVAL;
 		}
@@ -617,7 +617,7 @@ NOKPROBE_SYMBOL(toggle_bp_registers);
 /*
  * Debug exception handlers.
  */
-static int breakpoint_handler(unsigned long unused, unsigned int esr,
+static int breakpoint_handler(unsigned long unused, unsigned long esr,
 			      struct pt_regs *regs)
 {
 	int i, step = 0, *kernel_step;
@@ -701,7 +701,7 @@ NOKPROBE_SYMBOL(breakpoint_handler);
  * addresses. There is no straight-forward way, short of disassembling the
  * offending instruction, to map that address back to the watchpoint. This
  * function computes the distance of the memory access from the watchpoint as a
- * heuristic for the likelyhood that a given access triggered the watchpoint.
+ * heuristic for the likelihood that a given access triggered the watchpoint.
  *
  * See Section D2.10.5 "Determining the memory location that caused a Watchpoint
  * exception" of ARMv8 Architecture Reference Manual for details.
@@ -730,7 +730,28 @@ static u64 get_distance_from_watchpoint(unsigned long addr, u64 val,
 		return 0;
 }
 
-static int watchpoint_handler(unsigned long addr, unsigned int esr,
+static int watchpoint_report(struct perf_event *wp, unsigned long addr,
+			     struct pt_regs *regs)
+{
+	int step = is_default_overflow_handler(wp);
+	struct arch_hw_breakpoint *info = counter_arch_bp(wp);
+
+	info->trigger = addr;
+
+	/*
+	 * If we triggered a user watchpoint from a uaccess routine, then
+	 * handle the stepping ourselves since userspace really can't help
+	 * us with this.
+	 */
+	if (!user_mode(regs) && info->ctrl.privilege == AARCH64_BREAKPOINT_EL0)
+		step = 1;
+	else
+		perf_bp_event(wp, regs);
+
+	return step;
+}
+
+static int watchpoint_handler(unsigned long addr, unsigned long esr,
 			      struct pt_regs *regs)
 {
 	int i, step = 0, *kernel_step, access, closest_match = 0;
@@ -739,7 +760,6 @@ static int watchpoint_handler(unsigned long addr, unsigned int esr,
 	u64 val;
 	struct perf_event *wp, **slots;
 	struct debug_info *debug_info;
-	struct arch_hw_breakpoint *info;
 	struct arch_hw_breakpoint_ctrl ctrl;
 
 	slots = this_cpu_ptr(wp_on_reg);
@@ -777,25 +797,13 @@ static int watchpoint_handler(unsigned long addr, unsigned int esr,
 		if (dist != 0)
 			continue;
 
-		info = counter_arch_bp(wp);
-		info->trigger = addr;
-		perf_bp_event(wp, regs);
-
-		/* Do we need to handle the stepping? */
-		if (is_default_overflow_handler(wp))
-			step = 1;
+		step = watchpoint_report(wp, addr, regs);
 	}
-	if (min_dist > 0 && min_dist != -1) {
-		/* No exact match found. */
-		wp = slots[closest_match];
-		info = counter_arch_bp(wp);
-		info->trigger = addr;
-		perf_bp_event(wp, regs);
 
-		/* Do we need to handle the stepping? */
-		if (is_default_overflow_handler(wp))
-			step = 1;
-	}
+	/* No exact match found? */
+	if (min_dist > 0 && min_dist != -1)
+		step = watchpoint_report(slots[closest_match], addr, regs);
+
 	rcu_read_unlock();
 
 	if (!step)

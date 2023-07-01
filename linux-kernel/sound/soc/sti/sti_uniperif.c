@@ -97,6 +97,7 @@ static const struct of_device_id snd_soc_sti_match[] = {
 	},
 	{},
 };
+MODULE_DEVICE_TABLE(of, snd_soc_sti_match);
 
 int  sti_uniperiph_reset(struct uniperif *uni)
 {
@@ -375,7 +376,8 @@ static const struct snd_soc_dai_driver sti_uniperiph_dai_template = {
 static const struct snd_soc_component_driver sti_uniperiph_dai_component = {
 	.name = "sti_cpu_dai",
 	.suspend = sti_uniperiph_suspend,
-	.resume = sti_uniperiph_resume
+	.resume = sti_uniperiph_resume,
+	.legacy_dai_naming = 1,
 };
 
 static int sti_uniperiph_cpu_dai_of(struct device_node *node,
@@ -409,16 +411,8 @@ static int sti_uniperiph_cpu_dai_of(struct device_node *node,
 	*dai = sti_uniperiph_dai_template;
 	dai->name = dev_data->dai_names;
 
-	/* Get resources */
-	uni->mem_region = platform_get_resource(priv->pdev, IORESOURCE_MEM, 0);
-
-	if (!uni->mem_region) {
-		dev_err(dev, "Failed to get memory resource\n");
-		return -ENODEV;
-	}
-
-	uni->base = devm_ioremap_resource(dev, uni->mem_region);
-
+	/* Get resources and base address */
+	uni->base = devm_platform_get_and_ioremap_resource(priv->pdev, 0, &uni->mem_region);
 	if (IS_ERR(uni->base))
 		return PTR_ERR(uni->base);
 
@@ -484,6 +478,8 @@ static int sti_uniperiph_probe(struct platform_device *pdev)
 	priv->pdev = pdev;
 
 	ret = sti_uniperiph_cpu_dai_of(node, priv);
+	if (ret < 0)
+		return ret;
 
 	dev_set_drvdata(&pdev->dev, priv);
 

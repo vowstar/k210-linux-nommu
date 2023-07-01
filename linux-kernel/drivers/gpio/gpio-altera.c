@@ -24,6 +24,7 @@
 * @interrupt_trigger	: specifies the hardware configured IRQ trigger type
 *			  (rising, falling, both, high)
 * @mapped_irq		: kernel mapped irq number.
+* @irq_chip		: IRQ chip configuration
 */
 struct altera_gpio_chip {
 	struct of_mm_gpio_chip mmchip;
@@ -69,7 +70,7 @@ static void altera_gpio_irq_mask(struct irq_data *d)
 	raw_spin_unlock_irqrestore(&altera_gc->gpio_lock, flags);
 }
 
-/**
+/*
  * This controller's IRQ type is synthesized in hardware, so this function
  * just checks if the requested set_type matches the synthesized IRQ type
  */
@@ -200,9 +201,8 @@ static void altera_gpio_irq_edge_handler(struct irq_desc *desc)
 	      (readl(mm_gc->regs + ALTERA_GPIO_EDGE_CAP) &
 	      readl(mm_gc->regs + ALTERA_GPIO_IRQ_MASK)))) {
 		writel(status, mm_gc->regs + ALTERA_GPIO_EDGE_CAP);
-		for_each_set_bit(i, &status, mm_gc->gc.ngpio) {
-			generic_handle_irq(irq_find_mapping(irqdomain, i));
-		}
+		for_each_set_bit(i, &status, mm_gc->gc.ngpio)
+			generic_handle_domain_irq(irqdomain, i);
 	}
 
 	chained_irq_exit(chip, desc);
@@ -227,9 +227,9 @@ static void altera_gpio_irq_leveL_high_handler(struct irq_desc *desc)
 	status = readl(mm_gc->regs + ALTERA_GPIO_DATA);
 	status &= readl(mm_gc->regs + ALTERA_GPIO_IRQ_MASK);
 
-	for_each_set_bit(i, &status, mm_gc->gc.ngpio) {
-		generic_handle_irq(irq_find_mapping(irqdomain, i));
-	}
+	for_each_set_bit(i, &status, mm_gc->gc.ngpio)
+		generic_handle_domain_irq(irqdomain, i);
+
 	chained_irq_exit(chip, desc);
 }
 

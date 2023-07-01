@@ -87,7 +87,7 @@ static u8 tpm2_ordinal_duration_index(u32 ordinal)
 		return TPM_MEDIUM;
 
 	case TPM2_CC_VERIFY_SIGNATURE:        /* 177 */
-		return TPM_LONG;
+		return TPM_LONG_LONG;
 
 	case TPM2_CC_PCR_EXTEND:              /* 182 */
 		return TPM_MEDIUM;
@@ -400,7 +400,16 @@ ssize_t tpm2_get_tpm_pt(struct tpm_chip *chip, u32 property_id,  u32 *value,
 	if (!rc) {
 		out = (struct tpm2_get_cap_out *)
 			&buf.data[TPM_HEADER_SIZE];
-		*value = be32_to_cpu(out->value);
+		/*
+		 * To prevent failing boot up of some systems, Infineon TPM2.0
+		 * returns SUCCESS on TPM2_Startup in field upgrade mode. Also
+		 * the TPM2_Getcapability command returns a zero length list
+		 * in field upgrade mode.
+		 */
+		if (be32_to_cpu(out->property_cnt) > 0)
+			*value = be32_to_cpu(out->value);
+		else
+			rc = -ENODATA;
 	}
 	tpm_buf_destroy(&buf);
 	return rc;
@@ -525,6 +534,8 @@ static int tpm2_init_bank_info(struct tpm_chip *chip, u32 bank_index)
 		return 0;
 	}
 
+	bank->crypto_id = HASH_ALGO__LAST;
+
 	return tpm2_pcr_read(chip, 0, &digest, &bank->digest_size);
 }
 
@@ -613,7 +624,7 @@ out:
 	return rc;
 }
 
-static int tpm2_get_cc_attrs_tbl(struct tpm_chip *chip)
+int tpm2_get_cc_attrs_tbl(struct tpm_chip *chip)
 {
 	struct tpm_buf buf;
 	u32 nr_commands;
@@ -654,6 +665,7 @@ static int tpm2_get_cc_attrs_tbl(struct tpm_chip *chip)
 
 	if (nr_commands !=
 	    be32_to_cpup((__be32 *)&buf.data[TPM_HEADER_SIZE + 5])) {
+		rc = -EFAULT;
 		tpm_buf_destroy(&buf);
 		goto out;
 	}
@@ -679,6 +691,7 @@ out:
 		rc = -ENODEV;
 	return rc;
 }
+EXPORT_SYMBOL_GPL(tpm2_get_cc_attrs_tbl);
 
 /**
  * tpm2_startup - turn on the TPM
@@ -739,8 +752,24 @@ int tpm2_auto_startup(struct tpm_chip *chip)
 	}
 
 	rc = tpm2_get_cc_attrs_tbl(chip);
+	if (rc == TPM2_RC_FAILURE || (rc < 0 && rc != -ENOMEM)) {
+		dev_info(&chip->dev,
+			 "TPM in field failure mode, requires firmware upgrade\n");
+		chip->flags |= TPM_CHIP_FLAG_FIRMWARE_UPGRADE;
+		rc = 0;
+	}
 
 out:
+	/*
+	 * Infineon TPM in field upgrade mode will return no data for the number
+	 * of supported commands.
+	 */
+	if (rc == TPM2_RC_UPGRADE || rc == -ENODATA) {
+		dev_info(&chip->dev, "TPM in field upgrade mode, requires firmware upgrade\n");
+		chip->flags |= TPM_CHIP_FLAG_FIRMWARE_UPGRADE;
+		rc = 0;
+	}
+
 	if (rc > 0)
 		rc = -ENODEV;
 	return rc;
@@ -748,10 +777,12 @@ out:
 
 int tpm2_find_cc(struct tpm_chip *chip, u32 cc)
 {
+	u32 cc_mask;
 	int i;
 
+	cc_mask = 1 << TPM2_CC_ATTR_VENDOR | GENMASK(15, 0);
 	for (i = 0; i < chip->nr_commands; i++)
-		if (cc == (chip->cc_attrs_tbl[i] & GENMASK(15, 0)))
+		if (cc == (chip->cc_attrs_tbl[i] & cc_mask))
 			return i;
 
 	return -1;

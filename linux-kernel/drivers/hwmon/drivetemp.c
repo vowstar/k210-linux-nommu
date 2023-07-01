@@ -10,7 +10,7 @@
  *    hwmon: Driver for SCSI/ATA temperature sensors
  *    by Constantin Baranov <const@mimas.ru>, submitted September 2009
  *
- * This drive supports reporting the temperatire of SATA drives. It can be
+ * This drive supports reporting the temperature of SATA drives. It can be
  * easily extended to report the temperature of SCSI drives.
  *
  * The primary means to read drive temperatures and temperature limits
@@ -164,7 +164,7 @@ static int drivetemp_scsi_command(struct drivetemp_data *st,
 				 u8 lba_low, u8 lba_mid, u8 lba_high)
 {
 	u8 scsi_cmd[MAX_COMMAND_SIZE];
-	int data_dir;
+	enum req_op op;
 
 	memset(scsi_cmd, 0, sizeof(scsi_cmd));
 	scsi_cmd[0] = ATA_16;
@@ -175,7 +175,7 @@ static int drivetemp_scsi_command(struct drivetemp_data *st,
 		 * field.
 		 */
 		scsi_cmd[2] = 0x06;
-		data_dir = DMA_TO_DEVICE;
+		op = REQ_OP_DRV_OUT;
 	} else {
 		scsi_cmd[1] = (4 << 1);	/* PIO Data-in */
 		/*
@@ -183,7 +183,7 @@ static int drivetemp_scsi_command(struct drivetemp_data *st,
 		 * field.
 		 */
 		scsi_cmd[2] = 0x0e;
-		data_dir = DMA_FROM_DEVICE;
+		op = REQ_OP_DRV_IN;
 	}
 	scsi_cmd[4] = feature;
 	scsi_cmd[6] = 1;	/* 1 sector */
@@ -192,9 +192,8 @@ static int drivetemp_scsi_command(struct drivetemp_data *st,
 	scsi_cmd[12] = lba_high;
 	scsi_cmd[14] = ata_command;
 
-	return scsi_execute_req(st->sdev, scsi_cmd, data_dir,
-				st->smartdata, ATA_SECT_SIZE, NULL, HZ, 5,
-				NULL);
+	return scsi_execute_cmd(st->sdev, scsi_cmd, op, st->smartdata,
+				ATA_SECT_SIZE, HZ, 5, NULL);
 }
 
 static int drivetemp_ata_command(struct drivetemp_data *st, u8 feature,
@@ -264,12 +263,18 @@ static int drivetemp_get_scttemp(struct drivetemp_data *st, u32 attr, long *val)
 		return err;
 	switch (attr) {
 	case hwmon_temp_input:
+		if (!temp_is_valid(buf[SCT_STATUS_TEMP]))
+			return -ENODATA;
 		*val = temp_from_sct(buf[SCT_STATUS_TEMP]);
 		break;
 	case hwmon_temp_lowest:
+		if (!temp_is_valid(buf[SCT_STATUS_TEMP_LOWEST]))
+			return -ENODATA;
 		*val = temp_from_sct(buf[SCT_STATUS_TEMP_LOWEST]);
 		break;
 	case hwmon_temp_highest:
+		if (!temp_is_valid(buf[SCT_STATUS_TEMP_HIGHEST]))
+			return -ENODATA;
 		*val = temp_from_sct(buf[SCT_STATUS_TEMP_HIGHEST]);
 		break;
 	default:
@@ -277,6 +282,42 @@ static int drivetemp_get_scttemp(struct drivetemp_data *st, u32 attr, long *val)
 		break;
 	}
 	return err;
+}
+
+static const char * const sct_avoid_models[] = {
+/*
+ * These drives will have WRITE FPDMA QUEUED command timeouts and sometimes just
+ * freeze until power-cycled under heavy write loads when their temperature is
+ * getting polled in SCT mode. The SMART mode seems to be fine, though.
+ *
+ * While only the 3 TB model (DT01ACA3) was actually caught exhibiting the
+ * problem let's play safe here to avoid data corruption and ban the whole
+ * DT01ACAx family.
+
+ * The models from this array are prefix-matched.
+ */
+	"TOSHIBA DT01ACA",
+};
+
+static bool drivetemp_sct_avoid(struct drivetemp_data *st)
+{
+	struct scsi_device *sdev = st->sdev;
+	unsigned int ctr;
+
+	if (!sdev->model)
+		return false;
+
+	/*
+	 * The "model" field contains just the raw SCSI INQUIRY response
+	 * "product identification" field, which has a width of 16 bytes.
+	 * This field is space-filled, but is NOT NULL-terminated.
+	 */
+	for (ctr = 0; ctr < ARRAY_SIZE(sct_avoid_models); ctr++)
+		if (!strncmp(sdev->model, sct_avoid_models[ctr],
+			     strlen(sct_avoid_models[ctr])))
+			return true;
+
+	return false;
 }
 
 static int drivetemp_identify_sata(struct drivetemp_data *st)
@@ -320,6 +361,13 @@ static int drivetemp_identify_sata(struct drivetemp_data *st)
 	/* bail out if this is not a SATA device */
 	if (!is_ata || !is_sata)
 		return -ENODEV;
+
+	if (have_sct && drivetemp_sct_avoid(st)) {
+		dev_notice(&sdev->sdev_gendev,
+			   "will avoid using SCT for temperature monitoring\n");
+		have_sct = false;
+	}
+
 	if (!have_sct)
 		goto skip_sct;
 
@@ -340,7 +388,7 @@ static int drivetemp_identify_sata(struct drivetemp_data *st)
 	st->have_temp_highest = temp_is_valid(buf[SCT_STATUS_TEMP_HIGHEST]);
 
 	if (!have_sct_data_table)
-		goto skip_sct;
+		goto skip_sct_data;
 
 	/* Request and read temperature history table */
 	memset(buf, '\0', sizeof(st->smartdata));
@@ -572,3 +620,4 @@ module_exit(drivetemp_exit);
 MODULE_AUTHOR("Guenter Roeck <linus@roeck-us.net>");
 MODULE_DESCRIPTION("Hard drive temperature monitor");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:drivetemp");

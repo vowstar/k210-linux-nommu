@@ -82,12 +82,7 @@ static int bd6107_write(struct bd6107 *bd, u8 reg, u8 data)
 static int bd6107_backlight_update_status(struct backlight_device *backlight)
 {
 	struct bd6107 *bd = bl_get_data(backlight);
-	int brightness = backlight->props.brightness;
-
-	if (backlight->props.power != FB_BLANK_UNBLANK ||
-	    backlight->props.fb_blank != FB_BLANK_UNBLANK ||
-	    backlight->props.state & (BL_CORE_SUSPENDED | BL_CORE_FBBLANK))
-		brightness = 0;
+	int brightness = backlight_get_brightness(backlight);
 
 	if (brightness) {
 		bd6107_write(bd, BD6107_PORTSEL, BD6107_PORTSEL_LEDM(2) |
@@ -118,8 +113,7 @@ static const struct backlight_ops bd6107_backlight_ops = {
 	.check_fb	= bd6107_backlight_check_fb,
 };
 
-static int bd6107_probe(struct i2c_client *client,
-			  const struct i2c_device_id *id)
+static int bd6107_probe(struct i2c_client *client)
 {
 	struct bd6107_platform_data *pdata = dev_get_platdata(&client->dev);
 	struct backlight_device *backlight;
@@ -180,14 +174,12 @@ static int bd6107_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int bd6107_remove(struct i2c_client *client)
+static void bd6107_remove(struct i2c_client *client)
 {
 	struct backlight_device *backlight = i2c_get_clientdata(client);
 
 	backlight->props.brightness = 0;
 	backlight_update_status(backlight);
-
-	return 0;
 }
 
 static const struct i2c_device_id bd6107_ids[] = {
@@ -200,7 +192,7 @@ static struct i2c_driver bd6107_driver = {
 	.driver = {
 		.name = "bd6107",
 	},
-	.probe = bd6107_probe,
+	.probe_new = bd6107_probe,
 	.remove = bd6107_remove,
 	.id_table = bd6107_ids,
 };

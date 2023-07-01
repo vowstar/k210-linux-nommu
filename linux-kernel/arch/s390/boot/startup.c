@@ -1,55 +1,42 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/string.h>
 #include <linux/elf.h>
+#include <asm/boot_data.h>
 #include <asm/sections.h>
+#include <asm/maccess.h>
+#include <asm/cpu_mf.h>
 #include <asm/setup.h>
+#include <asm/kasan.h>
 #include <asm/kexec.h>
 #include <asm/sclp.h>
 #include <asm/diag.h>
 #include <asm/uv.h>
-#include "compressed/decompressor.h"
+#include <asm/abs_lowcore.h>
+#include <asm/mem_detect.h>
+#include "decompressor.h"
 #include "boot.h"
+#include "uv.h"
 
-extern char __boot_data_start[], __boot_data_end[];
-extern char __boot_data_preserved_start[], __boot_data_preserved_end[];
 unsigned long __bootdata_preserved(__kaslr_offset);
+unsigned long __bootdata_preserved(__abs_lowcore);
+unsigned long __bootdata_preserved(__memcpy_real_area);
+pte_t *__bootdata_preserved(memcpy_real_ptep);
+unsigned long __bootdata(__amode31_base);
+unsigned long __bootdata_preserved(VMALLOC_START);
+unsigned long __bootdata_preserved(VMALLOC_END);
+struct page *__bootdata_preserved(vmemmap);
+unsigned long __bootdata_preserved(vmemmap_size);
+unsigned long __bootdata_preserved(MODULES_VADDR);
+unsigned long __bootdata_preserved(MODULES_END);
+unsigned long __bootdata(ident_map_size);
+int __bootdata(is_full_image) = 1;
+struct initrd_data __bootdata(initrd_data);
 
-/*
- * Some code and data needs to stay below 2 GB, even when the kernel would be
- * relocated above 2 GB, because it has to use 31 bit addresses.
- * Such code and data is part of the .dma section, and its location is passed
- * over to the decompressed / relocated kernel via the .boot.preserved.data
- * section.
- */
-extern char _sdma[], _edma[];
-extern char _stext_dma[], _etext_dma[];
-extern struct exception_table_entry _start_dma_ex_table[];
-extern struct exception_table_entry _stop_dma_ex_table[];
-unsigned long __bootdata_preserved(__sdma) = __pa(&_sdma);
-unsigned long __bootdata_preserved(__edma) = __pa(&_edma);
-unsigned long __bootdata_preserved(__stext_dma) = __pa(&_stext_dma);
-unsigned long __bootdata_preserved(__etext_dma) = __pa(&_etext_dma);
-struct exception_table_entry *
-	__bootdata_preserved(__start_dma_ex_table) = _start_dma_ex_table;
-struct exception_table_entry *
-	__bootdata_preserved(__stop_dma_ex_table) = _stop_dma_ex_table;
+u64 __bootdata_preserved(stfle_fac_list[16]);
+u64 __bootdata_preserved(alt_stfle_fac_list[16]);
+struct oldmem_data __bootdata_preserved(oldmem_data);
 
-int _diag210_dma(struct diag210 *addr);
-int _diag26c_dma(void *req, void *resp, enum diag26c_sc subcode);
-int _diag14_dma(unsigned long rx, unsigned long ry1, unsigned long subcode);
-void _diag0c_dma(struct hypfs_diag0c_entry *entry);
-void _diag308_reset_dma(void);
-struct diag_ops __bootdata_preserved(diag_dma_ops) = {
-	.diag210 = _diag210_dma,
-	.diag26c = _diag26c_dma,
-	.diag14 = _diag14_dma,
-	.diag0c = _diag0c_dma,
-	.diag308_reset = _diag308_reset_dma
-};
-static struct diag210 _diag210_tmp_dma __section(.dma.data);
-struct diag210 *__bootdata_preserved(__diag210_tmp_dma) = &_diag210_tmp_dma;
-void _swsusp_reset_dma(void);
-unsigned long __bootdata_preserved(__swsusp_reset_dma) = __pa(_swsusp_reset_dma);
+struct machine_info machine;
 
 void error(char *x)
 {
@@ -60,6 +47,28 @@ void error(char *x)
 	disabled_wait();
 }
 
+static void detect_facilities(void)
+{
+	if (test_facility(8)) {
+		machine.has_edat1 = 1;
+		__ctl_set_bit(0, 23);
+	}
+	if (test_facility(78))
+		machine.has_edat2 = 1;
+	if (!noexec_disabled && test_facility(130)) {
+		machine.has_nx = 1;
+		__ctl_set_bit(0, 20);
+	}
+}
+
+static void setup_lpp(void)
+{
+	S390_lowcore.current_pid = 0;
+	S390_lowcore.lpp = LPP_MAGIC;
+	if (test_facility(40))
+		lpp(&S390_lowcore.lpp);
+}
+
 #ifdef CONFIG_KERNEL_UNCOMPRESSED
 unsigned long mem_safe_offset(void)
 {
@@ -67,16 +76,17 @@ unsigned long mem_safe_offset(void)
 }
 #endif
 
-static void rescue_initrd(unsigned long addr)
+static unsigned long rescue_initrd(unsigned long safe_addr)
 {
 	if (!IS_ENABLED(CONFIG_BLK_DEV_INITRD))
-		return;
-	if (!INITRD_START || !INITRD_SIZE)
-		return;
-	if (addr <= INITRD_START)
-		return;
-	memmove((void *)addr, (void *)INITRD_START, INITRD_SIZE);
-	INITRD_START = addr;
+		return safe_addr;
+	if (!initrd_data.start || !initrd_data.size)
+		return safe_addr;
+	if (initrd_data.start < safe_addr) {
+		memmove((void *)safe_addr, (void *)initrd_data.start, initrd_data.size);
+		initrd_data.start = safe_addr;
+	}
+	return initrd_data.start + initrd_data.size;
 }
 
 static void copy_bootdata(void)
@@ -120,41 +130,188 @@ static void handle_relocs(unsigned long offset)
 	}
 }
 
+/*
+ * Merge information from several sources into a single ident_map_size value.
+ * "ident_map_size" represents the upper limit of physical memory we may ever
+ * reach. It might not be all online memory, but also include standby (offline)
+ * memory. "ident_map_size" could be lower then actual standby or even online
+ * memory present, due to limiting factors. We should never go above this limit.
+ * It is the size of our identity mapping.
+ *
+ * Consider the following factors:
+ * 1. max_physmem_end - end of physical memory online or standby.
+ *    Always <= end of the last online memory block (get_mem_detect_end()).
+ * 2. CONFIG_MAX_PHYSMEM_BITS - the maximum size of physical memory the
+ *    kernel is able to support.
+ * 3. "mem=" kernel command line option which limits physical memory usage.
+ * 4. OLDMEM_BASE which is a kdump memory limit when the kernel is executed as
+ *    crash kernel.
+ * 5. "hsa" size which is a memory limit when the kernel is executed during
+ *    zfcp/nvme dump.
+ */
+static void setup_ident_map_size(unsigned long max_physmem_end)
+{
+	unsigned long hsa_size;
+
+	ident_map_size = max_physmem_end;
+	if (memory_limit)
+		ident_map_size = min(ident_map_size, memory_limit);
+	ident_map_size = min(ident_map_size, 1UL << MAX_PHYSMEM_BITS);
+
+#ifdef CONFIG_CRASH_DUMP
+	if (oldmem_data.start) {
+		kaslr_enabled = 0;
+		ident_map_size = min(ident_map_size, oldmem_data.size);
+	} else if (ipl_block_valid && is_ipl_block_dump()) {
+		kaslr_enabled = 0;
+		if (!sclp_early_get_hsa_size(&hsa_size) && hsa_size)
+			ident_map_size = min(ident_map_size, hsa_size);
+	}
+#endif
+}
+
+static unsigned long setup_kernel_memory_layout(void)
+{
+	unsigned long vmemmap_start;
+	unsigned long asce_limit;
+	unsigned long rte_size;
+	unsigned long pages;
+	unsigned long vmax;
+
+	pages = ident_map_size / PAGE_SIZE;
+	/* vmemmap contains a multiple of PAGES_PER_SECTION struct pages */
+	vmemmap_size = SECTION_ALIGN_UP(pages) * sizeof(struct page);
+
+	/* choose kernel address space layout: 4 or 3 levels. */
+	vmemmap_start = round_up(ident_map_size, _REGION3_SIZE);
+	if (IS_ENABLED(CONFIG_KASAN) ||
+	    vmalloc_size > _REGION2_SIZE ||
+	    vmemmap_start + vmemmap_size + vmalloc_size + MODULES_LEN >
+		    _REGION2_SIZE) {
+		asce_limit = _REGION1_SIZE;
+		rte_size = _REGION2_SIZE;
+	} else {
+		asce_limit = _REGION2_SIZE;
+		rte_size = _REGION3_SIZE;
+	}
+	/*
+	 * forcing modules and vmalloc area under the ultravisor
+	 * secure storage limit, so that any vmalloc allocation
+	 * we do could be used to back secure guest storage.
+	 */
+	vmax = adjust_to_uv_max(asce_limit);
+#ifdef CONFIG_KASAN
+	/* force vmalloc and modules below kasan shadow */
+	vmax = min(vmax, KASAN_SHADOW_START);
+#endif
+	__memcpy_real_area = round_down(vmax - PAGE_SIZE, PAGE_SIZE);
+	__abs_lowcore = round_down(__memcpy_real_area - ABS_LOWCORE_MAP_SIZE,
+				   sizeof(struct lowcore));
+	MODULES_END = round_down(__abs_lowcore, _SEGMENT_SIZE);
+	MODULES_VADDR = MODULES_END - MODULES_LEN;
+	VMALLOC_END = MODULES_VADDR;
+
+	/* allow vmalloc area to occupy up to about 1/2 of the rest virtual space left */
+	vmalloc_size = min(vmalloc_size, round_down(VMALLOC_END / 2, _REGION3_SIZE));
+	VMALLOC_START = VMALLOC_END - vmalloc_size;
+
+	/* split remaining virtual space between 1:1 mapping & vmemmap array */
+	pages = VMALLOC_START / (PAGE_SIZE + sizeof(struct page));
+	pages = SECTION_ALIGN_UP(pages);
+	/* keep vmemmap_start aligned to a top level region table entry */
+	vmemmap_start = round_down(VMALLOC_START - pages * sizeof(struct page), rte_size);
+	/* vmemmap_start is the future VMEM_MAX_PHYS, make sure it is within MAX_PHYSMEM */
+	vmemmap_start = min(vmemmap_start, 1UL << MAX_PHYSMEM_BITS);
+	/* make sure identity map doesn't overlay with vmemmap */
+	ident_map_size = min(ident_map_size, vmemmap_start);
+	vmemmap_size = SECTION_ALIGN_UP(ident_map_size / PAGE_SIZE) * sizeof(struct page);
+	/* make sure vmemmap doesn't overlay with vmalloc area */
+	VMALLOC_START = max(vmemmap_start + vmemmap_size, VMALLOC_START);
+	vmemmap = (struct page *)vmemmap_start;
+
+	return asce_limit;
+}
+
+/*
+ * This function clears the BSS section of the decompressed Linux kernel and NOT the decompressor's.
+ */
 static void clear_bss_section(void)
 {
 	memset((void *)vmlinux.default_lma + vmlinux.image_size, 0, vmlinux.bss_size);
 }
 
+/*
+ * Set vmalloc area size to an 8th of (potential) physical memory
+ * size, unless size has been set by kernel command line parameter.
+ */
+static void setup_vmalloc_size(void)
+{
+	unsigned long size;
+
+	if (vmalloc_size_set)
+		return;
+	size = round_up(ident_map_size / 8, _SEGMENT_SIZE);
+	vmalloc_size = max(size, vmalloc_size);
+}
+
+static void offset_vmlinux_info(unsigned long offset)
+{
+	vmlinux.default_lma += offset;
+	*(unsigned long *)(&vmlinux.entry) += offset;
+	vmlinux.bootdata_off += offset;
+	vmlinux.bootdata_preserved_off += offset;
+	vmlinux.rela_dyn_start += offset;
+	vmlinux.rela_dyn_end += offset;
+	vmlinux.dynsym_start += offset;
+	vmlinux.init_mm_off += offset;
+	vmlinux.swapper_pg_dir_off += offset;
+	vmlinux.invalid_pg_dir_off += offset;
+}
+
+static unsigned long reserve_amode31(unsigned long safe_addr)
+{
+	__amode31_base = PAGE_ALIGN(safe_addr);
+	return __amode31_base + vmlinux.amode31_size;
+}
+
 void startup_kernel(void)
 {
+	unsigned long max_physmem_end;
 	unsigned long random_lma;
 	unsigned long safe_addr;
+	unsigned long asce_limit;
 	void *img;
+	psw_t psw;
 
+	initrd_data.start = parmarea.initrd_start;
+	initrd_data.size = parmarea.initrd_size;
+	oldmem_data.start = parmarea.oldmem_base;
+	oldmem_data.size = parmarea.oldmem_size;
+
+	setup_lpp();
 	store_ipl_parmblock();
 	safe_addr = mem_safe_offset();
+	safe_addr = reserve_amode31(safe_addr);
 	safe_addr = read_ipl_report(safe_addr);
 	uv_query_info();
-	rescue_initrd(safe_addr);
+	safe_addr = rescue_initrd(safe_addr);
 	sclp_early_read_info();
 	setup_boot_command_line();
 	parse_boot_command_line();
-	setup_memory_end();
-	detect_memory();
+	detect_facilities();
+	sanitize_prot_virt_host();
+	max_physmem_end = detect_memory(&safe_addr);
+	setup_ident_map_size(max_physmem_end);
+	setup_vmalloc_size();
+	asce_limit = setup_kernel_memory_layout();
+	mem_detect_set_usable_limit(ident_map_size);
 
-	random_lma = __kaslr_offset = 0;
 	if (IS_ENABLED(CONFIG_RANDOMIZE_BASE) && kaslr_enabled) {
 		random_lma = get_random_base(safe_addr);
 		if (random_lma) {
 			__kaslr_offset = random_lma - vmlinux.default_lma;
 			img = (void *)vmlinux.default_lma;
-			vmlinux.default_lma += __kaslr_offset;
-			vmlinux.entry += __kaslr_offset;
-			vmlinux.bootdata_off += __kaslr_offset;
-			vmlinux.bootdata_preserved_off += __kaslr_offset;
-			vmlinux.rela_dyn_start += __kaslr_offset;
-			vmlinux.rela_dyn_end += __kaslr_offset;
-			vmlinux.dynsym_start += __kaslr_offset;
+			offset_vmlinux_info(__kaslr_offset);
 		}
 	}
 
@@ -164,10 +321,23 @@ void startup_kernel(void)
 	} else if (__kaslr_offset)
 		memcpy((void *)vmlinux.default_lma, img, vmlinux.image_size);
 
+	/*
+	 * The order of the following operations is important:
+	 *
+	 * - handle_relocs() must follow clear_bss_section() to establish static
+	 *   memory references to data in .bss to be used by setup_vmem()
+	 *   (i.e init_mm.pgd)
+	 *
+	 * - setup_vmem() must follow handle_relocs() to be able using
+	 *   static memory references to data in .bss (i.e init_mm.pgd)
+	 *
+	 * - copy_bootdata() must follow setup_vmem() to propagate changes to
+	 *   bootdata made by setup_vmem()
+	 */
 	clear_bss_section();
+	handle_relocs(__kaslr_offset);
+	setup_vmem(asce_limit);
 	copy_bootdata();
-	if (IS_ENABLED(CONFIG_RELOCATABLE))
-		handle_relocs(__kaslr_offset);
 
 	if (__kaslr_offset) {
 		/*
@@ -179,5 +349,11 @@ void startup_kernel(void)
 		if (IS_ENABLED(CONFIG_KERNEL_UNCOMPRESSED))
 			memset(img, 0, vmlinux.image_size);
 	}
-	vmlinux.entry();
+
+	/*
+	 * Jump to the decompressed kernel entry point and switch DAT mode on.
+	 */
+	psw.addr = vmlinux.entry;
+	psw.mask = PSW_KERNEL_BITS;
+	__load_psw(psw);
 }

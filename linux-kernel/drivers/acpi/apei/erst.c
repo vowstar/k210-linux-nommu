@@ -54,7 +54,7 @@ EXPORT_SYMBOL_GPL(erst_disable);
 
 static struct acpi_table_erst *erst_tab;
 
-/* ERST Error Log Address Range atrributes */
+/* ERST Error Log Address Range attributes */
 #define ERST_RANGE_RESERVED	0x0001
 #define ERST_RANGE_NVRAM	0x0002
 #define ERST_RANGE_SLOW		0x0004
@@ -688,7 +688,7 @@ static int __erst_read_from_storage(u64 record_id, u64 offset)
 			break;
 		if (erst_timedout(&timeout, SPIN_UNIT))
 			return -EIO;
-	};
+	}
 	rc = apei_exec_run(&ctx, ACPI_ERST_GET_COMMAND_STATUS);
 	if (rc)
 		return rc;
@@ -856,6 +856,74 @@ ssize_t erst_read(u64 record_id, struct cper_record_header *record,
 }
 EXPORT_SYMBOL_GPL(erst_read);
 
+static void erst_clear_cache(u64 record_id)
+{
+	int i;
+	u64 *entries;
+
+	mutex_lock(&erst_record_id_cache.lock);
+
+	entries = erst_record_id_cache.entries;
+	for (i = 0; i < erst_record_id_cache.len; i++) {
+		if (entries[i] == record_id)
+			entries[i] = APEI_ERST_INVALID_RECORD_ID;
+	}
+	__erst_record_id_cache_compact();
+
+	mutex_unlock(&erst_record_id_cache.lock);
+}
+
+ssize_t erst_read_record(u64 record_id, struct cper_record_header *record,
+		size_t buflen, size_t recordlen, const guid_t *creatorid)
+{
+	ssize_t len;
+
+	/*
+	 * if creatorid is NULL, read any record for erst-dbg module
+	 */
+	if (creatorid == NULL) {
+		len = erst_read(record_id, record, buflen);
+		if (len == -ENOENT)
+			erst_clear_cache(record_id);
+
+		return len;
+	}
+
+	len = erst_read(record_id, record, buflen);
+	/*
+	 * if erst_read return value is -ENOENT skip to next record_id,
+	 * and clear the record_id cache.
+	 */
+	if (len == -ENOENT) {
+		erst_clear_cache(record_id);
+		goto out;
+	}
+
+	if (len < 0)
+		goto out;
+
+	/*
+	 * if erst_read return value is less than record head length,
+	 * consider it as -EIO, and clear the record_id cache.
+	 */
+	if (len < recordlen) {
+		len = -EIO;
+		erst_clear_cache(record_id);
+		goto out;
+	}
+
+	/*
+	 * if creatorid is not wanted, consider it as not found,
+	 * for skipping to next record_id.
+	 */
+	if (!guid_equal(&record->creator_id, creatorid))
+		len = -ENOENT;
+
+out:
+	return len;
+}
+EXPORT_SYMBOL_GPL(erst_read_record);
+
 int erst_clear(u64 record_id)
 {
 	int rc, i;
@@ -891,7 +959,7 @@ EXPORT_SYMBOL_GPL(erst_clear);
 static int __init setup_erst_disable(char *str)
 {
 	erst_disable = 1;
-	return 0;
+	return 1;
 }
 
 __setup("erst_disable", setup_erst_disable);
@@ -952,14 +1020,10 @@ static int reader_pos;
 
 static int erst_open_pstore(struct pstore_info *psi)
 {
-	int rc;
-
 	if (erst_disable)
 		return -ENODEV;
 
-	rc = erst_get_record_id_begin(&reader_pos);
-
-	return rc;
+	return erst_get_record_id_begin(&reader_pos);
 }
 
 static int erst_close_pstore(struct pstore_info *psi)
@@ -996,16 +1060,13 @@ skip:
 		goto out;
 	}
 
-	len = erst_read(record_id, &rcd->hdr, rcd_len);
+	len = erst_read_record(record_id, &rcd->hdr, rcd_len, sizeof(*rcd),
+			&CPER_CREATOR_PSTORE);
 	/* The record may be cleared by others, try read next record */
 	if (len == -ENOENT)
 		goto skip;
-	else if (len < 0 || len < sizeof(*rcd)) {
-		rc = -EIO;
+	else if (len < 0)
 		goto out;
-	}
-	if (!guid_equal(&rcd->hdr.creator_id, &CPER_CREATOR_PSTORE))
-		goto skip;
 
 	record->buf = kmalloc(len, GFP_KERNEL);
 	if (record->buf == NULL) {
@@ -1122,7 +1183,7 @@ static int __init erst_init(void)
 	rc = erst_check_table(erst_tab);
 	if (rc) {
 		pr_err(FW_BUG "ERST table is invalid.\n");
-		goto err;
+		goto err_put_erst_tab;
 	}
 
 	apei_resources_init(&erst_resources);
@@ -1196,6 +1257,8 @@ err_release:
 	apei_resources_release(&erst_resources);
 err_fini:
 	apei_resources_fini(&erst_resources);
+err_put_erst_tab:
+	acpi_put_table((struct acpi_table_header *)erst_tab);
 err:
 	erst_disable = 1;
 	return rc;

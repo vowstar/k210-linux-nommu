@@ -4,7 +4,6 @@
  *
  * (C) 2004 Nadia Yvette Chambers, Oracle
  */
-#include "sched.h"
 
 void __init_waitqueue_head(struct wait_queue_head *wq_head, const char *name, struct lock_class_key *key)
 {
@@ -37,6 +36,17 @@ void add_wait_queue_exclusive(struct wait_queue_head *wq_head, struct wait_queue
 }
 EXPORT_SYMBOL(add_wait_queue_exclusive);
 
+void add_wait_queue_priority(struct wait_queue_head *wq_head, struct wait_queue_entry *wq_entry)
+{
+	unsigned long flags;
+
+	wq_entry->flags |= WQ_FLAG_EXCLUSIVE | WQ_FLAG_PRIORITY;
+	spin_lock_irqsave(&wq_head->lock, flags);
+	__add_wait_queue(wq_head, wq_entry);
+	spin_unlock_irqrestore(&wq_head->lock, flags);
+}
+EXPORT_SYMBOL_GPL(add_wait_queue_priority);
+
 void remove_wait_queue(struct wait_queue_head *wq_head, struct wait_queue_entry *wq_entry)
 {
 	unsigned long flags;
@@ -57,7 +67,11 @@ EXPORT_SYMBOL(remove_wait_queue);
 /*
  * The core wakeup function. Non-exclusive wakeups (nr_exclusive == 0) just
  * wake everything up. If it's an exclusive wakeup (nr_exclusive == small +ve
- * number) then we wake all the non-exclusive tasks and one exclusive task.
+ * number) then we wake that number of exclusive tasks, and potentially all
+ * the non-exclusive tasks. Normally, exclusive tasks will be at the end of
+ * the list and any non-exclusive tasks will be woken first. A priority task
+ * may be at the head of the list, and can consume the event without any other
+ * tasks being woken.
  *
  * There are circumstances in which we can try to wake a task which has already
  * started to run but is not in state TASK_RUNNING. try_to_wake_up() returns
@@ -107,11 +121,12 @@ static int __wake_up_common(struct wait_queue_head *wq_head, unsigned int mode,
 	return nr_exclusive;
 }
 
-static void __wake_up_common_lock(struct wait_queue_head *wq_head, unsigned int mode,
+static int __wake_up_common_lock(struct wait_queue_head *wq_head, unsigned int mode,
 			int nr_exclusive, int wake_flags, void *key)
 {
 	unsigned long flags;
 	wait_queue_entry_t bookmark;
+	int remaining = nr_exclusive;
 
 	bookmark.flags = 0;
 	bookmark.private = NULL;
@@ -120,10 +135,12 @@ static void __wake_up_common_lock(struct wait_queue_head *wq_head, unsigned int 
 
 	do {
 		spin_lock_irqsave(&wq_head->lock, flags);
-		nr_exclusive = __wake_up_common(wq_head, mode, nr_exclusive,
+		remaining = __wake_up_common(wq_head, mode, remaining,
 						wake_flags, key, &bookmark);
 		spin_unlock_irqrestore(&wq_head->lock, flags);
 	} while (bookmark.flags & WQ_FLAG_BOOKMARK);
+
+	return nr_exclusive - remaining;
 }
 
 /**
@@ -133,13 +150,14 @@ static void __wake_up_common_lock(struct wait_queue_head *wq_head, unsigned int 
  * @nr_exclusive: how many wake-one or wake-many threads to wake up
  * @key: is directly passed to the wakeup function
  *
- * If this function wakes up a task, it executes a full memory barrier before
- * accessing the task state.
+ * If this function wakes up a task, it executes a full memory barrier
+ * before accessing the task state.  Returns the number of exclusive
+ * tasks that were awaken.
  */
-void __wake_up(struct wait_queue_head *wq_head, unsigned int mode,
-			int nr_exclusive, void *key)
+int __wake_up(struct wait_queue_head *wq_head, unsigned int mode,
+	      int nr_exclusive, void *key)
 {
-	__wake_up_common_lock(wq_head, mode, nr_exclusive, 0, key);
+	return __wake_up_common_lock(wq_head, mode, nr_exclusive, 0, key);
 }
 EXPORT_SYMBOL(__wake_up);
 
@@ -223,6 +241,13 @@ void __wake_up_sync(struct wait_queue_head *wq_head, unsigned int mode)
 }
 EXPORT_SYMBOL_GPL(__wake_up_sync);	/* For internal use only */
 
+void __wake_up_pollfree(struct wait_queue_head *wq_head)
+{
+	__wake_up(wq_head, TASK_NORMAL, 0, poll_to_key(EPOLLHUP | POLLFREE));
+	/* POLLFREE must have cleared the queue. */
+	WARN_ON_ONCE(waitqueue_active(wq_head));
+}
+
 /*
  * Note: we use "set_current_state()" _after_ the wait-queue add,
  * because we need a memory barrier there on SMP, so that any
@@ -249,17 +274,22 @@ prepare_to_wait(struct wait_queue_head *wq_head, struct wait_queue_entry *wq_ent
 }
 EXPORT_SYMBOL(prepare_to_wait);
 
-void
+/* Returns true if we are the first waiter in the queue, false otherwise. */
+bool
 prepare_to_wait_exclusive(struct wait_queue_head *wq_head, struct wait_queue_entry *wq_entry, int state)
 {
 	unsigned long flags;
+	bool was_empty = false;
 
 	wq_entry->flags |= WQ_FLAG_EXCLUSIVE;
 	spin_lock_irqsave(&wq_head->lock, flags);
-	if (list_empty(&wq_entry->entry))
+	if (list_empty(&wq_entry->entry)) {
+		was_empty = list_empty(&wq_head->head);
 		__add_wait_queue_entry_tail(wq_head, wq_entry);
+	}
 	set_current_state(state);
 	spin_unlock_irqrestore(&wq_head->lock, flags);
+	return was_empty;
 }
 EXPORT_SYMBOL(prepare_to_wait_exclusive);
 
@@ -389,7 +419,7 @@ int autoremove_wake_function(struct wait_queue_entry *wq_entry, unsigned mode, i
 	int ret = default_wake_function(wq_entry, mode, sync, key);
 
 	if (ret)
-		list_del_init(&wq_entry->entry);
+		list_del_init_careful(&wq_entry->entry);
 
 	return ret;
 }

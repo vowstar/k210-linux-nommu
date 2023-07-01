@@ -44,11 +44,9 @@ static int stm32_vrefbuf_enable(struct regulator_dev *rdev)
 	u32 val;
 	int ret;
 
-	ret = pm_runtime_get_sync(priv->dev);
-	if (ret < 0) {
-		pm_runtime_put_noidle(priv->dev);
+	ret = pm_runtime_resume_and_get(priv->dev);
+	if (ret < 0)
 		return ret;
-	}
 
 	val = readl_relaxed(priv->base + STM32_VREFBUF_CSR);
 	val = (val & ~STM32_HIZ) | STM32_ENVR;
@@ -81,14 +79,12 @@ static int stm32_vrefbuf_disable(struct regulator_dev *rdev)
 	u32 val;
 	int ret;
 
-	ret = pm_runtime_get_sync(priv->dev);
-	if (ret < 0) {
-		pm_runtime_put_noidle(priv->dev);
+	ret = pm_runtime_resume_and_get(priv->dev);
+	if (ret < 0)
 		return ret;
-	}
 
 	val = readl_relaxed(priv->base + STM32_VREFBUF_CSR);
-	val = (val & ~STM32_ENVR) | STM32_HIZ;
+	val &= ~STM32_ENVR;
 	writel_relaxed(val, priv->base + STM32_VREFBUF_CSR);
 
 	pm_runtime_mark_last_busy(priv->dev);
@@ -102,11 +98,9 @@ static int stm32_vrefbuf_is_enabled(struct regulator_dev *rdev)
 	struct stm32_vrefbuf *priv = rdev_get_drvdata(rdev);
 	int ret;
 
-	ret = pm_runtime_get_sync(priv->dev);
-	if (ret < 0) {
-		pm_runtime_put_noidle(priv->dev);
+	ret = pm_runtime_resume_and_get(priv->dev);
+	if (ret < 0)
 		return ret;
-	}
 
 	ret = readl_relaxed(priv->base + STM32_VREFBUF_CSR) & STM32_ENVR;
 
@@ -123,11 +117,9 @@ static int stm32_vrefbuf_set_voltage_sel(struct regulator_dev *rdev,
 	u32 val;
 	int ret;
 
-	ret = pm_runtime_get_sync(priv->dev);
-	if (ret < 0) {
-		pm_runtime_put_noidle(priv->dev);
+	ret = pm_runtime_resume_and_get(priv->dev);
+	if (ret < 0)
 		return ret;
-	}
 
 	val = readl_relaxed(priv->base + STM32_VREFBUF_CSR);
 	val = (val & ~STM32_VRS) | FIELD_PREP(STM32_VRS, sel);
@@ -145,11 +137,9 @@ static int stm32_vrefbuf_get_voltage_sel(struct regulator_dev *rdev)
 	u32 val;
 	int ret;
 
-	ret = pm_runtime_get_sync(priv->dev);
-	if (ret < 0) {
-		pm_runtime_put_noidle(priv->dev);
+	ret = pm_runtime_resume_and_get(priv->dev);
+	if (ret < 0)
 		return ret;
-	}
 
 	val = readl_relaxed(priv->base + STM32_VREFBUF_CSR);
 	ret = FIELD_GET(STM32_VRS, val);
@@ -175,6 +165,7 @@ static const struct regulator_desc stm32_vrefbuf_regu = {
 	.volt_table = stm32_vrefbuf_voltages,
 	.n_voltages = ARRAY_SIZE(stm32_vrefbuf_voltages),
 	.ops = &stm32_vrefbuf_volt_ops,
+	.off_on_delay = 1000,
 	.type = REGULATOR_VOLTAGE,
 	.owner = THIS_MODULE,
 };
@@ -219,7 +210,7 @@ static int stm32_vrefbuf_probe(struct platform_device *pdev)
 						      pdev->dev.of_node,
 						      &stm32_vrefbuf_regu);
 
-	rdev = regulator_register(&stm32_vrefbuf_regu, &config);
+	rdev = regulator_register(&pdev->dev, &stm32_vrefbuf_regu, &config);
 	if (IS_ERR(rdev)) {
 		ret = PTR_ERR(rdev);
 		dev_err(&pdev->dev, "register failed with error %d\n", ret);
@@ -283,7 +274,7 @@ static const struct dev_pm_ops stm32_vrefbuf_pm_ops = {
 			   NULL)
 };
 
-static const struct of_device_id stm32_vrefbuf_of_match[] = {
+static const struct of_device_id __maybe_unused stm32_vrefbuf_of_match[] = {
 	{ .compatible = "st,stm32-vrefbuf", },
 	{},
 };

@@ -48,10 +48,9 @@ struct ext2_group_desc * ext2_get_group_desc(struct super_block * sb,
 	struct ext2_sb_info *sbi = EXT2_SB(sb);
 
 	if (block_group >= sbi->s_groups_count) {
-		ext2_error (sb, "ext2_get_group_desc",
-			    "block_group >= groups_count - "
-			    "block_group = %d, groups_count = %lu",
-			    block_group, sbi->s_groups_count);
+		WARN(1, "block_group >= groups_count - "
+		     "block_group = %d, groups_count = %lu",
+		     block_group, sbi->s_groups_count);
 
 		return NULL;
 	}
@@ -59,10 +58,9 @@ struct ext2_group_desc * ext2_get_group_desc(struct super_block * sb,
 	group_desc = block_group >> EXT2_DESC_PER_BLOCK_BITS(sb);
 	offset = block_group & (EXT2_DESC_PER_BLOCK(sb) - 1);
 	if (!sbi->s_group_desc[group_desc]) {
-		ext2_error (sb, "ext2_get_group_desc",
-			    "Group descriptor not loaded - "
-			    "block_group = %d, group_desc = %lu, desc = %lu",
-			     block_group, group_desc, offset);
+		WARN(1, "Group descriptor not loaded - "
+		     "block_group = %d, group_desc = %lu, desc = %lu",
+		      block_group, group_desc, offset);
 		return NULL;
 	}
 
@@ -128,6 +126,7 @@ read_block_bitmap(struct super_block *sb, unsigned int block_group)
 	struct ext2_group_desc * desc;
 	struct buffer_head * bh = NULL;
 	ext2_fsblk_t bitmap_blk;
+	int ret;
 
 	desc = ext2_get_group_desc(sb, block_group, NULL);
 	if (!desc)
@@ -141,10 +140,10 @@ read_block_bitmap(struct super_block *sb, unsigned int block_group)
 			    block_group, le32_to_cpu(desc->bg_block_bitmap));
 		return NULL;
 	}
-	if (likely(bh_uptodate_or_lock(bh)))
+	ret = bh_read(bh, 0);
+	if (ret > 0)
 		return bh;
-
-	if (bh_submit_read(bh) < 0) {
+	if (ret < 0) {
 		brelse(bh);
 		ext2_error(sb, __func__,
 			    "Cannot read block bitmap - "
@@ -189,7 +188,7 @@ static void group_adjust_blocks(struct super_block *sb, int group_no,
 
 /**
  * __rsv_window_dump() -- Dump the filesystem block allocation reservation map
- * @rb_root:		root of per-filesystem reservation rb tree
+ * @root:		root of per-filesystem reservation rb tree
  * @verbose:		verbose mode
  * @fn:			function which wishes to dump the reservation map
  *
@@ -282,7 +281,7 @@ goal_in_my_reservation(struct ext2_reserve_window *rsv, ext2_grpblk_t grp_goal,
 
 /**
  * search_reserve_window()
- * @rb_root:		root of reservation tree
+ * @root:		root of reservation tree
  * @goal:		target allocation block
  *
  * Find the reserved window which includes the goal, or the previous one
@@ -668,7 +667,7 @@ ext2_try_to_allocate(struct super_block *sb, int group,
 {
 	ext2_fsblk_t group_first_block = ext2_group_first_block_no(sb, group);
 	ext2_fsblk_t group_last_block = ext2_group_last_block_no(sb, group);
-       	ext2_grpblk_t start, end;
+	ext2_grpblk_t start, end;
 	unsigned long num = 0;
 
 	start = 0;
@@ -859,7 +858,7 @@ static int find_next_reservable_window(
  *
  *	failed: we failed to find a reservation window in this group
  *
- *	@rsv: the reservation
+ *	@my_rsv: the reservation
  *
  *	@grp_goal: The goal (group-relative).  It is where the search for a
  *		free reservable space should start from.
@@ -1482,11 +1481,11 @@ unsigned long ext2_count_free_blocks (struct super_block * sb)
 		desc_count, bitmap_count);
 	return bitmap_count;
 #else
-        for (i = 0; i < EXT2_SB(sb)->s_groups_count; i++) {
-                desc = ext2_get_group_desc (sb, i, NULL);
-                if (!desc)
-                        continue;
-                desc_count += le16_to_cpu(desc->bg_free_blocks_count);
+	for (i = 0; i < EXT2_SB(sb)->s_groups_count; i++) {
+		desc = ext2_get_group_desc(sb, i, NULL);
+		if (!desc)
+			continue;
+		desc_count += le16_to_cpu(desc->bg_free_blocks_count);
 	}
 	return desc_count;
 #endif

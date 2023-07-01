@@ -431,7 +431,7 @@ static int bnx2fc_init_tgt(struct bnx2fc_rport *tgt,
 	return 0;
 }
 
-/**
+/*
  * This event_callback is called after successful completion of libfc
  * initiated target login. bnx2fc can proceed with initiating the session
  * establishment.
@@ -482,7 +482,7 @@ void bnx2fc_rport_event_handler(struct fc_lport *lport,
 		}
 
 		/*
-		 * Offlaod process is protected with hba mutex.
+		 * Offload process is protected with hba mutex.
 		 * Use the same mutex_lock for upload process too
 		 */
 		mutex_lock(&hba->hba_mutex);
@@ -656,9 +656,8 @@ static void bnx2fc_free_conn_id(struct bnx2fc_hba *hba, u32 conn_id)
 	spin_unlock_bh(&hba->hba_lock);
 }
 
-/**
- *bnx2fc_alloc_session_resc - Allocate qp resources for the session
- *
+/*
+ * bnx2fc_alloc_session_resc - Allocate qp resources for the session
  */
 static int bnx2fc_alloc_session_resc(struct bnx2fc_hba *hba,
 					struct bnx2fc_rport *tgt)
@@ -820,7 +819,7 @@ mem_alloc_failure:
 }
 
 /**
- * bnx2i_free_session_resc - free qp resources for the session
+ * bnx2fc_free_session_resc - free qp resources for the session
  *
  * @hba:	adapter structure pointer
  * @tgt:	bnx2fc_rport structure pointer

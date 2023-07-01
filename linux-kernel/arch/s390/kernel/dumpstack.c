@@ -79,6 +79,15 @@ static bool in_nodat_stack(unsigned long sp, struct stack_info *info)
 	return in_stack(sp, info, STACK_TYPE_NODAT, top - THREAD_SIZE, top);
 }
 
+static bool in_mcck_stack(unsigned long sp, struct stack_info *info)
+{
+	unsigned long frame_size, top;
+
+	frame_size = STACK_FRAME_OVERHEAD + sizeof(struct pt_regs);
+	top = S390_lowcore.mcck_stack + frame_size;
+	return in_stack(sp, info, STACK_TYPE_MCCK, top - THREAD_SIZE, top);
+}
+
 static bool in_restart_stack(unsigned long sp, struct stack_info *info)
 {
 	unsigned long frame_size, top;
@@ -108,7 +117,8 @@ int get_stack_info(unsigned long sp, struct task_struct *task,
 	/* Check per-cpu stacks */
 	if (!in_irq_stack(sp, info) &&
 	    !in_nodat_stack(sp, info) &&
-	    !in_restart_stack(sp, info))
+	    !in_restart_stack(sp, info) &&
+	    !in_mcck_stack(sp, info))
 		goto unknown;
 
 recursion_check:
@@ -126,22 +136,23 @@ unknown:
 	return -EINVAL;
 }
 
-void show_stack(struct task_struct *task, unsigned long *stack)
+void show_stack(struct task_struct *task, unsigned long *stack,
+		       const char *loglvl)
 {
 	struct unwind_state state;
 
-	printk("Call Trace:\n");
+	printk("%sCall Trace:\n", loglvl);
 	unwind_for_each_frame(&state, task, NULL, (unsigned long) stack)
-		printk(state.reliable ? " [<%016lx>] %pSR \n" :
-					"([<%016lx>] %pSR)\n",
-		       state.ip, (void *) state.ip);
+		printk(state.reliable ? "%s [<%016lx>] %pSR \n" :
+					"%s([<%016lx>] %pSR)\n",
+		       loglvl, state.ip, (void *) state.ip);
 	debug_show_held_locks(task ? : current);
 }
 
 static void show_last_breaking_event(struct pt_regs *regs)
 {
 	printk("Last Breaking-Event-Address:\n");
-	printk(" [<%016lx>] %pSR\n", regs->args[0], (void *)regs->args[0]);
+	printk(" [<%016lx>] %pSR\n", regs->last_break, (void *)regs->last_break);
 }
 
 void show_registers(struct pt_regs *regs)
@@ -175,13 +186,13 @@ void show_regs(struct pt_regs *regs)
 	show_registers(regs);
 	/* Show stack backtrace if pt_regs is from kernel mode */
 	if (!user_mode(regs))
-		show_stack(NULL, (unsigned long *) regs->gprs[15]);
+		show_stack(NULL, (unsigned long *) regs->gprs[15], KERN_DEFAULT);
 	show_last_breaking_event(regs);
 }
 
 static DEFINE_SPINLOCK(die_lock);
 
-void die(struct pt_regs *regs, const char *str)
+void __noreturn die(struct pt_regs *regs, const char *str)
 {
 	static int die_counter;
 
@@ -213,5 +224,5 @@ void die(struct pt_regs *regs, const char *str)
 	if (panic_on_oops)
 		panic("Fatal exception: panic_on_oops");
 	oops_exit();
-	do_exit(SIGSEGV);
+	make_task_dead(SIGSEGV);
 }

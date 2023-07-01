@@ -24,9 +24,9 @@
 	};
 
 	aliases {
-	       gpio0 = &gpio0;
-	       gpio1 = &gpio1;
-	       i2c0 = &i2c0;
+		gpio0 = &gpio0;
+		gpio1 = &gpio1;
+		i2c0 = &i2c0;
 	};
 
 	mbus@f1000000 {
@@ -228,7 +228,7 @@
 			reg = <0x20128 0x4>;
 		};
 
-		intc: main-interrupt-ctrl@20200 {
+		intc: interrupt-controller@20200 {
 			compatible = "marvell,orion-intc";
 			interrupt-controller;
 			#interrupt-cells = <1>;
@@ -279,15 +279,15 @@
 			clocks = <&gate_clk 8>;
 
 			xor00 {
-			      interrupts = <5>;
-			      dmacap,memcpy;
-			      dmacap,xor;
+				interrupts = <5>;
+				dmacap,memcpy;
+				dmacap,xor;
 			};
 			xor01 {
-			      interrupts = <6>;
-			      dmacap,memcpy;
-			      dmacap,xor;
-			      dmacap,memset;
+				interrupts = <6>;
+				dmacap,memcpy;
+				dmacap,xor;
+				dmacap,memset;
 			};
 		};
 
@@ -299,15 +299,15 @@
 			clocks = <&gate_clk 16>;
 
 			xor00 {
-			      interrupts = <7>;
-			      dmacap,memcpy;
-			      dmacap,xor;
+				interrupts = <7>;
+				dmacap,memcpy;
+				dmacap,xor;
 			};
 			xor01 {
-			      interrupts = <8>;
-			      dmacap,memcpy;
-			      dmacap,xor;
-			      dmacap,memset;
+				interrupts = <8>;
+				dmacap,memcpy;
+				dmacap,xor;
+				dmacap,memset;
 			};
 		};
 
@@ -369,7 +369,7 @@
 			clocks = <&gate_clk 14>;
 			clock-names = "sata";
 			#phy-cells = <0>;
-			status = "ok";
+			status = "okay";
 		};
 
 		sata_phy1: sata-phy@84000 {
@@ -378,7 +378,7 @@
 			clocks = <&gate_clk 15>;
 			clock-names = "sata";
 			#phy-cells = <0>;
-			status = "ok";
+			status = "okay";
 		};
 
 		audio0: audio-controller@a0000 {

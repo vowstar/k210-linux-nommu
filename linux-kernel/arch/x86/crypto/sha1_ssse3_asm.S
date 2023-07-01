@@ -25,6 +25,7 @@
  */
 
 #include <linux/linkage.h>
+#include <linux/cfi_types.h>
 
 #define CTX	%rdi	// arg1
 #define BUF	%rsi	// arg2
@@ -67,7 +68,7 @@
  * param: function's name
  */
 .macro SHA1_VECTOR_ASM  name
-	SYM_FUNC_START(\name)
+	SYM_TYPED_FUNC_START(\name)
 
 	push	%rbx
 	push	%r12
@@ -99,7 +100,7 @@
 	pop	%rbp
 	pop	%r12
 	pop	%rbx
-	ret
+	RET
 
 	SYM_FUNC_END(\name)
 .endm
@@ -467,8 +468,6 @@ W_PRECALC_SSSE3
  */
 SHA1_VECTOR_ASM     sha1_transform_ssse3
 
-#ifdef CONFIG_AS_AVX
-
 .macro W_PRECALC_AVX
 
 .purgem W_PRECALC_00_15
@@ -553,5 +552,3 @@ W_PRECALC_AVX
  *				       const u8 *data, int blocks);
  */
 SHA1_VECTOR_ASM     sha1_transform_avx
-
-#endif

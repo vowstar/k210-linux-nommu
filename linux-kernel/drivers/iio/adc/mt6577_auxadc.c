@@ -9,9 +9,9 @@
 #include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/of.h>
-#include <linux/of_device.h>
+#include <linux/mod_devicetable.h>
 #include <linux/platform_device.h>
+#include <linux/property.h>
 #include <linux/iopoll.h>
 #include <linux/io.h>
 #include <linux/iio/iio.h>
@@ -44,6 +44,11 @@ struct mt6577_auxadc_device {
 	struct clk *adc_clk;
 	struct mutex lock;
 	const struct mtk_auxadc_compatible *dev_comp;
+};
+
+static const struct mtk_auxadc_compatible mt8186_compat = {
+	.sample_data_cali = false,
+	.check_global_idle = false,
 };
 
 static const struct mtk_auxadc_compatible mt8173_compat = {
@@ -81,6 +86,10 @@ static const struct iio_chan_spec mt6577_auxadc_iio_channels[] = {
 	MT6577_AUXADC_CHANNEL(14),
 	MT6577_AUXADC_CHANNEL(15),
 };
+
+/* For Voltage calculation */
+#define VOLTAGE_FULL_RANGE  1500	/* VA voltage */
+#define AUXADC_PRECISE      4096	/* 12 bits */
 
 static int mt_auxadc_get_cali_data(int rawdata, bool enable_cali)
 {
@@ -191,6 +200,10 @@ static int mt6577_auxadc_read_raw(struct iio_dev *indio_dev,
 		}
 		if (adc_dev->dev_comp->sample_data_cali)
 			*val = mt_auxadc_get_cali_data(*val, true);
+
+		/* Convert adc raw data to voltage: 0 - 1500 mV */
+		*val = *val * VOLTAGE_FULL_RANGE / AUXADC_PRECISE;
+
 		return IIO_VAL_INT;
 
 	default:
@@ -202,7 +215,7 @@ static const struct iio_info mt6577_auxadc_info = {
 	.read_raw = &mt6577_auxadc_read_raw,
 };
 
-static int __maybe_unused mt6577_auxadc_resume(struct device *dev)
+static int mt6577_auxadc_resume(struct device *dev)
 {
 	struct iio_dev *indio_dev = dev_get_drvdata(dev);
 	struct mt6577_auxadc_device *adc_dev = iio_priv(indio_dev);
@@ -221,7 +234,7 @@ static int __maybe_unused mt6577_auxadc_resume(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused mt6577_auxadc_suspend(struct device *dev)
+static int mt6577_auxadc_suspend(struct device *dev)
 {
 	struct iio_dev *indio_dev = dev_get_drvdata(dev);
 	struct mt6577_auxadc_device *adc_dev = iio_priv(indio_dev);
@@ -245,7 +258,6 @@ static int mt6577_auxadc_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	adc_dev = iio_priv(indio_dev);
-	indio_dev->dev.parent = &pdev->dev;
 	indio_dev->name = dev_name(&pdev->dev);
 	indio_dev->info = &mt6577_auxadc_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
@@ -276,6 +288,8 @@ static int mt6577_auxadc_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "null clock rate\n");
 		goto err_disable_clk;
 	}
+
+	adc_dev->dev_comp = device_get_match_data(&pdev->dev);
 
 	mutex_init(&adc_dev->lock);
 
@@ -316,16 +330,17 @@ static int mt6577_auxadc_remove(struct platform_device *pdev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(mt6577_auxadc_pm_ops,
-			 mt6577_auxadc_suspend,
-			 mt6577_auxadc_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(mt6577_auxadc_pm_ops,
+				mt6577_auxadc_suspend,
+				mt6577_auxadc_resume);
 
 static const struct of_device_id mt6577_auxadc_of_match[] = {
-	{ .compatible = "mediatek,mt2701-auxadc", .data = &mt8173_compat},
-	{ .compatible = "mediatek,mt2712-auxadc", .data = &mt8173_compat},
-	{ .compatible = "mediatek,mt7622-auxadc", .data = &mt8173_compat},
-	{ .compatible = "mediatek,mt8173-auxadc", .data = &mt8173_compat},
-	{ .compatible = "mediatek,mt6765-auxadc", .data = &mt6765_compat},
+	{ .compatible = "mediatek,mt2701-auxadc", .data = &mt8173_compat },
+	{ .compatible = "mediatek,mt2712-auxadc", .data = &mt8173_compat },
+	{ .compatible = "mediatek,mt7622-auxadc", .data = &mt8173_compat },
+	{ .compatible = "mediatek,mt8173-auxadc", .data = &mt8173_compat },
+	{ .compatible = "mediatek,mt8186-auxadc", .data = &mt8186_compat },
+	{ .compatible = "mediatek,mt6765-auxadc", .data = &mt6765_compat },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, mt6577_auxadc_of_match);
@@ -334,7 +349,7 @@ static struct platform_driver mt6577_auxadc_driver = {
 	.driver = {
 		.name   = "mt6577-auxadc",
 		.of_match_table = mt6577_auxadc_of_match,
-		.pm = &mt6577_auxadc_pm_ops,
+		.pm = pm_sleep_ptr(&mt6577_auxadc_pm_ops),
 	},
 	.probe	= mt6577_auxadc_probe,
 	.remove	= mt6577_auxadc_remove,

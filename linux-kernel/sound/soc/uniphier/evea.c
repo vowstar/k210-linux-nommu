@@ -397,7 +397,6 @@ static struct snd_soc_component_driver soc_codec_evea = {
 	.idle_bias_on		= 1,
 	.use_pmdown_time	= 1,
 	.endianness		= 1,
-	.non_legacy_dai_naming	= 1,
 };
 
 static struct snd_soc_dai_driver soc_dai_evea[] = {
@@ -551,7 +550,7 @@ static int evea_remove(struct platform_device *pdev)
 	return 0;
 }
 
-static const struct of_device_id evea_of_match[] = {
+static const struct of_device_id evea_of_match[] __maybe_unused = {
 	{ .compatible = "socionext,uniphier-evea", },
 	{}
 };

@@ -50,15 +50,6 @@ static const struct vm_special_mapping vdso_data_mapping = {
 static int vdso_mremap(const struct vm_special_mapping *sm,
 		struct vm_area_struct *new_vma)
 {
-	unsigned long new_size = new_vma->vm_end - new_vma->vm_start;
-	unsigned long vdso_size;
-
-	/* without VVAR page */
-	vdso_size = (vdso_total_pages - 1) << PAGE_SHIFT;
-
-	if (vdso_size != new_size)
-		return -EINVAL;
-
 	current->mm->context.vdso = new_vma->vm_start;
 
 	return 0;
@@ -94,6 +85,8 @@ static bool __init cntvct_functional(void)
 	 * this.
 	 */
 	np = of_find_compatible_node(NULL, NULL, "arm,armv7-timer");
+	if (!np)
+		np = of_find_compatible_node(NULL, NULL, "arm,armv8-timer");
 	if (!np)
 		goto out_put;
 
@@ -182,6 +175,7 @@ static void __init patch_vdso(void *ehdr)
 	if (!cntvct_ok) {
 		vdso_nullpatch_one(&einfo, "__vdso_gettimeofday");
 		vdso_nullpatch_one(&einfo, "__vdso_clock_gettime");
+		vdso_nullpatch_one(&einfo, "__vdso_clock_gettime64");
 	}
 }
 
@@ -238,7 +232,7 @@ static int install_vvar(struct mm_struct *mm, unsigned long addr)
 	return PTR_ERR_OR_ZERO(vma);
 }
 
-/* assumes mmap_sem is write-locked */
+/* assumes mmap_lock is write-locked */
 void arm_install_vdso(struct mm_struct *mm, unsigned long addr)
 {
 	struct vm_area_struct *vma;

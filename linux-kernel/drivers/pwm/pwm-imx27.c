@@ -18,7 +18,6 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/platform_device.h>
 #include <linux/pwm.h>
 #include <linux/slab.h>
@@ -96,9 +95,8 @@ struct pwm_imx27_chip {
 
 #define to_pwm_imx27_chip(chip)	container_of(chip, struct pwm_imx27_chip, chip)
 
-static int pwm_imx27_clk_prepare_enable(struct pwm_chip *chip)
+static int pwm_imx27_clk_prepare_enable(struct pwm_imx27_chip *imx)
 {
-	struct pwm_imx27_chip *imx = to_pwm_imx27_chip(chip);
 	int ret;
 
 	ret = clk_prepare_enable(imx->clk_ipg);
@@ -114,25 +112,23 @@ static int pwm_imx27_clk_prepare_enable(struct pwm_chip *chip)
 	return 0;
 }
 
-static void pwm_imx27_clk_disable_unprepare(struct pwm_chip *chip)
+static void pwm_imx27_clk_disable_unprepare(struct pwm_imx27_chip *imx)
 {
-	struct pwm_imx27_chip *imx = to_pwm_imx27_chip(chip);
-
 	clk_disable_unprepare(imx->clk_per);
 	clk_disable_unprepare(imx->clk_ipg);
 }
 
-static void pwm_imx27_get_state(struct pwm_chip *chip,
-				struct pwm_device *pwm, struct pwm_state *state)
+static int pwm_imx27_get_state(struct pwm_chip *chip,
+			       struct pwm_device *pwm, struct pwm_state *state)
 {
 	struct pwm_imx27_chip *imx = to_pwm_imx27_chip(chip);
 	u32 period, prescaler, pwm_clk, val;
 	u64 tmp;
 	int ret;
 
-	ret = pwm_imx27_clk_prepare_enable(chip);
+	ret = pwm_imx27_clk_prepare_enable(imx);
 	if (ret < 0)
-		return;
+		return ret;
 
 	val = readl(imx->mmio_base + MX3_PWMCR);
 
@@ -154,13 +150,12 @@ static void pwm_imx27_get_state(struct pwm_chip *chip,
 
 	prescaler = MX3_PWMCR_PRESCALER_GET(val);
 	pwm_clk = clk_get_rate(imx->clk_per);
-	pwm_clk = DIV_ROUND_CLOSEST_ULL(pwm_clk, prescaler);
 	val = readl(imx->mmio_base + MX3_PWMPR);
 	period = val >= MX3_PWMPR_MAX ? MX3_PWMPR_MAX : val;
 
 	/* PWMOUT (Hz) = PWMCLK / (PWMPR + 2) */
-	tmp = NSEC_PER_SEC * (u64)(period + 2);
-	state->period = DIV_ROUND_CLOSEST_ULL(tmp, pwm_clk);
+	tmp = NSEC_PER_SEC * (u64)(period + 2) * prescaler;
+	state->period = DIV_ROUND_UP_ULL(tmp, pwm_clk);
 
 	/*
 	 * PWMSAR can be read only if PWM is enabled. If the PWM is disabled,
@@ -171,11 +166,12 @@ static void pwm_imx27_get_state(struct pwm_chip *chip,
 	else
 		val = imx->duty_cycle;
 
-	tmp = NSEC_PER_SEC * (u64)(val);
-	state->duty_cycle = DIV_ROUND_CLOSEST_ULL(tmp, pwm_clk);
+	tmp = NSEC_PER_SEC * (u64)(val) * prescaler;
+	state->duty_cycle = DIV_ROUND_UP_ULL(tmp, pwm_clk);
 
-	if (!state->enabled)
-		pwm_imx27_clk_disable_unprepare(chip);
+	pwm_imx27_clk_disable_unprepare(imx);
+
+	return 0;
 }
 
 static void pwm_imx27_sw_reset(struct pwm_chip *chip)
@@ -208,7 +204,7 @@ static void pwm_imx27_wait_fifo_slot(struct pwm_chip *chip,
 	sr = readl(imx->mmio_base + MX3_PWMSR);
 	fifoav = FIELD_GET(MX3_PWMSR_FIFOAV, sr);
 	if (fifoav == MX3_PWMSR_FIFOAV_4WORDS) {
-		period_ms = DIV_ROUND_UP(pwm_get_period(pwm),
+		period_ms = DIV_ROUND_UP_ULL(pwm_get_period(pwm),
 					 NSEC_PER_MSEC);
 		msleep(period_ms);
 
@@ -225,23 +221,25 @@ static int pwm_imx27_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	struct pwm_imx27_chip *imx = to_pwm_imx27_chip(chip);
 	struct pwm_state cstate;
 	unsigned long long c;
+	unsigned long long clkrate;
 	int ret;
 	u32 cr;
 
 	pwm_get_state(pwm, &cstate);
 
-	c = clk_get_rate(imx->clk_per);
-	c *= state->period;
+	clkrate = clk_get_rate(imx->clk_per);
+	c = clkrate * state->period;
 
-	do_div(c, 1000000000);
+	do_div(c, NSEC_PER_SEC);
 	period_cycles = c;
 
 	prescale = period_cycles / 0x10000 + 1;
 
 	period_cycles /= prescale;
-	c = (unsigned long long)period_cycles * state->duty_cycle;
-	do_div(c, state->period);
+	c = clkrate * state->duty_cycle;
+	do_div(c, NSEC_PER_SEC);
 	duty_cycles = c;
+	duty_cycles /= prescale;
 
 	/*
 	 * according to imx pwm RM, the real period value should be PERIOD
@@ -259,7 +257,7 @@ static int pwm_imx27_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 	if (cstate.enabled) {
 		pwm_imx27_wait_fifo_slot(chip, pwm);
 	} else {
-		ret = pwm_imx27_clk_prepare_enable(chip);
+		ret = pwm_imx27_clk_prepare_enable(imx);
 		if (ret)
 			return ret;
 
@@ -289,8 +287,8 @@ static int pwm_imx27_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 
 	writel(cr, imx->mmio_base + MX3_PWMCR);
 
-	if (!state->enabled && cstate.enabled)
-		pwm_imx27_clk_disable_unprepare(chip);
+	if (!state->enabled)
+		pwm_imx27_clk_disable_unprepare(imx);
 
 	return 0;
 }
@@ -310,60 +308,41 @@ MODULE_DEVICE_TABLE(of, pwm_imx27_dt_ids);
 static int pwm_imx27_probe(struct platform_device *pdev)
 {
 	struct pwm_imx27_chip *imx;
+	int ret;
+	u32 pwmcr;
 
 	imx = devm_kzalloc(&pdev->dev, sizeof(*imx), GFP_KERNEL);
 	if (imx == NULL)
 		return -ENOMEM;
 
-	platform_set_drvdata(pdev, imx);
-
 	imx->clk_ipg = devm_clk_get(&pdev->dev, "ipg");
-	if (IS_ERR(imx->clk_ipg)) {
-		int ret = PTR_ERR(imx->clk_ipg);
-
-		if (ret != -EPROBE_DEFER)
-			dev_err(&pdev->dev,
-				"getting ipg clock failed with %d\n",
-				ret);
-		return ret;
-	}
+	if (IS_ERR(imx->clk_ipg))
+		return dev_err_probe(&pdev->dev, PTR_ERR(imx->clk_ipg),
+				     "getting ipg clock failed\n");
 
 	imx->clk_per = devm_clk_get(&pdev->dev, "per");
-	if (IS_ERR(imx->clk_per)) {
-		int ret = PTR_ERR(imx->clk_per);
-
-		if (ret != -EPROBE_DEFER)
-			dev_err(&pdev->dev,
-				"failed to get peripheral clock: %d\n",
-				ret);
-
-		return ret;
-	}
+	if (IS_ERR(imx->clk_per))
+		return dev_err_probe(&pdev->dev, PTR_ERR(imx->clk_per),
+				     "failed to get peripheral clock\n");
 
 	imx->chip.ops = &pwm_imx27_ops;
 	imx->chip.dev = &pdev->dev;
-	imx->chip.base = -1;
 	imx->chip.npwm = 1;
-
-	imx->chip.of_xlate = of_pwm_xlate_with_flags;
-	imx->chip.of_pwm_n_cells = 3;
 
 	imx->mmio_base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(imx->mmio_base))
 		return PTR_ERR(imx->mmio_base);
 
-	return pwmchip_add(&imx->chip);
-}
+	ret = pwm_imx27_clk_prepare_enable(imx);
+	if (ret)
+		return ret;
 
-static int pwm_imx27_remove(struct platform_device *pdev)
-{
-	struct pwm_imx27_chip *imx;
+	/* keep clks on if pwm is running */
+	pwmcr = readl(imx->mmio_base + MX3_PWMCR);
+	if (!(pwmcr & MX3_PWMCR_EN))
+		pwm_imx27_clk_disable_unprepare(imx);
 
-	imx = platform_get_drvdata(pdev);
-
-	pwm_imx27_clk_disable_unprepare(&imx->chip);
-
-	return pwmchip_remove(&imx->chip);
+	return devm_pwmchip_add(&pdev->dev, &imx->chip);
 }
 
 static struct platform_driver imx_pwm_driver = {
@@ -372,7 +351,6 @@ static struct platform_driver imx_pwm_driver = {
 		.of_match_table = pwm_imx27_dt_ids,
 	},
 	.probe = pwm_imx27_probe,
-	.remove = pwm_imx27_remove,
 };
 module_platform_driver(imx_pwm_driver);
 

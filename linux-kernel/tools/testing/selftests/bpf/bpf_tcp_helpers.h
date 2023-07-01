@@ -6,16 +6,25 @@
 #include <linux/types.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_core_read.h>
-#include "bpf_trace_helpers.h"
+#include <bpf/bpf_tracing.h>
 
 #define BPF_STRUCT_OPS(name, args...) \
 SEC("struct_ops/"#name) \
 BPF_PROG(name, args)
 
+#ifndef SOL_TCP
+#define SOL_TCP 6
+#endif
+
+#ifndef TCP_CA_NAME_MAX
+#define TCP_CA_NAME_MAX	16
+#endif
+
 #define tcp_jiffies32 ((__u32)bpf_jiffies64())
 
 struct sock_common {
 	unsigned char	skc_state;
+	__u16		skc_num;
 } __attribute__((preserve_access_index));
 
 enum sk_pacing {
@@ -26,6 +35,7 @@ enum sk_pacing {
 
 struct sock {
 	struct sock_common	__sk_common;
+#define sk_state		__sk_common.skc_state
 	unsigned long		sk_pacing_rate;
 	__u32			sk_pacing_status; /* see enum sk_pacing */
 } __attribute__((preserve_access_index));
@@ -45,12 +55,17 @@ struct inet_connection_sock {
 	__u64			  icsk_ca_priv[104 / sizeof(__u64)];
 } __attribute__((preserve_access_index));
 
+struct request_sock {
+	struct sock_common		__req_common;
+} __attribute__((preserve_access_index));
+
 struct tcp_sock {
 	struct inet_connection_sock	inet_conn;
 
 	__u32	rcv_nxt;
 	__u32	snd_nxt;
 	__u32	snd_una;
+	__u32	window_clamp;
 	__u8	ecn_flags;
 	__u32	delivered;
 	__u32	delivered_ce;
@@ -70,6 +85,7 @@ struct tcp_sock {
 	__u32	lsndtime;
 	__u32	prior_cwnd;
 	__u64	tcp_mstamp;	/* most recent packet received/sent */
+	bool	is_mptcp;
 } __attribute__((preserve_access_index));
 
 static __always_inline struct inet_connection_sock *inet_csk(const struct sock *sk)
@@ -113,14 +129,6 @@ enum tcp_ca_event {
 	CA_EVENT_LOSS = 3,
 	CA_EVENT_ECN_NO_CE = 4,
 	CA_EVENT_ECN_IS_CE = 5,
-};
-
-enum tcp_ca_state {
-	TCP_CA_Open = 0,
-	TCP_CA_Disorder = 1,
-	TCP_CA_CWR = 2,
-	TCP_CA_Recovery = 3,
-	TCP_CA_Loss = 4
 };
 
 struct ack_sample {
@@ -179,6 +187,7 @@ struct tcp_congestion_ops {
 	 * after all the ca_state processing. (optional)
 	 */
 	void (*cong_control)(struct sock *sk, const struct rate_sample *rs);
+	void *owner;
 };
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
@@ -187,16 +196,6 @@ struct tcp_congestion_ops {
 	typeof(x) __x = (x);			\
 	typeof(y) __y = (y);			\
 	__x == 0 ? __y : ((__y == 0) ? __x : min(__x, __y)); })
-
-static __always_inline __u32 tcp_slow_start(struct tcp_sock *tp, __u32 acked)
-{
-	__u32 cwnd = min(tp->snd_cwnd + acked, tp->snd_ssthresh);
-
-	acked -= cwnd - tp->snd_cwnd;
-	tp->snd_cwnd = min(cwnd, tp->snd_cwnd_clamp);
-
-	return acked;
-}
 
 static __always_inline bool tcp_in_slow_start(const struct tcp_sock *tp)
 {
@@ -214,22 +213,29 @@ static __always_inline bool tcp_is_cwnd_limited(const struct sock *sk)
 	return !!BPF_CORE_READ_BITFIELD(tp, is_cwnd_limited);
 }
 
-static __always_inline void tcp_cong_avoid_ai(struct tcp_sock *tp, __u32 w, __u32 acked)
+static __always_inline bool tcp_cc_eq(const char *a, const char *b)
 {
-	/* If credits accumulated at a higher w, apply them gently now. */
-	if (tp->snd_cwnd_cnt >= w) {
-		tp->snd_cwnd_cnt = 0;
-		tp->snd_cwnd++;
+	int i;
+
+	for (i = 0; i < TCP_CA_NAME_MAX; i++) {
+		if (a[i] != b[i])
+			return false;
+		if (!a[i])
+			break;
 	}
 
-	tp->snd_cwnd_cnt += acked;
-	if (tp->snd_cwnd_cnt >= w) {
-		__u32 delta = tp->snd_cwnd_cnt / w;
-
-		tp->snd_cwnd_cnt -= delta * w;
-		tp->snd_cwnd += delta;
-	}
-	tp->snd_cwnd = min(tp->snd_cwnd, tp->snd_cwnd_clamp);
+	return true;
 }
+
+extern __u32 tcp_slow_start(struct tcp_sock *tp, __u32 acked) __ksym;
+extern void tcp_cong_avoid_ai(struct tcp_sock *tp, __u32 w, __u32 acked) __ksym;
+
+struct mptcp_sock {
+	struct inet_connection_sock	sk;
+
+	__u32		token;
+	struct sock	*first;
+	char		ca_name[TCP_CA_NAME_MAX];
+} __attribute__((preserve_access_index));
 
 #endif

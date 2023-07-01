@@ -6,8 +6,11 @@
 #include <linux/io.h>
 #include <linux/clk-provider.h>
 #include <linux/clkdev.h>
+#include <linux/init.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <linux/of_device.h>
+#include <linux/platform_device.h>
 #include <linux/clk/tegra.h>
 #include <linux/delay.h>
 #include <dt-bindings/clock/tegra20-car.h>
@@ -391,6 +394,8 @@ static struct tegra_clk_pll_params pll_x_params = {
 	.lock_delay = 300,
 	.freq_table = pll_x_freq_table,
 	.flags = TEGRA_PLL_HAS_CPCON | TEGRA_PLL_HAS_LOCK_ENABLE,
+	.pre_rate_change = tegra_cclk_pre_pllx_rate_change,
+	.post_rate_change = tegra_cclk_post_pllx_rate_change,
 };
 
 static struct tegra_clk_pll_params pll_e_params = {
@@ -412,7 +417,7 @@ static struct tegra_clk_pll_params pll_e_params = {
 	.fixed_rate = 100000000,
 };
 
-static struct tegra_devclk devclks[] __initdata = {
+static struct tegra_devclk devclks[] = {
 	{ .con_id = "pll_c", .dt_id = TEGRA20_CLK_PLL_C },
 	{ .con_id = "pll_c_out1", .dt_id = TEGRA20_CLK_PLL_C_OUT1 },
 	{ .con_id = "pll_p", .dt_id = TEGRA20_CLK_PLL_P },
@@ -458,7 +463,6 @@ static struct tegra_devclk devclks[] __initdata = {
 	{ .con_id = "cdev1", .dt_id = TEGRA20_CLK_CDEV1 },
 	{ .con_id = "cdev2", .dt_id = TEGRA20_CLK_CDEV2 },
 	{ .con_id = "clk_32k", .dt_id = TEGRA20_CLK_CLK_32K },
-	{ .con_id = "blink", .dt_id = TEGRA20_CLK_BLINK },
 	{ .con_id = "clk_m", .dt_id = TEGRA20_CLK_CLK_M },
 	{ .con_id = "pll_ref", .dt_id = TEGRA20_CLK_PLL_REF },
 	{ .dev_id = "tegra20-i2s.0", .dt_id = TEGRA20_CLK_I2S1 },
@@ -537,7 +541,6 @@ static struct tegra_clk tegra20_clks[tegra_clk_max] __initdata = {
 	[tegra_clk_csi] = { .dt_id = TEGRA20_CLK_CSI, .present = true },
 	[tegra_clk_isp] = { .dt_id = TEGRA20_CLK_ISP, .present = true },
 	[tegra_clk_clk_32k] = { .dt_id = TEGRA20_CLK_CLK_32K, .present = true },
-	[tegra_clk_blink] = { .dt_id = TEGRA20_CLK_BLINK, .present = true },
 	[tegra_clk_hclk] = { .dt_id = TEGRA20_CLK_HCLK, .present = true },
 	[tegra_clk_pclk] = { .dt_id = TEGRA20_CLK_PCLK, .present = true },
 	[tegra_clk_pll_p_out1] = { .dt_id = TEGRA20_CLK_PLL_P_OUT1, .present = true },
@@ -704,17 +707,11 @@ static void tegra20_super_clk_init(void)
 	struct clk *clk;
 
 	/* CCLK */
-	clk = tegra_clk_register_super_mux("cclk", cclk_parents,
+	clk = tegra_clk_register_super_cclk("cclk", cclk_parents,
 			      ARRAY_SIZE(cclk_parents), CLK_SET_RATE_PARENT,
-			      clk_base + CCLK_BURST_POLICY, 0, 4, 0, 0, NULL);
+			      clk_base + CCLK_BURST_POLICY, TEGRA20_SUPER_CLK,
+			      NULL);
 	clks[TEGRA20_CLK_CCLK] = clk;
-
-	/* SCLK */
-	clk = tegra_clk_register_super_mux("sclk", sclk_parents,
-			      ARRAY_SIZE(sclk_parents),
-			      CLK_SET_RATE_PARENT | CLK_IS_CRITICAL,
-			      clk_base + SCLK_BURST_POLICY, 0, 4, 0, 0, NULL);
-	clks[TEGRA20_CLK_SCLK] = clk;
 
 	/* twd */
 	clk = clk_register_fixed_factor(NULL, "twd", "cclk", 0, 1, 4);
@@ -1013,16 +1010,16 @@ static struct tegra_cpu_car_ops tegra20_cpu_car_ops = {
 #endif
 };
 
-static struct tegra_clk_init_table init_table[] __initdata = {
+static struct tegra_clk_init_table init_table[] = {
 	{ TEGRA20_CLK_PLL_P, TEGRA20_CLK_CLK_MAX, 216000000, 1 },
 	{ TEGRA20_CLK_PLL_P_OUT1, TEGRA20_CLK_CLK_MAX, 28800000, 1 },
 	{ TEGRA20_CLK_PLL_P_OUT2, TEGRA20_CLK_CLK_MAX, 48000000, 1 },
 	{ TEGRA20_CLK_PLL_P_OUT3, TEGRA20_CLK_CLK_MAX, 72000000, 1 },
 	{ TEGRA20_CLK_PLL_P_OUT4, TEGRA20_CLK_CLK_MAX, 24000000, 1 },
 	{ TEGRA20_CLK_PLL_C, TEGRA20_CLK_CLK_MAX, 600000000, 0 },
-	{ TEGRA20_CLK_PLL_C_OUT1, TEGRA20_CLK_CLK_MAX, 240000000, 0 },
-	{ TEGRA20_CLK_SCLK, TEGRA20_CLK_PLL_C_OUT1, 240000000, 0 },
-	{ TEGRA20_CLK_HCLK, TEGRA20_CLK_CLK_MAX, 240000000, 0 },
+	{ TEGRA20_CLK_PLL_C_OUT1, TEGRA20_CLK_CLK_MAX, 120000000, 0 },
+	{ TEGRA20_CLK_SCLK, TEGRA20_CLK_PLL_C_OUT1, 120000000, 0 },
+	{ TEGRA20_CLK_HCLK, TEGRA20_CLK_CLK_MAX, 120000000, 0 },
 	{ TEGRA20_CLK_PCLK, TEGRA20_CLK_CLK_MAX, 60000000, 0 },
 	{ TEGRA20_CLK_CSITE, TEGRA20_CLK_CLK_MAX, 0, 1 },
 	{ TEGRA20_CLK_CCLK, TEGRA20_CLK_CLK_MAX, 0, 1 },
@@ -1031,10 +1028,8 @@ static struct tegra_clk_init_table init_table[] __initdata = {
 	{ TEGRA20_CLK_UARTC, TEGRA20_CLK_PLL_P, 0, 0 },
 	{ TEGRA20_CLK_UARTD, TEGRA20_CLK_PLL_P, 0, 0 },
 	{ TEGRA20_CLK_UARTE, TEGRA20_CLK_PLL_P, 0, 0 },
-	{ TEGRA20_CLK_PLL_A, TEGRA20_CLK_CLK_MAX, 56448000, 1 },
-	{ TEGRA20_CLK_PLL_A_OUT0, TEGRA20_CLK_CLK_MAX, 11289600, 1 },
-	{ TEGRA20_CLK_CDEV1, TEGRA20_CLK_CLK_MAX, 0, 1 },
-	{ TEGRA20_CLK_BLINK, TEGRA20_CLK_CLK_MAX, 32768, 1 },
+	{ TEGRA20_CLK_PLL_A, TEGRA20_CLK_CLK_MAX, 56448000, 0 },
+	{ TEGRA20_CLK_PLL_A_OUT0, TEGRA20_CLK_CLK_MAX, 11289600, 0 },
 	{ TEGRA20_CLK_I2S1, TEGRA20_CLK_PLL_A_OUT0, 11289600, 0 },
 	{ TEGRA20_CLK_I2S2, TEGRA20_CLK_PLL_A_OUT0, 11289600, 0 },
 	{ TEGRA20_CLK_SDMMC1, TEGRA20_CLK_PLL_P, 48000000, 0 },
@@ -1049,14 +1044,10 @@ static struct tegra_clk_init_table init_table[] __initdata = {
 	{ TEGRA20_CLK_GR2D, TEGRA20_CLK_PLL_C, 300000000, 0 },
 	{ TEGRA20_CLK_GR3D, TEGRA20_CLK_PLL_C, 300000000, 0 },
 	{ TEGRA20_CLK_VDE, TEGRA20_CLK_PLL_C, 300000000, 0 },
+	{ TEGRA20_CLK_PWM, TEGRA20_CLK_PLL_P, 48000000, 0 },
 	/* must be the last entry */
 	{ TEGRA20_CLK_CLK_MAX, TEGRA20_CLK_CLK_MAX, 0, 0 },
 };
-
-static void __init tegra20_clock_apply_init_table(void)
-{
-	tegra_init_from_table(init_table, clks, TEGRA20_CLK_CLK_MAX);
-}
 
 /*
  * Some clocks may be used by different drivers depending on the board
@@ -1077,12 +1068,24 @@ static const struct of_device_id pmc_match[] __initconst = {
 	{ },
 };
 
+static bool tegra20_car_initialized;
+
 static struct clk *tegra20_clk_src_onecell_get(struct of_phandle_args *clkspec,
 					       void *data)
 {
 	struct clk_hw *parent_hw;
 	struct clk_hw *hw;
 	struct clk *clk;
+
+	/*
+	 * Timer clocks are needed early, the rest of the clocks shouldn't be
+	 * available to device drivers until clock tree is fully initialized.
+	 */
+	if (clkspec->args[0] != TEGRA20_CLK_RTC &&
+	    clkspec->args[0] != TEGRA20_CLK_TWD &&
+	    clkspec->args[0] != TEGRA20_CLK_TIMER &&
+	    !tegra20_car_initialized)
+		return ERR_PTR(-EPROBE_DEFER);
 
 	clk = of_clk_src_onecell_get(clkspec, data);
 	if (IS_ERR(clk))
@@ -1129,6 +1132,7 @@ static void __init tegra20_clock_init(struct device_node *np)
 	}
 
 	pmc_base = of_iomap(node, 0);
+	of_node_put(node);
 	if (!pmc_base) {
 		pr_err("Can't map pmc registers\n");
 		BUG();
@@ -1146,15 +1150,52 @@ static void __init tegra20_clock_init(struct device_node *np)
 	tegra_super_clk_gen4_init(clk_base, pmc_base, tegra20_clks, NULL);
 	tegra20_periph_clk_init();
 	tegra20_audio_clk_init();
-	tegra_pmc_clk_init(pmc_base, tegra20_clks);
 
 	tegra_init_dup_clks(tegra_clk_duplicates, clks, TEGRA20_CLK_CLK_MAX);
 
 	tegra_add_of_provider(np, tegra20_clk_src_onecell_get);
-	tegra_register_devclks(devclks, ARRAY_SIZE(devclks));
-
-	tegra_clk_apply_init_table = tegra20_clock_apply_init_table;
 
 	tegra_cpu_car_ops = &tegra20_cpu_car_ops;
 }
-CLK_OF_DECLARE(tegra20, "nvidia,tegra20-car", tegra20_clock_init);
+CLK_OF_DECLARE_DRIVER(tegra20, "nvidia,tegra20-car", tegra20_clock_init);
+
+/*
+ * Clocks that use runtime PM can't be created at the tegra20_clock_init
+ * time because drivers' base isn't initialized yet, and thus platform
+ * devices can't be created for the clocks.  Hence we need to split the
+ * registration of the clocks into two phases.  The first phase registers
+ * essential clocks which don't require RPM and are actually used during
+ * early boot.  The second phase registers clocks which use RPM and this
+ * is done when device drivers' core API is ready.
+ */
+static int tegra20_car_probe(struct platform_device *pdev)
+{
+	struct clk *clk;
+
+	clk = tegra_clk_register_super_mux("sclk", sclk_parents,
+			      ARRAY_SIZE(sclk_parents),
+			      CLK_SET_RATE_PARENT | CLK_IS_CRITICAL,
+			      clk_base + SCLK_BURST_POLICY, 0, 4, 0, 0, NULL);
+	clks[TEGRA20_CLK_SCLK] = clk;
+
+	tegra_register_devclks(devclks, ARRAY_SIZE(devclks));
+	tegra_init_from_table(init_table, clks, TEGRA20_CLK_CLK_MAX);
+	tegra20_car_initialized = true;
+
+	return 0;
+}
+
+static const struct of_device_id tegra20_car_match[] = {
+	{ .compatible = "nvidia,tegra20-car" },
+	{ }
+};
+
+static struct platform_driver tegra20_car_driver = {
+	.driver = {
+		.name = "tegra20-car",
+		.of_match_table = tegra20_car_match,
+		.suppress_bind_attrs = true,
+	},
+	.probe = tegra20_car_probe,
+};
+builtin_platform_driver(tegra20_car_driver);

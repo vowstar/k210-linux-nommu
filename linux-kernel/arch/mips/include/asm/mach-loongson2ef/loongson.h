@@ -56,15 +56,6 @@ extern int mach_i8259_irq(void);
 	(*(volatile u32 *)((char *)CKSEG1ADDR(LOONGSON_REG_BASE) + (x)))
 
 #define LOONGSON_IRQ_BASE	32
-#define LOONGSON2_PERFCNT_IRQ	(MIPS_CPU_IRQ_BASE + 6) /* cpu perf counter */
-
-#include <linux/interrupt.h>
-static inline void do_perfcnt_IRQ(void)
-{
-#if IS_ENABLED(CONFIG_OPROFILE)
-	do_IRQ(LOONGSON2_PERFCNT_IRQ);
-#endif
-}
 
 #define LOONGSON_FLASH_BASE	0x1c000000
 #define LOONGSON_FLASH_SIZE	0x02000000	/* 32M */
@@ -244,6 +235,7 @@ static inline void do_perfcnt_IRQ(void)
 #ifdef CONFIG_CPU_SUPPORTS_CPUFREQ
 #include <linux/cpufreq.h>
 extern struct cpufreq_frequency_table loongson2_clockmod_table[];
+extern int loongson2_cpu_set_rate(unsigned long rate_khz);
 #endif
 
 /*

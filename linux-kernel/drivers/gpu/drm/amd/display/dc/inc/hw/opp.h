@@ -310,7 +310,13 @@ struct opp_funcs {
 			enum dc_color_depth color_depth,
 			const struct tg_color *solid_color,
 			int width,
-			int height);
+			int height,
+			int offset);
+
+	void (*opp_program_dpg_dimensions)(
+				struct output_pixel_processor *opp,
+				int width,
+				int height);
 
 	bool (*dpg_is_blanked)(
 			struct output_pixel_processor *opp);

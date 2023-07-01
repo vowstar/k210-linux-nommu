@@ -14,9 +14,24 @@
 # Based on the ia64 and arm64 boot/Makefile.
 #
 
-OBJCOPYFLAGS_Image :=-O binary -R .note -R .note.gnu.build-id -R .comment -S
+KCOV_INSTRUMENT := n
 
-targets := Image loader
+OBJCOPYFLAGS_Image :=-O binary -R .note -R .note.gnu.build-id -R .comment -S
+OBJCOPYFLAGS_xipImage :=-O binary -R .note -R .note.gnu.build-id -R .comment -S
+
+targets := Image Image.* loader loader.o loader.lds loader.bin
+targets := Image Image.* loader loader.o loader.lds loader.bin xipImage
+
+ifeq ($(CONFIG_XIP_KERNEL),y)
+
+quiet_cmd_mkxip = $(quiet_cmd_objcopy)
+cmd_mkxip = $(cmd_objcopy)
+
+$(obj)/xipImage: vmlinux FORCE
+	$(call if_changed,mkxip)
+	@$(kecho) '  Physical Address of xipImage: $(CONFIG_XIP_PHYS_ADDR)'
+
+endif
 
 $(obj)/Image: vmlinux FORCE
 	$(call if_changed,objcopy)
@@ -41,13 +56,14 @@ $(obj)/Image.lzma: $(obj)/Image FORCE
 $(obj)/Image.lzo: $(obj)/Image FORCE
 	$(call if_changed,lzo)
 
+$(obj)/Image.zst: $(obj)/Image FORCE
+	$(call if_changed,zstd)
+
 $(obj)/loader.bin: $(obj)/loader FORCE
 	$(call if_changed,objcopy)
 
-install:
-	$(CONFIG_SHELL) $(srctree)/$(src)/install.sh $(KERNELRELEASE) \
-	$(obj)/Image System.map "$(INSTALL_PATH)"
+EFI_ZBOOT_PAYLOAD	:= Image
+EFI_ZBOOT_BFD_TARGET	:= elf$(BITS)-littleriscv
+EFI_ZBOOT_MACH_TYPE	:= RISCV$(BITS)
 
-zinstall:
-	$(CONFIG_SHELL) $(srctree)/$(src)/install.sh $(KERNELRELEASE) \
-	$(obj)/Image.gz System.map "$(INSTALL_PATH)"
+include $(srctree)/drivers/firmware/efi/libstub/Makefile.zboot

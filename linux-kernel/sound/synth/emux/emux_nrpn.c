@@ -69,7 +69,7 @@ static const int gs_sense[] =
 	DEF_FX_VIBRATE, DEF_FX_VIBDEPTH, DEF_FX_VIBDELAY
 };
 
-/* effect sensitivies for XG controls:
+/* effect sensitivities for XG controls:
  * adjusted for chaos 8MB soundfonts
  */
 static const int xg_sense[] =
@@ -349,6 +349,9 @@ int
 snd_emux_xg_control(struct snd_emux_port *port, struct snd_midi_channel *chan,
 		    int param)
 {
+	if (param >= ARRAY_SIZE(chan->control))
+		return -EINVAL;
+
 	return send_converted_effect(xg_effects, ARRAY_SIZE(xg_effects),
 				     port, chan, param,
 				     chan->control[param],

@@ -179,6 +179,38 @@ static __init int strnchr_selftest(void)
 	return 0;
 }
 
+static __init int strspn_selftest(void)
+{
+	static const struct strspn_test {
+		const char str[16];
+		const char accept[16];
+		const char reject[16];
+		unsigned a;
+		unsigned r;
+	} tests[] __initconst = {
+		{ "foobar", "", "", 0, 6 },
+		{ "abba", "abc", "ABBA", 4, 4 },
+		{ "abba", "a", "b", 1, 1 },
+		{ "", "abc", "abc", 0, 0},
+	};
+	const struct strspn_test *s = tests;
+	size_t i, res;
+
+	for (i = 0; i < ARRAY_SIZE(tests); ++i, ++s) {
+		res = strspn(s->str, s->accept);
+		if (res != s->a)
+			return 0x100 + 2*i;
+		res = strcspn(s->str, s->reject);
+		if (res != s->r)
+			return 0x100 + 2*i + 1;
+	}
+	return 0;
+}
+
+static __exit void string_selftest_remove(void)
+{
+}
+
 static __init int string_selftest_init(void)
 {
 	int test, subtest;
@@ -208,6 +240,11 @@ static __init int string_selftest_init(void)
 	if (subtest)
 		goto fail;
 
+	test = 6;
+	subtest = strspn_selftest();
+	if (subtest)
+		goto fail;
+
 	pr_info("String selftests succeeded\n");
 	return 0;
 fail:
@@ -216,4 +253,5 @@ fail:
 }
 
 module_init(string_selftest_init);
+module_exit(string_selftest_remove);
 MODULE_LICENSE("GPL v2");

@@ -7,6 +7,7 @@
 
 #include "common.h"
 #include <linux/magic.h>
+#include <linux/proc_fs.h>
 
 /**
  * tomoyo_encode2 - Encode binary string to ascii string.
@@ -161,9 +162,10 @@ static char *tomoyo_get_local_path(struct dentry *dentry, char * const buffer,
 	if (sb->s_magic == PROC_SUPER_MAGIC && *pos == '/') {
 		char *ep;
 		const pid_t pid = (pid_t) simple_strtoul(pos + 1, &ep, 10);
+		struct pid_namespace *proc_pidns = proc_pid_ns(sb);
 
 		if (*ep == '/' && pid && pid ==
-		    task_tgid_nr_ns(current, sb->s_fs_info)) {
+		    task_tgid_nr_ns(current, proc_pidns)) {
 			pos = ep - 5;
 			if (pos < buffer)
 				goto out;
@@ -238,11 +240,8 @@ char *tomoyo_realpath_from_path(const struct path *path)
 	char *name = NULL;
 	unsigned int buf_len = PAGE_SIZE / 2;
 	struct dentry *dentry = path->dentry;
-	struct super_block *sb;
+	struct super_block *sb = dentry->d_sb;
 
-	if (!dentry)
-		return NULL;
-	sb = dentry->d_sb;
 	while (1) {
 		char *pos;
 		struct inode *inode;
@@ -262,10 +261,8 @@ char *tomoyo_realpath_from_path(const struct path *path)
 		inode = d_backing_inode(sb->s_root);
 		/*
 		 * Get local name for filesystems without rename() operation
-		 * or dentry without vfsmount.
 		 */
-		if (!path->mnt ||
-		    (!inode->i_op->rename &&
+		if ((!inode->i_op->rename &&
 		     !(sb->s_type->fs_flags & FS_REQUIRES_DEV)))
 			pos = tomoyo_get_local_path(path->dentry, buf,
 						    buf_len - 1);

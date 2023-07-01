@@ -22,7 +22,16 @@ properties:
   compatible:
     enum:
       - qcom,sc7180-llcc
+      - qcom,sc7280-llcc
+      - qcom,sc8180x-llcc
+      - qcom,sc8280xp-llcc
       - qcom,sdm845-llcc
+      - qcom,sm6350-llcc
+      - qcom,sm8150-llcc
+      - qcom,sm8250-llcc
+      - qcom,sm8350-llcc
+      - qcom,sm8450-llcc
+      - qcom,sm8550-llcc
 
   reg:
     items:
@@ -41,7 +50,8 @@ required:
   - compatible
   - reg
   - reg-names
-  - interrupts
+
+additionalProperties: false
 
 examples:
   - |

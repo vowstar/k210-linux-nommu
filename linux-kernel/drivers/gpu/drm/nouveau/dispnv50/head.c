@@ -24,12 +24,17 @@
 #include "core.h"
 #include "curs.h"
 #include "ovly.h"
+#include "crc.h"
 
 #include <nvif/class.h>
+#include <nvif/event.h>
+#include <nvif/cl0046.h>
 
+#include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
-#include <drm/drm_crtc_helper.h>
+#include <drm/drm_vblank.h>
 #include "nouveau_connector.h"
+
 void
 nv50_head_flush_clr(struct nv50_head *head,
 		    struct nv50_head_atom *asyh, bool flush)
@@ -37,9 +42,23 @@ nv50_head_flush_clr(struct nv50_head *head,
 	union nv50_head_atom_mask clr = {
 		.mask = asyh->clr.mask & ~(flush ? 0 : asyh->set.mask),
 	};
+	if (clr.crc)  nv50_crc_atomic_clr(head);
 	if (clr.olut) head->func->olut_clr(head);
 	if (clr.core) head->func->core_clr(head);
 	if (clr.curs) head->func->curs_clr(head);
+}
+
+void
+nv50_head_flush_set_wndw(struct nv50_head *head, struct nv50_head_atom *asyh)
+{
+	if (asyh->set.curs   ) head->func->curs_set(head, asyh);
+	if (asyh->set.olut   ) {
+		asyh->olut.offset = nv50_lut_load(&head->olut,
+						  asyh->olut.buffer,
+						  asyh->state.gamma_lut,
+						  asyh->olut.load);
+		head->func->olut_set(head, asyh);
+	}
 }
 
 void
@@ -48,18 +67,11 @@ nv50_head_flush_set(struct nv50_head *head, struct nv50_head_atom *asyh)
 	if (asyh->set.view   ) head->func->view    (head, asyh);
 	if (asyh->set.mode   ) head->func->mode    (head, asyh);
 	if (asyh->set.core   ) head->func->core_set(head, asyh);
-	if (asyh->set.olut   ) {
-		asyh->olut.offset = nv50_lut_load(&head->olut,
-						  asyh->olut.buffer,
-						  asyh->state.gamma_lut,
-						  asyh->olut.load);
-		head->func->olut_set(head, asyh);
-	}
-	if (asyh->set.curs   ) head->func->curs_set(head, asyh);
 	if (asyh->set.base   ) head->func->base    (head, asyh);
 	if (asyh->set.ovly   ) head->func->ovly    (head, asyh);
 	if (asyh->set.dither ) head->func->dither  (head, asyh);
 	if (asyh->set.procamp) head->func->procamp (head, asyh);
+	if (asyh->set.crc    ) nv50_crc_atomic_set (head, asyh);
 	if (asyh->set.or     ) head->func->or      (head, asyh);
 }
 
@@ -83,23 +95,25 @@ nv50_head_atomic_check_dither(struct nv50_head_atom *armh,
 {
 	u32 mode = 0x00;
 
-	if (asyc->dither.mode == DITHERING_MODE_AUTO) {
-		if (asyh->base.depth > asyh->or.bpc * 3)
-			mode = DITHERING_MODE_DYNAMIC2X2;
-	} else {
-		mode = asyc->dither.mode;
+	if (asyc->dither.mode) {
+		if (asyc->dither.mode == DITHERING_MODE_AUTO) {
+			if (asyh->base.depth > asyh->or.bpc * 3)
+				mode = DITHERING_MODE_DYNAMIC2X2;
+		} else {
+			mode = asyc->dither.mode;
+		}
+
+		if (asyc->dither.depth == DITHERING_DEPTH_AUTO) {
+			if (asyh->or.bpc >= 8)
+				mode |= DITHERING_DEPTH_8BPC;
+		} else {
+			mode |= asyc->dither.depth;
+		}
 	}
 
-	if (asyc->dither.depth == DITHERING_DEPTH_AUTO) {
-		if (asyh->or.bpc >= 8)
-			mode |= DITHERING_DEPTH_8BPC;
-	} else {
-		mode |= asyc->dither.depth;
-	}
-
-	asyh->dither.enable = mode;
-	asyh->dither.bits = mode >> 1;
-	asyh->dither.mode = mode >> 3;
+	asyh->dither.enable = NVVAL_GET(mode, NV507D, HEAD_SET_DITHER_CONTROL, ENABLE);
+	asyh->dither.bits = NVVAL_GET(mode, NV507D, HEAD_SET_DITHER_CONTROL, BITS);
+	asyh->dither.mode = NVVAL_GET(mode, NV507D, HEAD_SET_DITHER_CONTROL, MODE);
 	asyh->set.dither = true;
 }
 
@@ -211,9 +225,23 @@ static int
 nv50_head_atomic_check_lut(struct nv50_head *head,
 			   struct nv50_head_atom *asyh)
 {
-	struct nv50_disp *disp = nv50_disp(head->base.base.dev);
-	struct drm_property_blob *olut = asyh->state.gamma_lut;
+	struct drm_device *dev = head->base.base.dev;
+	struct drm_crtc *crtc = &head->base.base;
+	struct nv50_disp *disp = nv50_disp(dev);
+	struct nouveau_drm *drm = nouveau_drm(dev);
+	struct drm_property_blob *olut = asyh->state.gamma_lut,
+				 *ilut = asyh->state.degamma_lut;
 	int size;
+
+	/* Ensure that the ilut is valid */
+	if (ilut) {
+		size = drm_color_lut_size(ilut);
+		if (!head->func->ilut_check(size)) {
+			NV_ATOMIC(drm, "Invalid size %d for degamma on [CRTC:%d:%s]\n",
+				  size, crtc->base.id, crtc->name);
+			return -EINVAL;
+		}
+	}
 
 	/* Determine whether core output LUT should be enabled. */
 	if (olut) {
@@ -241,7 +269,8 @@ nv50_head_atomic_check_lut(struct nv50_head *head,
 	}
 
 	if (!head->func->olut(head, asyh, size)) {
-		DRM_DEBUG_KMS("Invalid olut\n");
+		NV_ATOMIC(drm, "Invalid size %d for gamma on [CRTC:%d:%s]\n",
+			  size, crtc->base.id, crtc->name);
 		return -EINVAL;
 	}
 	asyh->olut.handle = disp->core->chan.vram.handle;
@@ -301,18 +330,31 @@ nv50_head_atomic_check_mode(struct nv50_head *head, struct nv50_head_atom *asyh)
 }
 
 static int
-nv50_head_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
+nv50_head_atomic_check(struct drm_crtc *crtc, struct drm_atomic_state *state)
 {
+	struct drm_crtc_state *old_crtc_state = drm_atomic_get_old_crtc_state(state,
+									      crtc);
+	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state,
+									  crtc);
 	struct nouveau_drm *drm = nouveau_drm(crtc->dev);
 	struct nv50_head *head = nv50_head(crtc);
-	struct nv50_head_atom *armh = nv50_head_atom(crtc->state);
-	struct nv50_head_atom *asyh = nv50_head_atom(state);
+	struct nv50_head_atom *armh = nv50_head_atom(old_crtc_state);
+	struct nv50_head_atom *asyh = nv50_head_atom(crtc_state);
 	struct nouveau_conn_atom *asyc = NULL;
 	struct drm_connector_state *conns;
 	struct drm_connector *conn;
-	int i;
+	int i, ret;
+	bool check_lut = asyh->state.color_mgmt_changed ||
+			 memcmp(&armh->wndw, &asyh->wndw, sizeof(asyh->wndw));
 
 	NV_ATOMIC(drm, "%s atomic_check %d\n", crtc->name, asyh->state.active);
+
+	if (check_lut) {
+		ret = nv50_head_atomic_check_lut(head, asyh);
+		if (ret)
+			return ret;
+	}
+
 	if (asyh->state.active) {
 		for_each_new_connector_in_state(asyh->state.state, conn, conns, i) {
 			if (conns->crtc == crtc) {
@@ -338,14 +380,8 @@ nv50_head_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
 		if (asyh->state.mode_changed || asyh->state.connectors_changed)
 			nv50_head_atomic_check_mode(head, asyh);
 
-		if (asyh->state.color_mgmt_changed ||
-		    memcmp(&armh->wndw, &asyh->wndw, sizeof(asyh->wndw))) {
-			int ret = nv50_head_atomic_check_lut(head, asyh);
-			if (ret)
-				return ret;
-
+		if (check_lut)
 			asyh->olut.visible = asyh->olut.handle != 0;
-		}
 
 		if (asyc) {
 			if (asyc->set.scaler)
@@ -405,6 +441,10 @@ nv50_head_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
 		asyh->set.curs = asyh->curs.visible;
 	}
 
+	ret = nv50_crc_atomic_check_head(head, asyh, armh);
+	if (ret)
+		return ret;
+
 	if (asyh->clr.mask || asyh->set.mask)
 		nv50_atom(asyh->state.state)->lock_core = true;
 	return 0;
@@ -413,6 +453,7 @@ nv50_head_atomic_check(struct drm_crtc *crtc, struct drm_crtc_state *state)
 static const struct drm_crtc_helper_funcs
 nv50_head_help = {
 	.atomic_check = nv50_head_atomic_check,
+	.get_scanout_position = nouveau_display_scanoutpos,
 };
 
 static void
@@ -442,6 +483,7 @@ nv50_head_atomic_duplicate_state(struct drm_crtc *crtc)
 	asyh->ovly = armh->ovly;
 	asyh->dither = armh->dither;
 	asyh->procamp = armh->procamp;
+	asyh->crc = armh->crc;
 	asyh->or = armh->or;
 	asyh->dp = armh->dp;
 	asyh->clr.mask = 0;
@@ -463,10 +505,19 @@ nv50_head_reset(struct drm_crtc *crtc)
 	__drm_atomic_helper_crtc_reset(crtc, &asyh->state);
 }
 
+static int
+nv50_head_late_register(struct drm_crtc *crtc)
+{
+	return nv50_head_crc_late_register(nv50_head(crtc));
+}
+
 static void
 nv50_head_destroy(struct drm_crtc *crtc)
 {
 	struct nv50_head *head = nv50_head(crtc);
+
+	nvif_event_dtor(&head->base.vblank);
+	nvif_head_dtor(&head->base.head);
 	nv50_lut_fini(&head->olut);
 	drm_crtc_cleanup(crtc);
 	kfree(head);
@@ -475,13 +526,44 @@ nv50_head_destroy(struct drm_crtc *crtc)
 static const struct drm_crtc_funcs
 nv50_head_func = {
 	.reset = nv50_head_reset,
-	.gamma_set = drm_atomic_helper_legacy_gamma_set,
 	.destroy = nv50_head_destroy,
 	.set_config = drm_atomic_helper_set_config,
 	.page_flip = drm_atomic_helper_page_flip,
 	.atomic_duplicate_state = nv50_head_atomic_duplicate_state,
 	.atomic_destroy_state = nv50_head_atomic_destroy_state,
+	.enable_vblank = nouveau_display_vblank_enable,
+	.disable_vblank = nouveau_display_vblank_disable,
+	.get_vblank_timestamp = drm_crtc_vblank_helper_get_vblank_timestamp,
+	.late_register = nv50_head_late_register,
 };
+
+static const struct drm_crtc_funcs
+nvd9_head_func = {
+	.reset = nv50_head_reset,
+	.destroy = nv50_head_destroy,
+	.set_config = drm_atomic_helper_set_config,
+	.page_flip = drm_atomic_helper_page_flip,
+	.atomic_duplicate_state = nv50_head_atomic_duplicate_state,
+	.atomic_destroy_state = nv50_head_atomic_destroy_state,
+	.enable_vblank = nouveau_display_vblank_enable,
+	.disable_vblank = nouveau_display_vblank_disable,
+	.get_vblank_timestamp = drm_crtc_vblank_helper_get_vblank_timestamp,
+	.verify_crc_source = nv50_crc_verify_source,
+	.get_crc_sources = nv50_crc_get_sources,
+	.set_crc_source = nv50_crc_set_source,
+	.late_register = nv50_head_late_register,
+};
+
+static int
+nv50_head_vblank_handler(struct nvif_event *event, void *repv, u32 repc)
+{
+	struct nouveau_crtc *nv_crtc = container_of(event, struct nouveau_crtc, vblank);
+
+	if (drm_crtc_handle_vblank(&nv_crtc->base))
+		nv50_crc_handle_vblank(nv50_head(&nv_crtc->base));
+
+	return NVIF_EVENT_KEEP;
+}
 
 struct nv50_head *
 nv50_head_create(struct drm_device *dev, int index)
@@ -490,7 +572,9 @@ nv50_head_create(struct drm_device *dev, int index)
 	struct nv50_disp *disp = nv50_disp(dev);
 	struct nv50_head *head;
 	struct nv50_wndw *base, *ovly, *curs;
+	struct nouveau_crtc *nv_crtc;
 	struct drm_crtc *crtc;
+	const struct drm_crtc_funcs *funcs;
 	int ret;
 
 	head = kzalloc(sizeof(*head), GFP_KERNEL);
@@ -499,6 +583,11 @@ nv50_head_create(struct drm_device *dev, int index)
 
 	head->func = disp->core->func->head;
 	head->base.index = index;
+
+	if (disp->disp->object.oclass < GF110_DISP)
+		funcs = &nv50_head_func;
+	else
+		funcs = &nvd9_head_func;
 
 	if (disp->disp->object.oclass < GV100_DISP) {
 		ret = nv50_base_new(drm, head->base.index, &base);
@@ -516,9 +605,10 @@ nv50_head_create(struct drm_device *dev, int index)
 		return ERR_PTR(ret);
 	}
 
-	crtc = &head->base.base;
+	nv_crtc = &head->base;
+	crtc = &nv_crtc->base;
 	drm_crtc_init_with_planes(dev, crtc, &base->plane, &curs->plane,
-				  &nv50_head_func, "head-%d", head->base.index);
+				  funcs, "head-%d", head->base.index);
 	drm_crtc_helper_add(crtc, &nv50_head_help);
 	/* Keep the legacy gamma size at 256 to avoid compatibility issues */
 	drm_mode_crtc_set_gamma_size(crtc, 256);
@@ -533,6 +623,15 @@ nv50_head_create(struct drm_device *dev, int index)
 			return ERR_PTR(ret);
 		}
 	}
+
+	ret = nvif_head_ctor(disp->disp, head->base.base.name, head->base.index, &head->base.head);
+	if (ret)
+		return ERR_PTR(ret);
+
+	ret = nvif_head_vblank_event_ctor(&head->base.head, "kmsVbl", nv50_head_vblank_handler,
+					  false, &nv_crtc->vblank);
+	if (ret)
+		return ERR_PTR(ret);
 
 	return head;
 }

@@ -163,7 +163,7 @@ chiave principale attraverso firme certificate. È quindi importante
 comprendere i seguenti punti:
 
 1. Non ci sono differenze tecniche tra la chiave principale e la sottochiave.
-2. In fesa di creazione, assegniamo limitazioni funzionali ad ogni chiave
+2. In fase di creazione, assegniamo limitazioni funzionali ad ogni chiave
    assegnando capacità specifiche.
 3. Una chiave PGP può avere 4 capacità:
 
@@ -286,9 +286,7 @@ magari in una cassetta di sicurezza in banca.
     Probabilmente la vostra stampante non è più quello stupido dispositivo
     connesso alla porta parallela, ma dato che il suo output è comunque
     criptato con la passphrase, eseguire la stampa in un sistema "cloud"
-    moderno dovrebbe essere comunque relativamente sicuro. Un'opzione potrebbe
-    essere quella di cambiare la passphrase della vostra chiave primaria
-    subito dopo aver finito con paperkey.
+    moderno dovrebbe essere comunque relativamente sicuro.
 
 Copia di riserva di tutta la cartella GnuPG
 -------------------------------------------
@@ -931,12 +929,11 @@ che avete nel vostro portachiavi::
     uid           [ unknown] Linus Torvalds <torvalds@kernel.org>
     sub   rsa2048 2011-09-20 [E]
 
-Poi, aprite il `PGP pathfinder`_. Nel campo "From", incollate l'impronta
-digitale della chiave di Linus Torvalds che si vede nell'output qui sopra.
-Nel campo "to", incollate il key-id della chiave sconosciuta che avete
-trovato con ``gpg --search``, e poi verificare il risultato:
-
-- `Finding paths to Linus`_
+Poi, cercate un percorso affidabile da Linux Torvalds alla chiave che avete
+trovato con ``gpg --search`` usando la chiave sconosciuta.Per farlo potete usare
+diversi strumenti come https://github.com/mricon/wotmate,
+https://git.kernel.org/pub/scm/docs/kernel/pgpkeys.git/tree/graphs, e
+https://the.earth.li/~noodles/pathfind.html.
 
 Se trovate un paio di percorsi affidabili è un buon segno circa la validità
 della chiave. Ora, potete aggiungerla al vostro portachiavi dal keyserver::
@@ -948,6 +945,3 @@ fiducia nell'amministratore del servizio *PGP Pathfinder* sperando che non
 sia malintenzionato (infatti, questo va contro :ref:`it_devs_not_infra`).
 Tuttavia, se mantenete con cura la vostra rete di fiducia sarà un deciso
 miglioramento rispetto alla cieca fiducia nei keyserver.
-
-.. _`PGP pathfinder`: https://pgp.cs.uu.nl/
-.. _`Finding paths to Linus`: https://pgp.cs.uu.nl/paths/79BE3E4300411886/to/C94035C21B4F2AEB.html

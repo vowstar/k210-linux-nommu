@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0
-ifneq ($(CONFIG_BUILTIN_DTB_SOURCE),"")
-obj-$(CONFIG_USE_BUILTIN_DTB) += $(patsubst "%",%,$(CONFIG_BUILTIN_DTB_SOURCE)).dtb.o
-else
+subdir-y += allwinner
 subdir-y += sifive
-subdir-y += kendryte
-endif
+subdir-y += starfive
+subdir-y += canaan
+subdir-y += microchip
+subdir-y += renesas
+
+obj-$(CONFIG_BUILTIN_DTB) := $(addsuffix /, $(subdir-y))

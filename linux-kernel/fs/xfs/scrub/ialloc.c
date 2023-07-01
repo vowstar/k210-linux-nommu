@@ -21,6 +21,7 @@
 #include "scrub/common.h"
 #include "scrub/btree.h"
 #include "scrub/trace.h"
+#include "xfs_ag.h"
 
 /*
  * Set us up to scrub inode btrees.
@@ -29,10 +30,9 @@
  */
 int
 xchk_setup_ag_iallocbt(
-	struct xfs_scrub	*sc,
-	struct xfs_inode	*ip)
+	struct xfs_scrub	*sc)
 {
-	return xchk_setup_ag_btree(sc, ip, sc->flags & XCHK_TRY_HARDER);
+	return xchk_setup_ag_btree(sc, sc->flags & XCHK_TRY_HARDER);
 }
 
 /* Inode btree scrubber. */
@@ -104,13 +104,12 @@ xchk_iallocbt_chunk(
 	xfs_extlen_t			len)
 {
 	struct xfs_mount		*mp = bs->cur->bc_mp;
-	xfs_agnumber_t			agno = bs->cur->bc_private.a.agno;
+	struct xfs_perag		*pag = bs->cur->bc_ag.pag;
 	xfs_agblock_t			bno;
 
 	bno = XFS_AGINO_TO_AGBNO(mp, agino);
-	if (bno + len <= bno ||
-	    !xfs_verify_agbno(mp, agno, bno) ||
-	    !xfs_verify_agbno(mp, agno, bno + len - 1))
+
+	if (!xfs_verify_agbext(pag, bno, len))
 		xchk_btree_set_corrupt(bs->sc, bs->cur, 0);
 
 	xchk_iallocbt_chunk_xref(bs->sc, irec, agino, bno, len);
@@ -164,7 +163,7 @@ xchk_iallocbt_check_cluster_ifree(
 	 * the record, compute which fs inode we're talking about.
 	 */
 	agino = irec->ir_startino + irec_ino;
-	fsino = XFS_AGINO_TO_INO(mp, bs->cur->bc_private.a.agno, agino);
+	fsino = XFS_AGINO_TO_INO(mp, bs->cur->bc_ag.pag->pag_agno, agino);
 	irec_free = (irec->ir_free & XFS_INOBT_MASK(irec_ino));
 
 	if (be16_to_cpu(dip->di_magic) != XFS_DINODE_MAGIC ||
@@ -212,10 +211,9 @@ xchk_iallocbt_check_cluster(
 {
 	struct xfs_imap			imap;
 	struct xfs_mount		*mp = bs->cur->bc_mp;
-	struct xfs_dinode		*dip;
 	struct xfs_buf			*cluster_bp;
 	unsigned int			nr_inodes;
-	xfs_agnumber_t			agno = bs->cur->bc_private.a.agno;
+	xfs_agnumber_t			agno = bs->cur->bc_ag.pag->pag_agno;
 	xfs_agblock_t			agbno;
 	unsigned int			cluster_index;
 	uint16_t			cluster_mask = 0;
@@ -278,8 +276,7 @@ xchk_iallocbt_check_cluster(
 			&XFS_RMAP_OINFO_INODES);
 
 	/* Grab the inode cluster buffer. */
-	error = xfs_imap_to_bp(mp, bs->cur->bc_tp, &imap, &dip, &cluster_bp,
-			0, 0);
+	error = xfs_imap_to_bp(mp, bs->cur->bc_tp, &imap, &cluster_bp);
 	if (!xchk_btree_xref_process_error(bs->sc, bs->cur, 0, &error))
 		return error;
 
@@ -420,13 +417,13 @@ xchk_iallocbt_rec_alignment(
 STATIC int
 xchk_iallocbt_rec(
 	struct xchk_btree		*bs,
-	union xfs_btree_rec		*rec)
+	const union xfs_btree_rec	*rec)
 {
 	struct xfs_mount		*mp = bs->cur->bc_mp;
+	struct xfs_perag		*pag = bs->cur->bc_ag.pag;
 	struct xchk_iallocbt		*iabt = bs->private;
 	struct xfs_inobt_rec_incore	irec;
 	uint64_t			holes;
-	xfs_agnumber_t			agno = bs->cur->bc_private.a.agno;
 	xfs_agino_t			agino;
 	xfs_extlen_t			len;
 	int				holecount;
@@ -448,8 +445,8 @@ xchk_iallocbt_rec(
 
 	agino = irec.ir_startino;
 	/* Record has to be properly aligned within the AG. */
-	if (!xfs_verify_agino(mp, agno, agino) ||
-	    !xfs_verify_agino(mp, agno, agino + XFS_INODES_PER_CHUNK - 1)) {
+	if (!xfs_verify_agino(pag, agino) ||
+	    !xfs_verify_agino(pag, agino + XFS_INODES_PER_CHUNK - 1)) {
 		xchk_btree_set_corrupt(bs->sc, bs->cur, 0);
 		goto out;
 	}
@@ -519,7 +516,7 @@ xchk_iallocbt_xref_rmap_btreeblks(
 	int			error;
 
 	if (!sc->sa.ino_cur || !sc->sa.rmap_cur ||
-	    (xfs_sb_version_hasfinobt(&sc->mp->m_sb) && !sc->sa.fino_cur) ||
+	    (xfs_has_finobt(sc->mp) && !sc->sa.fino_cur) ||
 	    xchk_skip_xref(sc->sm))
 		return;
 

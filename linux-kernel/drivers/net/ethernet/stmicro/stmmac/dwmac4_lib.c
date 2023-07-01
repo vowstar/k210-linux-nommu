@@ -6,6 +6,7 @@
  */
 
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/delay.h>
 #include "common.h"
 #include "dwmac4_dma.h"
@@ -14,22 +15,14 @@
 int dwmac4_dma_reset(void __iomem *ioaddr)
 {
 	u32 value = readl(ioaddr + DMA_BUS_MODE);
-	int limit;
 
 	/* DMA SW reset */
 	value |= DMA_BUS_MODE_SFT_RESET;
 	writel(value, ioaddr + DMA_BUS_MODE);
-	limit = 10;
-	while (limit--) {
-		if (!(readl(ioaddr + DMA_BUS_MODE) & DMA_BUS_MODE_SFT_RESET))
-			break;
-		mdelay(10);
-	}
 
-	if (limit < 0)
-		return -EBUSY;
-
-	return 0;
+	return readl_poll_timeout(ioaddr + DMA_BUS_MODE, value,
+				 !(value & DMA_BUS_MODE_SFT_RESET),
+				 10000, 1000000);
 }
 
 void dwmac4_set_rx_tail_ptr(void __iomem *ioaddr, u32 tail_ptr, u32 chan)
@@ -60,10 +53,6 @@ void dwmac4_dma_stop_tx(void __iomem *ioaddr, u32 chan)
 
 	value &= ~DMA_CONTROL_ST;
 	writel(value, ioaddr + DMA_CHAN_TX_CONTROL(chan));
-
-	value = readl(ioaddr + GMAC_CONFIG);
-	value &= ~GMAC_CONFIG_TE;
-	writel(value, ioaddr + GMAC_CONFIG);
 }
 
 void dwmac4_dma_start_rx(void __iomem *ioaddr, u32 chan)
@@ -146,11 +135,16 @@ void dwmac410_disable_dma_irq(void __iomem *ioaddr, u32 chan, bool rx, bool tx)
 }
 
 int dwmac4_dma_interrupt(void __iomem *ioaddr,
-			 struct stmmac_extra_stats *x, u32 chan)
+			 struct stmmac_extra_stats *x, u32 chan, u32 dir)
 {
 	u32 intr_status = readl(ioaddr + DMA_CHAN_STATUS(chan));
 	u32 intr_en = readl(ioaddr + DMA_CHAN_INTR_ENA(chan));
 	int ret = 0;
+
+	if (dir == DMA_DIR_RX)
+		intr_status &= DMA_CHAN_STATUS_MSK_RX;
+	else if (dir == DMA_DIR_TX)
+		intr_status &= DMA_CHAN_STATUS_MSK_TX;
 
 	/* ABNORMAL interrupts */
 	if (unlikely(intr_status & DMA_CHAN_STATUS_AIS)) {
@@ -172,26 +166,28 @@ int dwmac4_dma_interrupt(void __iomem *ioaddr,
 		}
 	}
 	/* TX/RX NORMAL interrupts */
-	if (likely(intr_status & DMA_CHAN_STATUS_NIS)) {
+	if (likely(intr_status & DMA_CHAN_STATUS_NIS))
 		x->normal_irq_n++;
-		if (likely(intr_status & DMA_CHAN_STATUS_RI)) {
-			x->rx_normal_irq_n++;
-			ret |= handle_rx;
-		}
-		if (likely(intr_status & (DMA_CHAN_STATUS_TI |
-					  DMA_CHAN_STATUS_TBU))) {
-			x->tx_normal_irq_n++;
-			ret |= handle_tx;
-		}
-		if (unlikely(intr_status & DMA_CHAN_STATUS_ERI))
-			x->rx_early_irq++;
+	if (likely(intr_status & DMA_CHAN_STATUS_RI)) {
+		x->rx_normal_irq_n++;
+		x->rxq_stats[chan].rx_normal_irq_n++;
+		ret |= handle_rx;
 	}
+	if (likely(intr_status & DMA_CHAN_STATUS_TI)) {
+		x->tx_normal_irq_n++;
+		x->txq_stats[chan].tx_normal_irq_n++;
+		ret |= handle_tx;
+	}
+	if (unlikely(intr_status & DMA_CHAN_STATUS_TBU))
+		ret |= handle_tx;
+	if (unlikely(intr_status & DMA_CHAN_STATUS_ERI))
+		x->rx_early_irq++;
 
 	writel(intr_status & intr_en, ioaddr + DMA_CHAN_STATUS(chan));
 	return ret;
 }
 
-void stmmac_dwmac4_set_mac_addr(void __iomem *ioaddr, u8 addr[6],
+void stmmac_dwmac4_set_mac_addr(void __iomem *ioaddr, const u8 addr[6],
 				unsigned int high, unsigned int low)
 {
 	unsigned long data;

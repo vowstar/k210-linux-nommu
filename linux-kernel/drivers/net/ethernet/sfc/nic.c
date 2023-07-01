@@ -20,6 +20,7 @@
 #include "farch_regs.h"
 #include "io.h"
 #include "workarounds.h"
+#include "mcdi_pcol.h"
 
 /**************************************************************************
  *
@@ -89,6 +90,7 @@ int efx_nic_init_interrupt(struct efx_nic *efx)
 				  efx->pci_dev->irq);
 			goto fail1;
 		}
+		efx->irqs_hooked = true;
 		return 0;
 	}
 
@@ -128,6 +130,7 @@ int efx_nic_init_interrupt(struct efx_nic *efx)
 #endif
 	}
 
+	efx->irqs_hooked = true;
 	return 0;
 
  fail2:
@@ -153,6 +156,8 @@ void efx_nic_fini_interrupt(struct efx_nic *efx)
 	efx->net_dev->rx_cpu_rmap = NULL;
 #endif
 
+	if (!efx->irqs_hooked)
+		return;
 	if (EFX_INT_MODE_USE_MSI(efx)) {
 		/* Disable MSI/MSI-X interrupts */
 		efx_for_each_channel(channel, efx)
@@ -162,6 +167,7 @@ void efx_nic_fini_interrupt(struct efx_nic *efx)
 		/* Disable legacy interrupt */
 		free_irq(efx->legacy_irq, efx);
 	}
+	efx->irqs_hooked = false;
 }
 
 /* Register dump */
@@ -459,7 +465,7 @@ size_t efx_nic_describe_stats(const struct efx_hw_stat_desc *desc, size_t count,
 	for_each_set_bit(index, mask, count) {
 		if (desc[index].name) {
 			if (names) {
-				strlcpy(names, desc[index].name,
+				strscpy(names, desc[index].name,
 					ETH_GSTRING_LEN);
 				names += ETH_GSTRING_LEN;
 			}
@@ -468,6 +474,49 @@ size_t efx_nic_describe_stats(const struct efx_hw_stat_desc *desc, size_t count,
 	}
 
 	return visible;
+}
+
+/**
+ * efx_nic_copy_stats - Copy stats from the DMA buffer in to an
+ *	intermediate buffer. This is used to get a consistent
+ *	set of stats while the DMA buffer can be written at any time
+ *	by the NIC.
+ * @efx: The associated NIC.
+ * @dest: Destination buffer. Must be the same size as the DMA buffer.
+ */
+int efx_nic_copy_stats(struct efx_nic *efx, __le64 *dest)
+{
+	__le64 *dma_stats = efx->stats_buffer.addr;
+	__le64 generation_start, generation_end;
+	int rc = 0, retry;
+
+	if (!dest)
+		return 0;
+
+	if (!dma_stats)
+		goto return_zeroes;
+
+	/* If we're unlucky enough to read statistics during the DMA, wait
+	 * up to 10ms for it to finish (typically takes <500us)
+	 */
+	for (retry = 0; retry < 100; ++retry) {
+		generation_end = dma_stats[efx->num_mac_stats - 1];
+		if (generation_end == EFX_MC_STATS_GENERATION_INVALID)
+			goto return_zeroes;
+		rmb();
+		memcpy(dest, dma_stats, efx->num_mac_stats * sizeof(__le64));
+		rmb();
+		generation_start = dma_stats[MC_CMD_MAC_GENERATION_START];
+		if (generation_end == generation_start)
+			return 0; /* return good data */
+		udelay(100);
+	}
+
+	rc = -EIO;
+
+return_zeroes:
+	memset(dest, 0, efx->num_mac_stats * sizeof(u64));
+	return rc;
 }
 
 /**

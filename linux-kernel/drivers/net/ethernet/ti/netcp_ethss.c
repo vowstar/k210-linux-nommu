@@ -51,7 +51,6 @@
 #define GBE13_CPTS_OFFSET		0x500
 #define GBE13_ALE_OFFSET		0x600
 #define GBE13_HOST_PORT_NUM		0
-#define GBE13_NUM_ALE_ENTRIES		1024
 
 /* 1G Ethernet NU SS defines */
 #define GBENU_MODULE_NAME		"netcp-gbenu"
@@ -101,7 +100,6 @@
 #define XGBE10_ALE_OFFSET		0x700
 #define XGBE10_HW_STATS_OFFSET		0x800
 #define XGBE10_HOST_PORT_NUM		0
-#define XGBE10_NUM_ALE_ENTRIES		2048
 
 #define	GBE_TIMER_INTERVAL			(HZ / 2)
 
@@ -711,7 +709,6 @@ struct gbe_priv {
 	struct netcp_device		*netcp_device;
 	struct timer_list		timer;
 	u32				num_slaves;
-	u32				ale_entries;
 	u32				ale_ports;
 	bool				enable_ale;
 	u8				max_num_slaves;
@@ -2657,10 +2654,6 @@ static int gbe_hwtstamp_set(struct gbe_intf *gbe_intf, struct ifreq *ifr)
 	if (copy_from_user(&cfg, ifr->ifr_data, sizeof(cfg)))
 		return -EFAULT;
 
-	/* reserved for future extensions */
-	if (cfg.flags)
-		return -EINVAL;
-
 	switch (cfg.tx_type) {
 	case HWTSTAMP_TX_OFF:
 		gbe_dev->tx_ts_enabled = 0;
@@ -3309,7 +3302,6 @@ static int set_xgbe_ethss10_priv(struct gbe_priv *gbe_dev,
 	gbe_dev->cpts_reg = gbe_dev->switch_regs + XGBE10_CPTS_OFFSET;
 	gbe_dev->ale_ports = gbe_dev->max_num_ports;
 	gbe_dev->host_port = XGBE10_HOST_PORT_NUM;
-	gbe_dev->ale_entries = XGBE10_NUM_ALE_ENTRIES;
 	gbe_dev->stats_en_mask = (1 << (gbe_dev->max_num_ports)) - 1;
 
 	/* Subsystem registers */
@@ -3433,7 +3425,6 @@ static int set_gbe_ethss14_priv(struct gbe_priv *gbe_dev,
 	gbe_dev->ale_reg = gbe_dev->switch_regs + GBE13_ALE_OFFSET;
 	gbe_dev->ale_ports = gbe_dev->max_num_ports;
 	gbe_dev->host_port = GBE13_HOST_PORT_NUM;
-	gbe_dev->ale_entries = GBE13_NUM_ALE_ENTRIES;
 	gbe_dev->stats_en_mask = GBE13_REG_VAL_STAT_ENABLE_ALL;
 
 	/* Subsystem registers */
@@ -3592,13 +3583,11 @@ static int gbe_probe(struct netcp_device *netcp_device, struct device *dev,
 	/* init the hw stats lock */
 	spin_lock_init(&gbe_dev->hw_stats_lock);
 
-	if (of_find_property(node, "enable-ale", NULL)) {
-		gbe_dev->enable_ale = true;
+	gbe_dev->enable_ale = of_property_read_bool(node, "enable-ale");
+	if (gbe_dev->enable_ale)
 		dev_info(dev, "ALE enabled\n");
-	} else {
-		gbe_dev->enable_ale = false;
+	else
 		dev_dbg(dev, "ALE bypass enabled*\n");
-	}
 
 	ret = of_property_read_u32(node, "tx-queue",
 				   &gbe_dev->tx_queue_id);
@@ -3697,16 +3686,19 @@ static int gbe_probe(struct netcp_device *netcp_device, struct device *dev,
 	ale_params.dev		= gbe_dev->dev;
 	ale_params.ale_regs	= gbe_dev->ale_reg;
 	ale_params.ale_ageout	= GBE_DEFAULT_ALE_AGEOUT;
-	ale_params.ale_entries	= gbe_dev->ale_entries;
 	ale_params.ale_ports	= gbe_dev->ale_ports;
-	if (IS_SS_ID_MU(gbe_dev)) {
-		ale_params.major_ver_mask = 0x7;
-		ale_params.nu_switch_ale = true;
-	}
+	ale_params.dev_id	= "cpsw";
+	if (IS_SS_ID_NU(gbe_dev))
+		ale_params.dev_id = "66ak2el";
+	else if (IS_SS_ID_2U(gbe_dev))
+		ale_params.dev_id = "66ak2g";
+	else if (IS_SS_ID_XGBE(gbe_dev))
+		ale_params.dev_id = "66ak2h-xgbe";
+
 	gbe_dev->ale = cpsw_ale_create(&ale_params);
-	if (!gbe_dev->ale) {
+	if (IS_ERR(gbe_dev->ale)) {
 		dev_err(gbe_dev->dev, "error initializing ale engine\n");
-		ret = -ENODEV;
+		ret = PTR_ERR(gbe_dev->ale);
 		goto free_sec_ports;
 	} else {
 		dev_dbg(gbe_dev->dev, "Created a gbe ale engine\n");
@@ -3716,7 +3708,8 @@ static int gbe_probe(struct netcp_device *netcp_device, struct device *dev,
 	if (!cpts_node)
 		cpts_node = of_node_get(node);
 
-	gbe_dev->cpts = cpts_create(gbe_dev->dev, gbe_dev->cpts_reg, cpts_node);
+	gbe_dev->cpts = cpts_create(gbe_dev->dev, gbe_dev->cpts_reg,
+				    cpts_node, 0);
 	of_node_put(cpts_node);
 	if (IS_ENABLED(CONFIG_TI_CPTS) && IS_ERR(gbe_dev->cpts)) {
 		ret = PTR_ERR(gbe_dev->cpts);

@@ -51,25 +51,27 @@
 #include <linux/err.h>
 #include <linux/nmi.h>
 #include <linux/tboot.h>
-#include <linux/stackprotector.h>
 #include <linux/gfp.h>
 #include <linux/cpuidle.h>
 #include <linux/numa.h>
+#include <linux/pgtable.h>
+#include <linux/overflow.h>
+#include <linux/stackprotector.h>
 
 #include <asm/acpi.h>
+#include <asm/cacheinfo.h>
 #include <asm/desc.h>
 #include <asm/nmi.h>
 #include <asm/irq.h>
 #include <asm/realmode.h>
 #include <asm/cpu.h>
 #include <asm/numa.h>
-#include <asm/pgtable.h>
 #include <asm/tlbflush.h>
 #include <asm/mtrr.h>
 #include <asm/mwait.h>
 #include <asm/apic.h>
 #include <asm/io_apic.h>
-#include <asm/fpu/internal.h>
+#include <asm/fpu/api.h>
 #include <asm/setup.h>
 #include <asm/uv/uv.h>
 #include <linux/mc146818rtc.h>
@@ -80,6 +82,8 @@
 #include <asm/cpu_device_id.h>
 #include <asm/spec-ctrl.h>
 #include <asm/hw_irq.h>
+#include <asm/stackprotector.h>
+#include <asm/sev.h>
 
 /* representing HT siblings of each logical CPU */
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_sibling_map);
@@ -92,8 +96,6 @@ EXPORT_PER_CPU_SYMBOL(cpu_core_map);
 /* representing HT, core, and die siblings of each logical CPU */
 DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_die_map);
 EXPORT_PER_CPU_SYMBOL(cpu_die_map);
-
-DEFINE_PER_CPU_READ_MOSTLY(cpumask_var_t, cpu_llc_shared_map);
 
 /* Per CPU bogomips and other parameters */
 DEFINE_PER_CPU_READ_MOSTLY(struct cpuinfo_x86, cpu_info);
@@ -183,6 +185,8 @@ static void smp_callin(void)
 	 */
 	set_cpu_sibling_map(raw_smp_processor_id());
 
+	ap_init_aperfmperf();
+
 	/*
 	 * Get our bogomips.
 	 * Update loops_per_jiffy in cpu_data. Previous call to
@@ -222,10 +226,9 @@ static void notrace start_secondary(void *unused)
 	load_cr3(swapper_pg_dir);
 	__flush_tlb_all();
 #endif
-	load_current_idt();
-	cpu_init();
+	cpu_init_secondary();
+	rcu_cpu_starting(raw_smp_processor_id());
 	x86_cpuinit.early_percpu_clock_init();
-	preempt_disable();
 	smp_callin();
 
 	enable_start_cpu0 = 0;
@@ -254,9 +257,6 @@ static void notrace start_secondary(void *unused)
 
 	/* enable local interrupts */
 	local_irq_enable();
-
-	/* to prevent fake stack check failure in clock setup */
-	boot_init_stack_canary();
 
 	x86_cpuinit.setup_percpu_clockev();
 
@@ -450,47 +450,27 @@ static bool match_smt(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 	return false;
 }
 
-/*
- * Define snc_cpu[] for SNC (Sub-NUMA Cluster) CPUs.
- *
- * These are Intel CPUs that enumerate an LLC that is shared by
- * multiple NUMA nodes. The LLC on these systems is shared for
- * off-package data access but private to the NUMA node (half
- * of the package) for on-package access.
- *
- * CPUID (the source of the information about the LLC) can only
- * enumerate the cache as being shared *or* unshared, but not
- * this particular configuration. The CPU in this case enumerates
- * the cache to be shared across the entire package (spanning both
- * NUMA nodes).
- */
+static bool match_die(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
+{
+	if (c->phys_proc_id == o->phys_proc_id &&
+	    c->cpu_die_id == o->cpu_die_id)
+		return true;
+	return false;
+}
 
-static const struct x86_cpu_id snc_cpu[] = {
-	{ X86_VENDOR_INTEL, 6, INTEL_FAM6_SKYLAKE_X },
-	{}
-};
-
-static bool match_llc(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
+static bool match_l2c(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 {
 	int cpu1 = c->cpu_index, cpu2 = o->cpu_index;
 
-	/* Do not match if we do not have a valid APICID for cpu: */
-	if (per_cpu(cpu_llc_id, cpu1) == BAD_APICID)
+	/* If the arch didn't set up l2c_id, fall back to SMT */
+	if (per_cpu(cpu_l2c_id, cpu1) == BAD_APICID)
+		return match_smt(c, o);
+
+	/* Do not match if L2 cache id does not match: */
+	if (per_cpu(cpu_l2c_id, cpu1) != per_cpu(cpu_l2c_id, cpu2))
 		return false;
 
-	/* Do not match if LLC id does not match: */
-	if (per_cpu(cpu_llc_id, cpu1) != per_cpu(cpu_llc_id, cpu2))
-		return false;
-
-	/*
-	 * Allow the SNC topology without warning. Return of false
-	 * means 'c' does not share the LLC of 'o'. This will be
-	 * reflected to userspace.
-	 */
-	if (!topology_same_node(c, o) && x86_match_cpu(snc_cpu))
-		return false;
-
-	return topology_sane(c, o, "llc");
+	return topology_sane(c, o, "l2c");
 }
 
 /*
@@ -505,16 +485,54 @@ static bool match_pkg(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 	return false;
 }
 
-static bool match_die(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
+/*
+ * Define intel_cod_cpu[] for Intel COD (Cluster-on-Die) CPUs.
+ *
+ * Any Intel CPU that has multiple nodes per package and does not
+ * match intel_cod_cpu[] has the SNC (Sub-NUMA Cluster) topology.
+ *
+ * When in SNC mode, these CPUs enumerate an LLC that is shared
+ * by multiple NUMA nodes. The LLC is shared for off-package data
+ * access but private to the NUMA node (half of the package) for
+ * on-package access. CPUID (the source of the information about
+ * the LLC) can only enumerate the cache as shared or unshared,
+ * but not this particular configuration.
+ */
+
+static const struct x86_cpu_id intel_cod_cpu[] = {
+	X86_MATCH_INTEL_FAM6_MODEL(HASWELL_X, 0),	/* COD */
+	X86_MATCH_INTEL_FAM6_MODEL(BROADWELL_X, 0),	/* COD */
+	X86_MATCH_INTEL_FAM6_MODEL(ANY, 1),		/* SNC */
+	{}
+};
+
+static bool match_llc(struct cpuinfo_x86 *c, struct cpuinfo_x86 *o)
 {
-	if ((c->phys_proc_id == o->phys_proc_id) &&
-		(c->cpu_die_id == o->cpu_die_id))
-		return true;
-	return false;
+	const struct x86_cpu_id *id = x86_match_cpu(intel_cod_cpu);
+	int cpu1 = c->cpu_index, cpu2 = o->cpu_index;
+	bool intel_snc = id && id->driver_data;
+
+	/* Do not match if we do not have a valid APICID for cpu: */
+	if (per_cpu(cpu_llc_id, cpu1) == BAD_APICID)
+		return false;
+
+	/* Do not match if LLC id does not match: */
+	if (per_cpu(cpu_llc_id, cpu1) != per_cpu(cpu_llc_id, cpu2))
+		return false;
+
+	/*
+	 * Allow the SNC topology without warning. Return of false
+	 * means 'c' does not share the LLC of 'o'. This will be
+	 * reflected to userspace.
+	 */
+	if (match_pkg(c, o) && !topology_same_node(c, o) && intel_snc)
+		return false;
+
+	return topology_sane(c, o, "llc");
 }
 
 
-#if defined(CONFIG_SCHED_SMT) || defined(CONFIG_SCHED_MC)
+#if defined(CONFIG_SCHED_SMT) || defined(CONFIG_SCHED_CLUSTER) || defined(CONFIG_SCHED_MC)
 static inline int x86_sched_itmt_flags(void)
 {
 	return sysctl_sched_itmt_enabled ? SD_ASYM_PACKING : 0;
@@ -532,11 +550,20 @@ static int x86_smt_flags(void)
 	return cpu_smt_flags() | x86_sched_itmt_flags();
 }
 #endif
+#ifdef CONFIG_SCHED_CLUSTER
+static int x86_cluster_flags(void)
+{
+	return cpu_cluster_flags() | x86_sched_itmt_flags();
+}
+#endif
 #endif
 
 static struct sched_domain_topology_level x86_numa_in_package_topology[] = {
 #ifdef CONFIG_SCHED_SMT
 	{ cpu_smt_mask, x86_smt_flags, SD_INIT_NAME(SMT) },
+#endif
+#ifdef CONFIG_SCHED_CLUSTER
+	{ cpu_clustergroup_mask, x86_cluster_flags, SD_INIT_NAME(CLS) },
 #endif
 #ifdef CONFIG_SCHED_MC
 	{ cpu_coregroup_mask, x86_core_flags, SD_INIT_NAME(MC) },
@@ -544,9 +571,23 @@ static struct sched_domain_topology_level x86_numa_in_package_topology[] = {
 	{ NULL, },
 };
 
+static struct sched_domain_topology_level x86_hybrid_topology[] = {
+#ifdef CONFIG_SCHED_SMT
+	{ cpu_smt_mask, x86_smt_flags, SD_INIT_NAME(SMT) },
+#endif
+#ifdef CONFIG_SCHED_MC
+	{ cpu_coregroup_mask, x86_core_flags, SD_INIT_NAME(MC) },
+#endif
+	{ cpu_cpu_mask, SD_INIT_NAME(DIE) },
+	{ NULL, },
+};
+
 static struct sched_domain_topology_level x86_topology[] = {
 #ifdef CONFIG_SCHED_SMT
 	{ cpu_smt_mask, x86_smt_flags, SD_INIT_NAME(SMT) },
+#endif
+#ifdef CONFIG_SCHED_CLUSTER
+	{ cpu_clustergroup_mask, x86_cluster_flags, SD_INIT_NAME(CLS) },
 #endif
 #ifdef CONFIG_SCHED_MC
 	{ cpu_coregroup_mask, x86_core_flags, SD_INIT_NAME(MC) },
@@ -575,6 +616,7 @@ void set_cpu_sibling_map(int cpu)
 	if (!has_mp) {
 		cpumask_set_cpu(cpu, topology_sibling_cpumask(cpu));
 		cpumask_set_cpu(cpu, cpu_llc_shared_mask(cpu));
+		cpumask_set_cpu(cpu, cpu_l2c_shared_mask(cpu));
 		cpumask_set_cpu(cpu, topology_core_cpumask(cpu));
 		cpumask_set_cpu(cpu, topology_die_cpumask(cpu));
 		c->booted_cores = 1;
@@ -584,13 +626,28 @@ void set_cpu_sibling_map(int cpu)
 	for_each_cpu(i, cpu_sibling_setup_mask) {
 		o = &cpu_data(i);
 
+		if (match_pkg(c, o) && !topology_same_node(c, o))
+			x86_has_numa_in_package = true;
+
 		if ((i == cpu) || (has_smt && match_smt(c, o)))
 			link_mask(topology_sibling_cpumask, cpu, i);
 
 		if ((i == cpu) || (has_mp && match_llc(c, o)))
 			link_mask(cpu_llc_shared_mask, cpu, i);
 
+		if ((i == cpu) || (has_mp && match_l2c(c, o)))
+			link_mask(cpu_l2c_shared_mask, cpu, i);
+
+		if ((i == cpu) || (has_mp && match_die(c, o)))
+			link_mask(topology_die_cpumask, cpu, i);
 	}
+
+	threads = cpumask_weight(topology_sibling_cpumask(cpu));
+	if (threads > __max_smt_threads)
+		__max_smt_threads = threads;
+
+	for_each_cpu(i, topology_sibling_cpumask(cpu))
+		cpu_data(i).smt_active = threads > 1;
 
 	/*
 	 * This needs a separate iteration over the cpus because we rely on all
@@ -605,8 +662,7 @@ void set_cpu_sibling_map(int cpu)
 			/*
 			 *  Does this new cpu bringup a new core?
 			 */
-			if (cpumask_weight(
-			    topology_sibling_cpumask(cpu)) == 1) {
+			if (threads == 1) {
 				/*
 				 * for each core in package, increment
 				 * the booted_cores for this new cpu
@@ -623,22 +679,18 @@ void set_cpu_sibling_map(int cpu)
 			} else if (i != cpu && !c->booted_cores)
 				c->booted_cores = cpu_data(i).booted_cores;
 		}
-		if (match_pkg(c, o) && !topology_same_node(c, o))
-			x86_has_numa_in_package = true;
-
-		if ((i == cpu) || (has_mp && match_die(c, o)))
-			link_mask(topology_die_cpumask, cpu, i);
 	}
-
-	threads = cpumask_weight(topology_sibling_cpumask(cpu));
-	if (threads > __max_smt_threads)
-		__max_smt_threads = threads;
 }
 
 /* maps the cpu to the sched domain representing multi-core */
 const struct cpumask *cpu_coregroup_mask(int cpu)
 {
 	return cpu_llc_shared_mask(cpu);
+}
+
+const struct cpumask *cpu_clustergroup_mask(int cpu)
+{
+	return cpu_l2c_shared_mask(cpu);
 }
 
 static void impress_friends(void)
@@ -745,13 +797,14 @@ static void __init smp_quirk_init_udelay(void)
 int
 wakeup_secondary_cpu_via_nmi(int apicid, unsigned long start_eip)
 {
+	u32 dm = apic->dest_mode_logical ? APIC_DEST_LOGICAL : APIC_DEST_PHYSICAL;
 	unsigned long send_status, accept_status = 0;
 	int maxlvt;
 
 	/* Target chip */
 	/* Boot on the stack */
 	/* Kick the second */
-	apic_icr_write(APIC_DM_NMI | apic->dest_logical, apicid);
+	apic_icr_write(APIC_DM_NMI | dm, apicid);
 
 	pr_debug("Waiting for send to finish...\n");
 	send_status = safe_apic_wait_icr_idle();
@@ -978,10 +1031,7 @@ wakeup_cpu_via_init_nmi(int cpu, unsigned long start_ip, int apicid,
 	if (!boot_error) {
 		enable_start_cpu0 = 1;
 		*cpu0_nmi_registered = 1;
-		if (apic->dest_logical == APIC_DEST_LOGICAL)
-			id = cpu0_logical_apicid;
-		else
-			id = apicid;
+		id = apic->dest_mode_logical ? cpu0_logical_apicid : apicid;
 		boot_error = wakeup_secondary_cpu_via_nmi(id, start_ip);
 	}
 
@@ -998,7 +1048,8 @@ int common_cpu_up(unsigned int cpu, struct task_struct *idle)
 	/* Just in case we booted with a single CPU. */
 	alternatives_enable_smp();
 
-	per_cpu(current_task, cpu) = idle;
+	per_cpu(pcpu_hot.current_task, cpu) = idle;
+	cpu_init_stack_canary(cpu, idle);
 
 	/* Initialize the interrupt stack(s) */
 	ret = irq_init_percpu_irqstack(cpu);
@@ -1007,7 +1058,7 @@ int common_cpu_up(unsigned int cpu, struct task_struct *idle)
 
 #ifdef CONFIG_X86_32
 	/* Stack for startup_32 can be just as for start_secondary onwards */
-	per_cpu(cpu_current_top_of_stack, cpu) = task_top_of_stack(idle);
+	per_cpu(pcpu_hot.top_of_stack, cpu) = task_top_of_stack(idle);
 #else
 	initial_gs = per_cpu_offset(cpu);
 #endif
@@ -1029,6 +1080,11 @@ static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle,
 	unsigned long boot_error = 0;
 	unsigned long timeout;
 
+#ifdef CONFIG_X86_64
+	/* If 64-bit wakeup method exists, use the 64-bit mode trampoline IP */
+	if (apic->wakeup_secondary_cpu_64)
+		start_ip = real_mode_header->trampoline_start64;
+#endif
 	idle->thread.sp = (unsigned long)task_pt_regs(idle);
 	early_gdt_descr.address = (unsigned long)get_cpu_gdt_rw(cpu);
 	initial_code = (unsigned long)start_secondary;
@@ -1070,11 +1126,14 @@ static int do_boot_cpu(int apicid, int cpu, struct task_struct *idle,
 
 	/*
 	 * Wake up a CPU in difference cases:
-	 * - Use the method in the APIC driver if it's defined
+	 * - Use a method from the APIC driver if one defined, with wakeup
+	 *   straight to 64-bit mode preferred over wakeup to RM.
 	 * Otherwise,
 	 * - Use an INIT boot APIC message for APs or NMI for BSP.
 	 */
-	if (apic->wakeup_secondary_cpu)
+	if (apic->wakeup_secondary_cpu_64)
+		boot_error = apic->wakeup_secondary_cpu_64(apicid, start_ip);
+	else if (apic->wakeup_secondary_cpu)
 		boot_error = apic->wakeup_secondary_cpu(apicid, start_ip);
 	else
 		boot_error = wakeup_cpu_via_init_nmi(cpu, start_ip, apicid,
@@ -1259,7 +1318,7 @@ static void __init smp_sanity_check(void)
 			nr++;
 		}
 
-		nr_cpu_ids = 8;
+		set_nr_cpu_ids(8);
 	}
 #endif
 
@@ -1302,12 +1361,7 @@ static void __init smp_get_logical_apicid(void)
 		cpu0_logical_apicid = GET_APIC_LOGICAL_ID(apic_read(APIC_LDR));
 }
 
-/*
- * Prepare for SMP bootup.
- * @max_cpus: configured maximum number of CPUs, It is a legacy parameter
- *            for common interface support.
- */
-void __init native_smp_prepare_cpus(unsigned int max_cpus)
+void __init smp_prepare_cpus_common(void)
 {
 	unsigned int i;
 
@@ -1325,6 +1379,7 @@ void __init native_smp_prepare_cpus(unsigned int max_cpus)
 		zalloc_cpumask_var(&per_cpu(cpu_core_map, i), GFP_KERNEL);
 		zalloc_cpumask_var(&per_cpu(cpu_die_map, i), GFP_KERNEL);
 		zalloc_cpumask_var(&per_cpu(cpu_llc_shared_map, i), GFP_KERNEL);
+		zalloc_cpumask_var(&per_cpu(cpu_l2c_shared_map, i), GFP_KERNEL);
 	}
 
 	/*
@@ -1337,6 +1392,16 @@ void __init native_smp_prepare_cpus(unsigned int max_cpus)
 	set_sched_topology(x86_topology);
 
 	set_cpu_sibling_map(0);
+}
+
+/*
+ * Prepare for SMP bootup.
+ * @max_cpus: configured maximum number of CPUs, It is a legacy parameter
+ *            for common interface support.
+ */
+void __init native_smp_prepare_cpus(unsigned int max_cpus)
+{
+	smp_prepare_cpus_common();
 
 	smp_sanity_check();
 
@@ -1365,21 +1430,21 @@ void __init native_smp_prepare_cpus(unsigned int max_cpus)
 
 	uv_system_init();
 
-	set_mtrr_aps_delayed_init();
-
 	smp_quirk_init_udelay();
 
 	speculative_store_bypass_ht_init();
+
+	snp_set_wakeup_secondary_cpu();
 }
 
-void arch_enable_nonboot_cpus_begin(void)
+void arch_thaw_secondary_cpus_begin(void)
 {
-	set_mtrr_aps_delayed_init();
+	set_cache_aps_delayed_init(true);
 }
 
-void arch_enable_nonboot_cpus_end(void)
+void arch_thaw_secondary_cpus_end(void)
 {
-	mtrr_aps_init();
+	cache_aps_init();
 }
 
 /*
@@ -1388,7 +1453,11 @@ void arch_enable_nonboot_cpus_end(void)
 void __init native_smp_prepare_boot_cpu(void)
 {
 	int me = smp_processor_id();
-	switch_to_new_gdt(me);
+
+	/* SMP handles this from setup_per_cpu_areas() */
+	if (!IS_ENABLED(CONFIG_SMP))
+		switch_gdt_and_percpu_base(me);
+
 	/* already set me in cpu_online_mask in boot_cpu_init() */
 	cpumask_set_cpu(me, cpu_callout_mask);
 	cpu_set_state_online(me);
@@ -1400,7 +1469,7 @@ void __init calculate_max_logical_packages(void)
 	int ncpus;
 
 	/*
-	 * Today neither Intel nor AMD support heterogenous systems so
+	 * Today neither Intel nor AMD support heterogeneous systems so
 	 * extrapolate the boot cpu's data to all packages.
 	 */
 	ncpus = cpu_data(0).booted_cores * topology_max_smt_threads();
@@ -1414,12 +1483,15 @@ void __init native_smp_cpus_done(unsigned int max_cpus)
 
 	calculate_max_logical_packages();
 
+	/* XXX for now assume numa-in-package and hybrid don't overlap */
 	if (x86_has_numa_in_package)
 		set_sched_topology(x86_numa_in_package_topology);
+	if (cpu_feature_enabled(X86_FEATURE_HYBRID_CPU))
+		set_sched_topology(x86_hybrid_topology);
 
 	nmi_selftest();
 	impress_friends();
-	mtrr_aps_init();
+	cache_aps_init();
 }
 
 static int __initdata setup_possible_cpus = -1;
@@ -1434,7 +1506,7 @@ early_param("possible_cpus", _setup_possible_cpus);
 /*
  * cpu_possible_mask should be static, it cannot change as cpu's
  * are onlined, or offlined. The reason is per-cpu data-structures
- * are allocated by some modules at init time, and dont expect to
+ * are allocated by some modules at init time, and don't expect to
  * do this dynamically on cpu arrival/departure.
  * cpu_present_mask on the other hand can change dynamically.
  * In case when cpu_hotplug is not compiled, then we resort to current
@@ -1501,7 +1573,7 @@ __init void prefill_possible_map(void)
 		possible = i;
 	}
 
-	nr_cpu_ids = possible;
+	set_nr_cpu_ids(possible);
 
 	pr_info("Allowing %d CPUs, %d hotplug CPUs\n",
 		possible, max_t(int, possible - num_processors, 0));
@@ -1545,11 +1617,19 @@ static void remove_siblinginfo(int cpu)
 
 	for_each_cpu(sibling, topology_die_cpumask(cpu))
 		cpumask_clear_cpu(cpu, topology_die_cpumask(sibling));
-	for_each_cpu(sibling, topology_sibling_cpumask(cpu))
+
+	for_each_cpu(sibling, topology_sibling_cpumask(cpu)) {
 		cpumask_clear_cpu(cpu, topology_sibling_cpumask(sibling));
+		if (cpumask_weight(topology_sibling_cpumask(sibling)) == 1)
+			cpu_data(sibling).smt_active = false;
+	}
+
 	for_each_cpu(sibling, cpu_llc_shared_mask(cpu))
 		cpumask_clear_cpu(cpu, cpu_llc_shared_mask(sibling));
+	for_each_cpu(sibling, cpu_l2c_shared_mask(cpu))
+		cpumask_clear_cpu(cpu, cpu_l2c_shared_mask(sibling));
 	cpumask_clear(cpu_llc_shared_mask(cpu));
+	cpumask_clear(cpu_l2c_shared_mask(cpu));
 	cpumask_clear(topology_sibling_cpumask(cpu));
 	cpumask_clear(topology_core_cpumask(cpu));
 	cpumask_clear(topology_die_cpumask(cpu));
@@ -1591,13 +1671,27 @@ int native_cpu_disable(void)
 	if (ret)
 		return ret;
 
-	/*
-	 * Disable the local APIC. Otherwise IPI broadcasts will reach
-	 * it. It still responds normally to INIT, NMI, SMI, and SIPI
-	 * messages.
-	 */
-	apic_soft_disable();
 	cpu_disable_common();
+
+        /*
+         * Disable the local APIC. Otherwise IPI broadcasts will reach
+         * it. It still responds normally to INIT, NMI, SMI, and SIPI
+         * messages.
+         *
+         * Disabling the APIC must happen after cpu_disable_common()
+         * which invokes fixup_irqs().
+         *
+         * Disabling the APIC preserves already set bits in IRR, but
+         * an interrupt arriving after disabling the local APIC does not
+         * set the corresponding IRR bit.
+         *
+         * fixup_irqs() scans IRR for set bits so it can raise a not
+         * yet handled interrupt on the new destination CPU via an IPI
+         * but obviously it can't do so for IRR bits which are not set.
+         * IOW, interrupts arriving after disabling the local APIC will
+         * be lost.
+         */
+	apic_soft_disable();
 
 	return 0;
 }
@@ -1638,13 +1732,17 @@ void play_dead_common(void)
 	local_irq_disable();
 }
 
-static bool wakeup_cpu0(void)
+/**
+ * cond_wakeup_cpu0 - Wake up CPU0 if needed.
+ *
+ * If NMI wants to wake up CPU0, start CPU0.
+ */
+void cond_wakeup_cpu0(void)
 {
 	if (smp_processor_id() == 0 && enable_start_cpu0)
-		return true;
-
-	return false;
+		start_cpu0();
 }
+EXPORT_SYMBOL_GPL(cond_wakeup_cpu0);
 
 /*
  * We need to flush the caches before going to sleep, lest we have
@@ -1713,11 +1811,8 @@ static inline void mwait_play_dead(void)
 		__monitor(mwait_ptr, 0, 0);
 		mb();
 		__mwait(eax, 0);
-		/*
-		 * If NMI wants to wake up CPU0, start CPU0.
-		 */
-		if (wakeup_cpu0())
-			start_cpu0();
+
+		cond_wakeup_cpu0();
 	}
 }
 
@@ -1728,11 +1823,8 @@ void hlt_play_dead(void)
 
 	while (1) {
 		native_halt();
-		/*
-		 * If NMI wants to wake up CPU0, start CPU0.
-		 */
-		if (wakeup_cpu0())
-			start_cpu0();
+
+		cond_wakeup_cpu0();
 	}
 }
 
@@ -1741,7 +1833,7 @@ void native_play_dead(void)
 	play_dead_common();
 	tboot_shutdown(TB_SHUTDOWN_WFS);
 
-	mwait_play_dead();	/* Only returns on failure */
+	mwait_play_dead();
 	if (cpuidle_play_dead())
 		hlt_play_dead();
 }

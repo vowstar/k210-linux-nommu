@@ -218,7 +218,7 @@ static int pcm_open(struct snd_pcm_substream *substream)
 
 		if (frames_per_period > 0) {
 			// For double_pcm_frame quirk.
-			if (rate > 96000) {
+			if (rate > 96000 && !dice->disable_double_pcm_frames) {
 				frames_per_period *= 2;
 				frames_per_buffer *= 2;
 			}
@@ -266,14 +266,14 @@ static int pcm_hw_params(struct snd_pcm_substream *substream,
 	struct snd_dice *dice = substream->private_data;
 	int err = 0;
 
-	if (substream->runtime->status->state == SNDRV_PCM_STATE_OPEN) {
+	if (substream->runtime->state == SNDRV_PCM_STATE_OPEN) {
 		unsigned int rate = params_rate(hw_params);
 		unsigned int events_per_period = params_period_size(hw_params);
 		unsigned int events_per_buffer = params_buffer_size(hw_params);
 
 		mutex_lock(&dice->mutex);
 		// For double_pcm_frame quirk.
-		if (rate > 96000) {
+		if (rate > 96000 && !dice->disable_double_pcm_frames) {
 			events_per_period /= 2;
 			events_per_buffer /= 2;
 		}
@@ -293,7 +293,7 @@ static int pcm_hw_free(struct snd_pcm_substream *substream)
 
 	mutex_lock(&dice->mutex);
 
-	if (substream->runtime->status->state != SNDRV_PCM_STATE_OPEN)
+	if (substream->runtime->state != SNDRV_PCM_STATE_OPEN)
 		--dice->substreams_counter;
 
 	snd_dice_stream_stop_duplex(dice);

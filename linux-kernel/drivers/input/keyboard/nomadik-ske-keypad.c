@@ -58,6 +58,8 @@
  * @board:	keypad platform device
  * @keymap:	matrix scan code table for keycodes
  * @clk:	clock structure pointer
+ * @pclk:	clock structure pointer
+ * @ske_keypad_lock: spinlock protecting the keypad read/writes
  */
 struct ske_keypad {
 	int irq;
@@ -386,7 +388,6 @@ static int ske_keypad_remove(struct platform_device *pdev)
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int ske_keypad_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
@@ -414,15 +415,14 @@ static int ske_keypad_resume(struct device *dev)
 
 	return 0;
 }
-#endif
 
-static SIMPLE_DEV_PM_OPS(ske_keypad_dev_pm_ops,
-			 ske_keypad_suspend, ske_keypad_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(ske_keypad_dev_pm_ops,
+				ske_keypad_suspend, ske_keypad_resume);
 
 static struct platform_driver ske_keypad_driver = {
 	.driver = {
 		.name = "nmk-ske-keypad",
-		.pm = &ske_keypad_dev_pm_ops,
+		.pm = pm_sleep_ptr(&ske_keypad_dev_pm_ops),
 	},
 	.remove = ske_keypad_remove,
 };

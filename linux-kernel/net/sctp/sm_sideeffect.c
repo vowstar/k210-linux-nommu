@@ -419,7 +419,7 @@ void sctp_generate_proto_unreach_event(struct timer_list *t)
 		/* Try again later.  */
 		if (!mod_timer(&transport->proto_unreach_timer,
 				jiffies + (HZ/20)))
-			sctp_association_hold(asoc);
+			sctp_transport_hold(transport);
 		goto out_unlock;
 	}
 
@@ -435,7 +435,7 @@ void sctp_generate_proto_unreach_event(struct timer_list *t)
 
 out_unlock:
 	bh_unlock_sock(sk);
-	sctp_association_put(asoc);
+	sctp_transport_put(transport);
 }
 
  /* Handle the timeout of the RE-CONFIG timer. */
@@ -458,8 +458,44 @@ void sctp_generate_reconf_event(struct timer_list *t)
 		goto out_unlock;
 	}
 
+	/* This happens when the response arrives after the timer is triggered. */
+	if (!asoc->strreset_chunk)
+		goto out_unlock;
+
 	error = sctp_do_sm(net, SCTP_EVENT_T_TIMEOUT,
 			   SCTP_ST_TIMEOUT(SCTP_EVENT_TIMEOUT_RECONF),
+			   asoc->state, asoc->ep, asoc,
+			   transport, GFP_ATOMIC);
+
+	if (error)
+		sk->sk_err = -error;
+
+out_unlock:
+	bh_unlock_sock(sk);
+	sctp_transport_put(transport);
+}
+
+/* Handle the timeout of the probe timer. */
+void sctp_generate_probe_event(struct timer_list *t)
+{
+	struct sctp_transport *transport = from_timer(transport, t, probe_timer);
+	struct sctp_association *asoc = transport->asoc;
+	struct sock *sk = asoc->base.sk;
+	struct net *net = sock_net(sk);
+	int error = 0;
+
+	bh_lock_sock(sk);
+	if (sock_owned_by_user(sk)) {
+		pr_debug("%s: sock is busy\n", __func__);
+
+		/* Try again later.  */
+		if (!mod_timer(&transport->probe_timer, jiffies + (HZ / 20)))
+			sctp_transport_hold(transport);
+		goto out_unlock;
+	}
+
+	error = sctp_do_sm(net, SCTP_EVENT_T_TIMEOUT,
+			   SCTP_ST_TIMEOUT(SCTP_EVENT_TIMEOUT_PROBE),
 			   asoc->state, asoc->ep, asoc,
 			   transport, GFP_ATOMIC);
 
@@ -824,28 +860,6 @@ static void sctp_cmd_setup_t2(struct sctp_cmd_seq *cmds,
 	}
 	asoc->shutdown_last_sent_to = t;
 	asoc->timeouts[SCTP_EVENT_TIMEOUT_T2_SHUTDOWN] = t->rto;
-}
-
-static void sctp_cmd_assoc_update(struct sctp_cmd_seq *cmds,
-				  struct sctp_association *asoc,
-				  struct sctp_association *new)
-{
-	struct net *net = asoc->base.net;
-	struct sctp_chunk *abort;
-
-	if (!sctp_assoc_update(asoc, new))
-		return;
-
-	abort = sctp_make_abort(asoc, NULL, sizeof(struct sctp_errhdr));
-	if (abort) {
-		sctp_init_cause(abort, SCTP_ERROR_RSRC_LOW, 0);
-		sctp_add_cmd_sf(cmds, SCTP_CMD_REPLY, SCTP_CHUNK(abort));
-	}
-	sctp_add_cmd_sf(cmds, SCTP_CMD_SET_SK_ERR, SCTP_ERROR(ECONNABORTED));
-	sctp_add_cmd_sf(cmds, SCTP_CMD_ASSOC_FAILED,
-			SCTP_PERR(SCTP_ERROR_RSRC_LOW));
-	SCTP_INC_STATS(net, SCTP_MIB_ABORTEDS);
-	SCTP_DEC_STATS(net, SCTP_MIB_CURRESTAB);
 }
 
 /* Helper function to change the state of an association. */
@@ -1301,10 +1315,6 @@ static int sctp_cmd_interpreter(enum sctp_event_type event_type,
 			sctp_endpoint_add_asoc(ep, asoc);
 			break;
 
-		case SCTP_CMD_UPDATE_ASSOC:
-		       sctp_cmd_assoc_update(commands, asoc, cmd->obj.asoc);
-		       break;
-
 		case SCTP_CMD_PURGE_OUTQUEUE:
 		       sctp_outq_teardown(&asoc->outqueue);
 		       break;
@@ -1516,16 +1526,24 @@ static int sctp_cmd_interpreter(enum sctp_event_type event_type,
 
 			if (timer_pending(timer))
 				break;
-			/* fall through */
+			fallthrough;
 
 		case SCTP_CMD_TIMER_START:
 			timer = &asoc->timers[cmd->obj.to];
 			timeout = asoc->timeouts[cmd->obj.to];
 			BUG_ON(!timeout);
 
-			timer->expires = jiffies + timeout;
-			sctp_association_hold(asoc);
-			add_timer(timer);
+			/*
+			 * SCTP has a hard time with timer starts.  Because we process
+			 * timer starts as side effects, it can be hard to tell if we
+			 * have already started a timer or not, which leads to BUG
+			 * halts when we call add_timer. So here, instead of just starting
+			 * a timer, if the timer is already started, and just mod
+			 * the timer with the shorter of the two expiration times
+			 */
+			if (!timer_pending(timer))
+				sctp_association_hold(asoc);
+			timer_reduce(timer, jiffies + timeout);
 			break;
 
 		case SCTP_CMD_TIMER_RESTART:
@@ -1593,12 +1611,12 @@ static int sctp_cmd_interpreter(enum sctp_event_type event_type,
 			break;
 
 		case SCTP_CMD_INIT_FAILED:
-			sctp_cmd_init_failed(commands, asoc, cmd->obj.u32);
+			sctp_cmd_init_failed(commands, asoc, cmd->obj.u16);
 			break;
 
 		case SCTP_CMD_ASSOC_FAILED:
 			sctp_cmd_assoc_failed(commands, asoc, event_type,
-					      subtype, chunk, cmd->obj.u32);
+					      subtype, chunk, cmd->obj.u16);
 			break;
 
 		case SCTP_CMD_INIT_COUNTER_INC:
@@ -1657,6 +1675,11 @@ static int sctp_cmd_interpreter(enum sctp_event_type event_type,
 
 		case SCTP_CMD_HB_TIMERS_STOP:
 			sctp_cmd_hb_timers_stop(commands, asoc);
+			break;
+
+		case SCTP_CMD_PROBE_TIMER_UPDATE:
+			t = cmd->obj.transport;
+			sctp_transport_reset_probe_timer(t);
 			break;
 
 		case SCTP_CMD_REPORT_ERROR:

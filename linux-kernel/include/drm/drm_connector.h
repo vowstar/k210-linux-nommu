@@ -27,6 +27,7 @@
 #include <linux/llist.h>
 #include <linux/ctype.h>
 #include <linux/hdmi.h>
+#include <linux/notifier.h>
 #include <drm/drm_mode_object.h>
 #include <drm/drm_util.h>
 
@@ -37,9 +38,11 @@ struct drm_modeset_acquire_ctx;
 struct drm_device;
 struct drm_crtc;
 struct drm_encoder;
+struct drm_panel;
 struct drm_property;
 struct drm_property_blob;
 struct drm_printer;
+struct drm_privacy_screen;
 struct edid;
 struct i2c_adapter;
 
@@ -84,7 +87,7 @@ enum drm_connector_status {
 };
 
 /**
- * enum drm_connector_registration_status - userspace registration status for
+ * enum drm_connector_registration_state - userspace registration status for
  * a &drm_connector
  *
  * This enum is used to track the status of initializing a connector and
@@ -141,6 +144,65 @@ enum subpixel_order {
 };
 
 /**
+ * enum drm_connector_tv_mode - Analog TV output mode
+ *
+ * This enum is used to indicate the TV output mode used on an analog TV
+ * connector.
+ *
+ * WARNING: The values of this enum is uABI since they're exposed in the
+ * "TV mode" connector property.
+ */
+enum drm_connector_tv_mode {
+	/**
+	 * @DRM_MODE_TV_MODE_NTSC: CCIR System M (aka 525-lines)
+	 * together with the NTSC Color Encoding.
+	 */
+	DRM_MODE_TV_MODE_NTSC,
+
+	/**
+	 * @DRM_MODE_TV_MODE_NTSC_443: Variant of
+	 * @DRM_MODE_TV_MODE_NTSC. Uses a color subcarrier frequency
+	 * of 4.43 MHz.
+	 */
+	DRM_MODE_TV_MODE_NTSC_443,
+
+	/**
+	 * @DRM_MODE_TV_MODE_NTSC_J: Variant of @DRM_MODE_TV_MODE_NTSC
+	 * used in Japan. Uses a black level equals to the blanking
+	 * level.
+	 */
+	DRM_MODE_TV_MODE_NTSC_J,
+
+	/**
+	 * @DRM_MODE_TV_MODE_PAL: CCIR System B together with the PAL
+	 * color system.
+	 */
+	DRM_MODE_TV_MODE_PAL,
+
+	/**
+	 * @DRM_MODE_TV_MODE_PAL_M: CCIR System M (aka 525-lines)
+	 * together with the PAL color encoding
+	 */
+	DRM_MODE_TV_MODE_PAL_M,
+
+	/**
+	 * @DRM_MODE_TV_MODE_PAL_N: CCIR System N together with the PAL
+	 * color encoding. It uses 625 lines, but has a color subcarrier
+	 * frequency of 3.58MHz, the SECAM color space, and narrower
+	 * channels compared to most of the other PAL variants.
+	 */
+	DRM_MODE_TV_MODE_PAL_N,
+
+	/**
+	 * @DRM_MODE_TV_MODE_SECAM: CCIR System B together with the
+	 * SECAM color system.
+	 */
+	DRM_MODE_TV_MODE_SECAM,
+
+	DRM_MODE_TV_MODE_MAX,
+};
+
+/**
  * struct drm_scrambling: sink's scrambling support.
  */
 struct drm_scrambling {
@@ -175,6 +237,46 @@ struct drm_scdc {
 	struct drm_scrambling scrambling;
 };
 
+/**
+ * struct drm_hdmi_dsc_cap - DSC capabilities of HDMI sink
+ *
+ * Describes the DSC support provided by HDMI 2.1 sink.
+ * The information is fetched fom additional HFVSDB blocks defined
+ * for HDMI 2.1.
+ */
+struct drm_hdmi_dsc_cap {
+	/** @v_1p2: flag for dsc1.2 version support by sink */
+	bool v_1p2;
+
+	/** @native_420: Does sink support DSC with 4:2:0 compression */
+	bool native_420;
+
+	/**
+	 * @all_bpp: Does sink support all bpp with 4:4:4: or 4:2:2
+	 * compressed formats
+	 */
+	bool all_bpp;
+
+	/**
+	 * @bpc_supported: compressed bpc supported by sink : 10, 12 or 16 bpc
+	 */
+	u8 bpc_supported;
+
+	/** @max_slices: maximum number of Horizontal slices supported by */
+	u8 max_slices;
+
+	/** @clk_per_slice : max pixel clock in MHz supported per slice */
+	int clk_per_slice;
+
+	/** @max_lanes : dsc max lanes supported for Fixed rate Link training */
+	u8 max_lanes;
+
+	/** @max_frl_rate_per_lane : maximum frl rate with DSC per lane */
+	u8 max_frl_rate_per_lane;
+
+	/** @total_chunk_kbytes: max size of chunks in KBs supported per line*/
+	u8 total_chunk_kbytes;
+};
 
 /**
  * struct drm_hdmi_info - runtime information about the connected HDMI sink
@@ -202,11 +304,17 @@ struct drm_hdmi_info {
 	 */
 	unsigned long y420_cmdb_modes[BITS_TO_LONGS(256)];
 
-	/** @y420_cmdb_map: bitmap of SVD index, to extraxt vcb modes */
-	u64 y420_cmdb_map;
-
 	/** @y420_dc_modes: bitmap of deep color support index */
 	u8 y420_dc_modes;
+
+	/** @max_frl_rate_per_lane: support fixed rate link */
+	u8 max_frl_rate_per_lane;
+
+	/** @max_lanes: supported by sink */
+	u8 max_lanes;
+
+	/** @dsc_cap: DSC capabilities of the sink */
+	struct drm_hdmi_dsc_cap dsc_cap;
 };
 
 /**
@@ -252,6 +360,63 @@ enum drm_panel_orientation {
 	DRM_MODE_PANEL_ORIENTATION_BOTTOM_UP,
 	DRM_MODE_PANEL_ORIENTATION_LEFT_UP,
 	DRM_MODE_PANEL_ORIENTATION_RIGHT_UP,
+};
+
+/**
+ * struct drm_monitor_range_info - Panel's Monitor range in EDID for
+ * &drm_display_info
+ *
+ * This struct is used to store a frequency range supported by panel
+ * as parsed from EDID's detailed monitor range descriptor block.
+ *
+ * @min_vfreq: This is the min supported refresh rate in Hz from
+ *             EDID's detailed monitor range.
+ * @max_vfreq: This is the max supported refresh rate in Hz from
+ *             EDID's detailed monitor range
+ */
+struct drm_monitor_range_info {
+	u16 min_vfreq;
+	u16 max_vfreq;
+};
+
+/**
+ * struct drm_luminance_range_info - Panel's luminance range for
+ * &drm_display_info. Calculated using data in EDID
+ *
+ * This struct is used to store a luminance range supported by panel
+ * as calculated using data from EDID's static hdr metadata.
+ *
+ * @min_luminance: This is the min supported luminance value
+ *
+ * @max_luminance: This is the max supported luminance value
+ */
+struct drm_luminance_range_info {
+	u32 min_luminance;
+	u32 max_luminance;
+};
+
+/**
+ * enum drm_privacy_screen_status - privacy screen status
+ *
+ * This enum is used to track and control the state of the integrated privacy
+ * screen present on some display panels, via the "privacy-screen sw-state"
+ * and "privacy-screen hw-state" properties. Note the _LOCKED enum values
+ * are only valid for the "privacy-screen hw-state" property.
+ *
+ * @PRIVACY_SCREEN_DISABLED:
+ *  The privacy-screen on the panel is disabled
+ * @PRIVACY_SCREEN_ENABLED:
+ *  The privacy-screen on the panel is enabled
+ * @PRIVACY_SCREEN_DISABLED_LOCKED:
+ *  The privacy-screen on the panel is disabled and locked (cannot be changed)
+ * @PRIVACY_SCREEN_ENABLED_LOCKED:
+ *  The privacy-screen on the panel is enabled and locked (cannot be changed)
+ */
+enum drm_privacy_screen_status {
+	PRIVACY_SCREEN_DISABLED = 0,
+	PRIVACY_SCREEN_ENABLED,
+	PRIVACY_SCREEN_DISABLED_LOCKED,
+	PRIVACY_SCREEN_ENABLED_LOCKED,
 };
 
 /*
@@ -303,51 +468,97 @@ enum drm_panel_orientation {
  * opposite edge of the driving edge. Transmitters and receivers may however
  * need to take other signal timings into account to convert between driving
  * and sample edges.
- *
- * @DRM_BUS_FLAG_DE_LOW:		The Data Enable signal is active low
- * @DRM_BUS_FLAG_DE_HIGH:		The Data Enable signal is active high
- * @DRM_BUS_FLAG_PIXDATA_POSEDGE:	Legacy value, do not use
- * @DRM_BUS_FLAG_PIXDATA_NEGEDGE:	Legacy value, do not use
- * @DRM_BUS_FLAG_PIXDATA_DRIVE_POSEDGE:	Data is driven on the rising edge of
- *					the pixel clock
- * @DRM_BUS_FLAG_PIXDATA_DRIVE_NEGEDGE:	Data is driven on the falling edge of
- *					the pixel clock
- * @DRM_BUS_FLAG_PIXDATA_SAMPLE_POSEDGE: Data is sampled on the rising edge of
- *					the pixel clock
- * @DRM_BUS_FLAG_PIXDATA_SAMPLE_NEGEDGE: Data is sampled on the falling edge of
- *					the pixel clock
- * @DRM_BUS_FLAG_DATA_MSB_TO_LSB:	Data is transmitted MSB to LSB on the bus
- * @DRM_BUS_FLAG_DATA_LSB_TO_MSB:	Data is transmitted LSB to MSB on the bus
- * @DRM_BUS_FLAG_SYNC_POSEDGE:		Legacy value, do not use
- * @DRM_BUS_FLAG_SYNC_NEGEDGE:		Legacy value, do not use
- * @DRM_BUS_FLAG_SYNC_DRIVE_POSEDGE:	Sync signals are driven on the rising
- *					edge of the pixel clock
- * @DRM_BUS_FLAG_SYNC_DRIVE_NEGEDGE:	Sync signals are driven on the falling
- *					edge of the pixel clock
- * @DRM_BUS_FLAG_SYNC_SAMPLE_POSEDGE:	Sync signals are sampled on the rising
- *					edge of the pixel clock
- * @DRM_BUS_FLAG_SYNC_SAMPLE_NEGEDGE:	Sync signals are sampled on the falling
- *					edge of the pixel clock
- * @DRM_BUS_FLAG_SHARP_SIGNALS:		Set if the Sharp-specific signals
- *					(SPL, CLS, PS, REV) must be used
  */
 enum drm_bus_flags {
+	/**
+	 * @DRM_BUS_FLAG_DE_LOW:
+	 *
+	 * The Data Enable signal is active low
+	 */
 	DRM_BUS_FLAG_DE_LOW = BIT(0),
+
+	/**
+	 * @DRM_BUS_FLAG_DE_HIGH:
+	 *
+	 * The Data Enable signal is active high
+	 */
 	DRM_BUS_FLAG_DE_HIGH = BIT(1),
-	DRM_BUS_FLAG_PIXDATA_POSEDGE = BIT(2),
-	DRM_BUS_FLAG_PIXDATA_NEGEDGE = BIT(3),
-	DRM_BUS_FLAG_PIXDATA_DRIVE_POSEDGE = DRM_BUS_FLAG_PIXDATA_POSEDGE,
-	DRM_BUS_FLAG_PIXDATA_DRIVE_NEGEDGE = DRM_BUS_FLAG_PIXDATA_NEGEDGE,
-	DRM_BUS_FLAG_PIXDATA_SAMPLE_POSEDGE = DRM_BUS_FLAG_PIXDATA_NEGEDGE,
-	DRM_BUS_FLAG_PIXDATA_SAMPLE_NEGEDGE = DRM_BUS_FLAG_PIXDATA_POSEDGE,
+
+	/**
+	 * @DRM_BUS_FLAG_PIXDATA_DRIVE_POSEDGE:
+	 *
+	 * Data is driven on the rising edge of the pixel clock
+	 */
+	DRM_BUS_FLAG_PIXDATA_DRIVE_POSEDGE = BIT(2),
+
+	/**
+	 * @DRM_BUS_FLAG_PIXDATA_DRIVE_NEGEDGE:
+	 *
+	 * Data is driven on the falling edge of the pixel clock
+	 */
+	DRM_BUS_FLAG_PIXDATA_DRIVE_NEGEDGE = BIT(3),
+
+	/**
+	 * @DRM_BUS_FLAG_PIXDATA_SAMPLE_POSEDGE:
+	 *
+	 * Data is sampled on the rising edge of the pixel clock
+	 */
+	DRM_BUS_FLAG_PIXDATA_SAMPLE_POSEDGE = DRM_BUS_FLAG_PIXDATA_DRIVE_NEGEDGE,
+
+	/**
+	 * @DRM_BUS_FLAG_PIXDATA_SAMPLE_NEGEDGE:
+	 *
+	 * Data is sampled on the falling edge of the pixel clock
+	 */
+	DRM_BUS_FLAG_PIXDATA_SAMPLE_NEGEDGE = DRM_BUS_FLAG_PIXDATA_DRIVE_POSEDGE,
+
+	/**
+	 * @DRM_BUS_FLAG_DATA_MSB_TO_LSB:
+	 *
+	 * Data is transmitted MSB to LSB on the bus
+	 */
 	DRM_BUS_FLAG_DATA_MSB_TO_LSB = BIT(4),
+
+	/**
+	 * @DRM_BUS_FLAG_DATA_LSB_TO_MSB:
+	 *
+	 * Data is transmitted LSB to MSB on the bus
+	 */
 	DRM_BUS_FLAG_DATA_LSB_TO_MSB = BIT(5),
-	DRM_BUS_FLAG_SYNC_POSEDGE = BIT(6),
-	DRM_BUS_FLAG_SYNC_NEGEDGE = BIT(7),
-	DRM_BUS_FLAG_SYNC_DRIVE_POSEDGE = DRM_BUS_FLAG_SYNC_POSEDGE,
-	DRM_BUS_FLAG_SYNC_DRIVE_NEGEDGE = DRM_BUS_FLAG_SYNC_NEGEDGE,
-	DRM_BUS_FLAG_SYNC_SAMPLE_POSEDGE = DRM_BUS_FLAG_SYNC_NEGEDGE,
-	DRM_BUS_FLAG_SYNC_SAMPLE_NEGEDGE = DRM_BUS_FLAG_SYNC_POSEDGE,
+
+	/**
+	 * @DRM_BUS_FLAG_SYNC_DRIVE_POSEDGE:
+	 *
+	 * Sync signals are driven on the rising edge of the pixel clock
+	 */
+	DRM_BUS_FLAG_SYNC_DRIVE_POSEDGE = BIT(6),
+
+	/**
+	 * @DRM_BUS_FLAG_SYNC_DRIVE_NEGEDGE:
+	 *
+	 * Sync signals are driven on the falling edge of the pixel clock
+	 */
+	DRM_BUS_FLAG_SYNC_DRIVE_NEGEDGE = BIT(7),
+
+	/**
+	 * @DRM_BUS_FLAG_SYNC_SAMPLE_POSEDGE:
+	 *
+	 * Sync signals are sampled on the rising edge of the pixel clock
+	 */
+	DRM_BUS_FLAG_SYNC_SAMPLE_POSEDGE = DRM_BUS_FLAG_SYNC_DRIVE_NEGEDGE,
+
+	/**
+	 * @DRM_BUS_FLAG_SYNC_SAMPLE_NEGEDGE:
+	 *
+	 * Sync signals are sampled on the falling edge of the pixel clock
+	 */
+	DRM_BUS_FLAG_SYNC_SAMPLE_NEGEDGE = DRM_BUS_FLAG_SYNC_DRIVE_POSEDGE,
+
+	/**
+	 * @DRM_BUS_FLAG_SHARP_SIGNALS:
+	 *
+	 *  Set if the Sharp-specific signals (SPL, CLS, PS, REV) must be used
+	 */
 	DRM_BUS_FLAG_SHARP_SIGNALS = BIT(8),
 };
 
@@ -384,9 +595,9 @@ struct drm_display_info {
 	enum subpixel_order subpixel_order;
 
 #define DRM_COLOR_FORMAT_RGB444		(1<<0)
-#define DRM_COLOR_FORMAT_YCRCB444	(1<<1)
-#define DRM_COLOR_FORMAT_YCRCB422	(1<<2)
-#define DRM_COLOR_FORMAT_YCRCB420	(1<<3)
+#define DRM_COLOR_FORMAT_YCBCR444	(1<<1)
+#define DRM_COLOR_FORMAT_YCBCR422	(1<<2)
+#define DRM_COLOR_FORMAT_YCBCR420	(1<<3)
 
 	/**
 	 * @panel_orientation: Read only connector property for built-in panels,
@@ -435,6 +646,14 @@ struct drm_display_info {
 	bool dvi_dual;
 
 	/**
+	 * @is_hdmi: True if the sink is an HDMI device.
+	 *
+	 * This field shall be used instead of calling
+	 * drm_detect_hdmi_monitor() when possible.
+	 */
+	bool is_hdmi;
+
+	/**
 	 * @has_hdmi_infoframe: Does the sink support the HDMI infoframe?
 	 */
 	bool has_hdmi_infoframe;
@@ -446,10 +665,16 @@ struct drm_display_info {
 	bool rgb_quant_range_selectable;
 
 	/**
-	 * @edid_hdmi_dc_modes: Mask of supported hdmi deep color modes. Even
-	 * more stuff redundant with @bus_formats.
+	 * @edid_hdmi_rgb444_dc_modes: Mask of supported hdmi deep color modes
+	 * in RGB 4:4:4. Even more stuff redundant with @bus_formats.
 	 */
-	u8 edid_hdmi_dc_modes;
+	u8 edid_hdmi_rgb444_dc_modes;
+
+	/**
+	 * @edid_hdmi_ycbcr444_dc_modes: Mask of supported hdmi deep color
+	 * modes in YCbCr 4:4:4. Even more stuff redundant with @bus_formats.
+	 */
+	u8 edid_hdmi_ycbcr444_dc_modes;
 
 	/**
 	 * @cea_rev: CEA revision of the HDMI sink.
@@ -465,6 +690,49 @@ struct drm_display_info {
 	 * @non_desktop: Non desktop display (HMD).
 	 */
 	bool non_desktop;
+
+	/**
+	 * @monitor_range: Frequency range supported by monitor range descriptor
+	 */
+	struct drm_monitor_range_info monitor_range;
+
+	/**
+	 * @luminance_range: Luminance range supported by panel
+	 */
+	struct drm_luminance_range_info luminance_range;
+
+	/**
+	 * @mso_stream_count: eDP Multi-SST Operation (MSO) stream count from
+	 * the DisplayID VESA vendor block. 0 for conventional Single-Stream
+	 * Transport (SST), or 2 or 4 MSO streams.
+	 */
+	u8 mso_stream_count;
+
+	/**
+	 * @mso_pixel_overlap: eDP MSO segment pixel overlap, 0-8 pixels.
+	 */
+	u8 mso_pixel_overlap;
+
+	/**
+	 * @max_dsc_bpp: Maximum DSC target bitrate, if it is set to 0 the
+	 * monitor's default value is used instead.
+	 */
+	u32 max_dsc_bpp;
+
+	/**
+	 * @vics: Array of vics_len VICs. Internal to EDID parsing.
+	 */
+	u8 *vics;
+
+	/**
+	 * @vics_len: Number of elements in vics. Internal to EDID parsing.
+	 */
+	int vics_len;
+
+	/**
+	 * @quirks: EDID based quirks. Internal to EDID parsing.
+	 */
+	u32 quirks;
 };
 
 int drm_display_info_set_bus_formats(struct drm_display_info *info,
@@ -501,8 +769,10 @@ struct drm_connector_tv_margins {
 
 /**
  * struct drm_tv_connector_state - TV connector related states
- * @subconnector: selected subconnector
+ * @select_subconnector: selected subconnector
+ * @subconnector: detected subconnector
  * @margins: TV margins
+ * @legacy_mode: Legacy TV mode, driver specific value
  * @mode: TV mode
  * @brightness: brightness in percent
  * @contrast: contrast in percent
@@ -512,8 +782,10 @@ struct drm_connector_tv_margins {
  * @hue: hue in percent
  */
 struct drm_tv_connector_state {
+	enum drm_mode_subconnector select_subconnector;
 	enum drm_mode_subconnector subconnector;
 	struct drm_connector_tv_margins margins;
+	unsigned int legacy_mode;
 	unsigned int mode;
 	unsigned int brightness;
 	unsigned int contrast;
@@ -657,6 +929,12 @@ struct drm_connector_state {
 	u8 max_bpc;
 
 	/**
+	 * @privacy_screen_sw_state: See :ref:`Standard Connector
+	 * Properties<standard_connector_properties>`
+	 */
+	enum drm_privacy_screen_status privacy_screen_sw_state;
+
+	/**
 	 * @hdr_output_metadata:
 	 * DRM blob property for HDR output metadata
 	 */
@@ -722,6 +1000,11 @@ struct drm_connector_funcs {
 	 * &drm_mode_config.connection_mutex. Drivers which need to grab additional
 	 * locks to avoid races with concurrent modeset changes need to use
 	 * &drm_connector_helper_funcs.detect_ctx instead.
+	 *
+	 * Also note that this callback can be called no matter the
+	 * state the connector is in. Drivers that need the underlying
+	 * device to be powered to perform the detection will first need
+	 * to make sure it's been properly enabled.
 	 *
 	 * RETURNS:
 	 *
@@ -954,6 +1237,21 @@ struct drm_connector_funcs {
 	 */
 	void (*atomic_print_state)(struct drm_printer *p,
 				   const struct drm_connector_state *state);
+
+	/**
+	 * @oob_hotplug_event:
+	 *
+	 * This will get called when a hotplug-event for a drm-connector
+	 * has been received from a source outside the display driver / device.
+	 */
+	void (*oob_hotplug_event)(struct drm_connector *connector);
+
+	/**
+	 * @debugfs_init:
+	 *
+	 * Allows connectors to create connector-specific debugfs files.
+	 */
+	void (*debugfs_init)(struct drm_connector *connector, struct dentry *root);
 };
 
 /**
@@ -992,6 +1290,13 @@ struct drm_cmdline_mode {
 	 * Did the mode have a preferred BPP?
 	 */
 	bool bpp_specified;
+
+	/**
+	 * @pixel_clock:
+	 *
+	 * Pixel Clock in kHz. Optional.
+	 */
+	unsigned int pixel_clock;
 
 	/**
 	 * @xres:
@@ -1081,6 +1386,18 @@ struct drm_cmdline_mode {
 	 * @tv_margins: TV margins to apply to the mode.
 	 */
 	struct drm_connector_tv_margins tv_margins;
+
+	/**
+	 * @tv_mode: TV mode standard. See DRM_MODE_TV_MODE_*.
+	 */
+	enum drm_connector_tv_mode tv_mode;
+
+	/**
+	 * @tv_mode_specified:
+	 *
+	 * Did the mode have a preferred TV mode?
+	 */
+	bool tv_mode_specified;
 };
 
 /**
@@ -1098,6 +1415,14 @@ struct drm_connector {
 	struct device *kdev;
 	/** @attr: sysfs attributes */
 	struct device_attribute *attr;
+	/**
+	 * @fwnode: associated fwnode supplied by platform firmware
+	 *
+	 * Drivers can set this to associate a fwnode with a connector, drivers
+	 * are expected to get a reference on the fwnode when setting this.
+	 * drm_connector_cleanup() will call fwnode_handle_put() on this.
+	 */
+	struct fwnode_handle *fwnode;
 
 	/**
 	 * @head:
@@ -1108,6 +1433,14 @@ struct drm_connector {
 	 * &drm_connector_list_iter to walk this list.
 	 */
 	struct list_head head;
+
+	/**
+	 * @global_connector_list_entry:
+	 *
+	 * Connector entry in the global connector-list, used by
+	 * drm_connector_find_by_fwnode().
+	 */
+	struct list_head global_connector_list_entry;
 
 	/** @base: base KMS object */
 	struct drm_mode_object base;
@@ -1255,6 +1588,24 @@ struct drm_connector {
 	 */
 	struct drm_property *max_bpc_property;
 
+	/** @privacy_screen: drm_privacy_screen for this connector, or NULL. */
+	struct drm_privacy_screen *privacy_screen;
+
+	/** @privacy_screen_notifier: privacy-screen notifier_block */
+	struct notifier_block privacy_screen_notifier;
+
+	/**
+	 * @privacy_screen_sw_state_property: Optional atomic property for the
+	 * connector to control the integrated privacy screen.
+	 */
+	struct drm_property *privacy_screen_sw_state_property;
+
+	/**
+	 * @privacy_screen_hw_state_property: Optional atomic property for the
+	 * connector to report the actual integrated privacy screen state.
+	 */
+	struct drm_property *privacy_screen_hw_state_property;
+
 #define DRM_CONNECTOR_POLL_HPD (1 << 0)
 #define DRM_CONNECTOR_POLL_CONNECT (1 << 1)
 #define DRM_CONNECTOR_POLL_DISCONNECT (1 << 2)
@@ -1297,8 +1648,22 @@ struct drm_connector {
 	struct drm_cmdline_mode cmdline_mode;
 	/** @force: a DRM_FORCE_<foo> state for forced mode sets */
 	enum drm_connector_force force;
-	/** @override_edid: has the EDID been overwritten through debugfs for testing? */
-	bool override_edid;
+
+	/**
+	 * @edid_override: Override EDID set via debugfs.
+	 *
+	 * Do not modify or access outside of the drm_edid_override_* family of
+	 * functions.
+	 */
+	const struct drm_edid *edid_override;
+
+	/**
+	 * @edid_override_mutex: Protect access to edid_override.
+	 */
+	struct mutex edid_override_mutex;
+
+	/** @epoch_counter: used to detect any other changes in connector, besides status */
+	u64 epoch_counter;
 
 	/**
 	 * @possible_encoders: Bit mask of encoders that can drive this
@@ -1357,6 +1722,12 @@ struct drm_connector {
 	 * rev1.1 4.2.2.6
 	 */
 	bool edid_corrupt;
+	/**
+	 * @real_edid_checksum: real edid checksum for corrupted edid block.
+	 * Required in Displayport 1.4 compliance testing
+	 * rev1.1 4.2.2.6
+	 */
+	u8 real_edid_checksum;
 
 	/** @debugfs_entry: debugfs directory for this connector */
 	struct dentry *debugfs_entry;
@@ -1435,6 +1806,11 @@ int drm_connector_init_with_ddc(struct drm_device *dev,
 				const struct drm_connector_funcs *funcs,
 				int connector_type,
 				struct i2c_adapter *ddc);
+int drmm_connector_init(struct drm_device *dev,
+			struct drm_connector *connector,
+			const struct drm_connector_funcs *funcs,
+			int connector_type,
+			struct i2c_adapter *ddc);
 void drm_connector_attach_edid_property(struct drm_connector *connector);
 int drm_connector_register(struct drm_connector *connector);
 void drm_connector_unregister(struct drm_connector *connector);
@@ -1512,21 +1888,31 @@ drm_connector_is_unregistered(struct drm_connector *connector)
 		DRM_CONNECTOR_UNREGISTERED;
 }
 
+void drm_connector_oob_hotplug_event(struct fwnode_handle *connector_fwnode);
+const char *drm_get_connector_type_name(unsigned int connector_type);
 const char *drm_get_connector_status_name(enum drm_connector_status status);
 const char *drm_get_subpixel_order_name(enum subpixel_order order);
 const char *drm_get_dpms_name(int val);
 const char *drm_get_dvi_i_subconnector_name(int val);
 const char *drm_get_dvi_i_select_name(int val);
+const char *drm_get_tv_mode_name(int val);
 const char *drm_get_tv_subconnector_name(int val);
 const char *drm_get_tv_select_name(int val);
+const char *drm_get_dp_subconnector_name(int val);
 const char *drm_get_content_protection_name(int val);
 const char *drm_get_hdcp_content_type_name(int val);
 
+int drm_get_tv_mode_from_name(const char *name, size_t len);
+
 int drm_mode_create_dvi_i_properties(struct drm_device *dev);
+void drm_connector_attach_dp_subconnector_property(struct drm_connector *connector);
+
 int drm_mode_create_tv_margin_properties(struct drm_device *dev);
+int drm_mode_create_tv_properties_legacy(struct drm_device *dev,
+					 unsigned int num_modes,
+					 const char * const modes[]);
 int drm_mode_create_tv_properties(struct drm_device *dev,
-				  unsigned int num_modes,
-				  const char * const modes[]);
+				  unsigned int supported_tv_modes);
 void drm_connector_attach_tv_margin_properties(struct drm_connector *conn);
 int drm_mode_create_scaling_mode_property(struct drm_device *dev);
 int drm_connector_attach_content_type_property(struct drm_connector *dev);
@@ -1534,13 +1920,14 @@ int drm_connector_attach_scaling_mode_property(struct drm_connector *connector,
 					       u32 scaling_mode_mask);
 int drm_connector_attach_vrr_capable_property(
 		struct drm_connector *connector);
+int drm_connector_attach_colorspace_property(struct drm_connector *connector);
+int drm_connector_attach_hdr_output_metadata_property(struct drm_connector *connector);
+bool drm_connector_atomic_hdr_metadata_equal(struct drm_connector_state *old_state,
+					     struct drm_connector_state *new_state);
 int drm_mode_create_aspect_ratio_property(struct drm_device *dev);
 int drm_mode_create_hdmi_colorspace_property(struct drm_connector *connector);
 int drm_mode_create_dp_colorspace_property(struct drm_connector *connector);
 int drm_mode_create_content_type_property(struct drm_device *dev);
-void drm_hdmi_avi_infoframe_content_type(struct hdmi_avi_infoframe *frame,
-					 const struct drm_connector_state *conn_state);
-
 int drm_mode_create_suggested_offset_properties(struct drm_device *dev);
 
 int drm_connector_set_path_property(struct drm_connector *connector,
@@ -1552,10 +1939,23 @@ void drm_connector_set_link_status_property(struct drm_connector *connector,
 					    uint64_t link_status);
 void drm_connector_set_vrr_capable_property(
 		struct drm_connector *connector, bool capable);
-int drm_connector_init_panel_orientation_property(
-	struct drm_connector *connector, int width, int height);
+int drm_connector_set_panel_orientation(
+	struct drm_connector *connector,
+	enum drm_panel_orientation panel_orientation);
+int drm_connector_set_panel_orientation_with_quirk(
+	struct drm_connector *connector,
+	enum drm_panel_orientation panel_orientation,
+	int width, int height);
+int drm_connector_set_orientation_from_panel(
+	struct drm_connector *connector,
+	struct drm_panel *panel);
 int drm_connector_attach_max_bpc_property(struct drm_connector *connector,
 					  int min, int max);
+void drm_connector_create_privacy_screen_properties(struct drm_connector *conn);
+void drm_connector_attach_privacy_screen_properties(struct drm_connector *conn);
+void drm_connector_attach_privacy_screen_provider(
+	struct drm_connector *connector, struct drm_privacy_screen *priv);
+void drm_connector_update_privacy_screen(const struct drm_connector_state *connector_state);
 
 /**
  * struct drm_tile_group - Tile group metadata
@@ -1575,9 +1975,9 @@ struct drm_tile_group {
 };
 
 struct drm_tile_group *drm_mode_create_tile_group(struct drm_device *dev,
-						  char topology[8]);
+						  const char topology[8]);
 struct drm_tile_group *drm_mode_get_tile_group(struct drm_device *dev,
-					       char topology[8]);
+					       const char topology[8]);
 void drm_mode_put_tile_group(struct drm_device *dev,
 			     struct drm_tile_group *tg);
 
@@ -1589,6 +1989,11 @@ void drm_mode_put_tile_group(struct drm_device *dev,
  * drm_connector_list_iter_begin(), drm_connector_list_iter_end() and
  * drm_connector_list_iter_next() respectively the convenience macro
  * drm_for_each_connector_iter().
+ *
+ * Note that the return value of drm_connector_list_iter_next() is only valid
+ * up to the next drm_connector_list_iter_next() or
+ * drm_connector_list_iter_end() call. If you want to use the connector later,
+ * then you need to grab your own reference first using drm_connector_get().
  */
 struct drm_connector_list_iter {
 /* private: */

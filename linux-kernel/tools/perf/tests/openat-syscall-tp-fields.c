@@ -14,6 +14,7 @@
 #include "util/mmap.h"
 #include <errno.h>
 #include <perf/mmap.h>
+#include "util/sample.h"
 
 #ifndef O_DIRECTORY
 #define O_DIRECTORY    00200000
@@ -22,7 +23,8 @@
 #define AT_FDCWD       -100
 #endif
 
-int test__syscall_openat_tp_fields(struct test *test __maybe_unused, int subtest __maybe_unused)
+static int test__syscall_openat_tp_fields(struct test_suite *test __maybe_unused,
+					  int subtest __maybe_unused)
 {
 	struct record_opts opts = {
 		.target = {
@@ -42,25 +44,25 @@ int test__syscall_openat_tp_fields(struct test *test __maybe_unused, int subtest
 	char sbuf[STRERR_BUFSIZE];
 
 	if (evlist == NULL) {
-		pr_debug("%s: perf_evlist__new\n", __func__);
+		pr_debug("%s: evlist__new\n", __func__);
 		goto out;
 	}
 
-	evsel = perf_evsel__newtp("syscalls", "sys_enter_openat");
+	evsel = evsel__newtp("syscalls", "sys_enter_openat");
 	if (IS_ERR(evsel)) {
-		pr_debug("%s: perf_evsel__newtp\n", __func__);
+		pr_debug("%s: evsel__newtp\n", __func__);
 		goto out_delete_evlist;
 	}
 
 	evlist__add(evlist, evsel);
 
-	err = perf_evlist__create_maps(evlist, &opts.target);
+	err = evlist__create_maps(evlist, &opts.target);
 	if (err < 0) {
-		pr_debug("%s: perf_evlist__create_maps\n", __func__);
+		pr_debug("%s: evlist__create_maps\n", __func__);
 		goto out_delete_evlist;
 	}
 
-	perf_evsel__config(evsel, &opts, NULL);
+	evsel__config(evsel, &opts, NULL);
 
 	perf_thread_map__set_pid(evlist->core.threads, 0, getpid());
 
@@ -108,13 +110,13 @@ int test__syscall_openat_tp_fields(struct test *test __maybe_unused, int subtest
 					continue;
 				}
 
-				err = perf_evsel__parse_sample(evsel, event, &sample);
+				err = evsel__parse_sample(evsel, event, &sample);
 				if (err) {
 					pr_debug("Can't parse sample, err = %d\n", err);
 					goto out_delete_evlist;
 				}
 
-				tp_flags = perf_evsel__intval(evsel, &sample, "flags");
+				tp_flags = evsel__intval(evsel, &sample, "flags");
 
 				if (flags != tp_flags) {
 					pr_debug("%s: Expected flags=%#x, got %#x\n",
@@ -142,3 +144,5 @@ out_delete_evlist:
 out:
 	return err;
 }
+
+DEFINE_SUITE("syscalls:sys_enter_openat event fields", syscall_openat_tp_fields);

@@ -8,6 +8,7 @@
 #include <linux/uaccess.h>
 #include <linux/slab.h>
 #include <linux/security.h>
+#include <linux/string_helpers.h>
 #include "common.h"
 
 /* String table for operation mode. */
@@ -173,16 +174,6 @@ static const char * const tomoyo_category_keywords
 static bool tomoyo_manage_by_non_root;
 
 /* Utility functions. */
-
-/**
- * tomoyo_yesno - Return "yes" or "no".
- *
- * @value: Bool value.
- */
-const char *tomoyo_yesno(const unsigned int value)
-{
-	return value ? "yes" : "no";
-}
 
 /**
  * tomoyo_addprintf - strncat()-like-snprintf().
@@ -498,7 +489,7 @@ static struct tomoyo_profile *tomoyo_assign_profile
 	ptr = ns->profile_ptr[profile];
 	if (ptr)
 		return ptr;
-	entry = kzalloc(sizeof(*entry), GFP_NOFS);
+	entry = kzalloc(sizeof(*entry), GFP_NOFS | __GFP_NOWARN);
 	if (mutex_lock_interruptible(&tomoyo_policy_lock))
 		goto out;
 	ptr = ns->profile_ptr[profile];
@@ -635,7 +626,7 @@ static int tomoyo_set_mode(char *name, const char *value,
 			if (strstr(value, tomoyo_mode[mode]))
 				/*
 				 * Update lower 3 bits in order to distinguish
-				 * 'config' from 'TOMOYO_CONFIG_USE_DEAFULT'.
+				 * 'config' from 'TOMOYO_CONFIG_USE_DEFAULT'.
 				 */
 				config = (config & ~7) | mode;
 		if (config != TOMOYO_CONFIG_USE_DEFAULT) {
@@ -730,8 +721,8 @@ static void tomoyo_print_config(struct tomoyo_io_buffer *head, const u8 config)
 {
 	tomoyo_io_printf(head, "={ mode=%s grant_log=%s reject_log=%s }\n",
 			 tomoyo_mode[config & 3],
-			 tomoyo_yesno(config & TOMOYO_CONFIG_WANT_GRANT_LOG),
-			 tomoyo_yesno(config & TOMOYO_CONFIG_WANT_REJECT_LOG));
+			 str_yes_no(config & TOMOYO_CONFIG_WANT_GRANT_LOG),
+			 str_yes_no(config & TOMOYO_CONFIG_WANT_REJECT_LOG));
 }
 
 /**
@@ -1025,7 +1016,7 @@ static bool tomoyo_select_domain(struct tomoyo_io_buffer *head,
 	if (domain)
 		head->r.domain = &domain->list;
 	else
-		head->r.eof = 1;
+		head->r.eof = true;
 	tomoyo_io_printf(head, "# select %s\n", data);
 	if (domain && domain->is_deleted)
 		tomoyo_io_printf(head, "# This is a deleted domain.\n");
@@ -1240,7 +1231,7 @@ static bool tomoyo_print_condition(struct tomoyo_io_buffer *head,
 			tomoyo_set_space(head);
 			tomoyo_set_string(head, cond->transit->name);
 		}
-		/* fall through */
+		fallthrough;
 	case 1:
 		{
 			const u16 condc = cond->condc;
@@ -1345,17 +1336,17 @@ static bool tomoyo_print_condition(struct tomoyo_io_buffer *head,
 			}
 		}
 		head->r.cond_step++;
-		/* fall through */
+		fallthrough;
 	case 2:
 		if (!tomoyo_flush(head))
 			break;
 		head->r.cond_step++;
-		/* fall through */
+		fallthrough;
 	case 3:
 		if (cond->grant_log != TOMOYO_GRANTLOG_AUTO)
 			tomoyo_io_printf(head, " grant_log=%s",
-					 tomoyo_yesno(cond->grant_log ==
-						      TOMOYO_GRANTLOG_YES));
+					 str_yes_no(cond->grant_log ==
+						    TOMOYO_GRANTLOG_YES));
 		tomoyo_set_lf(head);
 		return true;
 	}
@@ -1639,7 +1630,7 @@ static void tomoyo_read_domain(struct tomoyo_io_buffer *head)
 					tomoyo_set_string(head, tomoyo_dif[i]);
 			head->r.index = 0;
 			head->r.step++;
-			/* fall through */
+			fallthrough;
 		case 1:
 			while (head->r.index < TOMOYO_MAX_ACL_GROUPS) {
 				i = head->r.index++;
@@ -1652,14 +1643,14 @@ static void tomoyo_read_domain(struct tomoyo_io_buffer *head)
 			head->r.index = 0;
 			head->r.step++;
 			tomoyo_set_lf(head);
-			/* fall through */
+			fallthrough;
 		case 2:
 			if (!tomoyo_read_domain2(head, &domain->acl_info_list))
 				return;
 			head->r.step++;
 			if (!tomoyo_set_lf(head))
 				return;
-			/* fall through */
+			fallthrough;
 		case 3:
 			head->r.step = 0;
 			if (head->r.print_this_domain_only)
@@ -2066,7 +2057,7 @@ int tomoyo_supervisor(struct tomoyo_request_info *r, const char *fmt, ...)
 	bool quota_exceeded = false;
 
 	va_start(args, fmt);
-	len = vsnprintf((char *) &len, 1, fmt, args) + 1;
+	len = vsnprintf(NULL, 0, fmt, args) + 1;
 	va_end(args);
 	/* Write /sys/kernel/security/tomoyo/audit. */
 	va_start(args, fmt);
@@ -2088,7 +2079,7 @@ int tomoyo_supervisor(struct tomoyo_request_info *r, const char *fmt, ...)
 		/* Check max_learning_entry parameter. */
 		if (tomoyo_domain_quota_is_ok(r))
 			break;
-		/* fall through */
+		fallthrough;
 	default:
 		return 0;
 	}
@@ -2574,7 +2565,7 @@ static inline bool tomoyo_has_more_namespace(struct tomoyo_io_buffer *head)
  * tomoyo_read_control - read() for /sys/kernel/security/tomoyo/ interface.
  *
  * @head:       Pointer to "struct tomoyo_io_buffer".
- * @buffer:     Poiner to buffer to write to.
+ * @buffer:     Pointer to buffer to write to.
  * @buffer_len: Size of @buffer.
  *
  * Returns bytes read on success, negative value otherwise.
@@ -2608,7 +2599,7 @@ ssize_t tomoyo_read_control(struct tomoyo_io_buffer *head, char __user *buffer,
 /**
  * tomoyo_parse_policy - Parse a policy line.
  *
- * @head: Poiter to "struct tomoyo_io_buffer".
+ * @head: Pointer to "struct tomoyo_io_buffer".
  * @line: Line to parse.
  *
  * Returns 0 on success, negative value otherwise.
@@ -2662,8 +2653,6 @@ ssize_t tomoyo_write_control(struct tomoyo_io_buffer *head,
 
 	if (!head->write)
 		return -EINVAL;
-	if (!access_ok(buffer, buffer_len))
-		return -EFAULT;
 	if (mutex_lock_interruptible(&head->io_sem))
 		return -EINTR;
 	head->read_user_buf_avail = 0;
@@ -2712,13 +2701,13 @@ ssize_t tomoyo_write_control(struct tomoyo_io_buffer *head,
 		case TOMOYO_DOMAINPOLICY:
 			if (tomoyo_select_domain(head, cp0))
 				continue;
-			/* fall through */
+			fallthrough;
 		case TOMOYO_EXCEPTIONPOLICY:
 			if (!strcmp(cp0, "select transition_only")) {
 				head->r.print_transition_related_only = true;
 				continue;
 			}
-			/* fall through */
+			fallthrough;
 		default:
 			if (!tomoyo_manager()) {
 				error = -EPERM;

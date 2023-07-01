@@ -6,6 +6,7 @@
 #include <time.h>
 #include <stdlib.h>
 #include <linux/zalloc.h>
+#include <linux/err.h>
 #include <perf/cpumap.h>
 #include <perf/evlist.h>
 #include <perf/mmap.h>
@@ -18,6 +19,8 @@
 #include "record.h"
 #include "tests.h"
 #include "util/mmap.h"
+#include "util/sample.h"
+#include "pmu.h"
 
 static int spin_sleep(void)
 {
@@ -128,15 +131,15 @@ static int process_sample_event(struct evlist *evlist,
 	pid_t next_tid, prev_tid;
 	int cpu, err;
 
-	if (perf_evlist__parse_sample(evlist, event, &sample)) {
-		pr_debug("perf_evlist__parse_sample failed\n");
+	if (evlist__parse_sample(evlist, event, &sample)) {
+		pr_debug("evlist__parse_sample failed\n");
 		return -1;
 	}
 
-	evsel = perf_evlist__id2evsel(evlist, sample.id);
+	evsel = evlist__id2evsel(evlist, sample.id);
 	if (evsel == switch_tracking->switch_evsel) {
-		next_tid = perf_evsel__intval(evsel, &sample, "next_pid");
-		prev_tid = perf_evsel__intval(evsel, &sample, "prev_pid");
+		next_tid = evsel__intval(evsel, &sample, "next_pid");
+		prev_tid = evsel__intval(evsel, &sample, "prev_pid");
 		cpu = sample.cpu;
 		pr_debug3("sched_switch: cpu: %d prev_tid %d next_tid %d\n",
 			  cpu, prev_tid, next_tid);
@@ -223,8 +226,8 @@ static int add_event(struct evlist *evlist, struct list_head *events,
 	node->event = event;
 	list_add(&node->list, events);
 
-	if (perf_evlist__parse_sample(evlist, event, &sample)) {
-		pr_debug("perf_evlist__parse_sample failed\n");
+	if (evlist__parse_sample(evlist, event, &sample)) {
+		pr_debug("evlist__parse_sample failed\n");
 		return -1;
 	}
 
@@ -320,9 +323,10 @@ out_free_nodes:
  * evsel->core.system_wide and evsel->tracking flags (respectively) with other events
  * sometimes enabled or disabled.
  */
-int test__switch_tracking(struct test *test __maybe_unused, int subtest __maybe_unused)
+static int test__switch_tracking(struct test_suite *test __maybe_unused, int subtest __maybe_unused)
 {
 	const char *sched_switch = "sched:sched_switch";
+	const char *cycles = "cycles:u";
 	struct switch_tracking switch_tracking = { .tids = NULL, };
 	struct record_opts opts = {
 		.mmap_pages	     = UINT_MAX,
@@ -362,7 +366,7 @@ int test__switch_tracking(struct test *test __maybe_unused, int subtest __maybe_
 	perf_evlist__set_maps(&evlist->core, cpus, threads);
 
 	/* First event */
-	err = parse_events(evlist, "cpu-clock:u", NULL);
+	err = parse_event(evlist, "cpu-clock:u");
 	if (err) {
 		pr_debug("Failed to parse event dummy:u\n");
 		goto out_err;
@@ -371,34 +375,38 @@ int test__switch_tracking(struct test *test __maybe_unused, int subtest __maybe_
 	cpu_clocks_evsel = evlist__last(evlist);
 
 	/* Second event */
-	err = parse_events(evlist, "cycles:u", NULL);
+	if (perf_pmu__has_hybrid()) {
+		cycles = "cpu_core/cycles/u";
+		err = parse_event(evlist, cycles);
+		if (err) {
+			cycles = "cpu_atom/cycles/u";
+			pr_debug("Trying %s\n", cycles);
+			err = parse_event(evlist, cycles);
+		}
+	} else {
+		err = parse_event(evlist, cycles);
+	}
 	if (err) {
-		pr_debug("Failed to parse event cycles:u\n");
+		pr_debug("Failed to parse event %s\n", cycles);
 		goto out_err;
 	}
 
 	cycles_evsel = evlist__last(evlist);
 
 	/* Third event */
-	if (!perf_evlist__can_select_event(evlist, sched_switch)) {
+	if (!evlist__can_select_event(evlist, sched_switch)) {
 		pr_debug("No sched_switch\n");
 		err = 0;
 		goto out;
 	}
 
-	err = parse_events(evlist, sched_switch, NULL);
-	if (err) {
-		pr_debug("Failed to parse event %s\n", sched_switch);
+	switch_evsel = evlist__add_sched_switch(evlist, true);
+	if (IS_ERR(switch_evsel)) {
+		err = PTR_ERR(switch_evsel);
+		pr_debug("Failed to create event %s\n", sched_switch);
 		goto out_err;
 	}
 
-	switch_evsel = evlist__last(evlist);
-
-	perf_evsel__set_sample_bit(switch_evsel, CPU);
-	perf_evsel__set_sample_bit(switch_evsel, TIME);
-
-	switch_evsel->core.system_wide = true;
-	switch_evsel->no_aux_samples = true;
 	switch_evsel->immediate = true;
 
 	/* Test moving an event to the front */
@@ -406,17 +414,17 @@ int test__switch_tracking(struct test *test __maybe_unused, int subtest __maybe_
 		pr_debug("cycles event already at front");
 		goto out_err;
 	}
-	perf_evlist__to_front(evlist, cycles_evsel);
+	evlist__to_front(evlist, cycles_evsel);
 	if (cycles_evsel != evlist__first(evlist)) {
 		pr_debug("Failed to move cycles event to front");
 		goto out_err;
 	}
 
-	perf_evsel__set_sample_bit(cycles_evsel, CPU);
-	perf_evsel__set_sample_bit(cycles_evsel, TIME);
+	evsel__set_sample_bit(cycles_evsel, CPU);
+	evsel__set_sample_bit(cycles_evsel, TIME);
 
 	/* Fourth event */
-	err = parse_events(evlist, "dummy:u", NULL);
+	err = parse_event(evlist, "dummy:u");
 	if (err) {
 		pr_debug("Failed to parse event dummy:u\n");
 		goto out_err;
@@ -424,15 +432,15 @@ int test__switch_tracking(struct test *test __maybe_unused, int subtest __maybe_
 
 	tracking_evsel = evlist__last(evlist);
 
-	perf_evlist__set_tracking_event(evlist, tracking_evsel);
+	evlist__set_tracking_event(evlist, tracking_evsel);
 
 	tracking_evsel->core.attr.freq = 0;
 	tracking_evsel->core.attr.sample_period = 1;
 
-	perf_evsel__set_sample_bit(tracking_evsel, TIME);
+	evsel__set_sample_bit(tracking_evsel, TIME);
 
 	/* Config events */
-	perf_evlist__config(evlist, &opts, NULL);
+	evlist__config(evlist, &opts, NULL);
 
 	/* Check moved event is still at the front */
 	if (cycles_evsel != evlist__first(evlist)) {
@@ -574,10 +582,9 @@ out:
 	if (evlist) {
 		evlist__disable(evlist);
 		evlist__delete(evlist);
-	} else {
-		perf_cpu_map__put(cpus);
-		perf_thread_map__put(threads);
 	}
+	perf_cpu_map__put(cpus);
+	perf_thread_map__put(threads);
 
 	return err;
 
@@ -585,3 +592,5 @@ out_err:
 	err = -1;
 	goto out;
 }
+
+DEFINE_SUITE("Track with sched_switch", switch_tracking);

@@ -98,7 +98,7 @@ struct ip_set_counter {
 
 struct ip_set_comment_rcu {
 	struct rcu_head rcu;
-	char str[0];
+	char str[];
 };
 
 struct ip_set_comment {
@@ -121,9 +121,8 @@ struct ip_set_ext {
 	u32 timeout;
 	u8 packets_op;
 	u8 bytes_op;
+	bool target;
 };
-
-struct ip_set;
 
 #define ext_timeout(e, s)	\
 ((unsigned long *)(((void *)(e)) + (s)->offset[IPSET_EXT_ID_TIMEOUT]))
@@ -187,7 +186,21 @@ struct ip_set_type_variant {
 	/* Return true if "b" set is the same as "a"
 	 * according to the create set parameters */
 	bool (*same_set)(const struct ip_set *a, const struct ip_set *b);
+	/* Region-locking is used */
+	bool region_lock;
 };
+
+struct ip_set_region {
+	spinlock_t lock;	/* Region lock */
+	size_t ext_size;	/* Size of the dynamic extensions */
+	u32 elements;		/* Number of elements vs timeout */
+};
+
+/* Max range where every element is added/deleted in one step */
+#define IPSET_MAX_RANGE		(1<<14)
+
+/* The max revision number supported by any set type + 1 */
+#define IPSET_REVISION_MAX	9
 
 /* The core set type structure */
 struct ip_set_type {
@@ -206,6 +219,8 @@ struct ip_set_type {
 	u8 family;
 	/* Type revisions */
 	u8 revision_min, revision_max;
+	/* Revision-specific supported (create) flags */
+	u8 create_flags[IPSET_REVISION_MAX+1];
 	/* Set features to control swapping */
 	u16 features;
 
@@ -500,8 +515,18 @@ ip_set_init_skbinfo(struct ip_set_skbinfo *skbinfo,
 	*skbinfo = ext->skbinfo;
 }
 
+static inline void
+nf_inet_addr_mask_inplace(union nf_inet_addr *a1,
+			  const union nf_inet_addr *mask)
+{
+	a1->all[0] &= mask->all[0];
+	a1->all[1] &= mask->all[1];
+	a1->all[2] &= mask->all[2];
+	a1->all[3] &= mask->all[3];
+}
+
 #define IP_SET_INIT_KEXT(skb, opt, set)			\
-	{ .bytes = (skb)->len, .packets = 1,		\
+	{ .bytes = (skb)->len, .packets = 1, .target = true,\
 	  .timeout = ip_set_adt_opt_timeout(opt, set) }
 
 #define IP_SET_INIT_UEXT(set)				\

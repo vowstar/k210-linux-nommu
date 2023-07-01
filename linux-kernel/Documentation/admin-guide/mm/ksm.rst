@@ -1,5 +1,3 @@
-.. _admin_guide_ksm:
-
 =======================
 Kernel Samepage Merging
 =======================
@@ -9,7 +7,7 @@ Overview
 
 KSM is a memory-saving de-duplication feature, enabled by CONFIG_KSM=y,
 added to the Linux kernel in 2.6.32.  See ``mm/ksm.c`` for its implementation,
-and http://lwn.net/Articles/306704/ and http://lwn.net/Articles/330589/
+and http://lwn.net/Articles/306704/ and https://lwn.net/Articles/330589/
 
 KSM was originally developed for use with KVM (where it was known as
 Kernel Shared Memory), to fit more virtual machines into physical memory,
@@ -52,7 +50,7 @@ with EAGAIN, but more probably arousing the Out-Of-Memory killer.
 If KSM is not configured into the running kernel, madvise MADV_MERGEABLE
 and MADV_UNMERGEABLE simply fail with EINVAL.  If the running kernel was
 built with CONFIG_KSM=y, those calls will normally succeed: even if the
-the KSM daemon is not currently running, MADV_MERGEABLE still registers
+KSM daemon is not currently running, MADV_MERGEABLE still registers
 the range for whenever the KSM daemon is started; even if the range
 cannot contain any pages which KSM could actually merge; even if
 MADV_UNMERGEABLE is applied to a range which was never MADV_MERGEABLE.
@@ -183,6 +181,60 @@ indicate poor use of madvise MADV_MERGEABLE.
 The maximum possible ``pages_sharing/pages_shared`` ratio is limited by the
 ``max_page_sharing`` tunable. To increase the ratio ``max_page_sharing`` must
 be increased accordingly.
+
+Monitoring KSM profit
+=====================
+
+KSM can save memory by merging identical pages, but also can consume
+additional memory, because it needs to generate a number of rmap_items to
+save each scanned page's brief rmap information. Some of these pages may
+be merged, but some may not be abled to be merged after being checked
+several times, which are unprofitable memory consumed.
+
+1) How to determine whether KSM save memory or consume memory in system-wide
+   range? Here is a simple approximate calculation for reference::
+
+	general_profit =~ pages_sharing * sizeof(page) - (all_rmap_items) *
+			  sizeof(rmap_item);
+
+   where all_rmap_items can be easily obtained by summing ``pages_sharing``,
+   ``pages_shared``, ``pages_unshared`` and ``pages_volatile``.
+
+2) The KSM profit inner a single process can be similarly obtained by the
+   following approximate calculation::
+
+	process_profit =~ ksm_merging_pages * sizeof(page) -
+			  ksm_rmap_items * sizeof(rmap_item).
+
+   where ksm_merging_pages is shown under the directory ``/proc/<pid>/``,
+   and ksm_rmap_items is shown in ``/proc/<pid>/ksm_stat``.
+
+From the perspective of application, a high ratio of ``ksm_rmap_items`` to
+``ksm_merging_pages`` means a bad madvise-applied policy, so developers or
+administrators have to rethink how to change madvise policy. Giving an example
+for reference, a page's size is usually 4K, and the rmap_item's size is
+separately 32B on 32-bit CPU architecture and 64B on 64-bit CPU architecture.
+so if the ``ksm_rmap_items/ksm_merging_pages`` ratio exceeds 64 on 64-bit CPU
+or exceeds 128 on 32-bit CPU, then the app's madvise policy should be dropped,
+because the ksm profit is approximately zero or negative.
+
+Monitoring KSM events
+=====================
+
+There are some counters in /proc/vmstat that may be used to monitor KSM events.
+KSM might help save memory, it's a tradeoff by may suffering delay on KSM COW
+or on swapping in copy. Those events could help users evaluate whether or how
+to use KSM. For example, if cow_ksm increases too fast, user may decrease the
+range of madvise(, , MADV_MERGEABLE).
+
+cow_ksm
+	is incremented every time a KSM page triggers copy on write (COW)
+	when users try to write to a KSM page, we have to make a copy.
+
+ksm_swpin_copy
+	is incremented every time a KSM page is copied when swapping in
+	note that KSM page might be copied when swapping in because do_swap_page()
+	cannot do all the locking needed to reconstitute a cross-anon_vma KSM page.
 
 --
 Izik Eidus,

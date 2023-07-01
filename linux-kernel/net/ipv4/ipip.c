@@ -242,6 +242,8 @@ static int ipip_tunnel_rcv(struct sk_buff *skb, u8 ipproto)
 			if (!tun_dst)
 				return 0;
 		}
+		skb_reset_mac_header(skb);
+
 		return ip_tunnel_rcv(tunnel, skb, tpi, tun_dst, log_ecn_error);
 	}
 
@@ -308,7 +310,7 @@ static netdev_tx_t ipip_tunnel_xmit(struct sk_buff *skb,
 tx_error:
 	kfree_skb(skb);
 
-	dev->stats.tx_errors++;
+	DEV_STATS_INC(dev, tx_errors);
 	return NETDEV_TX_OK;
 }
 
@@ -327,41 +329,29 @@ static bool ipip_tunnel_ioctl_verify_protocol(u8 ipproto)
 }
 
 static int
-ipip_tunnel_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+ipip_tunnel_ctl(struct net_device *dev, struct ip_tunnel_parm *p, int cmd)
 {
-	int err = 0;
-	struct ip_tunnel_parm p;
-
-	if (copy_from_user(&p, ifr->ifr_ifru.ifru_data, sizeof(p)))
-		return -EFAULT;
-
 	if (cmd == SIOCADDTUNNEL || cmd == SIOCCHGTUNNEL) {
-		if (p.iph.version != 4 ||
-		    !ipip_tunnel_ioctl_verify_protocol(p.iph.protocol) ||
-		    p.iph.ihl != 5 || (p.iph.frag_off&htons(~IP_DF)))
+		if (p->iph.version != 4 ||
+		    !ipip_tunnel_ioctl_verify_protocol(p->iph.protocol) ||
+		    p->iph.ihl != 5 || (p->iph.frag_off & htons(~IP_DF)))
 			return -EINVAL;
 	}
 
-	p.i_key = p.o_key = 0;
-	p.i_flags = p.o_flags = 0;
-	err = ip_tunnel_ioctl(dev, &p, cmd);
-	if (err)
-		return err;
-
-	if (copy_to_user(ifr->ifr_ifru.ifru_data, &p, sizeof(p)))
-		return -EFAULT;
-
-	return 0;
+	p->i_key = p->o_key = 0;
+	p->i_flags = p->o_flags = 0;
+	return ip_tunnel_ctl(dev, p, cmd);
 }
 
 static const struct net_device_ops ipip_netdev_ops = {
 	.ndo_init       = ipip_tunnel_init,
 	.ndo_uninit     = ip_tunnel_uninit,
 	.ndo_start_xmit	= ipip_tunnel_xmit,
-	.ndo_do_ioctl	= ipip_tunnel_ioctl,
+	.ndo_siocdevprivate = ip_tunnel_siocdevprivate,
 	.ndo_change_mtu = ip_tunnel_change_mtu,
-	.ndo_get_stats64 = ip_tunnel_get_stats64,
+	.ndo_get_stats64 = dev_get_tstats64,
 	.ndo_get_iflink = ip_tunnel_get_iflink,
+	.ndo_tunnel_ctl	= ipip_tunnel_ctl,
 };
 
 #define IPIP_FEATURES (NETIF_F_SG |		\
@@ -373,6 +363,7 @@ static const struct net_device_ops ipip_netdev_ops = {
 static void ipip_tunnel_setup(struct net_device *dev)
 {
 	dev->netdev_ops		= &ipip_netdev_ops;
+	dev->header_ops		= &ip_tunnel_header_ops;
 
 	dev->type		= ARPHRD_TUNNEL;
 	dev->flags		= IFF_NOARP;
@@ -389,7 +380,7 @@ static int ipip_tunnel_init(struct net_device *dev)
 {
 	struct ip_tunnel *tunnel = netdev_priv(dev);
 
-	memcpy(dev->dev_addr, &tunnel->parms.iph.saddr, 4);
+	__dev_addr_set(dev, &tunnel->parms.iph.saddr, 4);
 	memcpy(dev->broadcast, &tunnel->parms.iph.daddr, 4);
 
 	tunnel->tun_hlen = 0;
@@ -426,69 +417,13 @@ static void ipip_netlink_parms(struct nlattr *data[],
 	if (!data)
 		return;
 
-	if (data[IFLA_IPTUN_LINK])
-		parms->link = nla_get_u32(data[IFLA_IPTUN_LINK]);
-
-	if (data[IFLA_IPTUN_LOCAL])
-		parms->iph.saddr = nla_get_in_addr(data[IFLA_IPTUN_LOCAL]);
-
-	if (data[IFLA_IPTUN_REMOTE])
-		parms->iph.daddr = nla_get_in_addr(data[IFLA_IPTUN_REMOTE]);
-
-	if (data[IFLA_IPTUN_TTL]) {
-		parms->iph.ttl = nla_get_u8(data[IFLA_IPTUN_TTL]);
-		if (parms->iph.ttl)
-			parms->iph.frag_off = htons(IP_DF);
-	}
-
-	if (data[IFLA_IPTUN_TOS])
-		parms->iph.tos = nla_get_u8(data[IFLA_IPTUN_TOS]);
-
-	if (data[IFLA_IPTUN_PROTO])
-		parms->iph.protocol = nla_get_u8(data[IFLA_IPTUN_PROTO]);
-
-	if (!data[IFLA_IPTUN_PMTUDISC] || nla_get_u8(data[IFLA_IPTUN_PMTUDISC]))
-		parms->iph.frag_off = htons(IP_DF);
+	ip_tunnel_netlink_parms(data, parms);
 
 	if (data[IFLA_IPTUN_COLLECT_METADATA])
 		*collect_md = true;
 
 	if (data[IFLA_IPTUN_FWMARK])
 		*fwmark = nla_get_u32(data[IFLA_IPTUN_FWMARK]);
-}
-
-/* This function returns true when ENCAP attributes are present in the nl msg */
-static bool ipip_netlink_encap_parms(struct nlattr *data[],
-				     struct ip_tunnel_encap *ipencap)
-{
-	bool ret = false;
-
-	memset(ipencap, 0, sizeof(*ipencap));
-
-	if (!data)
-		return ret;
-
-	if (data[IFLA_IPTUN_ENCAP_TYPE]) {
-		ret = true;
-		ipencap->type = nla_get_u16(data[IFLA_IPTUN_ENCAP_TYPE]);
-	}
-
-	if (data[IFLA_IPTUN_ENCAP_FLAGS]) {
-		ret = true;
-		ipencap->flags = nla_get_u16(data[IFLA_IPTUN_ENCAP_FLAGS]);
-	}
-
-	if (data[IFLA_IPTUN_ENCAP_SPORT]) {
-		ret = true;
-		ipencap->sport = nla_get_be16(data[IFLA_IPTUN_ENCAP_SPORT]);
-	}
-
-	if (data[IFLA_IPTUN_ENCAP_DPORT]) {
-		ret = true;
-		ipencap->dport = nla_get_be16(data[IFLA_IPTUN_ENCAP_DPORT]);
-	}
-
-	return ret;
 }
 
 static int ipip_newlink(struct net *src_net, struct net_device *dev,
@@ -500,7 +435,7 @@ static int ipip_newlink(struct net *src_net, struct net_device *dev,
 	struct ip_tunnel_encap ipencap;
 	__u32 fwmark = 0;
 
-	if (ipip_netlink_encap_parms(data, &ipencap)) {
+	if (ip_tunnel_netlink_encap_parms(data, &ipencap)) {
 		int err = ip_tunnel_encap_setup(t, &ipencap);
 
 		if (err < 0)
@@ -521,7 +456,7 @@ static int ipip_changelink(struct net_device *dev, struct nlattr *tb[],
 	bool collect_md;
 	__u32 fwmark = t->fwmark;
 
-	if (ipip_netlink_encap_parms(data, &ipencap)) {
+	if (ip_tunnel_netlink_encap_parms(data, &ipencap)) {
 		int err = ip_tunnel_encap_setup(t, &ipencap);
 
 		if (err < 0)
@@ -698,7 +633,7 @@ out:
 
 rtnl_link_failed:
 #if IS_ENABLED(CONFIG_MPLS)
-	xfrm4_tunnel_deregister(&mplsip_handler, AF_INET);
+	xfrm4_tunnel_deregister(&mplsip_handler, AF_MPLS);
 xfrm_tunnel_mplsip_failed:
 
 #endif

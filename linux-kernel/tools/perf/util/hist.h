@@ -4,10 +4,10 @@
 
 #include <linux/rbtree.h>
 #include <linux/types.h>
-#include <pthread.h>
 #include "evsel.h"
 #include "color.h"
 #include "events_stats.h"
+#include "mutex.h"
 
 struct hist_entry;
 struct hist_entry_ops;
@@ -38,6 +38,7 @@ enum hist_column {
 	HISTC_THREAD,
 	HISTC_COMM,
 	HISTC_CGROUP_ID,
+	HISTC_CGROUP,
 	HISTC_PARENT,
 	HISTC_CPU,
 	HISTC_SOCKET,
@@ -52,9 +53,11 @@ enum hist_column {
 	HISTC_DSO_TO,
 	HISTC_LOCAL_WEIGHT,
 	HISTC_GLOBAL_WEIGHT,
+	HISTC_CODE_PAGE_SIZE,
 	HISTC_MEM_DADDR_SYMBOL,
 	HISTC_MEM_DADDR_DSO,
 	HISTC_MEM_PHYS_DADDR,
+	HISTC_MEM_DATA_PAGE_SIZE,
 	HISTC_MEM_LOCKED,
 	HISTC_MEM_TLB,
 	HISTC_MEM_LVL,
@@ -69,6 +72,14 @@ enum hist_column {
 	HISTC_SYM_SIZE,
 	HISTC_DSO_SIZE,
 	HISTC_SYMBOL_IPC,
+	HISTC_MEM_BLOCKED,
+	HISTC_LOCAL_INS_LAT,
+	HISTC_GLOBAL_INS_LAT,
+	HISTC_LOCAL_P_STAGE_CYC,
+	HISTC_GLOBAL_P_STAGE_CYC,
+	HISTC_ADDR_FROM,
+	HISTC_ADDR_TO,
+	HISTC_ADDR,
 	HISTC_NR_COLS, /* Last entry */
 };
 
@@ -88,8 +99,8 @@ struct hists {
 	const struct dso	*dso_filter;
 	const char		*uid_filter_str;
 	const char		*symbol_filter_str;
-	pthread_mutex_t		lock;
-	struct events_stats	stats;
+	struct mutex		lock;
+	struct hists_stats	stats;
 	u64			event_stream;
 	u16			col_len[HISTC_NR_COLS];
 	bool			has_callchains;
@@ -172,9 +183,9 @@ void hist_entry__delete(struct hist_entry *he);
 
 typedef int (*hists__resort_cb_t)(struct hist_entry *he, void *arg);
 
-void perf_evsel__output_resort_cb(struct evsel *evsel, struct ui_progress *prog,
-				  hists__resort_cb_t cb, void *cb_arg);
-void perf_evsel__output_resort(struct evsel *evsel, struct ui_progress *prog);
+void evsel__output_resort_cb(struct evsel *evsel, struct ui_progress *prog,
+			     hists__resort_cb_t cb, void *cb_arg);
+void evsel__output_resort(struct evsel *evsel, struct ui_progress *prog);
 void hists__output_resort(struct hists *hists, struct ui_progress *prog);
 void hists__output_resort_cb(struct hists *hists, struct ui_progress *prog,
 			     hists__resort_cb_t cb);
@@ -189,13 +200,15 @@ struct hist_entry *hists__get_entry(struct hists *hists, int idx);
 u64 hists__total_period(struct hists *hists);
 void hists__reset_stats(struct hists *hists);
 void hists__inc_stats(struct hists *hists, struct hist_entry *h);
-void hists__inc_nr_events(struct hists *hists, u32 type);
+void hists__inc_nr_events(struct hists *hists);
 void hists__inc_nr_samples(struct hists *hists, bool filtered);
+void hists__inc_nr_lost_samples(struct hists *hists, u32 lost);
 
 size_t hists__fprintf(struct hists *hists, bool show_header, int max_rows,
 		      int max_cols, float min_pcnt, FILE *fp,
 		      bool ignore_callchains);
-size_t perf_evlist__fprintf_nr_events(struct evlist *evlist, FILE *fp);
+size_t evlist__fprintf_nr_events(struct evlist *evlist, FILE *fp,
+				 bool skip_empty);
 
 void hists__filter_by_dso(struct hists *hists);
 void hists__filter_by_thread(struct hists *hists);
@@ -259,6 +272,7 @@ struct perf_hpp_fmt {
 		      struct hists *hists, int line, int *span);
 	int (*width)(struct perf_hpp_fmt *fmt, struct perf_hpp *hpp,
 		     struct hists *hists);
+	void (*init)(struct perf_hpp_fmt *fmt, struct hist_entry *he);
 	int (*color)(struct perf_hpp_fmt *fmt, struct perf_hpp *hpp,
 		     struct hist_entry *he);
 	int (*entry)(struct perf_hpp_fmt *fmt, struct perf_hpp *hpp,
@@ -361,7 +375,6 @@ enum {
 };
 
 void perf_hpp__init(void);
-void perf_hpp__column_unregister(struct perf_hpp_fmt *format);
 void perf_hpp__cancel_cumulate(void);
 void perf_hpp__setup_output_field(struct perf_hpp_list *list);
 void perf_hpp__reset_output_field(struct perf_hpp_list *list);
@@ -463,12 +476,9 @@ int hist_entry__tui_annotate(struct hist_entry *he, struct evsel *evsel,
 			     struct hist_browser_timer *hbt,
 			     struct annotation_options *annotation_opts);
 
-int perf_evlist__tui_browse_hists(struct evlist *evlist, const char *help,
-				  struct hist_browser_timer *hbt,
-				  float min_pcnt,
-				  struct perf_env *env,
-				  bool warn_lost_event,
-				  struct annotation_options *annotation_options);
+int evlist__tui_browse_hists(struct evlist *evlist, const char *help, struct hist_browser_timer *hbt,
+			     float min_pcnt, struct perf_env *env, bool warn_lost_event,
+			     struct annotation_options *annotation_options);
 
 int script_browse(const char *script_opt, struct evsel *evsel);
 
@@ -482,13 +492,13 @@ int block_hists_tui_browse(struct block_hist *bh, struct evsel *evsel,
 			   struct annotation_options *annotation_opts);
 #else
 static inline
-int perf_evlist__tui_browse_hists(struct evlist *evlist __maybe_unused,
-				  const char *help __maybe_unused,
-				  struct hist_browser_timer *hbt __maybe_unused,
-				  float min_pcnt __maybe_unused,
-				  struct perf_env *env __maybe_unused,
-				  bool warn_lost_event __maybe_unused,
-				  struct annotation_options *annotation_options __maybe_unused)
+int evlist__tui_browse_hists(struct evlist *evlist __maybe_unused,
+			     const char *help __maybe_unused,
+			     struct hist_browser_timer *hbt __maybe_unused,
+			     float min_pcnt __maybe_unused,
+			     struct perf_env *env __maybe_unused,
+			     bool warn_lost_event __maybe_unused,
+			     struct annotation_options *annotation_options __maybe_unused)
 {
 	return 0;
 }
@@ -536,6 +546,7 @@ static inline int block_hists_tui_browse(struct block_hist *bh __maybe_unused,
 #define K_LEFT  -1000
 #define K_RIGHT -2000
 #define K_SWITCH_INPUT_DATA -3000
+#define K_RELOAD -4000
 #endif
 
 unsigned int hists__sort_list_width(struct hists *hists);

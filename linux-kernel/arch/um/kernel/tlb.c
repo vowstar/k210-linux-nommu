@@ -7,7 +7,6 @@
 #include <linux/module.h>
 #include <linux/sched/signal.h>
 
-#include <asm/pgtable.h>
 #include <asm/tlbflush.h>
 #include <as-layout.h>
 #include <mem_user.h>
@@ -163,9 +162,6 @@ static int add_munmap(unsigned long addr, unsigned long len,
 	struct host_vm_op *last;
 	int ret = 0;
 
-	if ((addr >= STUB_START) && (addr < STUB_END))
-		return -EINVAL;
-
 	if (hvc->index != 0) {
 		last = &hvc->ops[hvc->index - 1];
 		if ((last->type == MUNMAP) &&
@@ -227,9 +223,6 @@ static inline int update_pte_range(pmd_t *pmd, unsigned long addr,
 
 	pte = pte_offset_kernel(pmd, addr);
 	do {
-		if ((addr >= STUB_START) && (addr < STUB_END))
-			continue;
-
 		r = pte_read(*pte);
 		w = pte_write(*pte);
 		x = pte_exec(*pte);
@@ -321,8 +314,8 @@ static inline int update_p4d_range(pgd_t *pgd, unsigned long addr,
 	return ret;
 }
 
-void fix_range_common(struct mm_struct *mm, unsigned long start_addr,
-		      unsigned long end_addr, int force)
+static void fix_range_common(struct mm_struct *mm, unsigned long start_addr,
+			     unsigned long end_addr, int force)
 {
 	pgd_t *pgd;
 	struct host_vm_change hvc;
@@ -347,12 +340,11 @@ void fix_range_common(struct mm_struct *mm, unsigned long start_addr,
 
 	/* This is not an else because ret is modified above */
 	if (ret) {
+		struct mm_id *mm_idp = &current->mm->context.id;
+
 		printk(KERN_ERR "fix_range_common: failed, killing current "
 		       "process: %d\n", task_tgid_vnr(current));
-		/* We are under mmap_sem, release it such that current can terminate */
-		up_write(&current->mm->mmap_sem);
-		force_sig(SIGKILL);
-		do_signal(&current->thread.regs);
+		mm_idp->kill = 1;
 	}
 }
 
@@ -473,6 +465,7 @@ void flush_tlb_page(struct vm_area_struct *vma, unsigned long address)
 	struct mm_id *mm_id;
 
 	address &= PAGE_MASK;
+
 	pgd = pgd_offset(mm, address);
 	if (!pgd_present(*pgd))
 		goto kill;
@@ -591,21 +584,21 @@ void flush_tlb_mm_range(struct mm_struct *mm, unsigned long start,
 
 void flush_tlb_mm(struct mm_struct *mm)
 {
-	struct vm_area_struct *vma = mm->mmap;
+	struct vm_area_struct *vma;
+	VMA_ITERATOR(vmi, mm, 0);
 
-	while (vma != NULL) {
+	for_each_vma(vmi, vma)
 		fix_range(mm, vma->vm_start, vma->vm_end, 0);
-		vma = vma->vm_next;
-	}
 }
 
 void force_flush_all(void)
 {
 	struct mm_struct *mm = current->mm;
-	struct vm_area_struct *vma = mm->mmap;
+	struct vm_area_struct *vma;
+	VMA_ITERATOR(vmi, mm, 0);
 
-	while (vma != NULL) {
+	mmap_read_lock(mm);
+	for_each_vma(vmi, vma)
 		fix_range(mm, vma->vm_start, vma->vm_end, 1);
-		vma = vma->vm_next;
-	}
+	mmap_read_unlock(mm);
 }

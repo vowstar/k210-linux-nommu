@@ -39,8 +39,7 @@ static bool __read_mostly sched_itmt_capable;
 unsigned int __read_mostly sysctl_sched_itmt_enabled;
 
 static int sched_itmt_update_handler(struct ctl_table *table, int write,
-				     void __user *buffer, size_t *lenp,
-				     loff_t *ppos)
+				     void *buffer, size_t *lenp, loff_t *ppos)
 {
 	unsigned int old_sysctl;
 	int ret;
@@ -199,7 +198,7 @@ void sched_set_itmt_core_prio(int prio, int core_cpu)
 		 * of the priority chain and only used when
 		 * all other high priority cpus are out of capacity.
 		 */
-		smt_prio = prio * smp_num_siblings / i;
+		smt_prio = prio * smp_num_siblings / (i * i);
 		per_cpu(sched_core_priority, cpu) = smt_prio;
 		i++;
 	}

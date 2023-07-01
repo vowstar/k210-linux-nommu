@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2013 Texas Instruments Incorporated - http://www.ti.com/
+ * Copyright (C) 2013 Texas Instruments Incorporated - https://www.ti.com/
  */
 
 /* AM43x EPOS EVM */
@@ -11,7 +11,7 @@
 #include <dt-bindings/pinctrl/am43xx.h>
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/pwm/pwm.h>
-#include <dt-bindings/sound/tlv320aic31xx-micbias.h>
+#include <dt-bindings/sound/tlv320aic31xx.h>
 
 / {
 	model = "TI AM43x EPOS EVM";
@@ -46,22 +46,6 @@
 		label = "lcd";
 
 		backlight = <&lcd_bl>;
-
-		panel-timing {
-			clock-frequency = <33000000>;
-			hactive = <800>;
-			vactive = <480>;
-			hfront-porch = <210>;
-			hback-porch = <16>;
-			hsync-len = <30>;
-			vback-porch = <10>;
-			vfront-porch = <22>;
-			vsync-len = <13>;
-			hsync-active = <0>;
-			vsync-active = <0>;
-			de-active = <1>;
-			pixelclk-active = <1>;
-		};
 
 		port {
 			lcd_in: endpoint {
@@ -566,36 +550,39 @@
 	cd-gpios = <&gpio0 6 GPIO_ACTIVE_LOW>;
 };
 
-&mac {
+&mac_sw {
 	pinctrl-names = "default", "sleep";
 	pinctrl-0 = <&cpsw_default>;
 	pinctrl-1 = <&cpsw_sleep>;
 	status = "okay";
-	slaves = <1>;
 };
 
-&davinci_mdio {
+&davinci_mdio_sw {
 	pinctrl-names = "default", "sleep";
 	pinctrl-0 = <&davinci_mdio_default>;
 	pinctrl-1 = <&davinci_mdio_sleep>;
-	status = "okay";
 
 	ethphy0: ethernet-phy@16 {
 		reg = <16>;
 	};
 };
 
-&cpsw_emac0 {
+&cpsw_port1 {
 	phy-handle = <&ethphy0>;
 	phy-mode = "rmii";
 	phys = <&phy_gmii_sel 1 1>;
+	ti,dual-emac-pvid = <1>;
+};
+
+&cpsw_port2 {
+	status = "disabled";
 };
 
 &i2c0 {
 	status = "okay";
 	pinctrl-names = "default";
 	pinctrl-0 = <&i2c0_pins>;
-	clock-frequency = <400000>;
+	clock-frequency = <100000>;
 
 	tps65218: tps65218@24 {
 		reg = <0x24>;
@@ -738,7 +725,7 @@
 	pinctrl-0 = <&display_mux_pins>;
 	status = "okay";
 
-	p1 {
+	sel-lcd-hdmi-hog {
 		/*
 		 * SelLCDorHDMI selects between display and audio paths:
 		 * Low: HDMI display with audio via HDMI
@@ -849,6 +836,10 @@
 	status = "okay";
 };
 
+&rtc_target {
+	status = "disabled";
+};
+
 &tscadc {
 	status = "okay";
 
@@ -869,7 +860,7 @@
 	pinctrl-names = "default", "sleep";
 	pinctrl-0 = <&spi0_pins_default>;
 	pinctrl-1 = <&spi0_pins_sleep>;
-	ti,pindir-d0-out-d1-in = <1>;
+	ti,pindir-d0-out-d1-in;
 };
 
 &spi1 {
@@ -877,7 +868,7 @@
 	pinctrl-names = "default", "sleep";
 	pinctrl-0 = <&spi1_pins_default>;
 	pinctrl-1 = <&spi1_pins_sleep>;
-	ti,pindir-d0-out-d1-in = <1>;
+	ti,pindir-d0-out-d1-in;
 };
 
 &usb2_phy1 {
@@ -911,7 +902,7 @@
 	pinctrl-1 = <&qspi1_pins_sleep>;
 
 	spi-max-frequency = <48000000>;
-	m25p80@0 {
+	flash@0 {
 		compatible = "mx66l51235l";
 		spi-max-frequency = <48000000>;
 		reg = <0>;
@@ -928,7 +919,7 @@
 		 */
 		partition@0 {
 			label = "QSPI.U_BOOT";
-			reg = <0x00000000 0x000080000>;
+			reg = <0x00000000 0x00080000>;
 		};
 		partition@1 {
 			label = "QSPI.U_BOOT.backup";
@@ -964,7 +955,7 @@
 };
 
 &dss {
-	status = "ok";
+	status = "okay";
 
 	pinctrl-names = "default";
 	pinctrl-0 = <&dss_pins>;
@@ -1026,4 +1017,12 @@
 
 &cpu {
 	cpu0-supply = <&dcdc2>;
+};
+
+&wkup_m3_ipc {
+	firmware-name = "am43x-evm-scale-data.bin";
+};
+
+&pruss1_mdio {
+	status = "disabled";
 };

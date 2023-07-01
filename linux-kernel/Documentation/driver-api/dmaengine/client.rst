@@ -5,7 +5,7 @@ DMA Engine API Guide
 Vinod Koul <vinod dot koul at intel.com>
 
 .. note:: For DMA Engine usage in async_tx please see:
-          ``Documentation/crypto/async-tx-api.txt``
+          ``Documentation/crypto/async-tx-api.rst``
 
 
 Below is a guide to device driver writers on how to use the Slave-DMA API of the
@@ -86,7 +86,9 @@ The details of these operations are:
   - interleaved_dma: This is common to Slave as well as M2M clients. For slave
     address of devices' fifo could be already known to the driver.
     Various types of operations could be expressed by setting
-    appropriate values to the 'dma_interleaved_template' members.
+    appropriate values to the 'dma_interleaved_template' members. Cyclic
+    interleaved DMA transfers are also possible if supported by the channel by
+    setting the DMA_PREP_REPEAT transfer flag.
 
   A non-NULL return of this transfer API represents a "descriptor" for
   the given transaction.
@@ -118,7 +120,9 @@ The details of these operations are:
 
   .. code-block:: c
 
-     nr_sg = dma_map_sg(chan->device->dev, sgl, sg_len);
+     struct device *dma_dev = dmaengine_get_dma_device(chan);
+
+     nr_sg = dma_map_sg(dma_dev, sgl, sg_len);
 	if (nr_sg == 0)
 		/* error */
 
@@ -151,8 +155,8 @@ The details of these operations are:
      Note that callbacks will always be invoked from the DMA
      engines tasklet, never from interrupt context.
 
-Optional: per descriptor metadata
----------------------------------
+  **Optional: per descriptor metadata**
+
   DMAengine provides two ways for metadata support.
 
   DESC_METADATA_CLIENT
@@ -171,7 +175,7 @@ Optional: per descriptor metadata
     driver can ask for the pointer, maximum size and the currently used size of
     the metadata and can directly update or read it.
 
-    Becasue the DMA driver manages the memory area containing the metadata,
+    Because the DMA driver manages the memory area containing the metadata,
     clients must make sure that they do not try to access or get the pointer
     after their transfer completion callback has run for the descriptor.
     If no completion callback has been defined for the transfer, then the
@@ -199,12 +203,15 @@ Optional: per descriptor metadata
   DESC_METADATA_CLIENT
 
     - DMA_MEM_TO_DEV / DEV_MEM_TO_MEM:
+
       1. prepare the descriptor (dmaengine_prep_*)
          construct the metadata in the client's buffer
       2. use dmaengine_desc_attach_metadata() to attach the buffer to the
          descriptor
       3. submit the transfer
+
     - DMA_DEV_TO_MEM:
+
       1. prepare the descriptor (dmaengine_prep_*)
       2. use dmaengine_desc_attach_metadata() to attach the buffer to the
          descriptor
@@ -215,6 +222,7 @@ Optional: per descriptor metadata
   DESC_METADATA_ENGINE
 
     - DMA_MEM_TO_DEV / DEV_MEM_TO_MEM:
+
       1. prepare the descriptor (dmaengine_prep_*)
       2. use dmaengine_desc_get_metadata_ptr() to get the pointer to the
          engine's metadata area
@@ -222,7 +230,9 @@ Optional: per descriptor metadata
       4. use dmaengine_desc_set_metadata_len()  to tell the DMA engine the
          amount of data the client has placed into the metadata buffer
       5. submit the transfer
+
     - DMA_DEV_TO_MEM:
+
       1. prepare the descriptor (dmaengine_prep_*)
       2. submit the transfer
       3. on transfer completion, use dmaengine_desc_get_metadata_ptr() to get
@@ -278,8 +288,8 @@ Optional: per descriptor metadata
 
       void dma_async_issue_pending(struct dma_chan *chan);
 
-Further APIs:
--------------
+Further APIs
+------------
 
 1. Terminate APIs
 

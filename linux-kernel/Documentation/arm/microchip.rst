@@ -137,6 +137,26 @@ the Microchip website: http://www.microchip.com.
 
           http://ww1.microchip.com/downloads/en/DeviceDoc/DS60001476B.pdf
 
+    * ARM Cortex-A7 based SoCs
+      - sama7g5 family
+
+        - sama7g51
+        - sama7g52
+        - sama7g53
+        - sama7g54 (device superset)
+
+          * Datasheet
+
+          Coming soon
+
+      - lan966 family
+        - lan9662
+        - lan9668
+
+          * Datasheet
+
+          Coming soon
+
     * ARM Cortex-M7 MCUs
       - sams70 family
 
@@ -192,7 +212,7 @@ Device Tree files and Device Tree bindings that apply to AT91 SoCs and boards ar
 considered as "Unstable". To be completely clear, any at91 binding can change at
 any time. So, be sure to use a Device Tree Binary and a Kernel Image generated from
 the same source tree.
-Please refer to the Documentation/devicetree/bindings/ABI.txt file for a
+Please refer to the Documentation/devicetree/bindings/ABI.rst file for a
 definition of a "Stable" binding/ABI.
 This statement will be removed by AT91 MAINTAINERS when appropriate.
 

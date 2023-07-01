@@ -3,9 +3,6 @@
 # Kernel configuration targets
 # These targets are used from top-level makefile
 
-PHONY += xconfig gconfig menuconfig config localmodconfig localyesconfig \
-	build_menuconfig build_nconfig build_gconfig build_xconfig
-
 ifdef KBUILD_KCONFIG
 Kconfig := $(KBUILD_KCONFIG)
 else
@@ -20,32 +17,37 @@ ifeq ($(quiet),silent_)
 silent := -s
 endif
 
+export KCONFIG_DEFCONFIG_LIST :=
+ifndef cross_compiling
+kernel-release := $(shell uname -r)
+KCONFIG_DEFCONFIG_LIST += \
+	/lib/modules/$(kernel-release)/.config \
+	/etc/kernel-config \
+	/boot/config-$(kernel-release)
+endif
+KCONFIG_DEFCONFIG_LIST += arch/$(SRCARCH)/configs/$(KBUILD_DEFCONFIG)
+
 # We need this, in case the user has it in its environment
 unexport CONFIG_
 
-xconfig: $(obj)/qconf
-	$< $(silent) $(Kconfig)
+config-prog	:= conf
+menuconfig-prog	:= mconf
+nconfig-prog	:= nconf
+gconfig-prog	:= gconf
+xconfig-prog	:= qconf
 
-gconfig: $(obj)/gconf
-	$< $(silent) $(Kconfig)
+define config_rule
+PHONY += $(1)
+$(1): $(obj)/$($(1)-prog)
+	$(Q)$$< $(silent) $(Kconfig)
 
-menuconfig: $(obj)/mconf
-	$< $(silent) $(Kconfig)
+PHONY += build_$(1)
+build_$(1): $(obj)/$($(1)-prog)
+endef
 
-config: $(obj)/conf
-	$< $(silent) --oldaskconfig $(Kconfig)
+$(foreach c, config menuconfig nconfig gconfig xconfig, $(eval $(call config_rule,$(c))))
 
-nconfig: $(obj)/nconf
-	$< $(silent) $(Kconfig)
-
-build_menuconfig: $(obj)/mconf
-
-build_nconfig: $(obj)/nconf
-
-build_gconfig: $(obj)/gconf
-
-build_xconfig: $(obj)/qconf
-
+PHONY += localmodconfig localyesconfig
 localyesconfig localmodconfig: $(obj)/conf
 	$(Q)$(PERL) $(srctree)/$(src)/streamline_config.pl --$@ $(srctree) $(Kconfig) > .tmp.config
 	$(Q)if [ -f .config ]; then 				\
@@ -67,17 +69,17 @@ localyesconfig localmodconfig: $(obj)/conf
 #  deprecated for external use
 simple-targets := oldconfig allnoconfig allyesconfig allmodconfig \
 	alldefconfig randconfig listnewconfig olddefconfig syncconfig \
-	helpnewconfig yes2modconfig mod2yesconfig
+	helpnewconfig yes2modconfig mod2yesconfig mod2noconfig
 
 PHONY += $(simple-targets)
 
 $(simple-targets): $(obj)/conf
-	$< $(silent) --$@ $(Kconfig)
+	$(Q)$< $(silent) --$@ $(Kconfig)
 
 PHONY += savedefconfig defconfig
 
 savedefconfig: $(obj)/conf
-	$< $(silent) --$@=defconfig $(Kconfig)
+	$(Q)$< $(silent) --$@=defconfig $(Kconfig)
 
 defconfig: $(obj)/conf
 ifneq ($(wildcard $(srctree)/arch/$(SRCARCH)/configs/$(KBUILD_DEFCONFIG)),)
@@ -98,22 +100,15 @@ configfiles=$(wildcard $(srctree)/kernel/configs/$@ $(srctree)/arch/$(SRCARCH)/c
 	$(Q)$(CONFIG_SHELL) $(srctree)/scripts/kconfig/merge_config.sh -m .config $(configfiles)
 	$(Q)$(MAKE) -f $(srctree)/Makefile olddefconfig
 
-PHONY += kvmconfig
-kvmconfig: kvm_guest.config
-	@:
-
-PHONY += xenconfig
-xenconfig: xen.config
-	@:
-
 PHONY += tinyconfig
 tinyconfig:
-	$(Q)$(MAKE) -f $(srctree)/Makefile allnoconfig tiny.config
+	$(Q)KCONFIG_ALLCONFIG=kernel/configs/tiny-base.config $(MAKE) -f $(srctree)/Makefile allnoconfig
+	$(Q)$(MAKE) -f $(srctree)/Makefile tiny.config
 
 # CHECK: -o cache_dir=<path> working?
 PHONY += testconfig
 testconfig: $(obj)/conf
-	$(PYTHON3) -B -m pytest $(srctree)/$(src)/tests \
+	$(Q)$(PYTHON3) -B -m pytest $(srctree)/$(src)/tests \
 	-o cache_dir=$(abspath $(obj)/tests/.cache) \
 	$(if $(findstring 1,$(KBUILD_VERBOSE)),--capture=no)
 clean-files += tests/.cache
@@ -127,7 +122,9 @@ help:
 	@echo  '  gconfig	  - Update current config utilising a GTK+ based front-end'
 	@echo  '  oldconfig	  - Update current config utilising a provided .config as base'
 	@echo  '  localmodconfig  - Update current config disabling modules not loaded'
+	@echo  '                    except those preserved by LMC_KEEP environment variable'
 	@echo  '  localyesconfig  - Update current config converting local mods to core'
+	@echo  '                    except those preserved by LMC_KEEP environment variable'
 	@echo  '  defconfig	  - New config with default from ARCH supplied defconfig'
 	@echo  '  savedefconfig   - Save current config as ./defconfig (minimal config)'
 	@echo  '  allnoconfig	  - New config where all options are answered with no'
@@ -137,20 +134,18 @@ help:
 	@echo  '  randconfig	  - New config with random answer to all options'
 	@echo  '  yes2modconfig	  - Change answers from yes to mod if possible'
 	@echo  '  mod2yesconfig	  - Change answers from mod to yes if possible'
+	@echo  '  mod2noconfig	  - Change answers from mod to no if possible'
 	@echo  '  listnewconfig   - List new options'
 	@echo  '  helpnewconfig   - List new options and help text'
 	@echo  '  olddefconfig	  - Same as oldconfig but sets new symbols to their'
 	@echo  '                    default value without prompting'
-	@echo  '  kvmconfig	  - Enable additional options for kvm guest kernel support'
-	@echo  '  xenconfig       - Enable additional options for xen dom0 and guest kernel'
-	@echo  '                    support'
 	@echo  '  tinyconfig	  - Configure the tiniest possible kernel'
 	@echo  '  testconfig	  - Run Kconfig unit tests (requires python3 and pytest)'
 
 # ===========================================================================
 # object files used by all kconfig flavours
-common-objs	:= confdata.o expr.o lexer.lex.o parser.tab.o preprocess.o \
-		   symbol.o util.o
+common-objs	:= confdata.o expr.o lexer.lex.o menu.o parser.tab.o \
+		   preprocess.o symbol.o util.o
 
 $(obj)/lexer.lex.o: $(obj)/parser.tab.h
 HOSTCFLAGS_lexer.lex.o	:= -I $(srctree)/$(src)
@@ -164,11 +159,12 @@ conf-objs	:= conf.o $(common-objs)
 hostprogs	+= nconf
 nconf-objs	:= nconf.o nconf.gui.o $(common-objs)
 
-HOSTLDLIBS_nconf	= $(shell . $(obj)/nconf-cfg && echo $$libs)
-HOSTCFLAGS_nconf.o	= $(shell . $(obj)/nconf-cfg && echo $$cflags)
-HOSTCFLAGS_nconf.gui.o	= $(shell . $(obj)/nconf-cfg && echo $$cflags)
+HOSTLDLIBS_nconf       = $(call read-file, $(obj)/nconf-libs)
+HOSTCFLAGS_nconf.o     = $(call read-file, $(obj)/nconf-cflags)
+HOSTCFLAGS_nconf.gui.o = $(call read-file, $(obj)/nconf-cflags)
 
-$(obj)/nconf.o $(obj)/nconf.gui.o: $(obj)/nconf-cfg
+$(obj)/nconf: | $(obj)/nconf-libs
+$(obj)/nconf.o $(obj)/nconf.gui.o: | $(obj)/nconf-cflags
 
 # mconf: Used for the menuconfig target based on lxdialog
 hostprogs	+= mconf
@@ -176,41 +172,46 @@ lxdialog	:= $(addprefix lxdialog/, \
 		     checklist.o inputbox.o menubox.o textbox.o util.o yesno.o)
 mconf-objs	:= mconf.o $(lxdialog) $(common-objs)
 
-HOSTLDLIBS_mconf = $(shell . $(obj)/mconf-cfg && echo $$libs)
+HOSTLDLIBS_mconf = $(call read-file, $(obj)/mconf-libs)
 $(foreach f, mconf.o $(lxdialog), \
-  $(eval HOSTCFLAGS_$f = $$(shell . $(obj)/mconf-cfg && echo $$$$cflags)))
+  $(eval HOSTCFLAGS_$f = $$(call read-file, $(obj)/mconf-cflags)))
 
-$(addprefix $(obj)/, mconf.o $(lxdialog)): $(obj)/mconf-cfg
+$(obj)/mconf: | $(obj)/mconf-libs
+$(addprefix $(obj)/, mconf.o $(lxdialog)): | $(obj)/mconf-cflags
 
 # qconf: Used for the xconfig target based on Qt
 hostprogs	+= qconf
-qconf-cxxobjs	:= qconf.o
+qconf-cxxobjs	:= qconf.o qconf-moc.o
 qconf-objs	:= images.o $(common-objs)
 
-HOSTLDLIBS_qconf	= $(shell . $(obj)/qconf-cfg && echo $$libs)
-HOSTCXXFLAGS_qconf.o	= $(shell . $(obj)/qconf-cfg && echo $$cflags)
-
-$(obj)/qconf.o: $(obj)/qconf-cfg $(obj)/qconf.moc
+HOSTLDLIBS_qconf         = $(call read-file, $(obj)/qconf-libs)
+HOSTCXXFLAGS_qconf.o     = -std=c++11 -fPIC $(call read-file, $(obj)/qconf-cflags)
+HOSTCXXFLAGS_qconf-moc.o = -std=c++11 -fPIC $(call read-file, $(obj)/qconf-cflags)
+$(obj)/qconf: | $(obj)/qconf-libs
+$(obj)/qconf.o $(obj)/qconf-moc.o: | $(obj)/qconf-cflags
 
 quiet_cmd_moc = MOC     $@
-      cmd_moc = $(shell . $(obj)/qconf-cfg && echo $$moc) -i $< -o $@
+      cmd_moc = $(call read-file, $(obj)/qconf-bin)/moc $< -o $@
 
-$(obj)/%.moc: $(src)/%.h $(obj)/qconf-cfg
-	$(call cmd,moc)
+$(obj)/qconf-moc.cc: $(src)/qconf.h FORCE | $(obj)/qconf-bin
+	$(call if_changed,moc)
+
+targets += qconf-moc.cc
 
 # gconf: Used for the gconfig target based on GTK+
 hostprogs	+= gconf
 gconf-objs	:= gconf.o images.o $(common-objs)
 
-HOSTLDLIBS_gconf    = $(shell . $(obj)/gconf-cfg && echo $$libs)
-HOSTCFLAGS_gconf.o  = $(shell . $(obj)/gconf-cfg && echo $$cflags)
+HOSTLDLIBS_gconf   = $(call read-file, $(obj)/gconf-libs)
+HOSTCFLAGS_gconf.o = $(call read-file, $(obj)/gconf-cflags)
 
-$(obj)/gconf.o: $(obj)/gconf-cfg
+$(obj)/gconf: | $(obj)/gconf-libs
+$(obj)/gconf.o: | $(obj)/gconf-cflags
 
 # check if necessary packages are available, and configure build flags
-filechk_conf_cfg = $(CONFIG_SHELL) $<
+cmd_conf_cfg = $< $(addprefix $(obj)/$*conf-, cflags libs bin); touch $(obj)/$*conf-bin
 
-$(obj)/%conf-cfg: $(src)/%conf-cfg.sh FORCE
-	$(call filechk,conf_cfg)
+$(obj)/%conf-cflags $(obj)/%conf-libs $(obj)/%conf-bin: $(src)/%conf-cfg.sh
+	$(call cmd,conf_cfg)
 
-clean-files += *conf-cfg
+clean-files += *conf-cflags *conf-libs *conf-bin

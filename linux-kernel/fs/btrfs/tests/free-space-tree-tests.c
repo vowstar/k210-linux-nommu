@@ -10,6 +10,7 @@
 #include "../free-space-tree.h"
 #include "../transaction.h"
 #include "../block-group.h"
+#include "../accessors.h"
 
 struct free_space_extent {
 	u64 start;
@@ -60,8 +61,6 @@ static int __check_free_space_extents(struct btrfs_trans_handle *trans,
 				if (prev_bit == 0 && bit == 1) {
 					extent_start = offset;
 				} else if (prev_bit == 1 && bit == 0) {
-					if (i >= num_extents)
-						goto invalid;
 					if (i >= num_extents ||
 					    extent_start != extents[i].start ||
 					    offset - extent_start != extents[i].length)
@@ -448,7 +447,10 @@ static int run_test(test_func_t test_func, int bitmaps, u32 sectorsize,
 
 	btrfs_set_super_compat_ro_flags(root->fs_info->super_copy,
 					BTRFS_FEATURE_COMPAT_RO_FREE_SPACE_TREE);
-	root->fs_info->free_space_root = root;
+	root->root_key.objectid = BTRFS_FREE_SPACE_TREE_OBJECTID;
+	root->root_key.type = BTRFS_ROOT_ITEM_KEY;
+	root->root_key.offset = 0;
+	btrfs_global_root_insert(root);
 	root->fs_info->tree_root = root;
 
 	root->node = alloc_test_extent_buffer(root->fs_info, nodesize);
@@ -469,7 +471,7 @@ static int run_test(test_func_t test_func, int bitmaps, u32 sectorsize,
 	}
 	cache->bitmap_low_thresh = 0;
 	cache->bitmap_high_thresh = (u32)-1;
-	cache->needs_free_space = 1;
+	set_bit(BLOCK_GROUP_FLAG_NEEDS_FREE_SPACE, &cache->runtime_flags);
 	cache->fs_info = root->fs_info;
 
 	btrfs_init_dummy_trans(&trans, root->fs_info);

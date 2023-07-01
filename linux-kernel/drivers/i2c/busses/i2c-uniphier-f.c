@@ -73,8 +73,6 @@
 #define UNIPHIER_FI2C_BYTE_WISE		BIT(3)
 #define UNIPHIER_FI2C_DEFER_STOP_COMP	BIT(4)
 
-#define UNIPHIER_FI2C_DEFAULT_SPEED	100000
-#define UNIPHIER_FI2C_MAX_SPEED		400000
 #define UNIPHIER_FI2C_FIFO_SIZE		8
 
 struct uniphier_fi2c_priv {
@@ -531,15 +529,13 @@ static int uniphier_fi2c_probe(struct platform_device *pdev)
 		return PTR_ERR(priv->membase);
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		dev_err(dev, "failed to get IRQ number\n");
+	if (irq < 0)
 		return irq;
-	}
 
 	if (of_property_read_u32(dev->of_node, "clock-frequency", &bus_speed))
-		bus_speed = UNIPHIER_FI2C_DEFAULT_SPEED;
+		bus_speed = I2C_MAX_STANDARD_MODE_FREQ;
 
-	if (!bus_speed || bus_speed > UNIPHIER_FI2C_MAX_SPEED) {
+	if (!bus_speed || bus_speed > I2C_MAX_FAST_MODE_FREQ) {
 		dev_err(dev, "invalid clock-frequency %d\n", bus_speed);
 		return -EINVAL;
 	}
@@ -568,7 +564,7 @@ static int uniphier_fi2c_probe(struct platform_device *pdev)
 	priv->adap.algo = &uniphier_fi2c_algo;
 	priv->adap.dev.parent = dev;
 	priv->adap.dev.of_node = dev->of_node;
-	strlcpy(priv->adap.name, "UniPhier FI2C", sizeof(priv->adap.name));
+	strscpy(priv->adap.name, "UniPhier FI2C", sizeof(priv->adap.name));
 	priv->adap.bus_recovery_info = &uniphier_fi2c_bus_recovery_info;
 	i2c_set_adapdata(&priv->adap, priv);
 	platform_set_drvdata(pdev, priv);

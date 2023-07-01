@@ -253,13 +253,13 @@ static void au1xmmc_finish_request(struct au1xmmc_host *host)
 	mmc_request_done(host->mmc, mrq);
 }
 
-static void au1xmmc_tasklet_finish(unsigned long param)
+static void au1xmmc_tasklet_finish(struct tasklet_struct *t)
 {
-	struct au1xmmc_host *host = (struct au1xmmc_host *) param;
+	struct au1xmmc_host *host = from_tasklet(host, t, finish_task);
 	au1xmmc_finish_request(host);
 }
 
-static int au1xmmc_send_command(struct au1xmmc_host *host, int wait,
+static int au1xmmc_send_command(struct au1xmmc_host *host,
 				struct mmc_command *cmd, struct mmc_data *data)
 {
 	u32 mmccmd = (cmd->opcode << SD_CMD_CI_SHIFT);
@@ -302,28 +302,12 @@ static int au1xmmc_send_command(struct au1xmmc_host *host, int wait,
 	__raw_writel(cmd->arg, HOST_CMDARG(host));
 	wmb(); /* drain writebuffer */
 
-	if (wait)
-		IRQ_OFF(host, SD_CONFIG_CR);
-
 	__raw_writel((mmccmd | SD_CMD_GO), HOST_CMD(host));
 	wmb(); /* drain writebuffer */
 
 	/* Wait for the command to go on the line */
 	while (__raw_readl(HOST_CMD(host)) & SD_CMD_GO)
 		/* nop */;
-
-	/* Wait for the command to come back */
-	if (wait) {
-		u32 status = __raw_readl(HOST_STATUS(host));
-
-		while (!(status & SD_STATUS_CR))
-			status = __raw_readl(HOST_STATUS(host));
-
-		/* Clear the CR status */
-		__raw_writel(SD_STATUS_CR, HOST_STATUS(host));
-
-		IRQ_ON(host, SD_CONFIG_CR);
-	}
 
 	return 0;
 }
@@ -379,9 +363,9 @@ static void au1xmmc_data_complete(struct au1xmmc_host *host, u32 status)
 	au1xmmc_finish_request(host);
 }
 
-static void au1xmmc_tasklet_data(unsigned long param)
+static void au1xmmc_tasklet_data(struct tasklet_struct *t)
 {
-	struct au1xmmc_host *host = (struct au1xmmc_host *)param;
+	struct au1xmmc_host *host = from_tasklet(host, t, data_task);
 
 	u32 status = __raw_readl(HOST_STATUS(host));
 	au1xmmc_data_complete(host, status);
@@ -404,7 +388,7 @@ static void au1xmmc_send_pio(struct au1xmmc_host *host)
 
 	/* This is the pointer to the data buffer */
 	sg = &data->sg[host->pio.index];
-	sg_ptr = kmap_atomic(sg_page(sg)) + sg->offset + host->pio.offset;
+	sg_ptr = kmap_local_page(sg_page(sg)) + sg->offset + host->pio.offset;
 
 	/* This is the space left inside the buffer */
 	sg_len = data->sg[host->pio.index].length - host->pio.offset;
@@ -425,7 +409,7 @@ static void au1xmmc_send_pio(struct au1xmmc_host *host)
 		__raw_writel((unsigned long)val, HOST_TXPORT(host));
 		wmb(); /* drain writebuffer */
 	}
-	kunmap_atomic(sg_ptr);
+	kunmap_local(sg_ptr);
 
 	host->pio.len -= count;
 	host->pio.offset += count;
@@ -462,7 +446,7 @@ static void au1xmmc_receive_pio(struct au1xmmc_host *host)
 
 	if (host->pio.index < host->dma.len) {
 		sg = &data->sg[host->pio.index];
-		sg_ptr = kmap_atomic(sg_page(sg)) + sg->offset + host->pio.offset;
+		sg_ptr = kmap_local_page(sg_page(sg)) + sg->offset + host->pio.offset;
 
 		/* This is the space left inside the buffer */
 		sg_len = sg_dma_len(&data->sg[host->pio.index]) - host->pio.offset;
@@ -504,7 +488,7 @@ static void au1xmmc_receive_pio(struct au1xmmc_host *host)
 			sg_ptr[count] = (unsigned char)(val & 0xFF);
 	}
 	if (sg_ptr)
-		kunmap_atomic(sg_ptr);
+		kunmap_local(sg_ptr);
 
 	host->pio.len -= count;
 	host->pio.offset += count;
@@ -711,7 +695,7 @@ static void au1xmmc_request(struct mmc_host* mmc, struct mmc_request* mrq)
 	}
 
 	if (!ret)
-		ret = au1xmmc_send_command(host, 0, mrq->cmd, mrq->data);
+		ret = au1xmmc_send_command(host, mrq->cmd, mrq->data);
 
 	if (ret) {
 		mrq->cmd->error = ret;
@@ -985,8 +969,10 @@ static int au1xmmc_probe(struct platform_device *pdev)
 	}
 
 	host->irq = platform_get_irq(pdev, 0);
-	if (host->irq < 0)
+	if (host->irq < 0) {
+		ret = host->irq;
 		goto out3;
+	}
 
 	mmc->ops = &au1xmmc_ops;
 
@@ -1053,11 +1039,9 @@ static int au1xmmc_probe(struct platform_device *pdev)
 	if (host->platdata)
 		mmc->caps &= ~(host->platdata->mask_host_caps);
 
-	tasklet_init(&host->data_task, au1xmmc_tasklet_data,
-			(unsigned long)host);
+	tasklet_setup(&host->data_task, au1xmmc_tasklet_data);
 
-	tasklet_init(&host->finish_task, au1xmmc_tasklet_finish,
-			(unsigned long)host);
+	tasklet_setup(&host->finish_task, au1xmmc_tasklet_finish);
 
 	if (has_dbdma()) {
 		ret = au1xmmc_dbdma_init(host);
@@ -1113,8 +1097,9 @@ out5:
 	if (host->platdata && host->platdata->cd_setup &&
 	    !(mmc->caps & MMC_CAP_NEEDS_POLL))
 		host->platdata->cd_setup(mmc, 0);
-out_clk:
+
 	clk_disable_unprepare(host->clk);
+out_clk:
 	clk_put(host->clk);
 out_irq:
 	free_irq(host->irq, host);
@@ -1205,6 +1190,7 @@ static struct platform_driver au1xmmc_driver = {
 	.resume        = au1xmmc_resume,
 	.driver        = {
 		.name  = DRIVER_NAME,
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 };
 

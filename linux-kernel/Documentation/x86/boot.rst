@@ -455,6 +455,7 @@ Protocol:	2.00+
 	11 Minimal Linux Bootloader
 	   <http://sebastian-plotz.blogspot.de>
 	12 OVMF UEFI virtualization stack
+	13 barebox
 	== =======================================
 
   Please contact <hpa@zytor.com> if you need a bootloader ID value assigned.
@@ -490,15 +491,11 @@ Protocol:	2.00+
 		kernel) to not write early messages that require
 		accessing the display hardware directly.
 
-  Bit 6 (write): KEEP_SEGMENTS
+  Bit 6 (obsolete): KEEP_SEGMENTS
 
 	Protocol: 2.07+
 
-	- If 0, reload the segment registers in the 32bit entry point.
-	- If 1, do not reload the segment registers in the 32bit entry point.
-
-		Assume that %cs %ds %ss %es are all set to flat segments with
-		a base of 0 (or the equivalent for their environment).
+        - This flag is obsolete.
 
   Bit 7 (write): CAN_USE_HEAP
 
@@ -786,9 +783,9 @@ Protocol:	2.08+
   uncompressed data should be determined using the standard magic
   numbers.  The currently supported compression formats are gzip
   (magic numbers 1F 8B or 1F 9E), bzip2 (magic number 42 5A), LZMA
-  (magic number 5D 00), XZ (magic number FD 37), and LZ4 (magic number
-  02 21).  The uncompressed payload is currently always ELF (magic
-  number 7F 45 4C 46).
+  (magic number 5D 00), XZ (magic number FD 37), LZ4 (magic number
+  02 21) and ZSTD (magic number 28 B5). The uncompressed payload is
+  currently always ELF (magic number 7F 45 4C 46).
 
 ============	==============
 Field name:	payload_length
@@ -855,7 +852,7 @@ Protocol:	2.09+
     struct setup_data {
       __u64 next = 0 or <addr_of_next_setup_data_struct>;
       __u32 type = SETUP_INDIRECT;
-      __u32 len = sizeof(setup_data);
+      __u32 len = sizeof(setup_indirect);
       __u8 data[sizeof(setup_indirect)] = struct setup_indirect {
         __u32 type = SETUP_INDIRECT | SETUP_E820_EXT;
         __u32 reserved = 0;
@@ -1346,8 +1343,8 @@ follow::
 
 In addition to read/modify/write the setup header of the struct
 boot_params as that of 16-bit boot protocol, the boot loader should
-also fill the additional fields of the struct boot_params as that
-described in zero-page.txt.
+also fill the additional fields of the struct boot_params as
+described in chapter Documentation/x86/zero-page.rst.
 
 After setting up the struct boot_params, the boot loader can load the
 32/64-bit kernel in the same way as that of 16-bit boot protocol.
@@ -1383,7 +1380,7 @@ can be calculated as follows::
 In addition to read/modify/write the setup header of the struct
 boot_params as that of 16-bit boot protocol, the boot loader should
 also fill the additional fields of the struct boot_params as described
-in zero-page.txt.
+in chapter Documentation/x86/zero-page.rst.
 
 After setting up the struct boot_params, the boot loader can load
 64-bit kernel in the same way as that of 16-bit boot protocol, but
@@ -1403,14 +1400,20 @@ must have read/write permission; CS must be __BOOT_CS and DS, ES, SS
 must be __BOOT_DS; interrupt must be disabled; %rsi must hold the base
 address of the struct boot_params.
 
-EFI Handover Protocol
-=====================
+EFI Handover Protocol (deprecated)
+==================================
 
 This protocol allows boot loaders to defer initialisation to the EFI
 boot stub. The boot loader is required to load the kernel/initrd(s)
 from the boot media and jump to the EFI handover protocol entry point
 which is hdr->handover_offset bytes from the beginning of
 startup_{32,64}.
+
+The boot loader MUST respect the kernel's PE/COFF metadata when it comes
+to section alignment, the memory footprint of the executable image beyond
+the size of the file itself, and any other aspect of the PE/COFF header
+that may affect correct operation of the image as a PE/COFF binary in the
+execution context provided by the EFI firmware.
 
 The function prototype for the handover entry point looks like this::
 
@@ -1423,9 +1426,18 @@ UEFI specification. 'bp' is the boot loader-allocated boot params.
 
 The boot loader *must* fill out the following fields in bp::
 
-  - hdr.code32_start
   - hdr.cmd_line_ptr
   - hdr.ramdisk_image (if applicable)
   - hdr.ramdisk_size  (if applicable)
 
 All other fields should be zero.
+
+NOTE: The EFI Handover Protocol is deprecated in favour of the ordinary PE/COFF
+      entry point, combined with the LINUX_EFI_INITRD_MEDIA_GUID based initrd
+      loading protocol (refer to [0] for an example of the bootloader side of
+      this), which removes the need for any knowledge on the part of the EFI
+      bootloader regarding the internal representation of boot_params or any
+      requirements/limitations regarding the placement of the command line
+      and ramdisk in memory, or the placement of the kernel image itself.
+
+[0] https://github.com/u-boot/u-boot/commit/ec80b4735a593961fe701cc3a5d717d4739b0fd0

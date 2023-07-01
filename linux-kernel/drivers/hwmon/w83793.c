@@ -202,10 +202,9 @@ static inline s8 TEMP_TO_REG(long val, s8 min, s8 max)
 }
 
 struct w83793_data {
-	struct i2c_client *lm75[2];
 	struct device *hwmon_dev;
 	struct mutex update_lock;
-	char valid;			/* !=0 if following fields are valid */
+	bool valid;			/* true if following fields are valid */
 	unsigned long last_updated;	/* In jiffies */
 	unsigned long last_nonvolatile;	/* In jiffies, last time we update the
 					 * nonvolatile registers
@@ -283,11 +282,10 @@ static void w83793_release_resources(struct kref *ref)
 
 static u8 w83793_read_value(struct i2c_client *client, u16 reg);
 static int w83793_write_value(struct i2c_client *client, u16 reg, u8 value);
-static int w83793_probe(struct i2c_client *client,
-			const struct i2c_device_id *id);
+static int w83793_probe(struct i2c_client *client);
 static int w83793_detect(struct i2c_client *client,
 			 struct i2c_board_info *info);
-static int w83793_remove(struct i2c_client *client);
+static void w83793_remove(struct i2c_client *client);
 static void w83793_init_client(struct i2c_client *client);
 static void w83793_update_nonvolatile(struct device *dev);
 static struct w83793_data *w83793_update_device(struct device *dev);
@@ -303,7 +301,7 @@ static struct i2c_driver w83793_driver = {
 	.driver = {
 		   .name = "w83793",
 	},
-	.probe		= w83793_probe,
+	.probe_new	= w83793_probe,
 	.remove		= w83793_remove,
 	.id_table	= w83793_id,
 	.detect		= w83793_detect,
@@ -454,7 +452,7 @@ store_chassis_clear(struct device *dev,
 	mutex_lock(&data->update_lock);
 	reg = w83793_read_value(client, W83793_REG_CLR_CHASSIS);
 	w83793_write_value(client, W83793_REG_CLR_CHASSIS, reg | 0x80);
-	data->valid = 0;		/* Force cache refresh */
+	data->valid = false;		/* Force cache refresh */
 	mutex_unlock(&data->update_lock);
 	return count;
 }
@@ -1497,7 +1495,7 @@ static struct notifier_block watchdog_notifier = {
  * Init / remove routines
  */
 
-static int w83793_remove(struct i2c_client *client)
+static void w83793_remove(struct i2c_client *client)
 {
 	struct w83793_data *data = i2c_get_clientdata(client);
 	struct device *dev = &client->dev;
@@ -1556,8 +1554,6 @@ static int w83793_remove(struct i2c_client *client)
 	mutex_lock(&watchdog_data_mutex);
 	kref_put(&data->kref, w83793_release_resources);
 	mutex_unlock(&watchdog_data_mutex);
-
-	return 0;
 }
 
 static int
@@ -1567,7 +1563,6 @@ w83793_detect_subclients(struct i2c_client *client)
 	int address = client->addr;
 	u8 tmp;
 	struct i2c_adapter *adapter = client->adapter;
-	struct w83793_data *data = i2c_get_clientdata(client);
 
 	id = i2c_adapter_id(adapter);
 	if (force_subclients[0] == id && force_subclients[1] == address) {
@@ -1587,20 +1582,18 @@ w83793_detect_subclients(struct i2c_client *client)
 	}
 
 	tmp = w83793_read_value(client, W83793_REG_I2C_SUBADDR);
-	if (!(tmp & 0x08))
-		data->lm75[0] = devm_i2c_new_dummy_device(&client->dev, adapter,
-							  0x48 + (tmp & 0x7));
-	if (!(tmp & 0x80)) {
-		if (!IS_ERR(data->lm75[0])
-		    && ((tmp & 0x7) == ((tmp >> 4) & 0x7))) {
-			dev_err(&client->dev,
-				"duplicate addresses 0x%x, "
-				"use force_subclients\n", data->lm75[0]->addr);
-			return -ENODEV;
-		}
-		data->lm75[1] = devm_i2c_new_dummy_device(&client->dev, adapter,
-							  0x48 + ((tmp >> 4) & 0x7));
+
+	if (!(tmp & 0x88) && (tmp & 0x7) == ((tmp >> 4) & 0x7)) {
+		dev_err(&client->dev,
+			"duplicate addresses 0x%x, use force_subclient\n", 0x48 + (tmp & 0x7));
+		return -ENODEV;
 	}
+
+	if (!(tmp & 0x08))
+		devm_i2c_new_dummy_device(&client->dev, adapter, 0x48 + (tmp & 0x7));
+
+	if (!(tmp & 0x80))
+		devm_i2c_new_dummy_device(&client->dev, adapter, 0x48 + ((tmp >> 4) & 0x7));
 
 	return 0;
 }
@@ -1641,13 +1634,12 @@ static int w83793_detect(struct i2c_client *client,
 	if (chip_id != 0x7b)
 		return -ENODEV;
 
-	strlcpy(info->type, "w83793", I2C_NAME_SIZE);
+	strscpy(info->type, "w83793", I2C_NAME_SIZE);
 
 	return 0;
 }
 
-static int w83793_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int w83793_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	static const int watchdog_minors[] = {
@@ -2083,7 +2075,7 @@ static struct w83793_data *w83793_update_device(struct device *dev)
 		data->vid[1] = w83793_read_value(client, W83793_REG_VID_INB);
 	w83793_update_nonvolatile(dev);
 	data->last_updated = jiffies;
-	data->valid = 1;
+	data->valid = true;
 
 END:
 	mutex_unlock(&data->update_lock);

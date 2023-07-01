@@ -279,7 +279,7 @@ static const struct attribute_group *w1_f14_groups[] = {
 	NULL,
 };
 
-static struct w1_family_ops w1_f14_fops = {
+static const struct w1_family_ops w1_f14_fops = {
 	.groups	= w1_f14_groups,
 };
 
@@ -290,6 +290,6 @@ static struct w1_family w1_family_14 = {
 module_w1_family(w1_family_14);
 
 MODULE_AUTHOR("Angelo Dureghello <angelo.dureghello@timesys.com>");
-MODULE_DESCRIPTION("w1 family 14 driver for DS2430, 256kb EEPROM");
+MODULE_DESCRIPTION("w1 family 14 driver for DS2430, 256b EEPROM");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("w1-family-" __stringify(W1_EEPROM_DS2430));

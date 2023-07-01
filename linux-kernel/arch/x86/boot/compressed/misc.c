@@ -28,31 +28,37 @@
 
 /* Macros used by the included decompressor code below. */
 #define STATIC		static
+/* Define an externally visible malloc()/free(). */
+#define MALLOC_VISIBLE
+#include <linux/decompress/mm.h>
 
 /*
- * Use normal definitions of mem*() from string.c. There are already
- * included header files which expect a definition of memset() and by
- * the time we define memset macro, it is too late.
+ * Provide definitions of memzero and memmove as some of the decompressors will
+ * try to define their own functions if these are not defined as macros.
  */
-#undef memcpy
-#undef memset
 #define memzero(s, n)	memset((s), 0, (n))
+#ifndef memmove
 #define memmove		memmove
-
 /* Functions used by the included decompressor code below. */
 void *memmove(void *dest, const void *src, size_t n);
+#endif
 
 /*
  * This is set up by the setup-routine at boot-time
  */
 struct boot_params *boot_params;
 
+struct port_io_ops pio_ops;
+
 memptr free_mem_ptr;
 memptr free_mem_end_ptr;
 
 static char *vidmem;
 static int vidport;
-static int lines, cols;
+
+/* These might be accessed before .bss is cleared, so use .data instead. */
+static int lines __section(".data");
+static int cols __section(".data");
 
 #ifdef CONFIG_KERNEL_GZIP
 #include "../../../../lib/decompress_inflate.c"
@@ -76,6 +82,10 @@ static int lines, cols;
 
 #ifdef CONFIG_KERNEL_LZ4
 #include "../../../../lib/decompress_unlz4.c"
+#endif
+
+#ifdef CONFIG_KERNEL_ZSTD
+#include "../../../../lib/decompress_unzstd.c"
 #endif
 /*
  * NOTE: When adding a new decompressor, please update the analysis in
@@ -171,7 +181,7 @@ void __puthex(unsigned long value)
 	}
 }
 
-#if CONFIG_X86_NEED_RELOCS
+#ifdef CONFIG_X86_NEED_RELOCS
 static void handle_relocations(void *output, unsigned long output_len,
 			       unsigned long virt_addr)
 {
@@ -267,7 +277,7 @@ static inline void handle_relocations(void *output, unsigned long output_len,
 { }
 #endif
 
-static void parse_elf(void *output)
+static size_t parse_elf(void *output)
 {
 #ifdef CONFIG_X86_64
 	Elf64_Ehdr ehdr;
@@ -283,10 +293,8 @@ static void parse_elf(void *output)
 	if (ehdr.e_ident[EI_MAG0] != ELFMAG0 ||
 	   ehdr.e_ident[EI_MAG1] != ELFMAG1 ||
 	   ehdr.e_ident[EI_MAG2] != ELFMAG2 ||
-	   ehdr.e_ident[EI_MAG3] != ELFMAG3) {
+	   ehdr.e_ident[EI_MAG3] != ELFMAG3)
 		error("Kernel is not a valid ELF file");
-		return;
-	}
 
 	debug_putstr("Parsing ELF... ");
 
@@ -318,6 +326,8 @@ static void parse_elf(void *output)
 	}
 
 	free(phdrs);
+
+	return ehdr.e_entry - LOAD_PHYSICAL_ADDR;
 }
 
 /*
@@ -346,6 +356,7 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 	const unsigned long kernel_total_size = VO__end - VO__text;
 	unsigned long virt_addr = LOAD_PHYSICAL_ADDR;
 	unsigned long needed_size;
+	size_t entry_offset;
 
 	/* Retain x86 boot parameters pointer passed from startup_32/64. */
 	boot_params = rmode;
@@ -365,6 +376,16 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 
 	lines = boot_params->screen_info.orig_video_lines;
 	cols = boot_params->screen_info.orig_video_cols;
+
+	init_default_io_ops();
+
+	/*
+	 * Detect TDX guest environment.
+	 *
+	 * It has to be done before console_init() in order to use
+	 * paravirtualized port I/O operations if needed.
+	 */
+	early_tdx_detect();
 
 	console_init();
 
@@ -429,8 +450,6 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 		error("Destination address too large");
 #endif
 #ifndef CONFIG_RELOCATABLE
-	if ((unsigned long)output != LOAD_PHYSICAL_ADDR)
-		error("Destination address does not match LOAD_PHYSICAL_ADDR");
 	if (virt_addr != LOAD_PHYSICAL_ADDR)
 		error("Destination virtual address changed when not relocatable");
 #endif
@@ -438,10 +457,17 @@ asmlinkage __visible void *extract_kernel(void *rmode, memptr heap,
 	debug_putstr("\nDecompressing Linux... ");
 	__decompress(input_data, input_len, NULL, NULL, output, output_len,
 			NULL, error);
-	parse_elf(output);
+	entry_offset = parse_elf(output);
 	handle_relocations(output, output_len, virt_addr);
-	debug_putstr("done.\nBooting the kernel.\n");
-	return output;
+
+	debug_putstr("done.\nBooting the kernel (entry_offset: 0x");
+	debug_puthex(entry_offset);
+	debug_putstr(").\n");
+
+	/* Disable exception handling before booting the kernel */
+	cleanup_exception_handling();
+
+	return output + entry_offset;
 }
 
 void fortify_panic(const char *name)

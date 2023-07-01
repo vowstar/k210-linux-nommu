@@ -938,7 +938,7 @@ static irqreturn_t isl29501_trigger_handler(int irq, void *p)
 	struct iio_dev *indio_dev = pf->indio_dev;
 	struct isl29501_private *isl29501 = iio_priv(indio_dev);
 	const unsigned long *active_mask = indio_dev->active_scan_mask;
-	u32 buffer[4] = {}; /* 1x16-bit + ts */
+	u32 buffer[4] __aligned(8) = {}; /* 1x16-bit + naturally aligned ts */
 
 	if (test_bit(ISL29501_DISTANCE_SCAN_INDEX, active_mask))
 		isl29501_register_read(isl29501, REG_DISTANCE, buffer);
@@ -949,8 +949,7 @@ static irqreturn_t isl29501_trigger_handler(int irq, void *p)
 	return IRQ_HANDLED;
 }
 
-static int isl29501_probe(struct i2c_client *client,
-			  const struct i2c_device_id *id)
+static int isl29501_probe(struct i2c_client *client)
 {
 	struct iio_dev *indio_dev;
 	struct isl29501_private *isl29501;
@@ -972,7 +971,6 @@ static int isl29501_probe(struct i2c_client *client,
 		return ret;
 
 	indio_dev->modes = INDIO_DIRECT_MODE;
-	indio_dev->dev.parent = &client->dev;
 	indio_dev->channels = isl29501_channels;
 	indio_dev->num_channels = ARRAY_SIZE(isl29501_channels);
 	indio_dev->name = client->name;
@@ -1010,7 +1008,7 @@ static struct i2c_driver isl29501_driver = {
 		.name	= "isl29501",
 	},
 	.id_table	= isl29501_id,
-	.probe		= isl29501_probe,
+	.probe_new	= isl29501_probe,
 };
 module_i2c_driver(isl29501_driver);
 

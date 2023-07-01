@@ -64,6 +64,28 @@ static DEFINE_SPINLOCK(nr_list_lock);
 static const struct proto_ops nr_proto_ops;
 
 /*
+ * NETROM network devices are virtual network devices encapsulating NETROM
+ * frames into AX.25 which will be sent through an AX.25 device, so form a
+ * special "super class" of normal net devices; split their locks off into a
+ * separate class since they always nest.
+ */
+static struct lock_class_key nr_netdev_xmit_lock_key;
+static struct lock_class_key nr_netdev_addr_lock_key;
+
+static void nr_set_lockdep_one(struct net_device *dev,
+			       struct netdev_queue *txq,
+			       void *_unused)
+{
+	lockdep_set_class(&txq->_xmit_lock, &nr_netdev_xmit_lock_key);
+}
+
+static void nr_set_lockdep_key(struct net_device *dev)
+{
+	lockdep_set_class(&dev->addr_list_lock, &nr_netdev_addr_lock_key);
+	netdev_for_each_tx_queue(dev, nr_set_lockdep_one, NULL);
+}
+
+/*
  *	Socket removal during an interrupt is now safe.
  */
 static void nr_remove_socket(struct sock *sk)
@@ -272,11 +294,11 @@ void nr_destroy_socket(struct sock *sk)
  */
 
 static int nr_setsockopt(struct socket *sock, int level, int optname,
-	char __user *optval, unsigned int optlen)
+		sockptr_t optval, unsigned int optlen)
 {
 	struct sock *sk = sock->sk;
 	struct nr_sock *nr = nr_sk(sk);
-	unsigned long opt;
+	unsigned int opt;
 
 	if (level != SOL_NETROM)
 		return -ENOPROTOOPT;
@@ -284,18 +306,18 @@ static int nr_setsockopt(struct socket *sock, int level, int optname,
 	if (optlen < sizeof(unsigned int))
 		return -EINVAL;
 
-	if (get_user(opt, (unsigned int __user *)optval))
+	if (copy_from_sockptr(&opt, optval, sizeof(opt)))
 		return -EFAULT;
 
 	switch (optname) {
 	case NETROM_T1:
-		if (opt < 1 || opt > ULONG_MAX / HZ)
+		if (opt < 1 || opt > UINT_MAX / HZ)
 			return -EINVAL;
 		nr->t1 = opt * HZ;
 		return 0;
 
 	case NETROM_T2:
-		if (opt < 1 || opt > ULONG_MAX / HZ)
+		if (opt < 1 || opt > UINT_MAX / HZ)
 			return -EINVAL;
 		nr->t2 = opt * HZ;
 		return 0;
@@ -307,13 +329,13 @@ static int nr_setsockopt(struct socket *sock, int level, int optname,
 		return 0;
 
 	case NETROM_T4:
-		if (opt < 1 || opt > ULONG_MAX / HZ)
+		if (opt < 1 || opt > UINT_MAX / HZ)
 			return -EINVAL;
 		nr->t4 = opt * HZ;
 		return 0;
 
 	case NETROM_IDLE:
-		if (opt > ULONG_MAX / (60 * HZ))
+		if (opt > UINT_MAX / (60 * HZ))
 			return -EINVAL;
 		nr->idle = opt * 60 * HZ;
 		return 0;
@@ -378,6 +400,11 @@ static int nr_listen(struct socket *sock, int backlog)
 	struct sock *sk = sock->sk;
 
 	lock_sock(sk);
+	if (sock->state != SS_UNCONNECTED) {
+		release_sock(sk);
+		return -EINVAL;
+	}
+
 	if (sk->sk_state != TCP_LISTEN) {
 		memset(&nr_sk(sk)->user_addr, 0, AX25_ADDR_LEN);
 		sk->sk_max_ack_backlog = backlog;
@@ -611,7 +638,7 @@ static int nr_connect(struct socket *sock, struct sockaddr *uaddr,
 	struct sock *sk = sock->sk;
 	struct nr_sock *nr = nr_sk(sk);
 	struct sockaddr_ax25 *addr = (struct sockaddr_ax25 *)uaddr;
-	ax25_address *source = NULL;
+	const ax25_address *source = NULL;
 	ax25_uid_assoc *user;
 	struct net_device *dev;
 	int err = 0;
@@ -651,7 +678,7 @@ static int nr_connect(struct socket *sock, struct sockaddr *uaddr,
 			err = -ENETUNREACH;
 			goto out_release;
 		}
-		source = (ax25_address *)dev->dev_addr;
+		source = (const ax25_address *)dev->dev_addr;
 
 		user = ax25_findbyuid(current_euid());
 		if (user) {
@@ -1137,7 +1164,8 @@ static int nr_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
 	}
 
 	/* Now we can treat all alike */
-	if ((skb = skb_recv_datagram(sk, flags & ~MSG_DONTWAIT, flags & MSG_DONTWAIT, &er)) == NULL) {
+	skb = skb_recv_datagram(sk, flags, &er);
+	if (!skb) {
 		release_sock(sk);
 		return er;
 	}
@@ -1230,6 +1258,7 @@ static int nr_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 #ifdef CONFIG_PROC_FS
 
 static void *nr_info_start(struct seq_file *seq, loff_t *pos)
+	__acquires(&nr_list_lock)
 {
 	spin_lock_bh(&nr_list_lock);
 	return seq_hlist_start_head(&nr_list, *pos);
@@ -1241,6 +1270,7 @@ static void *nr_info_next(struct seq_file *seq, void *v, loff_t *pos)
 }
 
 static void nr_info_stop(struct seq_file *seq, void *v)
+	__releases(&nr_list_lock)
 {
 	spin_unlock_bh(&nr_list_lock);
 }
@@ -1392,6 +1422,7 @@ static int __init nr_proto_init(void)
 			free_netdev(dev);
 			goto fail;
 		}
+		nr_set_lockdep_key(dev);
 		dev_nr[i] = dev;
 	}
 

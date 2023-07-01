@@ -91,7 +91,7 @@ static unsigned int fq_codel_classify(struct sk_buff *skb, struct Qdisc *sch,
 		return fq_codel_hash(q, skb) + 1;
 
 	*qerr = NET_XMIT_SUCCESS | __NET_XMIT_BYPASS;
-	result = tcf_classify(skb, filter, &res, false);
+	result = tcf_classify(skb, NULL, filter, &res, false);
 	if (result >= 0) {
 #ifdef CONFIG_NET_CLS_ACT
 		switch (result) {
@@ -99,7 +99,7 @@ static unsigned int fq_codel_classify(struct sk_buff *skb, struct Qdisc *sch,
 		case TC_ACT_QUEUED:
 		case TC_ACT_TRAP:
 			*qerr = NET_XMIT_SUCCESS | __NET_XMIT_STOLEN;
-			/* fall through */
+			fallthrough;
 		case TC_ACT_SHOT:
 			return 0;
 		}
@@ -187,7 +187,7 @@ static int fq_codel_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 	struct fq_codel_sched_data *q = qdisc_priv(sch);
 	unsigned int idx, prev_backlog, prev_qlen;
 	struct fq_codel_flow *flow;
-	int uninitialized_var(ret);
+	int ret;
 	unsigned int pkt_len;
 	bool memory_limited;
 
@@ -347,8 +347,6 @@ static void fq_codel_reset(struct Qdisc *sch)
 		codel_vars_init(&flow->cvars);
 	}
 	memset(q->backlogs, 0, q->flows_cnt * sizeof(u32));
-	sch->q.qlen = 0;
-	sch->qstats.backlog = 0;
 	q->memory_usage = 0;
 }
 
@@ -362,6 +360,8 @@ static const struct nla_policy fq_codel_policy[TCA_FQ_CODEL_MAX + 1] = {
 	[TCA_FQ_CODEL_CE_THRESHOLD] = { .type = NLA_U32 },
 	[TCA_FQ_CODEL_DROP_BATCH_SIZE] = { .type = NLA_U32 },
 	[TCA_FQ_CODEL_MEMORY_LIMIT] = { .type = NLA_U32 },
+	[TCA_FQ_CODEL_CE_THRESHOLD_SELECTOR] = { .type = NLA_U8 },
+	[TCA_FQ_CODEL_CE_THRESHOLD_MASK] = { .type = NLA_U8 },
 };
 
 static int fq_codel_change(struct Qdisc *sch, struct nlattr *opt,
@@ -369,10 +369,8 @@ static int fq_codel_change(struct Qdisc *sch, struct nlattr *opt,
 {
 	struct fq_codel_sched_data *q = qdisc_priv(sch);
 	struct nlattr *tb[TCA_FQ_CODEL_MAX + 1];
+	u32 quantum = 0;
 	int err;
-
-	if (!opt)
-		return -EINVAL;
 
 	err = nla_parse_nested_deprecated(tb, TCA_FQ_CODEL_MAX, opt,
 					  fq_codel_policy, NULL);
@@ -385,6 +383,13 @@ static int fq_codel_change(struct Qdisc *sch, struct nlattr *opt,
 		if (!q->flows_cnt ||
 		    q->flows_cnt > 65536)
 			return -EINVAL;
+	}
+	if (tb[TCA_FQ_CODEL_QUANTUM]) {
+		quantum = max(256U, nla_get_u32(tb[TCA_FQ_CODEL_QUANTUM]));
+		if (quantum > FQ_CODEL_QUANTUM_MAX) {
+			NL_SET_ERR_MSG(extack, "Invalid quantum");
+			return -EINVAL;
+		}
 	}
 	sch_tree_lock(sch);
 
@@ -400,6 +405,11 @@ static int fq_codel_change(struct Qdisc *sch, struct nlattr *opt,
 		q->cparams.ce_threshold = (val * NSEC_PER_USEC) >> CODEL_SHIFT;
 	}
 
+	if (tb[TCA_FQ_CODEL_CE_THRESHOLD_SELECTOR])
+		q->cparams.ce_threshold_selector = nla_get_u8(tb[TCA_FQ_CODEL_CE_THRESHOLD_SELECTOR]);
+	if (tb[TCA_FQ_CODEL_CE_THRESHOLD_MASK])
+		q->cparams.ce_threshold_mask = nla_get_u8(tb[TCA_FQ_CODEL_CE_THRESHOLD_MASK]);
+
 	if (tb[TCA_FQ_CODEL_INTERVAL]) {
 		u64 interval = nla_get_u32(tb[TCA_FQ_CODEL_INTERVAL]);
 
@@ -412,11 +422,11 @@ static int fq_codel_change(struct Qdisc *sch, struct nlattr *opt,
 	if (tb[TCA_FQ_CODEL_ECN])
 		q->cparams.ecn = !!nla_get_u32(tb[TCA_FQ_CODEL_ECN]);
 
-	if (tb[TCA_FQ_CODEL_QUANTUM])
-		q->quantum = max(256U, nla_get_u32(tb[TCA_FQ_CODEL_QUANTUM]));
+	if (quantum)
+		q->quantum = quantum;
 
 	if (tb[TCA_FQ_CODEL_DROP_BATCH_SIZE])
-		q->drop_batch_size = min(1U, nla_get_u32(tb[TCA_FQ_CODEL_DROP_BATCH_SIZE]));
+		q->drop_batch_size = max(1U, nla_get_u32(tb[TCA_FQ_CODEL_DROP_BATCH_SIZE]));
 
 	if (tb[TCA_FQ_CODEL_MEMORY_LIMIT])
 		q->memory_limit = min(1U << 31, nla_get_u32(tb[TCA_FQ_CODEL_MEMORY_LIMIT]));
@@ -536,10 +546,15 @@ static int fq_codel_dump(struct Qdisc *sch, struct sk_buff *skb)
 			q->flows_cnt))
 		goto nla_put_failure;
 
-	if (q->cparams.ce_threshold != CODEL_DISABLED_THRESHOLD &&
-	    nla_put_u32(skb, TCA_FQ_CODEL_CE_THRESHOLD,
-			codel_time_to_us(q->cparams.ce_threshold)))
-		goto nla_put_failure;
+	if (q->cparams.ce_threshold != CODEL_DISABLED_THRESHOLD) {
+		if (nla_put_u32(skb, TCA_FQ_CODEL_CE_THRESHOLD,
+				codel_time_to_us(q->cparams.ce_threshold)))
+			goto nla_put_failure;
+		if (nla_put_u8(skb, TCA_FQ_CODEL_CE_THRESHOLD_SELECTOR, q->cparams.ce_threshold_selector))
+			goto nla_put_failure;
+		if (nla_put_u8(skb, TCA_FQ_CODEL_CE_THRESHOLD_MASK, q->cparams.ce_threshold_mask))
+			goto nla_put_failure;
+	}
 
 	return nla_nest_end(skb, opts);
 
@@ -667,16 +682,12 @@ static void fq_codel_walk(struct Qdisc *sch, struct qdisc_walker *arg)
 		return;
 
 	for (i = 0; i < q->flows_cnt; i++) {
-		if (list_empty(&q->flows[i].flowchain) ||
-		    arg->count < arg->skip) {
+		if (list_empty(&q->flows[i].flowchain)) {
 			arg->count++;
 			continue;
 		}
-		if (arg->fn(sch, i + 1, arg) < 0) {
-			arg->stop = 1;
+		if (!tc_qdisc_stats_dump(sch, i + 1, arg))
 			break;
-		}
-		arg->count++;
 	}
 }
 
@@ -721,3 +732,4 @@ module_init(fq_codel_module_init)
 module_exit(fq_codel_module_exit)
 MODULE_AUTHOR("Eric Dumazet");
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Fair Queue CoDel discipline");

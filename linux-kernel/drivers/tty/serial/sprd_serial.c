@@ -206,7 +206,6 @@ static void sprd_stop_tx_dma(struct uart_port *port)
 {
 	struct sprd_uart_port *sp =
 		container_of(port, struct sprd_uart_port, port);
-	struct circ_buf *xmit = &port->state->xmit;
 	struct dma_tx_state state;
 	u32 trans_len;
 
@@ -215,8 +214,7 @@ static void sprd_stop_tx_dma(struct uart_port *port)
 	dmaengine_tx_status(sp->tx_dma.chn, sp->tx_dma.cookie, &state);
 	if (state.residue) {
 		trans_len = state.residue - sp->tx_dma.phys_addr;
-		xmit->tail = (xmit->tail + trans_len) & (UART_XMIT_SIZE - 1);
-		port->icount.tx += trans_len;
+		uart_xmit_advance(port, trans_len);
 		dma_unmap_single(port->dev, sp->tx_dma.phys_addr,
 				 sp->tx_dma.trans_len, DMA_TO_DEVICE);
 	}
@@ -253,8 +251,7 @@ static void sprd_complete_tx_dma(void *data)
 	dma_unmap_single(port->dev, sp->tx_dma.phys_addr,
 			 sp->tx_dma.trans_len, DMA_TO_DEVICE);
 
-	xmit->tail = (xmit->tail + sp->tx_dma.trans_len) & (UART_XMIT_SIZE - 1);
-	port->icount.tx += sp->tx_dma.trans_len;
+	uart_xmit_advance(port, sp->tx_dma.trans_len);
 
 	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
 		uart_write_wakeup(port);
@@ -626,35 +623,12 @@ static inline void sprd_rx(struct uart_port *port)
 
 static inline void sprd_tx(struct uart_port *port)
 {
-	struct circ_buf *xmit = &port->state->xmit;
-	int count;
+	u8 ch;
 
-	if (port->x_char) {
-		serial_out(port, SPRD_TXD, port->x_char);
-		port->icount.tx++;
-		port->x_char = 0;
-		return;
-	}
-
-	if (uart_circ_empty(xmit) || uart_tx_stopped(port)) {
-		sprd_stop_tx(port);
-		return;
-	}
-
-	count = THLD_TX_EMPTY;
-	do {
-		serial_out(port, SPRD_TXD, xmit->buf[xmit->tail]);
-		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
-		port->icount.tx++;
-		if (uart_circ_empty(xmit))
-			break;
-	} while (--count > 0);
-
-	if (uart_circ_chars_pending(xmit) < WAKEUP_CHARS)
-		uart_write_wakeup(port);
-
-	if (uart_circ_empty(xmit))
-		sprd_stop_tx(port);
+	uart_port_tx_limited(port, ch, THLD_TX_EMPTY,
+		true,
+		serial_out(port, SPRD_TXD, ch),
+		({}));
 }
 
 /* this handles the interrupt from one port */
@@ -771,9 +745,8 @@ static void sprd_shutdown(struct uart_port *port)
 	devm_free_irq(port->dev, port->irq, port);
 }
 
-static void sprd_set_termios(struct uart_port *port,
-			     struct ktermios *termios,
-			     struct ktermios *old)
+static void sprd_set_termios(struct uart_port *port, struct ktermios *termios,
+		             const struct ktermios *old)
 {
 	unsigned int baud, quot;
 	unsigned int lcr = 0, fc;
@@ -984,7 +957,7 @@ static void wait_for_xmitr(struct uart_port *port)
 	} while (status & SPRD_TX_FIFO_CNT_MASK);
 }
 
-static void sprd_console_putchar(struct uart_port *port, int ch)
+static void sprd_console_putchar(struct uart_port *port, unsigned char ch)
 {
 	wait_for_xmitr(port);
 	serial_out(port, SPRD_TXD, ch);
@@ -1013,7 +986,7 @@ static void sprd_console_write(struct console *co, const char *s,
 		spin_unlock_irqrestore(&port->lock, flags);
 }
 
-static int __init sprd_console_setup(struct console *co, char *options)
+static int sprd_console_setup(struct console *co, char *options)
 {
 	struct sprd_uart_port *sprd_uart_port;
 	int baud = 115200;
@@ -1058,7 +1031,7 @@ console_initcall(sprd_serial_console_init);
 #define SPRD_CONSOLE	(&sprd_console)
 
 /* Support for earlycon */
-static void sprd_putc(struct uart_port *port, int c)
+static void sprd_putc(struct uart_port *port, unsigned char c)
 {
 	unsigned int timeout = SPRD_TIMEOUT;
 
@@ -1102,29 +1075,6 @@ static struct uart_driver sprd_uart_driver = {
 	.cons = SPRD_CONSOLE,
 };
 
-static int sprd_probe_dt_alias(int index, struct device *dev)
-{
-	struct device_node *np;
-	int ret = index;
-
-	if (!IS_ENABLED(CONFIG_OF))
-		return ret;
-
-	np = dev->of_node;
-	if (!np)
-		return ret;
-
-	ret = of_alias_get_id(np, "serial");
-	if (ret < 0)
-		ret = index;
-	else if (ret >= ARRAY_SIZE(sprd_port) || sprd_port[ret] != NULL) {
-		dev_warn(dev, "requested serial port %d not available.\n", ret);
-		ret = index;
-	}
-
-	return ret;
-}
-
 static int sprd_remove(struct platform_device *dev)
 {
 	struct sprd_uart_port *sup = platform_get_drvdata(dev);
@@ -1132,13 +1082,12 @@ static int sprd_remove(struct platform_device *dev)
 	if (sup) {
 		uart_remove_one_port(&sprd_uart_driver, &sup->port);
 		sprd_port[sup->port.line] = NULL;
+		sprd_rx_free_buf(sup);
 		sprd_ports_num--;
 	}
 
 	if (!sprd_ports_num)
 		uart_unregister_driver(&sprd_uart_driver);
-
-	sprd_rx_free_buf(sup);
 
 	return 0;
 }
@@ -1147,7 +1096,8 @@ static bool sprd_uart_is_console(struct uart_port *uport)
 {
 	struct console *cons = sprd_uart_driver.cons;
 
-	if (cons && cons->index >= 0 && cons->index == uport->line)
+	if ((cons && cons->index >= 0 && cons->index == uport->line) ||
+	    of_console_check(uport->dev->of_node, SPRD_TTY_NAME, uport->line))
 		return true;
 
 	return false;
@@ -1203,14 +1153,11 @@ static int sprd_probe(struct platform_device *pdev)
 	int index;
 	int ret;
 
-	for (index = 0; index < ARRAY_SIZE(sprd_port); index++)
-		if (sprd_port[index] == NULL)
-			break;
-
-	if (index == ARRAY_SIZE(sprd_port))
-		return -EBUSY;
-
-	index = sprd_probe_dt_alias(index, &pdev->dev);
+	index = of_alias_get_id(pdev->dev.of_node, "serial");
+	if (index < 0 || index >= ARRAY_SIZE(sprd_port)) {
+		dev_err(&pdev->dev, "got a wrong serial alias id %d\n", index);
+		return -EINVAL;
+	}
 
 	sprd_port[index] = devm_kzalloc(&pdev->dev, sizeof(*sprd_port[index]),
 					GFP_KERNEL);
@@ -1262,10 +1209,8 @@ static int sprd_probe(struct platform_device *pdev)
 	sprd_ports_num++;
 
 	ret = uart_add_one_port(&sprd_uart_driver, up);
-	if (ret) {
-		sprd_port[index] = NULL;
+	if (ret)
 		sprd_remove(pdev);
-	}
 
 	platform_set_drvdata(pdev, up);
 

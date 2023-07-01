@@ -64,27 +64,21 @@ static int ipack_bus_probe(struct device *device)
 	struct ipack_device *dev = to_ipack_dev(device);
 	struct ipack_driver *drv = to_ipack_driver(device->driver);
 
-	if (!drv->ops->probe)
-		return -EINVAL;
-
 	return drv->ops->probe(dev);
 }
 
-static int ipack_bus_remove(struct device *device)
+static void ipack_bus_remove(struct device *device)
 {
 	struct ipack_device *dev = to_ipack_dev(device);
 	struct ipack_driver *drv = to_ipack_driver(device->driver);
 
-	if (!drv->ops->remove)
-		return -EINVAL;
-
-	drv->ops->remove(dev);
-	return 0;
+	if (drv->ops->remove)
+		drv->ops->remove(dev);
 }
 
-static int ipack_uevent(struct device *dev, struct kobj_uevent_env *env)
+static int ipack_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
-	struct ipack_device *idev;
+	const struct ipack_device *idev;
 
 	if (!dev)
 		return -ENODEV;
@@ -252,6 +246,9 @@ EXPORT_SYMBOL_GPL(ipack_bus_unregister);
 int ipack_driver_register(struct ipack_driver *edrv, struct module *owner,
 			  const char *name)
 {
+	if (!edrv->ops->probe)
+		return -EINVAL;
+
 	edrv->driver.owner = owner;
 	edrv->driver.name = name;
 	edrv->driver.bus = &ipack_bus_type;
@@ -432,8 +429,11 @@ int ipack_device_init(struct ipack_device *dev)
 	dev->dev.bus = &ipack_bus_type;
 	dev->dev.release = ipack_device_release;
 	dev->dev.parent = dev->bus->parent;
-	dev_set_name(&dev->dev,
+	ret = dev_set_name(&dev->dev,
 		     "ipack-dev.%u.%u", dev->bus->bus_nr, dev->slot);
+	if (ret)
+		return ret;
+
 	device_initialize(&dev->dev);
 
 	if (dev->bus->ops->set_clockrate(dev, 8))

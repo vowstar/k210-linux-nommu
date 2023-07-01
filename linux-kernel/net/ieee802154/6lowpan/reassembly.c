@@ -130,6 +130,7 @@ static int lowpan_frag_queue(struct lowpan_frag_queue *fq,
 		goto err;
 
 	fq->q.stamp = skb->tstamp;
+	fq->q.mono_delivery_time = skb->mono_delivery_time;
 	if (frag_type == LOWPAN_DISPATCH_FRAG1)
 		fq->q.flags |= INET_FRAG_FIRST_IN;
 
@@ -195,7 +196,7 @@ static int lowpan_frag_rx_handlers_result(struct sk_buff *skb,
 		net_warn_ratelimited("%s: received unknown dispatch\n",
 				     __func__);
 
-		/* fall-through */
+		fallthrough;
 	default:
 		/* all others failure */
 		return NET_RX_DROP;

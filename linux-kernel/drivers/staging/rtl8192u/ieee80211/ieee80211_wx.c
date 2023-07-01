@@ -184,9 +184,8 @@ static inline char *rtl819x_translate_scan(struct ieee80211_device *ieee,
 	//	printk("WPA IE\n");
 		u8 *p = buf;
 		p += sprintf(p, "wpa_ie=");
-		for (i = 0; i < network->wpa_ie_len; i++) {
+		for (i = 0; i < network->wpa_ie_len; i++)
 			p += sprintf(p, "%02x", network->wpa_ie[i]);
-		}
 
 		memset(&iwe, 0, sizeof(iwe));
 		iwe.cmd = IWEVCUSTOM;
@@ -199,9 +198,8 @@ static inline char *rtl819x_translate_scan(struct ieee80211_device *ieee,
 
 		u8 *p = buf;
 		p += sprintf(p, "rsn_ie=");
-		for (i = 0; i < network->rsn_ie_len; i++) {
+		for (i = 0; i < network->rsn_ie_len; i++)
 			p += sprintf(p, "%02x", network->rsn_ie[i]);
-		}
 
 		memset(&iwe, 0, sizeof(iwe));
 		iwe.cmd = IWEVCUSTOM;
@@ -356,9 +354,8 @@ int ieee80211_wx_set_encode(struct ieee80211_device *ieee,
 			kfree(new_crypt);
 			new_crypt = NULL;
 
-			printk(KERN_WARNING "%s: could not initialize WEP: "
-			       "load module ieee80211_crypt_wep\n",
-			       dev->name);
+			netdev_warn(dev, "could not initialize WEP: "
+				    "load module ieee80211_crypt_wep\n");
 			return -EOPNOTSUPP;
 		}
 		*crypt = new_crypt;
@@ -436,7 +433,7 @@ int ieee80211_wx_set_encode(struct ieee80211_device *ieee,
 	if (ieee->reset_on_keychange &&
 	    ieee->iw_mode != IW_MODE_INFRA &&
 	    ieee->reset_port && ieee->reset_port(dev)) {
-		printk(KERN_DEBUG "%s: reset_port failed\n", dev->name);
+		netdev_dbg(ieee->dev, "reset_port failed\n");
 		return -EINVAL;
 	}
 	return 0;
@@ -473,7 +470,9 @@ int ieee80211_wx_get_encode(struct ieee80211_device *ieee,
 		return 0;
 	}
 	len = crypt->ops->get_key(keybuf, SCM_KEY_LEN, NULL, crypt->priv);
-	erq->length = (len >= 0 ? len : 0);
+	if (len < 0)
+		len = 0;
+	erq->length = len;
 
 	erq->flags |= IW_ENCODE_ENABLED;
 
@@ -689,9 +688,9 @@ int ieee80211_wx_get_encode_ext(struct ieee80211_device *ieee,
 	} else {
 		if (strcmp(crypt->ops->name, "WEP") == 0)
 			ext->alg = IW_ENCODE_ALG_WEP;
-		else if (strcmp(crypt->ops->name, "TKIP"))
+		else if (strcmp(crypt->ops->name, "TKIP") == 0)
 			ext->alg = IW_ENCODE_ALG_TKIP;
-		else if (strcmp(crypt->ops->name, "CCMP"))
+		else if (strcmp(crypt->ops->name, "CCMP") == 0)
 			ext->alg = IW_ENCODE_ALG_CCMP;
 		else
 			return -EINVAL;

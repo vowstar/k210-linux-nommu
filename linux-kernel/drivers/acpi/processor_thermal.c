@@ -17,12 +17,6 @@
 #include <acpi/processor.h>
 #include <linux/uaccess.h>
 
-#define PREFIX "ACPI: "
-
-#define ACPI_PROCESSOR_CLASS            "processor"
-#define _COMPONENT              ACPI_PROCESSOR_COMPONENT
-ACPI_MODULE_NAME("processor_thermal");
-
 #ifdef CONFIG_CPU_FREQ
 
 /* If a passive cooling situation is detected, primarily CPUfreq is used, as it
@@ -59,10 +53,17 @@ static int phys_package_first_cpu(int cpu)
 
 static int cpu_has_cpufreq(unsigned int cpu)
 {
-	struct cpufreq_policy policy;
-	if (!acpi_processor_cpufreq_init || cpufreq_get_policy(&policy, cpu))
+	struct cpufreq_policy *policy;
+
+	if (!acpi_processor_cpufreq_init)
 		return 0;
-	return 1;
+
+	policy = cpufreq_cpu_get(cpu);
+	if (policy) {
+		cpufreq_cpu_put(policy);
+		return 1;
+	}
+	return 0;
 }
 
 static int cpufreq_get_max_state(unsigned int cpu)
@@ -139,9 +140,13 @@ void acpi_thermal_cpufreq_init(struct cpufreq_policy *policy)
 		ret = freq_qos_add_request(&policy->constraints,
 					   &pr->thermal_req,
 					   FREQ_QOS_MAX, INT_MAX);
-		if (ret < 0)
+		if (ret < 0) {
 			pr_err("Failed to add freq constraint for CPU%d (%d)\n",
 			       cpu, ret);
+			continue;
+		}
+
+		thermal_cooling_device_update(pr->cdev);
 	}
 }
 
@@ -150,10 +155,14 @@ void acpi_thermal_cpufreq_exit(struct cpufreq_policy *policy)
 	unsigned int cpu;
 
 	for_each_cpu(cpu, policy->related_cpus) {
-		struct acpi_processor *pr = per_cpu(processors, policy->cpu);
+		struct acpi_processor *pr = per_cpu(processors, cpu);
 
-		if (pr)
-			freq_qos_remove_request(&pr->thermal_req);
+		if (!pr)
+			continue;
+
+		freq_qos_remove_request(&pr->thermal_req);
+
+		thermal_cooling_device_update(pr->cdev);
 	}
 }
 #else				/* ! CONFIG_CPU_FREQ */
@@ -265,3 +274,57 @@ const struct thermal_cooling_device_ops processor_cooling_ops = {
 	.get_cur_state = processor_get_cur_state,
 	.set_cur_state = processor_set_cur_state,
 };
+
+int acpi_processor_thermal_init(struct acpi_processor *pr,
+				struct acpi_device *device)
+{
+	int result = 0;
+
+	pr->cdev = thermal_cooling_device_register("Processor", device,
+						   &processor_cooling_ops);
+	if (IS_ERR(pr->cdev)) {
+		result = PTR_ERR(pr->cdev);
+		return result;
+	}
+
+	dev_dbg(&device->dev, "registered as cooling_device%d\n",
+		pr->cdev->id);
+
+	result = sysfs_create_link(&device->dev.kobj,
+				   &pr->cdev->device.kobj,
+				   "thermal_cooling");
+	if (result) {
+		dev_err(&device->dev,
+			"Failed to create sysfs link 'thermal_cooling'\n");
+		goto err_thermal_unregister;
+	}
+
+	result = sysfs_create_link(&pr->cdev->device.kobj,
+				   &device->dev.kobj,
+				   "device");
+	if (result) {
+		dev_err(&pr->cdev->device,
+			"Failed to create sysfs link 'device'\n");
+		goto err_remove_sysfs_thermal;
+	}
+
+	return 0;
+
+err_remove_sysfs_thermal:
+	sysfs_remove_link(&device->dev.kobj, "thermal_cooling");
+err_thermal_unregister:
+	thermal_cooling_device_unregister(pr->cdev);
+
+	return result;
+}
+
+void acpi_processor_thermal_exit(struct acpi_processor *pr,
+				 struct acpi_device *device)
+{
+	if (pr->cdev) {
+		sysfs_remove_link(&device->dev.kobj, "thermal_cooling");
+		sysfs_remove_link(&pr->cdev->device.kobj, "device");
+		thermal_cooling_device_unregister(pr->cdev);
+		pr->cdev = NULL;
+	}
+}

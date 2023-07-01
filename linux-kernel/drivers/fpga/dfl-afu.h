@@ -41,7 +41,7 @@ struct dfl_afu_mmio_region {
 };
 
 /**
- * struct fpga_afu_dma_region - afu DMA region data structure
+ * struct dfl_afu_dma_region - afu DMA region data structure
  *
  * @user_addr: region userspace virtual address.
  * @length: region length.
@@ -80,7 +80,7 @@ struct dfl_afu {
 };
 
 /* hold pdata->lock when call __afu_port_enable/disable */
-void __afu_port_enable(struct platform_device *pdev);
+int __afu_port_enable(struct platform_device *pdev);
 int __afu_port_disable(struct platform_device *pdev);
 
 void afu_mmio_region_init(struct dfl_feature_platform_data *pdata);

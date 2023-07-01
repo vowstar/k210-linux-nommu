@@ -18,7 +18,6 @@
 #include <linux/capability.h>
 #include <linux/elf.h>
 #include <linux/elfcore.h>
-#include <linux/notifier.h>
 #include <linux/vmalloc.h>
 #include <linux/highmem.h>
 #include <linux/printk.h>
@@ -193,8 +192,6 @@ kclist_add_private(unsigned long pfn, unsigned long nr_pages, void *arg)
 		return 1;
 
 	p = pfn_to_page(pfn);
-	if (!memmap_valid_within(pfn, p, page_zone(p)))
-		return 1;
 
 	ent = kmalloc(sizeof(*ent), GFP_KERNEL);
 	if (!ent)
@@ -315,6 +312,7 @@ read_kcore(struct file *file, char __user *buffer, size_t buflen, loff_t *fpos)
 {
 	char *buf = file->private_data;
 	size_t phdrs_offset, notes_offset, data_offset;
+	size_t page_offline_frozen = 1;
 	size_t phdrs_len, notes_len;
 	struct kcore_list *m;
 	size_t tsz;
@@ -324,6 +322,11 @@ read_kcore(struct file *file, char __user *buffer, size_t buflen, loff_t *fpos)
 	int ret = 0;
 
 	down_read(&kclist_lock);
+	/*
+	 * Don't race against drivers that set PageOffline() and expect no
+	 * further page access.
+	 */
+	page_offline_freeze();
 
 	get_kcore_size(&nphdr, &phdrs_len, &notes_len, &data_offset);
 	phdrs_offset = sizeof(struct elfhdr);
@@ -382,11 +385,8 @@ read_kcore(struct file *file, char __user *buffer, size_t buflen, loff_t *fpos)
 			phdr->p_type = PT_LOAD;
 			phdr->p_flags = PF_R | PF_W | PF_X;
 			phdr->p_offset = kc_vaddr_to_offset(m->addr) + data_offset;
-			if (m->type == KCORE_REMAP)
-				phdr->p_vaddr = (size_t)m->vaddr;
-			else
-				phdr->p_vaddr = (size_t)m->addr;
-			if (m->type == KCORE_RAM || m->type == KCORE_REMAP)
+			phdr->p_vaddr = (size_t)m->addr;
+			if (m->type == KCORE_RAM)
 				phdr->p_paddr = __pa(m->addr);
 			else if (m->type == KCORE_TEXT)
 				phdr->p_paddr = __pa_symbol(m->addr);
@@ -470,66 +470,100 @@ read_kcore(struct file *file, char __user *buffer, size_t buflen, loff_t *fpos)
 
 	m = NULL;
 	while (buflen) {
+		struct page *page;
+		unsigned long pfn;
+
 		/*
 		 * If this is the first iteration or the address is not within
 		 * the previous entry, search for a matching entry.
 		 */
 		if (!m || start < m->addr || start >= m->addr + m->size) {
-			list_for_each_entry(m, &kclist_head, list) {
-				if (start >= m->addr &&
-				    start < m->addr + m->size)
+			struct kcore_list *iter;
+
+			m = NULL;
+			list_for_each_entry(iter, &kclist_head, list) {
+				if (start >= iter->addr &&
+				    start < iter->addr + iter->size) {
+					m = iter;
 					break;
+				}
 			}
 		}
 
-		if (&m->list == &kclist_head) {
+		if (page_offline_frozen++ % MAX_ORDER_NR_PAGES == 0) {
+			page_offline_thaw();
+			cond_resched();
+			page_offline_freeze();
+		}
+
+		if (!m) {
 			if (clear_user(buffer, tsz)) {
 				ret = -EFAULT;
 				goto out;
 			}
-			m = NULL;	/* skip the list anchor */
-		} else if (!pfn_is_ram(__pa(start) >> PAGE_SHIFT)) {
-			if (clear_user(buffer, tsz)) {
-				ret = -EFAULT;
-				goto out;
-			}
-		} else if (m->type == KCORE_VMALLOC) {
+			goto skip;
+		}
+
+		switch (m->type) {
+		case KCORE_VMALLOC:
 			vread(buf, (char *)start, tsz);
 			/* we have to zero-fill user buffer even if no read */
 			if (copy_to_user(buffer, buf, tsz)) {
 				ret = -EFAULT;
 				goto out;
 			}
-		} else if (m->type == KCORE_USER) {
+			break;
+		case KCORE_USER:
 			/* User page is handled prior to normal kernel page: */
 			if (copy_to_user(buffer, (char *)start, tsz)) {
 				ret = -EFAULT;
 				goto out;
 			}
-		} else {
-			if (kern_addr_valid(start)) {
-				/*
-				 * Using bounce buffer to bypass the
-				 * hardened user copy kernel text checks.
-				 */
-				if (probe_kernel_read(buf, (void *) start, tsz)) {
-					if (clear_user(buffer, tsz)) {
-						ret = -EFAULT;
-						goto out;
-					}
-				} else {
-					if (copy_to_user(buffer, buf, tsz)) {
-						ret = -EFAULT;
-						goto out;
-					}
-				}
-			} else {
+			break;
+		case KCORE_RAM:
+			pfn = __pa(start) >> PAGE_SHIFT;
+			page = pfn_to_online_page(pfn);
+
+			/*
+			 * Don't read offline sections, logically offline pages
+			 * (e.g., inflated in a balloon), hwpoisoned pages,
+			 * and explicitly excluded physical ranges.
+			 */
+			if (!page || PageOffline(page) ||
+			    is_page_hwpoison(page) || !pfn_is_ram(pfn)) {
 				if (clear_user(buffer, tsz)) {
 					ret = -EFAULT;
 					goto out;
 				}
+				break;
+			}
+			fallthrough;
+		case KCORE_VMEMMAP:
+		case KCORE_TEXT:
+			/*
+			 * Using bounce buffer to bypass the
+			 * hardened user copy kernel text checks.
+			 */
+			if (copy_from_kernel_nofault(buf, (void *)start, tsz)) {
+				if (clear_user(buffer, tsz)) {
+					ret = -EFAULT;
+					goto out;
+				}
+			} else {
+				if (copy_to_user(buffer, buf, tsz)) {
+					ret = -EFAULT;
+					goto out;
+				}
+			}
+			break;
+		default:
+			pr_warn_once("Unhandled KCORE type: %d\n", m->type);
+			if (clear_user(buffer, tsz)) {
+				ret = -EFAULT;
+				goto out;
 			}
 		}
+skip:
 		buflen -= tsz;
 		*fpos += tsz;
 		buffer += tsz;
@@ -538,6 +572,7 @@ read_kcore(struct file *file, char __user *buffer, size_t buflen, loff_t *fpos)
 	}
 
 out:
+	page_offline_thaw();
 	up_read(&kclist_lock);
 	if (ret)
 		return ret;
@@ -594,10 +629,6 @@ static int __meminit kcore_callback(struct notifier_block *self,
 	return NOTIFY_OK;
 }
 
-static struct notifier_block kcore_callback_nb __meminitdata = {
-	.notifier_call = kcore_callback,
-	.priority = 0,
-};
 
 static struct kcore_list kcore_vmalloc;
 
@@ -650,7 +681,7 @@ static int __init proc_kcore_init(void)
 	add_modules_range();
 	/* Store direct-map area from physical memory map */
 	kcore_update_ram();
-	register_hotmemory_notifier(&kcore_callback_nb);
+	hotplug_memory_notifier(kcore_callback, DEFAULT_CALLBACK_PRI);
 
 	return 0;
 }

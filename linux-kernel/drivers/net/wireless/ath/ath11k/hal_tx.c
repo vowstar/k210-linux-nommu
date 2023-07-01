@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 /*
  * Copyright (c) 2018-2019 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
-#include "ahb.h"
+#include "hal_desc.h"
 #include "hal.h"
 #include "hal_tx.h"
+#include "hif.h"
 
 #define DSCP_TID_MAP_TBL_ENTRY_SIZE 64
 
@@ -43,8 +45,7 @@ void ath11k_hal_tx_cmd_desc_setup(struct ath11k_base *ab, void *cmd,
 		FIELD_PREP(BUFFER_ADDR_INFO1_ADDR,
 			   ((uint64_t)ti->paddr >> HAL_ADDR_MSB_REG_SHIFT));
 	tcl_cmd->buf_addr_info.info1 |=
-		FIELD_PREP(BUFFER_ADDR_INFO1_RET_BUF_MGR,
-			   (ti->ring_id + HAL_RX_BUF_RBM_SW0_BM)) |
+		FIELD_PREP(BUFFER_ADDR_INFO1_RET_BUF_MGR, ti->rbm_id) |
 		FIELD_PREP(BUFFER_ADDR_INFO1_SW_COOKIE, ti->desc_id);
 
 	tcl_cmd->info0 =
@@ -70,8 +71,13 @@ void ath11k_hal_tx_cmd_desc_setup(struct ath11k_base *ab, void *cmd,
 	tcl_cmd->info3 = FIELD_PREP(HAL_TCL_DATA_CMD_INFO3_DSCP_TID_TABLE_IDX,
 				    ti->dscp_tid_tbl_idx) |
 			 FIELD_PREP(HAL_TCL_DATA_CMD_INFO3_SEARCH_INDEX,
+				    ti->bss_ast_idx) |
+			 FIELD_PREP(HAL_TCL_DATA_CMD_INFO3_CACHE_SET_NUM,
 				    ti->bss_ast_hash);
 	tcl_cmd->info4 = 0;
+
+	if (ti->enable_mesh)
+		ab->hw_params.hw_ops->tx_mesh_enable(ab, tcl_cmd);
 }
 
 void ath11k_hal_tx_set_dscp_tid_map(struct ath11k_base *ab, int id)
@@ -83,11 +89,11 @@ void ath11k_hal_tx_set_dscp_tid_map(struct ath11k_base *ab, int id)
 	u32 value;
 	int cnt = 0;
 
-	ctrl_reg_val = ath11k_ahb_read32(ab, HAL_SEQ_WCSS_UMAC_TCL_REG +
+	ctrl_reg_val = ath11k_hif_read32(ab, HAL_SEQ_WCSS_UMAC_TCL_REG +
 					 HAL_TCL1_RING_CMN_CTRL_REG);
 	/* Enable read/write access */
 	ctrl_reg_val |= HAL_TCL1_RING_CMN_CTRL_DSCP_TID_MAP_PROG_EN;
-	ath11k_ahb_write32(ab, HAL_SEQ_WCSS_UMAC_TCL_REG +
+	ath11k_hif_write32(ab, HAL_SEQ_WCSS_UMAC_TCL_REG +
 			   HAL_TCL1_RING_CMN_CTRL_REG, ctrl_reg_val);
 
 	addr = HAL_SEQ_WCSS_UMAC_TCL_REG + HAL_TCL1_RING_DSCP_TID_MAP +
@@ -118,15 +124,15 @@ void ath11k_hal_tx_set_dscp_tid_map(struct ath11k_base *ab, int id)
 	}
 
 	for (i = 0; i < HAL_DSCP_TID_TBL_SIZE; i += 4) {
-		ath11k_ahb_write32(ab, addr, *(u32 *)&hw_map_val[i]);
+		ath11k_hif_write32(ab, addr, *(u32 *)&hw_map_val[i]);
 		addr += 4;
 	}
 
 	/* Disable read/write access */
-	ctrl_reg_val = ath11k_ahb_read32(ab, HAL_SEQ_WCSS_UMAC_TCL_REG +
+	ctrl_reg_val = ath11k_hif_read32(ab, HAL_SEQ_WCSS_UMAC_TCL_REG +
 					 HAL_TCL1_RING_CMN_CTRL_REG);
 	ctrl_reg_val &= ~HAL_TCL1_RING_CMN_CTRL_DSCP_TID_MAP_PROG_EN;
-	ath11k_ahb_write32(ab, HAL_SEQ_WCSS_UMAC_TCL_REG +
+	ath11k_hif_write32(ab, HAL_SEQ_WCSS_UMAC_TCL_REG +
 			   HAL_TCL1_RING_CMN_CTRL_REG,
 			   ctrl_reg_val);
 }
@@ -140,7 +146,7 @@ void ath11k_hal_tx_init_data_ring(struct ath11k_base *ab, struct hal_srng *srng)
 
 	memset(&params, 0, sizeof(params));
 
-	entry_size = ath11k_hal_srng_get_entrysize(HAL_TCL_DATA);
+	entry_size = ath11k_hal_srng_get_entrysize(ab, HAL_TCL_DATA);
 	ath11k_hal_srng_get_params(ab, srng, &params);
 	desc = (u8 *)params.ring_base_vaddr;
 

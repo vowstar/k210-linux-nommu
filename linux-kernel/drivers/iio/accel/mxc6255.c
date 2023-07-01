@@ -113,8 +113,7 @@ static const struct regmap_config mxc6255_regmap_config = {
 	.readable_reg = mxc6255_is_readable_reg,
 };
 
-static int mxc6255_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+static int mxc6255_probe(struct i2c_client *client)
 {
 	struct mxc6255_data *data;
 	struct iio_dev *indio_dev;
@@ -138,7 +137,6 @@ static int mxc6255_probe(struct i2c_client *client,
 	data->regmap = regmap;
 
 	indio_dev->name = MXC6255_DRV_NAME;
-	indio_dev->dev.parent = &client->dev;
 	indio_dev->channels = mxc6255_channels;
 	indio_dev->num_channels = ARRAY_SIZE(mxc6255_channels);
 	indio_dev->modes = INDIO_DIRECT_MODE;
@@ -185,7 +183,7 @@ static struct i2c_driver mxc6255_driver = {
 		.name = MXC6255_DRV_NAME,
 		.acpi_match_table = ACPI_PTR(mxc6255_acpi_match),
 	},
-	.probe		= mxc6255_probe,
+	.probe_new	= mxc6255_probe,
 	.id_table	= mxc6255_id,
 };
 

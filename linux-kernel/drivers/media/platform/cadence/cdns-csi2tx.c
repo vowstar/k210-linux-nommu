@@ -15,6 +15,7 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 
+#include <media/mipi-csi2.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-fwnode.h>
@@ -121,12 +122,12 @@ static const struct csi2tx_fmt csi2tx_formats[] = {
 	{
 		.mbus	= MEDIA_BUS_FMT_UYVY8_1X16,
 		.bpp	= 2,
-		.dt	= 0x1e,
+		.dt	= MIPI_CSI2_DT_YUV422_8B,
 	},
 	{
 		.mbus	= MEDIA_BUS_FMT_RGB888_1X24,
 		.bpp	= 3,
-		.dt	= 0x24,
+		.dt	= MIPI_CSI2_DT_RGB888,
 	},
 };
 
@@ -156,7 +157,7 @@ static const struct csi2tx_fmt *csi2tx_get_fmt_from_mbus(u32 mbus)
 }
 
 static int csi2tx_enum_mbus_code(struct v4l2_subdev *subdev,
-				 struct v4l2_subdev_pad_config *cfg,
+				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_mbus_code_enum *code)
 {
 	if (code->pad || code->index >= ARRAY_SIZE(csi2tx_formats))
@@ -169,20 +170,20 @@ static int csi2tx_enum_mbus_code(struct v4l2_subdev *subdev,
 
 static struct v4l2_mbus_framefmt *
 __csi2tx_get_pad_format(struct v4l2_subdev *subdev,
-			struct v4l2_subdev_pad_config *cfg,
+			struct v4l2_subdev_state *sd_state,
 			struct v4l2_subdev_format *fmt)
 {
 	struct csi2tx_priv *csi2tx = v4l2_subdev_to_csi2tx(subdev);
 
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY)
-		return v4l2_subdev_get_try_format(subdev, cfg,
+		return v4l2_subdev_get_try_format(subdev, sd_state,
 						  fmt->pad);
 
 	return &csi2tx->pad_fmts[fmt->pad];
 }
 
 static int csi2tx_get_pad_format(struct v4l2_subdev *subdev,
-				 struct v4l2_subdev_pad_config *cfg,
+				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_format *fmt)
 {
 	const struct v4l2_mbus_framefmt *format;
@@ -191,7 +192,7 @@ static int csi2tx_get_pad_format(struct v4l2_subdev *subdev,
 	if (fmt->pad == CSI2TX_PAD_SOURCE)
 		return -EINVAL;
 
-	format = __csi2tx_get_pad_format(subdev, cfg, fmt);
+	format = __csi2tx_get_pad_format(subdev, sd_state, fmt);
 	if (!format)
 		return -EINVAL;
 
@@ -201,7 +202,7 @@ static int csi2tx_get_pad_format(struct v4l2_subdev *subdev,
 }
 
 static int csi2tx_set_pad_format(struct v4l2_subdev *subdev,
-				 struct v4l2_subdev_pad_config *cfg,
+				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_format *fmt)
 {
 	const struct v4l2_mbus_framefmt *src_format = &fmt->format;
@@ -214,7 +215,7 @@ static int csi2tx_set_pad_format(struct v4l2_subdev *subdev,
 	if (!csi2tx_get_fmt_from_mbus(fmt->format.code))
 		src_format = &fmt_default;
 
-	dst_format = __csi2tx_get_pad_format(subdev, cfg, fmt);
+	dst_format = __csi2tx_get_pad_format(subdev, sd_state, fmt);
 	if (!dst_format)
 		return -EINVAL;
 
@@ -433,12 +434,11 @@ static const struct v4l2_subdev_ops csi2tx_subdev_ops = {
 static int csi2tx_get_resources(struct csi2tx_priv *csi2tx,
 				struct platform_device *pdev)
 {
-	struct resource *res;
 	unsigned int i;
 	u32 dev_cfg;
+	int ret;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	csi2tx->base = devm_ioremap_resource(&pdev->dev, res);
+	csi2tx->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(csi2tx->base))
 		return PTR_ERR(csi2tx->base);
 
@@ -454,7 +454,12 @@ static int csi2tx_get_resources(struct csi2tx_priv *csi2tx,
 		return PTR_ERR(csi2tx->esc_clk);
 	}
 
-	clk_prepare_enable(csi2tx->p_clk);
+	ret = clk_prepare_enable(csi2tx->p_clk);
+	if (ret) {
+		dev_err(&pdev->dev, "Couldn't prepare and enable p_clk\n");
+		return ret;
+	}
+
 	dev_cfg = readl(csi2tx->base + CSI2TX_DEVICE_CONFIG_REG);
 	clk_disable_unprepare(csi2tx->p_clk);
 

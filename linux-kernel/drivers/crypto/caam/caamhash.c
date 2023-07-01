@@ -65,6 +65,9 @@
 #include "sg_sw_sec4.h"
 #include "key_gen.h"
 #include "caamhash_desc.h"
+#include <crypto/engine.h>
+#include <linux/dma-mapping.h>
+#include <linux/kernel.h>
 
 #define CAAM_CRA_PRIORITY		3000
 
@@ -86,6 +89,7 @@ static struct list_head hash_list;
 
 /* ahash per-session context */
 struct caam_hash_ctx {
+	struct crypto_engine_ctx enginectx;
 	u32 sh_desc_update[DESC_HASH_MAX_USED_LEN] ____cacheline_aligned;
 	u32 sh_desc_update_first[DESC_HASH_MAX_USED_LEN] ____cacheline_aligned;
 	u32 sh_desc_fin[DESC_HASH_MAX_USED_LEN] ____cacheline_aligned;
@@ -111,9 +115,12 @@ struct caam_hash_state {
 	int buflen;
 	int next_buflen;
 	u8 caam_ctx[MAX_CTX_LEN] ____cacheline_aligned;
-	int (*update)(struct ahash_request *req);
+	int (*update)(struct ahash_request *req) ____cacheline_aligned;
 	int (*final)(struct ahash_request *req);
 	int (*finup)(struct ahash_request *req);
+	struct ahash_edesc *edesc;
+	void (*ahash_op_done)(struct device *jrdev, u32 *desc, u32 err,
+			      void *context);
 };
 
 struct caam_export_state {
@@ -194,7 +201,7 @@ static inline int ctx_map_to_sec4_sg(struct device *jrdev,
 
 static int ahash_set_sh_desc(struct crypto_ahash *ahash)
 {
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
 	int digestsize = crypto_ahash_digestsize(ahash);
 	struct device *jrdev = ctx->jrdev;
 	struct caam_drv_private *ctrlpriv = dev_get_drvdata(jrdev->parent);
@@ -250,7 +257,7 @@ static int ahash_set_sh_desc(struct crypto_ahash *ahash)
 
 static int axcbc_set_sh_desc(struct crypto_ahash *ahash)
 {
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
 	int digestsize = crypto_ahash_digestsize(ahash);
 	struct device *jrdev = ctx->jrdev;
 	u32 *desc;
@@ -302,7 +309,7 @@ static int axcbc_set_sh_desc(struct crypto_ahash *ahash)
 
 static int acmac_set_sh_desc(struct crypto_ahash *ahash)
 {
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
 	int digestsize = crypto_ahash_digestsize(ahash);
 	struct device *jrdev = ctx->jrdev;
 	u32 *desc;
@@ -360,7 +367,7 @@ static int hash_digest_key(struct caam_hash_ctx *ctx, u32 *keylen, u8 *key,
 	dma_addr_t key_dma;
 	int ret;
 
-	desc = kmalloc(CAAM_CMD_SZ * 8 + CAAM_PTR_SZ * 2, GFP_KERNEL | GFP_DMA);
+	desc = kmalloc(CAAM_CMD_SZ * 8 + CAAM_PTR_SZ * 2, GFP_KERNEL);
 	if (!desc) {
 		dev_err(jrdev, "unable to allocate key input memory\n");
 		return -ENOMEM;
@@ -395,7 +402,7 @@ static int hash_digest_key(struct caam_hash_ctx *ctx, u32 *keylen, u8 *key,
 	init_completion(&result.completion);
 
 	ret = caam_jr_enqueue(jrdev, desc, split_key_done, &result);
-	if (!ret) {
+	if (ret == -EINPROGRESS) {
 		/* in progress */
 		wait_for_completion(&result.completion);
 		ret = result.err;
@@ -416,7 +423,7 @@ static int hash_digest_key(struct caam_hash_ctx *ctx, u32 *keylen, u8 *key,
 static int ahash_setkey(struct crypto_ahash *ahash,
 			const u8 *key, unsigned int keylen)
 {
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
 	struct device *jrdev = ctx->jrdev;
 	int blocksize = crypto_tfm_alg_blocksize(&ahash->base);
 	int digestsize = crypto_ahash_digestsize(ahash);
@@ -427,7 +434,13 @@ static int ahash_setkey(struct crypto_ahash *ahash,
 	dev_dbg(jrdev, "keylen %d\n", keylen);
 
 	if (keylen > blocksize) {
-		hashed_key = kmemdup(key, keylen, GFP_KERNEL | GFP_DMA);
+		unsigned int aligned_len =
+			ALIGN(keylen, dma_get_cache_alignment());
+
+		if (aligned_len < keylen)
+			return -EOVERFLOW;
+
+		hashed_key = kmemdup(key, keylen, GFP_KERNEL);
 		if (!hashed_key)
 			return -ENOMEM;
 		ret = hash_digest_key(ctx, &keylen, hashed_key, digestsize);
@@ -479,7 +492,7 @@ static int ahash_setkey(struct crypto_ahash *ahash,
 static int axcbc_setkey(struct crypto_ahash *ahash, const u8 *key,
 			unsigned int keylen)
 {
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
 	struct device *jrdev = ctx->jrdev;
 
 	if (keylen != AES_KEYSIZE_128)
@@ -499,7 +512,7 @@ static int axcbc_setkey(struct crypto_ahash *ahash, const u8 *key,
 static int acmac_setkey(struct crypto_ahash *ahash, const u8 *key,
 			unsigned int keylen)
 {
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
 	int err;
 
 	err = aes_check_keylen(keylen);
@@ -521,6 +534,7 @@ static int acmac_setkey(struct crypto_ahash *ahash, const u8 *key,
  * @sec4_sg_dma: physical mapped address of h/w link table
  * @src_nents: number of segments in input scatterlist
  * @sec4_sg_bytes: length of dma mapped sec4_sg space
+ * @bklog: stored to determine if the request needs backlog
  * @hw_desc: the h/w job descriptor followed by any referenced link tables
  * @sec4_sg: h/w link table
  */
@@ -528,15 +542,16 @@ struct ahash_edesc {
 	dma_addr_t sec4_sg_dma;
 	int src_nents;
 	int sec4_sg_bytes;
+	bool bklog;
 	u32 hw_desc[DESC_JOB_IO_LEN_MAX / sizeof(u32)] ____cacheline_aligned;
-	struct sec4_sg_entry sec4_sg[0];
+	struct sec4_sg_entry sec4_sg[];
 };
 
 static inline void ahash_unmap(struct device *dev,
 			struct ahash_edesc *edesc,
 			struct ahash_request *req, int dst_len)
 {
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 
 	if (edesc->src_nents)
 		dma_unmap_sg(dev, req->src, edesc->src_nents, DMA_TO_DEVICE);
@@ -556,7 +571,7 @@ static inline void ahash_unmap_ctx(struct device *dev,
 			struct ahash_edesc *edesc,
 			struct ahash_request *req, int dst_len, u32 flag)
 {
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 
 	if (state->ctx_dma) {
 		dma_unmap_single(dev, state->ctx_dma, state->ctx_dma_len, flag);
@@ -565,24 +580,28 @@ static inline void ahash_unmap_ctx(struct device *dev,
 	ahash_unmap(dev, edesc, req, dst_len);
 }
 
-static void ahash_done(struct device *jrdev, u32 *desc, u32 err,
-		       void *context)
+static inline void ahash_done_cpy(struct device *jrdev, u32 *desc, u32 err,
+				  void *context, enum dma_data_direction dir)
 {
 	struct ahash_request *req = context;
+	struct caam_drv_private_jr *jrp = dev_get_drvdata(jrdev);
 	struct ahash_edesc *edesc;
 	struct crypto_ahash *ahash = crypto_ahash_reqtfm(req);
 	int digestsize = crypto_ahash_digestsize(ahash);
-	struct caam_hash_state *state = ahash_request_ctx(req);
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
 	int ecode = 0;
+	bool has_bklog;
 
 	dev_dbg(jrdev, "%s %d: err 0x%x\n", __func__, __LINE__, err);
 
-	edesc = container_of(desc, struct ahash_edesc, hw_desc[0]);
+	edesc = state->edesc;
+	has_bklog = edesc->bklog;
+
 	if (err)
 		ecode = caam_jr_strstatus(jrdev, err);
 
-	ahash_unmap_ctx(jrdev, edesc, req, digestsize, DMA_FROM_DEVICE);
+	ahash_unmap_ctx(jrdev, edesc, req, digestsize, dir);
 	memcpy(req->result, state->caam_ctx, digestsize);
 	kfree(edesc);
 
@@ -590,95 +609,49 @@ static void ahash_done(struct device *jrdev, u32 *desc, u32 err,
 			     DUMP_PREFIX_ADDRESS, 16, 4, state->caam_ctx,
 			     ctx->ctx_len, 1);
 
-	req->base.complete(&req->base, ecode);
+	/*
+	 * If no backlog flag, the completion of the request is done
+	 * by CAAM, not crypto engine.
+	 */
+	if (!has_bklog)
+		ahash_request_complete(req, ecode);
+	else
+		crypto_finalize_hash_request(jrp->engine, req, ecode);
 }
 
-static void ahash_done_bi(struct device *jrdev, u32 *desc, u32 err,
-			    void *context)
+static void ahash_done(struct device *jrdev, u32 *desc, u32 err,
+		       void *context)
 {
-	struct ahash_request *req = context;
-	struct ahash_edesc *edesc;
-	struct crypto_ahash *ahash = crypto_ahash_reqtfm(req);
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
-	struct caam_hash_state *state = ahash_request_ctx(req);
-	int digestsize = crypto_ahash_digestsize(ahash);
-	int ecode = 0;
-
-	dev_dbg(jrdev, "%s %d: err 0x%x\n", __func__, __LINE__, err);
-
-	edesc = container_of(desc, struct ahash_edesc, hw_desc[0]);
-	if (err)
-		ecode = caam_jr_strstatus(jrdev, err);
-
-	ahash_unmap_ctx(jrdev, edesc, req, ctx->ctx_len, DMA_BIDIRECTIONAL);
-	kfree(edesc);
-
-	scatterwalk_map_and_copy(state->buf, req->src,
-				 req->nbytes - state->next_buflen,
-				 state->next_buflen, 0);
-	state->buflen = state->next_buflen;
-
-	print_hex_dump_debug("buf@" __stringify(__LINE__)": ",
-			     DUMP_PREFIX_ADDRESS, 16, 4, state->buf,
-			     state->buflen, 1);
-
-	print_hex_dump_debug("ctx@"__stringify(__LINE__)": ",
-			     DUMP_PREFIX_ADDRESS, 16, 4, state->caam_ctx,
-			     ctx->ctx_len, 1);
-	if (req->result)
-		print_hex_dump_debug("result@"__stringify(__LINE__)": ",
-				     DUMP_PREFIX_ADDRESS, 16, 4, req->result,
-				     digestsize, 1);
-
-	req->base.complete(&req->base, ecode);
+	ahash_done_cpy(jrdev, desc, err, context, DMA_FROM_DEVICE);
 }
 
 static void ahash_done_ctx_src(struct device *jrdev, u32 *desc, u32 err,
 			       void *context)
 {
-	struct ahash_request *req = context;
-	struct ahash_edesc *edesc;
-	struct crypto_ahash *ahash = crypto_ahash_reqtfm(req);
-	int digestsize = crypto_ahash_digestsize(ahash);
-	struct caam_hash_state *state = ahash_request_ctx(req);
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
-	int ecode = 0;
-
-	dev_dbg(jrdev, "%s %d: err 0x%x\n", __func__, __LINE__, err);
-
-	edesc = container_of(desc, struct ahash_edesc, hw_desc[0]);
-	if (err)
-		ecode = caam_jr_strstatus(jrdev, err);
-
-	ahash_unmap_ctx(jrdev, edesc, req, digestsize, DMA_BIDIRECTIONAL);
-	memcpy(req->result, state->caam_ctx, digestsize);
-	kfree(edesc);
-
-	print_hex_dump_debug("ctx@"__stringify(__LINE__)": ",
-			     DUMP_PREFIX_ADDRESS, 16, 4, state->caam_ctx,
-			     ctx->ctx_len, 1);
-
-	req->base.complete(&req->base, ecode);
+	ahash_done_cpy(jrdev, desc, err, context, DMA_BIDIRECTIONAL);
 }
 
-static void ahash_done_ctx_dst(struct device *jrdev, u32 *desc, u32 err,
-			       void *context)
+static inline void ahash_done_switch(struct device *jrdev, u32 *desc, u32 err,
+				     void *context, enum dma_data_direction dir)
 {
 	struct ahash_request *req = context;
+	struct caam_drv_private_jr *jrp = dev_get_drvdata(jrdev);
 	struct ahash_edesc *edesc;
 	struct crypto_ahash *ahash = crypto_ahash_reqtfm(req);
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 	int digestsize = crypto_ahash_digestsize(ahash);
 	int ecode = 0;
+	bool has_bklog;
 
 	dev_dbg(jrdev, "%s %d: err 0x%x\n", __func__, __LINE__, err);
 
-	edesc = container_of(desc, struct ahash_edesc, hw_desc[0]);
+	edesc = state->edesc;
+	has_bklog = edesc->bklog;
 	if (err)
 		ecode = caam_jr_strstatus(jrdev, err);
 
-	ahash_unmap_ctx(jrdev, edesc, req, ctx->ctx_len, DMA_FROM_DEVICE);
+	ahash_unmap_ctx(jrdev, edesc, req, ctx->ctx_len, dir);
 	kfree(edesc);
 
 	scatterwalk_map_and_copy(state->buf, req->src,
@@ -698,26 +671,52 @@ static void ahash_done_ctx_dst(struct device *jrdev, u32 *desc, u32 err,
 				     DUMP_PREFIX_ADDRESS, 16, 4, req->result,
 				     digestsize, 1);
 
-	req->base.complete(&req->base, ecode);
+	/*
+	 * If no backlog flag, the completion of the request is done
+	 * by CAAM, not crypto engine.
+	 */
+	if (!has_bklog)
+		ahash_request_complete(req, ecode);
+	else
+		crypto_finalize_hash_request(jrp->engine, req, ecode);
+
+}
+
+static void ahash_done_bi(struct device *jrdev, u32 *desc, u32 err,
+			  void *context)
+{
+	ahash_done_switch(jrdev, desc, err, context, DMA_BIDIRECTIONAL);
+}
+
+static void ahash_done_ctx_dst(struct device *jrdev, u32 *desc, u32 err,
+			       void *context)
+{
+	ahash_done_switch(jrdev, desc, err, context, DMA_FROM_DEVICE);
 }
 
 /*
  * Allocate an enhanced descriptor, which contains the hardware descriptor
  * and space for hardware scatter table containing sg_num entries.
  */
-static struct ahash_edesc *ahash_edesc_alloc(struct caam_hash_ctx *ctx,
+static struct ahash_edesc *ahash_edesc_alloc(struct ahash_request *req,
 					     int sg_num, u32 *sh_desc,
-					     dma_addr_t sh_desc_dma,
-					     gfp_t flags)
+					     dma_addr_t sh_desc_dma)
 {
+	struct crypto_ahash *ahash = crypto_ahash_reqtfm(req);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
+	gfp_t flags = (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) ?
+		       GFP_KERNEL : GFP_ATOMIC;
 	struct ahash_edesc *edesc;
 	unsigned int sg_size = sg_num * sizeof(struct sec4_sg_entry);
 
-	edesc = kzalloc(sizeof(*edesc) + sg_size, GFP_DMA | flags);
+	edesc = kzalloc(sizeof(*edesc) + sg_size, flags);
 	if (!edesc) {
 		dev_err(ctx->jrdev, "could not allocate extended descriptor\n");
 		return NULL;
 	}
+
+	state->edesc = edesc;
 
 	init_job_desc_shared(edesc->hw_desc, sh_desc_dma, desc_len(sh_desc),
 			     HDR_SHARE_DEFER | HDR_REVERSE);
@@ -761,15 +760,72 @@ static int ahash_edesc_add_src(struct caam_hash_ctx *ctx,
 	return 0;
 }
 
+static int ahash_do_one_req(struct crypto_engine *engine, void *areq)
+{
+	struct ahash_request *req = ahash_request_cast(areq);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(crypto_ahash_reqtfm(req));
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
+	struct device *jrdev = ctx->jrdev;
+	u32 *desc = state->edesc->hw_desc;
+	int ret;
+
+	state->edesc->bklog = true;
+
+	ret = caam_jr_enqueue(jrdev, desc, state->ahash_op_done, req);
+
+	if (ret == -ENOSPC && engine->retry_support)
+		return ret;
+
+	if (ret != -EINPROGRESS) {
+		ahash_unmap(jrdev, state->edesc, req, 0);
+		kfree(state->edesc);
+	} else {
+		ret = 0;
+	}
+
+	return ret;
+}
+
+static int ahash_enqueue_req(struct device *jrdev,
+			     void (*cbk)(struct device *jrdev, u32 *desc,
+					 u32 err, void *context),
+			     struct ahash_request *req,
+			     int dst_len, enum dma_data_direction dir)
+{
+	struct caam_drv_private_jr *jrpriv = dev_get_drvdata(jrdev);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
+	struct ahash_edesc *edesc = state->edesc;
+	u32 *desc = edesc->hw_desc;
+	int ret;
+
+	state->ahash_op_done = cbk;
+
+	/*
+	 * Only the backlog request are sent to crypto-engine since the others
+	 * can be handled by CAAM, if free, especially since JR has up to 1024
+	 * entries (more than the 10 entries from crypto-engine).
+	 */
+	if (req->base.flags & CRYPTO_TFM_REQ_MAY_BACKLOG)
+		ret = crypto_transfer_hash_request_to_engine(jrpriv->engine,
+							     req);
+	else
+		ret = caam_jr_enqueue(jrdev, desc, cbk, req);
+
+	if ((ret != -EINPROGRESS) && (ret != -EBUSY)) {
+		ahash_unmap_ctx(jrdev, edesc, req, dst_len, dir);
+		kfree(edesc);
+	}
+
+	return ret;
+}
+
 /* submit update job descriptor */
 static int ahash_update_ctx(struct ahash_request *req)
 {
 	struct crypto_ahash *ahash = crypto_ahash_reqtfm(req);
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 	struct device *jrdev = ctx->jrdev;
-	gfp_t flags = (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) ?
-		       GFP_KERNEL : GFP_ATOMIC;
 	u8 *buf = state->buf;
 	int *buflen = &state->buflen;
 	int *next_buflen = &state->next_buflen;
@@ -823,8 +879,8 @@ static int ahash_update_ctx(struct ahash_request *req)
 		 * allocate space for base edesc and hw desc commands,
 		 * link tables
 		 */
-		edesc = ahash_edesc_alloc(ctx, pad_nents, ctx->sh_desc_update,
-					  ctx->sh_desc_update_dma, flags);
+		edesc = ahash_edesc_alloc(req, pad_nents, ctx->sh_desc_update,
+					  ctx->sh_desc_update_dma);
 		if (!edesc) {
 			dma_unmap_sg(jrdev, req->src, src_nents, DMA_TO_DEVICE);
 			return -ENOMEM;
@@ -870,11 +926,8 @@ static int ahash_update_ctx(struct ahash_request *req)
 				     DUMP_PREFIX_ADDRESS, 16, 4, desc,
 				     desc_bytes(desc), 1);
 
-		ret = caam_jr_enqueue(jrdev, desc, ahash_done_bi, req);
-		if (ret)
-			goto unmap_ctx;
-
-		ret = -EINPROGRESS;
+		ret = ahash_enqueue_req(jrdev, ahash_done_bi, req,
+					ctx->ctx_len, DMA_BIDIRECTIONAL);
 	} else if (*next_buflen) {
 		scatterwalk_map_and_copy(buf + *buflen, req->src, 0,
 					 req->nbytes, 0);
@@ -895,11 +948,9 @@ unmap_ctx:
 static int ahash_final_ctx(struct ahash_request *req)
 {
 	struct crypto_ahash *ahash = crypto_ahash_reqtfm(req);
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 	struct device *jrdev = ctx->jrdev;
-	gfp_t flags = (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) ?
-		       GFP_KERNEL : GFP_ATOMIC;
 	int buflen = state->buflen;
 	u32 *desc;
 	int sec4_sg_bytes;
@@ -911,8 +962,8 @@ static int ahash_final_ctx(struct ahash_request *req)
 			sizeof(struct sec4_sg_entry);
 
 	/* allocate space for base edesc and hw desc commands, link tables */
-	edesc = ahash_edesc_alloc(ctx, 4, ctx->sh_desc_fin,
-				  ctx->sh_desc_fin_dma, flags);
+	edesc = ahash_edesc_alloc(req, 4, ctx->sh_desc_fin,
+				  ctx->sh_desc_fin_dma);
 	if (!edesc)
 		return -ENOMEM;
 
@@ -947,11 +998,8 @@ static int ahash_final_ctx(struct ahash_request *req)
 			     DUMP_PREFIX_ADDRESS, 16, 4, desc, desc_bytes(desc),
 			     1);
 
-	ret = caam_jr_enqueue(jrdev, desc, ahash_done_ctx_src, req);
-	if (ret)
-		goto unmap_ctx;
-
-	return -EINPROGRESS;
+	return ahash_enqueue_req(jrdev, ahash_done_ctx_src, req,
+				 digestsize, DMA_BIDIRECTIONAL);
  unmap_ctx:
 	ahash_unmap_ctx(jrdev, edesc, req, digestsize, DMA_BIDIRECTIONAL);
 	kfree(edesc);
@@ -961,11 +1009,9 @@ static int ahash_final_ctx(struct ahash_request *req)
 static int ahash_finup_ctx(struct ahash_request *req)
 {
 	struct crypto_ahash *ahash = crypto_ahash_reqtfm(req);
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 	struct device *jrdev = ctx->jrdev;
-	gfp_t flags = (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) ?
-		       GFP_KERNEL : GFP_ATOMIC;
 	int buflen = state->buflen;
 	u32 *desc;
 	int sec4_sg_src_index;
@@ -994,9 +1040,8 @@ static int ahash_finup_ctx(struct ahash_request *req)
 	sec4_sg_src_index = 1 + (buflen ? 1 : 0);
 
 	/* allocate space for base edesc and hw desc commands, link tables */
-	edesc = ahash_edesc_alloc(ctx, sec4_sg_src_index + mapped_nents,
-				  ctx->sh_desc_fin, ctx->sh_desc_fin_dma,
-				  flags);
+	edesc = ahash_edesc_alloc(req, sec4_sg_src_index + mapped_nents,
+				  ctx->sh_desc_fin, ctx->sh_desc_fin_dma);
 	if (!edesc) {
 		dma_unmap_sg(jrdev, req->src, src_nents, DMA_TO_DEVICE);
 		return -ENOMEM;
@@ -1027,11 +1072,8 @@ static int ahash_finup_ctx(struct ahash_request *req)
 			     DUMP_PREFIX_ADDRESS, 16, 4, desc, desc_bytes(desc),
 			     1);
 
-	ret = caam_jr_enqueue(jrdev, desc, ahash_done_ctx_src, req);
-	if (ret)
-		goto unmap_ctx;
-
-	return -EINPROGRESS;
+	return ahash_enqueue_req(jrdev, ahash_done_ctx_src, req,
+				 digestsize, DMA_BIDIRECTIONAL);
  unmap_ctx:
 	ahash_unmap_ctx(jrdev, edesc, req, digestsize, DMA_BIDIRECTIONAL);
 	kfree(edesc);
@@ -1041,11 +1083,9 @@ static int ahash_finup_ctx(struct ahash_request *req)
 static int ahash_digest(struct ahash_request *req)
 {
 	struct crypto_ahash *ahash = crypto_ahash_reqtfm(req);
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 	struct device *jrdev = ctx->jrdev;
-	gfp_t flags = (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) ?
-		       GFP_KERNEL : GFP_ATOMIC;
 	u32 *desc;
 	int digestsize = crypto_ahash_digestsize(ahash);
 	int src_nents, mapped_nents;
@@ -1072,9 +1112,8 @@ static int ahash_digest(struct ahash_request *req)
 	}
 
 	/* allocate space for base edesc and hw desc commands, link tables */
-	edesc = ahash_edesc_alloc(ctx, mapped_nents > 1 ? mapped_nents : 0,
-				  ctx->sh_desc_digest, ctx->sh_desc_digest_dma,
-				  flags);
+	edesc = ahash_edesc_alloc(req, mapped_nents > 1 ? mapped_nents : 0,
+				  ctx->sh_desc_digest, ctx->sh_desc_digest_dma);
 	if (!edesc) {
 		dma_unmap_sg(jrdev, req->src, src_nents, DMA_TO_DEVICE);
 		return -ENOMEM;
@@ -1103,26 +1142,17 @@ static int ahash_digest(struct ahash_request *req)
 			     DUMP_PREFIX_ADDRESS, 16, 4, desc, desc_bytes(desc),
 			     1);
 
-	ret = caam_jr_enqueue(jrdev, desc, ahash_done, req);
-	if (!ret) {
-		ret = -EINPROGRESS;
-	} else {
-		ahash_unmap_ctx(jrdev, edesc, req, digestsize, DMA_FROM_DEVICE);
-		kfree(edesc);
-	}
-
-	return ret;
+	return ahash_enqueue_req(jrdev, ahash_done, req, digestsize,
+				 DMA_FROM_DEVICE);
 }
 
 /* submit ahash final if it the first job descriptor */
 static int ahash_final_no_ctx(struct ahash_request *req)
 {
 	struct crypto_ahash *ahash = crypto_ahash_reqtfm(req);
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 	struct device *jrdev = ctx->jrdev;
-	gfp_t flags = (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) ?
-		       GFP_KERNEL : GFP_ATOMIC;
 	u8 *buf = state->buf;
 	int buflen = state->buflen;
 	u32 *desc;
@@ -1131,8 +1161,8 @@ static int ahash_final_no_ctx(struct ahash_request *req)
 	int ret;
 
 	/* allocate space for base edesc and hw desc commands, link tables */
-	edesc = ahash_edesc_alloc(ctx, 0, ctx->sh_desc_digest,
-				  ctx->sh_desc_digest_dma, flags);
+	edesc = ahash_edesc_alloc(req, 0, ctx->sh_desc_digest,
+				  ctx->sh_desc_digest_dma);
 	if (!edesc)
 		return -ENOMEM;
 
@@ -1157,31 +1187,21 @@ static int ahash_final_no_ctx(struct ahash_request *req)
 			     DUMP_PREFIX_ADDRESS, 16, 4, desc, desc_bytes(desc),
 			     1);
 
-	ret = caam_jr_enqueue(jrdev, desc, ahash_done, req);
-	if (!ret) {
-		ret = -EINPROGRESS;
-	} else {
-		ahash_unmap_ctx(jrdev, edesc, req, digestsize, DMA_FROM_DEVICE);
-		kfree(edesc);
-	}
-
-	return ret;
+	return ahash_enqueue_req(jrdev, ahash_done, req,
+				 digestsize, DMA_FROM_DEVICE);
  unmap:
 	ahash_unmap(jrdev, edesc, req, digestsize);
 	kfree(edesc);
 	return -ENOMEM;
-
 }
 
 /* submit ahash update if it the first job descriptor after update */
 static int ahash_update_no_ctx(struct ahash_request *req)
 {
 	struct crypto_ahash *ahash = crypto_ahash_reqtfm(req);
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 	struct device *jrdev = ctx->jrdev;
-	gfp_t flags = (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) ?
-		       GFP_KERNEL : GFP_ATOMIC;
 	u8 *buf = state->buf;
 	int *buflen = &state->buflen;
 	int *next_buflen = &state->next_buflen;
@@ -1234,10 +1254,9 @@ static int ahash_update_no_ctx(struct ahash_request *req)
 		 * allocate space for base edesc and hw desc commands,
 		 * link tables
 		 */
-		edesc = ahash_edesc_alloc(ctx, pad_nents,
+		edesc = ahash_edesc_alloc(req, pad_nents,
 					  ctx->sh_desc_update_first,
-					  ctx->sh_desc_update_first_dma,
-					  flags);
+					  ctx->sh_desc_update_first_dma);
 		if (!edesc) {
 			dma_unmap_sg(jrdev, req->src, src_nents, DMA_TO_DEVICE);
 			return -ENOMEM;
@@ -1273,11 +1292,10 @@ static int ahash_update_no_ctx(struct ahash_request *req)
 				     DUMP_PREFIX_ADDRESS, 16, 4, desc,
 				     desc_bytes(desc), 1);
 
-		ret = caam_jr_enqueue(jrdev, desc, ahash_done_ctx_dst, req);
-		if (ret)
-			goto unmap_ctx;
-
-		ret = -EINPROGRESS;
+		ret = ahash_enqueue_req(jrdev, ahash_done_ctx_dst, req,
+					ctx->ctx_len, DMA_TO_DEVICE);
+		if ((ret != -EINPROGRESS) && (ret != -EBUSY))
+			return ret;
 		state->update = ahash_update_ctx;
 		state->finup = ahash_finup_ctx;
 		state->final = ahash_final_ctx;
@@ -1302,11 +1320,9 @@ static int ahash_update_no_ctx(struct ahash_request *req)
 static int ahash_finup_no_ctx(struct ahash_request *req)
 {
 	struct crypto_ahash *ahash = crypto_ahash_reqtfm(req);
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 	struct device *jrdev = ctx->jrdev;
-	gfp_t flags = (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) ?
-		       GFP_KERNEL : GFP_ATOMIC;
 	int buflen = state->buflen;
 	u32 *desc;
 	int sec4_sg_bytes, sec4_sg_src_index, src_nents, mapped_nents;
@@ -1336,9 +1352,8 @@ static int ahash_finup_no_ctx(struct ahash_request *req)
 			 sizeof(struct sec4_sg_entry);
 
 	/* allocate space for base edesc and hw desc commands, link tables */
-	edesc = ahash_edesc_alloc(ctx, sec4_sg_src_index + mapped_nents,
-				  ctx->sh_desc_digest, ctx->sh_desc_digest_dma,
-				  flags);
+	edesc = ahash_edesc_alloc(req, sec4_sg_src_index + mapped_nents,
+				  ctx->sh_desc_digest, ctx->sh_desc_digest_dma);
 	if (!edesc) {
 		dma_unmap_sg(jrdev, req->src, src_nents, DMA_TO_DEVICE);
 		return -ENOMEM;
@@ -1368,15 +1383,8 @@ static int ahash_finup_no_ctx(struct ahash_request *req)
 			     DUMP_PREFIX_ADDRESS, 16, 4, desc, desc_bytes(desc),
 			     1);
 
-	ret = caam_jr_enqueue(jrdev, desc, ahash_done, req);
-	if (!ret) {
-		ret = -EINPROGRESS;
-	} else {
-		ahash_unmap_ctx(jrdev, edesc, req, digestsize, DMA_FROM_DEVICE);
-		kfree(edesc);
-	}
-
-	return ret;
+	return ahash_enqueue_req(jrdev, ahash_done, req,
+				 digestsize, DMA_FROM_DEVICE);
  unmap:
 	ahash_unmap(jrdev, edesc, req, digestsize);
 	kfree(edesc);
@@ -1388,11 +1396,9 @@ static int ahash_finup_no_ctx(struct ahash_request *req)
 static int ahash_update_first(struct ahash_request *req)
 {
 	struct crypto_ahash *ahash = crypto_ahash_reqtfm(req);
-	struct caam_hash_ctx *ctx = crypto_ahash_ctx(ahash);
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 	struct device *jrdev = ctx->jrdev;
-	gfp_t flags = (req->base.flags & CRYPTO_TFM_REQ_MAY_SLEEP) ?
-		       GFP_KERNEL : GFP_ATOMIC;
 	u8 *buf = state->buf;
 	int *buflen = &state->buflen;
 	int *next_buflen = &state->next_buflen;
@@ -1440,11 +1446,10 @@ static int ahash_update_first(struct ahash_request *req)
 		 * allocate space for base edesc and hw desc commands,
 		 * link tables
 		 */
-		edesc = ahash_edesc_alloc(ctx, mapped_nents > 1 ?
+		edesc = ahash_edesc_alloc(req, mapped_nents > 1 ?
 					  mapped_nents : 0,
 					  ctx->sh_desc_update_first,
-					  ctx->sh_desc_update_first_dma,
-					  flags);
+					  ctx->sh_desc_update_first_dma);
 		if (!edesc) {
 			dma_unmap_sg(jrdev, req->src, src_nents, DMA_TO_DEVICE);
 			return -ENOMEM;
@@ -1467,11 +1472,10 @@ static int ahash_update_first(struct ahash_request *req)
 				     DUMP_PREFIX_ADDRESS, 16, 4, desc,
 				     desc_bytes(desc), 1);
 
-		ret = caam_jr_enqueue(jrdev, desc, ahash_done_ctx_dst, req);
-		if (ret)
-			goto unmap_ctx;
-
-		ret = -EINPROGRESS;
+		ret = ahash_enqueue_req(jrdev, ahash_done_ctx_dst, req,
+					ctx->ctx_len, DMA_TO_DEVICE);
+		if ((ret != -EINPROGRESS) && (ret != -EBUSY))
+			return ret;
 		state->update = ahash_update_ctx;
 		state->finup = ahash_finup_ctx;
 		state->final = ahash_final_ctx;
@@ -1502,7 +1506,7 @@ static int ahash_finup_first(struct ahash_request *req)
 
 static int ahash_init(struct ahash_request *req)
 {
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 
 	state->update = ahash_update_first;
 	state->finup = ahash_finup_first;
@@ -1519,28 +1523,28 @@ static int ahash_init(struct ahash_request *req)
 
 static int ahash_update(struct ahash_request *req)
 {
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 
 	return state->update(req);
 }
 
 static int ahash_finup(struct ahash_request *req)
 {
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 
 	return state->finup(req);
 }
 
 static int ahash_final(struct ahash_request *req)
 {
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 
 	return state->final(req);
 }
 
 static int ahash_export(struct ahash_request *req, void *out)
 {
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 	struct caam_export_state *export = out;
 	u8 *buf = state->buf;
 	int len = state->buflen;
@@ -1557,7 +1561,7 @@ static int ahash_export(struct ahash_request *req, void *out)
 
 static int ahash_import(struct ahash_request *req, const void *in)
 {
-	struct caam_hash_state *state = ahash_request_ctx(req);
+	struct caam_hash_state *state = ahash_request_ctx_dma(req);
 	const struct caam_export_state *export = in;
 
 	memset(state, 0, sizeof(*state));
@@ -1766,7 +1770,7 @@ static int caam_hash_cra_init(struct crypto_tfm *tfm)
 		 container_of(halg, struct ahash_alg, halg);
 	struct caam_hash_alg *caam_hash =
 		 container_of(alg, struct caam_hash_alg, ahash_alg);
-	struct caam_hash_ctx *ctx = crypto_tfm_ctx(tfm);
+	struct caam_hash_ctx *ctx = crypto_ahash_ctx_dma(ahash);
 	/* Sizes for MDHA running digests: MD5, SHA1, 224, 256, 384, 512 */
 	static const u8 runninglen[] = { HASH_MSG_LEN + MD5_DIGEST_SIZE,
 					 HASH_MSG_LEN + SHA1_DIGEST_SIZE,
@@ -1774,6 +1778,8 @@ static int caam_hash_cra_init(struct crypto_tfm *tfm)
 					 HASH_MSG_LEN + SHA256_DIGEST_SIZE,
 					 HASH_MSG_LEN + 64,
 					 HASH_MSG_LEN + SHA512_DIGEST_SIZE };
+	const size_t sh_desc_update_offset = offsetof(struct caam_hash_ctx,
+						      sh_desc_update);
 	dma_addr_t dma_addr;
 	struct caam_drv_private *priv;
 
@@ -1826,7 +1832,8 @@ static int caam_hash_cra_init(struct crypto_tfm *tfm)
 	}
 
 	dma_addr = dma_map_single_attrs(ctx->jrdev, ctx->sh_desc_update,
-					offsetof(struct caam_hash_ctx, key),
+					offsetof(struct caam_hash_ctx, key) -
+					sh_desc_update_offset,
 					ctx->dir, DMA_ATTR_SKIP_CPU_SYNC);
 	if (dma_mapping_error(ctx->jrdev, dma_addr)) {
 		dev_err(ctx->jrdev, "unable to map shared descriptors\n");
@@ -1844,14 +1851,18 @@ static int caam_hash_cra_init(struct crypto_tfm *tfm)
 	ctx->sh_desc_update_dma = dma_addr;
 	ctx->sh_desc_update_first_dma = dma_addr +
 					offsetof(struct caam_hash_ctx,
-						 sh_desc_update_first);
+						 sh_desc_update_first) -
+					sh_desc_update_offset;
 	ctx->sh_desc_fin_dma = dma_addr + offsetof(struct caam_hash_ctx,
-						   sh_desc_fin);
+						   sh_desc_fin) -
+					sh_desc_update_offset;
 	ctx->sh_desc_digest_dma = dma_addr + offsetof(struct caam_hash_ctx,
-						      sh_desc_digest);
+						      sh_desc_digest) -
+					sh_desc_update_offset;
 
-	crypto_ahash_set_reqsize(__crypto_ahash_cast(tfm),
-				 sizeof(struct caam_hash_state));
+	ctx->enginectx.op.do_one_request = ahash_do_one_req;
+
+	crypto_ahash_set_reqsize_dma(ahash, sizeof(struct caam_hash_state));
 
 	/*
 	 * For keyed hash algorithms shared descriptors
@@ -1862,10 +1873,11 @@ static int caam_hash_cra_init(struct crypto_tfm *tfm)
 
 static void caam_hash_cra_exit(struct crypto_tfm *tfm)
 {
-	struct caam_hash_ctx *ctx = crypto_tfm_ctx(tfm);
+	struct caam_hash_ctx *ctx = crypto_tfm_ctx_dma(tfm);
 
 	dma_unmap_single_attrs(ctx->jrdev, ctx->sh_desc_update_dma,
-			       offsetof(struct caam_hash_ctx, key),
+			       offsetof(struct caam_hash_ctx, key) -
+			       offsetof(struct caam_hash_ctx, sh_desc_update),
 			       ctx->dir, DMA_ATTR_SKIP_CPU_SYNC);
 	if (ctx->key_dir != DMA_NONE)
 		dma_unmap_single_attrs(ctx->jrdev, ctx->adata.key_dma,
@@ -1921,11 +1933,11 @@ caam_hash_alloc(struct caam_hash_template *template,
 	alg->cra_module = THIS_MODULE;
 	alg->cra_init = caam_hash_cra_init;
 	alg->cra_exit = caam_hash_cra_exit;
-	alg->cra_ctxsize = sizeof(struct caam_hash_ctx);
+	alg->cra_ctxsize = sizeof(struct caam_hash_ctx) + crypto_dma_padding();
 	alg->cra_priority = CAAM_CRA_PRIORITY;
 	alg->cra_blocksize = template->blocksize;
 	alg->cra_alignmask = 0;
-	alg->cra_flags = CRYPTO_ALG_ASYNC;
+	alg->cra_flags = CRYPTO_ALG_ASYNC | CRYPTO_ALG_ALLOCATES_MEMORY;
 
 	t_alg->alg_type = template->alg_type;
 

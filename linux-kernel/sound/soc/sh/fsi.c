@@ -219,7 +219,7 @@ struct fsi_stream {
 	u32 bus_option;
 
 	/*
-	 * thse are initialized by fsi_handler_init()
+	 * these are initialized by fsi_handler_init()
 	 */
 	struct fsi_stream_handler *handler;
 	struct fsi_priv		*priv;
@@ -406,9 +406,9 @@ static int fsi_is_play(struct snd_pcm_substream *substream)
 
 static struct snd_soc_dai *fsi_get_dai(struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
 
-	return  rtd->cpu_dai;
+	return  asoc_rtd_to_cpu(rtd, 0);
 }
 
 static struct fsi_priv *fsi_get_priv_frm_dai(struct snd_soc_dai *dai)
@@ -816,13 +816,26 @@ static int fsi_clk_enable(struct device *dev,
 			return ret;
 		}
 
-		clk_enable(clock->xck);
-		clk_enable(clock->ick);
-		clk_enable(clock->div);
+		ret = clk_enable(clock->xck);
+		if (ret)
+			goto err;
+		ret = clk_enable(clock->ick);
+		if (ret)
+			goto disable_xck;
+		ret = clk_enable(clock->div);
+		if (ret)
+			goto disable_ick;
 
 		clock->count++;
 	}
 
+	return ret;
+
+disable_ick:
+	clk_disable(clock->ick);
+disable_xck:
+	clk_disable(clock->xck);
+err:
 	return ret;
 }
 
@@ -1632,12 +1645,12 @@ static int fsi_dai_set_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 	struct fsi_priv *fsi = fsi_get_priv_frm_dai(dai);
 	int ret;
 
-	/* set master/slave audio interface */
-	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	/* set clock master audio interface */
+	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+	case SND_SOC_DAIFMT_BC_FC:
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
-		fsi->clk_master = 1; /* codec is slave, cpu is master */
+	case SND_SOC_DAIFMT_BP_FP:
+		fsi->clk_master = 1; /* cpu is master */
 		break;
 	default:
 		return -EINVAL;
@@ -1694,12 +1707,27 @@ static int fsi_dai_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
+/*
+ * Select below from Sound Card, not auto
+ *	SND_SOC_DAIFMT_CBC_CFC
+ *	SND_SOC_DAIFMT_CBP_CFP
+ */
+static u64 fsi_dai_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_IB_IF;
+
 static const struct snd_soc_dai_ops fsi_dai_ops = {
 	.startup	= fsi_dai_startup,
 	.shutdown	= fsi_dai_shutdown,
 	.trigger	= fsi_dai_trigger,
 	.set_fmt	= fsi_dai_set_fmt,
 	.hw_params	= fsi_dai_hw_params,
+	.auto_selectable_formats	= &fsi_dai_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 /*
@@ -1938,8 +1966,7 @@ static int fsi_probe(struct platform_device *pdev)
 	if (!master)
 		return -ENOMEM;
 
-	master->base = devm_ioremap(&pdev->dev,
-					    res->start, resource_size(res));
+	master->base = devm_ioremap(&pdev->dev, res->start, resource_size(res));
 	if (!master->base) {
 		dev_err(&pdev->dev, "Unable to ioremap FSI registers.\n");
 		return -ENXIO;

@@ -36,7 +36,6 @@ struct sel_netif {
 };
 
 static u32 sel_netif_total;
-static LIST_HEAD(sel_netif_list);
 static DEFINE_SPINLOCK(sel_netif_lock);
 static struct list_head sel_netif_hash[SEL_NETIF_HASH_SIZE];
 
@@ -124,7 +123,7 @@ static void sel_netif_destroy(struct sel_netif *netif)
  * @sid: interface SID
  *
  * Description:
- * This function determines the SID of a network interface by quering the
+ * This function determines the SID of a network interface by querying the
  * security policy.  The result is added to the network interface table to
  * speedup future queries.  Returns zero on success, negative values on
  * failure.

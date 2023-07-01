@@ -44,9 +44,7 @@
 	bp->base.ctx->logger
 
 #define GET_INDEX_INTO_MASTER_TABLE(MasterOrData, FieldName)\
-	(((char *)(&((\
-		struct atom_master_list_of_##MasterOrData##_functions_v2_1 *)0)\
-		->FieldName)-(char *)0)/sizeof(uint16_t))
+	(offsetof(struct atom_master_list_of_##MasterOrData##_functions_v2_1, FieldName) / sizeof(uint16_t))
 
 #define EXEC_BIOS_CMD_TABLE(fname, params)\
 	(amdgpu_atom_execute_table(((struct amdgpu_device *)bp->base.ctx->driver_context)->mode_info.atom_context, \
@@ -113,13 +111,19 @@ static void encoder_control_dmcub(
 		struct dc_dmub_srv *dmcub,
 		struct dig_encoder_stream_setup_parameters_v1_5 *dig)
 {
-	struct dmub_rb_cmd_digx_encoder_control encoder_control = { 0 };
+	union dmub_rb_cmd cmd;
 
-	encoder_control.header.type = DMUB_CMD__VBIOS;
-	encoder_control.header.sub_type = DMUB_CMD__VBIOS_DIGX_ENCODER_CONTROL;
-	encoder_control.encoder_control.dig.stream_param = *dig;
+	memset(&cmd, 0, sizeof(cmd));
 
-	dc_dmub_srv_cmd_queue(dmcub, &encoder_control.header);
+	cmd.digx_encoder_control.header.type = DMUB_CMD__VBIOS;
+	cmd.digx_encoder_control.header.sub_type =
+		DMUB_CMD__VBIOS_DIGX_ENCODER_CONTROL;
+	cmd.digx_encoder_control.header.payload_bytes =
+		sizeof(cmd.digx_encoder_control) -
+		sizeof(cmd.digx_encoder_control.header);
+	cmd.digx_encoder_control.encoder_control.dig.stream_param = *dig;
+
+	dc_dmub_srv_cmd_queue(dmcub, &cmd);
 	dc_dmub_srv_cmd_execute(dmcub);
 	dc_dmub_srv_wait_idle(dmcub);
 }
@@ -212,6 +216,10 @@ static enum bp_result transmitter_control_v1_6(
 	struct bios_parser *bp,
 	struct bp_transmitter_control *cntl);
 
+static enum bp_result transmitter_control_v1_7(
+	struct bios_parser *bp,
+	struct bp_transmitter_control *cntl);
+
 static enum bp_result transmitter_control_fallback(
 	struct bios_parser *bp,
 	struct bp_transmitter_control *cntl);
@@ -221,11 +229,14 @@ static void init_transmitter_control(struct bios_parser *bp)
 	uint8_t frev;
 	uint8_t crev;
 
-	if (BIOS_CMD_TABLE_REVISION(dig1transmittercontrol, frev, crev) == false)
-		BREAK_TO_DEBUGGER();
+	BIOS_CMD_TABLE_REVISION(dig1transmittercontrol, frev, crev);
+
 	switch (crev) {
 	case 6:
 		bp->cmd_tbl.transmitter_control = transmitter_control_v1_6;
+		break;
+	case 7:
+		bp->cmd_tbl.transmitter_control = transmitter_control_v1_7;
 		break;
 	default:
 		dm_output_to_console("Don't have transmitter_control for v%d\n", crev);
@@ -238,14 +249,19 @@ static void transmitter_control_dmcub(
 		struct dc_dmub_srv *dmcub,
 		struct dig_transmitter_control_parameters_v1_6 *dig)
 {
-	struct dmub_rb_cmd_dig1_transmitter_control transmitter_control;
+	union dmub_rb_cmd cmd;
 
-	transmitter_control.header.type = DMUB_CMD__VBIOS;
-	transmitter_control.header.sub_type =
+	memset(&cmd, 0, sizeof(cmd));
+
+	cmd.dig1_transmitter_control.header.type = DMUB_CMD__VBIOS;
+	cmd.dig1_transmitter_control.header.sub_type =
 		DMUB_CMD__VBIOS_DIG1_TRANSMITTER_CONTROL;
-	transmitter_control.transmitter_control.dig = *dig;
+	cmd.dig1_transmitter_control.header.payload_bytes =
+		sizeof(cmd.dig1_transmitter_control) -
+		sizeof(cmd.dig1_transmitter_control.header);
+	cmd.dig1_transmitter_control.transmitter_control.dig = *dig;
 
-	dc_dmub_srv_cmd_queue(dmcub, &transmitter_control.header);
+	dc_dmub_srv_cmd_queue(dmcub, &cmd);
 	dc_dmub_srv_cmd_execute(dmcub);
 	dc_dmub_srv_wait_idle(dmcub);
 }
@@ -293,13 +309,82 @@ static enum bp_result transmitter_control_v1_6(
 	return result;
 }
 
+static void transmitter_control_dmcub_v1_7(
+		struct dc_dmub_srv *dmcub,
+		struct dmub_dig_transmitter_control_data_v1_7 *dig)
+{
+	union dmub_rb_cmd cmd;
+
+	memset(&cmd, 0, sizeof(cmd));
+
+	cmd.dig1_transmitter_control.header.type = DMUB_CMD__VBIOS;
+	cmd.dig1_transmitter_control.header.sub_type =
+		DMUB_CMD__VBIOS_DIG1_TRANSMITTER_CONTROL;
+	cmd.dig1_transmitter_control.header.payload_bytes =
+		sizeof(cmd.dig1_transmitter_control) -
+		sizeof(cmd.dig1_transmitter_control.header);
+	cmd.dig1_transmitter_control.transmitter_control.dig_v1_7 = *dig;
+
+	dc_dmub_srv_cmd_queue(dmcub, &cmd);
+	dc_dmub_srv_cmd_execute(dmcub);
+	dc_dmub_srv_wait_idle(dmcub);
+}
+
+static enum bp_result transmitter_control_v1_7(
+	struct bios_parser *bp,
+	struct bp_transmitter_control *cntl)
+{
+	enum bp_result result = BP_RESULT_FAILURE;
+	const struct command_table_helper *cmd = bp->cmd_helper;
+	struct dmub_dig_transmitter_control_data_v1_7 dig_v1_7 = {0};
+
+	uint8_t hpo_instance = (uint8_t)cntl->hpo_engine_id - ENGINE_ID_HPO_0;
+
+	if (dc_is_dp_signal(cntl->signal))
+		hpo_instance = (uint8_t)cntl->hpo_engine_id - ENGINE_ID_HPO_DP_0;
+
+	dig_v1_7.phyid = cmd->phy_id_to_atom(cntl->transmitter);
+	dig_v1_7.action = (uint8_t)cntl->action;
+
+	if (cntl->action == TRANSMITTER_CONTROL_SET_VOLTAGE_AND_PREEMPASIS)
+		dig_v1_7.mode_laneset.dplaneset = (uint8_t)cntl->lane_settings;
+	else
+		dig_v1_7.mode_laneset.digmode =
+				cmd->signal_type_to_atom_dig_mode(cntl->signal);
+
+	dig_v1_7.lanenum = (uint8_t)cntl->lanes_number;
+	dig_v1_7.hpdsel = cmd->hpd_sel_to_atom(cntl->hpd_sel);
+	dig_v1_7.digfe_sel = cmd->dig_encoder_sel_to_atom(cntl->engine_id);
+	dig_v1_7.connobj_id = (uint8_t)cntl->connector_obj_id.id;
+	dig_v1_7.HPO_instance = hpo_instance;
+	dig_v1_7.symclk_units.symclk_10khz = cntl->pixel_clock/10;
+
+	if (cntl->action == TRANSMITTER_CONTROL_ENABLE ||
+		cntl->action == TRANSMITTER_CONTROL_ACTIAVATE ||
+		cntl->action == TRANSMITTER_CONTROL_DEACTIVATE) {
+			DC_LOG_BIOS("%s:dig_v1_7.symclk_units.symclk_10khz = %d\n",
+			__func__, dig_v1_7.symclk_units.symclk_10khz);
+	}
+
+	if (bp->base.ctx->dc->ctx->dmub_srv &&
+		bp->base.ctx->dc->debug.dmub_command_table) {
+		transmitter_control_dmcub_v1_7(bp->base.ctx->dmub_srv, &dig_v1_7);
+		return BP_RESULT_OK;
+	}
+
+/*color_depth not used any more, driver has deep color factor in the Phyclk*/
+	if (EXEC_BIOS_CMD_TABLE(dig1transmittercontrol, dig_v1_7))
+		result = BP_RESULT_OK;
+	return result;
+}
+
 static enum bp_result transmitter_control_fallback(
 	struct bios_parser *bp,
 	struct bp_transmitter_control *cntl)
 {
 	if (bp->base.ctx->dc->ctx->dmub_srv &&
 	    bp->base.ctx->dc->debug.dmub_command_table) {
-		return transmitter_control_v1_6(bp, cntl);
+		return transmitter_control_v1_7(bp, cntl);
 	}
 
 	return BP_RESULT_FAILURE;
@@ -339,13 +424,18 @@ static void set_pixel_clock_dmcub(
 		struct dc_dmub_srv *dmcub,
 		struct set_pixel_clock_parameter_v1_7 *clk)
 {
-	struct dmub_rb_cmd_set_pixel_clock pixel_clock = { 0 };
+	union dmub_rb_cmd cmd;
 
-	pixel_clock.header.type = DMUB_CMD__VBIOS;
-	pixel_clock.header.sub_type = DMUB_CMD__VBIOS_SET_PIXEL_CLOCK;
-	pixel_clock.pixel_clock.clk = *clk;
+	memset(&cmd, 0, sizeof(cmd));
 
-	dc_dmub_srv_cmd_queue(dmcub, &pixel_clock.header);
+	cmd.set_pixel_clock.header.type = DMUB_CMD__VBIOS;
+	cmd.set_pixel_clock.header.sub_type = DMUB_CMD__VBIOS_SET_PIXEL_CLOCK;
+	cmd.set_pixel_clock.header.payload_bytes =
+		sizeof(cmd.set_pixel_clock) -
+		sizeof(cmd.set_pixel_clock.header);
+	cmd.set_pixel_clock.pixel_clock.clk = *clk;
+
+	dc_dmub_srv_cmd_queue(dmcub, &cmd);
 	dc_dmub_srv_cmd_execute(dmcub);
 	dc_dmub_srv_wait_idle(dmcub);
 }
@@ -553,10 +643,7 @@ static enum bp_result set_crtc_using_dtd_timing_v3(
 			 * but it is 4 either from Edid data (spec CEA 861)
 			 * or CEA timing table.
 			 */
-			params.v_syncoffset =
-				cpu_to_le16(le16_to_cpu(params.v_syncoffset) +
-						1);
-
+			le16_add_cpu(&params.v_syncoffset, 1);
 		}
 	}
 
@@ -705,17 +792,19 @@ static void enable_disp_power_gating_dmcub(
 	struct dc_dmub_srv *dmcub,
 	struct enable_disp_power_gating_parameters_v2_1 *pwr)
 {
-	struct dmub_rb_cmd_enable_disp_power_gating power_gating;
+	union dmub_rb_cmd cmd;
 
-	power_gating.header.type = DMUB_CMD__VBIOS;
-	power_gating.header.sub_type = DMUB_CMD__VBIOS_ENABLE_DISP_POWER_GATING;
-	power_gating.power_gating.pwr = *pwr;
+	memset(&cmd, 0, sizeof(cmd));
 
-	/* ATOM_ENABLE is old API in DMUB */
-	if (power_gating.power_gating.pwr.enable == ATOM_ENABLE)
-		power_gating.power_gating.pwr.enable = ATOM_INIT;
+	cmd.enable_disp_power_gating.header.type = DMUB_CMD__VBIOS;
+	cmd.enable_disp_power_gating.header.sub_type =
+		DMUB_CMD__VBIOS_ENABLE_DISP_POWER_GATING;
+	cmd.enable_disp_power_gating.header.payload_bytes =
+		sizeof(cmd.enable_disp_power_gating) -
+		sizeof(cmd.enable_disp_power_gating.header);
+	cmd.enable_disp_power_gating.power_gating.pwr = *pwr;
 
-	dc_dmub_srv_cmd_queue(dmcub, &power_gating.header);
+	dc_dmub_srv_cmd_queue(dmcub, &cmd);
 	dc_dmub_srv_cmd_execute(dmcub);
 	dc_dmub_srv_wait_idle(dmcub);
 }
@@ -886,6 +975,72 @@ static unsigned int get_smu_clock_info_v3_1(struct bios_parser *bp, uint8_t id)
 	return 0;
 }
 
+/******************************************************************************
+ ******************************************************************************
+ **
+ **                  LVTMA CONTROL
+ **
+ ******************************************************************************
+ *****************************************************************************/
+
+static enum bp_result enable_lvtma_control(
+	struct bios_parser *bp,
+	uint8_t uc_pwr_on,
+	uint8_t panel_instance,
+	uint8_t bypass_panel_control_wait);
+
+static void init_enable_lvtma_control(struct bios_parser *bp)
+{
+	/* TODO add switch for table vrsion */
+	bp->cmd_tbl.enable_lvtma_control = enable_lvtma_control;
+
+}
+
+static void enable_lvtma_control_dmcub(
+	struct dc_dmub_srv *dmcub,
+	uint8_t uc_pwr_on,
+	uint8_t panel_instance,
+	uint8_t bypass_panel_control_wait)
+{
+
+	union dmub_rb_cmd cmd;
+
+	memset(&cmd, 0, sizeof(cmd));
+
+	cmd.lvtma_control.header.type = DMUB_CMD__VBIOS;
+	cmd.lvtma_control.header.sub_type =
+			DMUB_CMD__VBIOS_LVTMA_CONTROL;
+	cmd.lvtma_control.data.uc_pwr_action =
+			uc_pwr_on;
+	cmd.lvtma_control.data.panel_inst =
+			panel_instance;
+	cmd.lvtma_control.data.bypass_panel_control_wait =
+			bypass_panel_control_wait;
+	dc_dmub_srv_cmd_queue(dmcub, &cmd);
+	dc_dmub_srv_cmd_execute(dmcub);
+	dc_dmub_srv_wait_idle(dmcub);
+
+}
+
+static enum bp_result enable_lvtma_control(
+	struct bios_parser *bp,
+	uint8_t uc_pwr_on,
+	uint8_t panel_instance,
+	uint8_t bypass_panel_control_wait)
+{
+	enum bp_result result = BP_RESULT_FAILURE;
+
+	if (bp->base.ctx->dc->ctx->dmub_srv &&
+	    bp->base.ctx->dc->debug.dmub_command_table) {
+		enable_lvtma_control_dmcub(bp->base.ctx->dmub_srv,
+				uc_pwr_on,
+				panel_instance,
+				bypass_panel_control_wait);
+		return BP_RESULT_OK;
+	}
+	return result;
+}
+
 void dal_firmware_parser_init_cmd_tbl(struct bios_parser *bp)
 {
 	init_dig_encoder_control(bp);
@@ -901,4 +1056,5 @@ void dal_firmware_parser_init_cmd_tbl(struct bios_parser *bp)
 	init_set_dce_clock(bp);
 	init_get_smu_clock_info(bp);
 
+	init_enable_lvtma_control(bp);
 }

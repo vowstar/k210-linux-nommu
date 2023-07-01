@@ -1,20 +1,30 @@
 # SPDX-License-Identifier: GPL-2.0-only
 #
-# Generic thermal sysfs drivers configuration
+# Generic thermal drivers configuration
 #
 
 menuconfig THERMAL
-	bool "Generic Thermal sysfs driver"
+	bool "Thermal drivers"
 	help
-	  Generic Thermal Sysfs driver offers a generic mechanism for
+	  Thermal drivers offer a generic mechanism for
 	  thermal management. Usually it's made up of one or more thermal
-	  zone and cooling device.
+	  zones and cooling devices.
 	  Each thermal zone contains its own temperature, trip points,
-	  cooling devices.
-	  All platforms with ACPI thermal support can use this driver.
+	  and cooling devices.
+	  All platforms with ACPI or Open Firmware thermal support can use
+	  this driver.
 	  If you want this support, you should say Y here.
 
 if THERMAL
+
+config THERMAL_NETLINK
+	bool "Thermal netlink management"
+	depends on NET
+	help
+	  The thermal framework has a netlink interface to do thermal
+	  zones discovery, temperature readings and events such as
+	  trip point crossed, cooling device update or governor
+	  change. It is recommended to enable the feature.
 
 config THERMAL_STATISTICS
 	bool "Thermal state transition statistics"
@@ -66,6 +76,10 @@ config THERMAL_OF
 	  Say 'Y' here if you need to build thermal infrastructure
 	  based on device tree.
 
+config THERMAL_ACPI
+       depends on ACPI
+       bool
+
 config THERMAL_WRITABLE_TRIPS
 	bool "Enable writable trip points"
 	help
@@ -103,8 +117,10 @@ config THERMAL_DEFAULT_GOV_USER_SPACE
 	bool "user_space"
 	select THERMAL_GOV_USER_SPACE
 	help
-	  Select this if you want to let the user space manage the
-	  platform thermals.
+	  The Userspace governor allows to get trip point crossed
+	  notification from the kernel via uevents. It is recommended
+	  to use the netlink interface instead which gives richer
+	  information about the thermal framework events.
 
 config THERMAL_DEFAULT_GOV_POWER_ALLOCATOR
 	bool "power_allocator"
@@ -179,16 +195,6 @@ config CPU_IDLE_THERMAL
 	  idle cycle.
 endif
 
-config CLOCK_THERMAL
-	bool "Generic clock cooling support"
-	depends on COMMON_CLK
-	depends on PM_OPP
-	help
-	  This entry implements the generic clock cooling mechanism through
-	  frequency clipping. Typically used to cool off co-processors. The
-	  device that is configured to use this cooling mechanism will be
-	  controlled to reduce clock frequency whenever temperature is high.
-
 config DEVFREQ_THERMAL
 	bool "Generic device cooling support"
 	depends on PM_DEVFREQ
@@ -219,7 +225,7 @@ config THERMAL_EMULATION
 
 config THERMAL_MMIO
 	tristate "Generic Thermal MMIO driver"
-	depends on OF || COMPILE_TEST
+	depends on OF
 	depends on HAS_IOMEM
 	help
 	  This option enables the generic thermal MMIO driver that will use
@@ -251,6 +257,37 @@ config IMX_THERMAL
 	  cpufreq is used as the cooling device to throttle CPUs when the
 	  passive trip is crossed.
 
+config IMX_SC_THERMAL
+	tristate "Temperature sensor driver for NXP i.MX SoCs with System Controller"
+	depends on IMX_SCU
+	depends on OF
+	help
+	  Support for Temperature Monitor (TEMPMON) found on NXP i.MX SoCs with
+	  system controller inside, Linux kernel has to communicate with system
+	  controller via MU (message unit) IPC to get temperature from thermal
+	  sensor. It supports one critical trip point and one
+	  passive trip point for each thermal sensor.
+
+config IMX8MM_THERMAL
+	tristate "Temperature sensor driver for Freescale i.MX8MM SoC"
+	depends on ARCH_MXC || COMPILE_TEST
+	depends on OF
+	help
+	  Support for Thermal Monitoring Unit (TMU) found on Freescale i.MX8MM SoC.
+	  It supports one critical trip point and one passive trip point. The
+	  cpufreq is used as the cooling device to throttle CPUs when the passive
+	  trip is crossed.
+
+config K3_THERMAL
+	tristate "Texas Instruments K3 thermal support"
+	depends on ARCH_K3 || COMPILE_TEST
+	help
+	  If you say yes here you get thermal support for the Texas Instruments
+	  K3 SoC family. The current chip supported is:
+	  - AM654
+
+	  This includes temperature reading functionality.
+
 config MAX77620_THERMAL
 	tristate "Temperature sensor driver for Maxim MAX77620 PMIC"
 	depends on MFD_MAX77620
@@ -263,8 +300,9 @@ config MAX77620_THERMAL
 
 config QORIQ_THERMAL
 	tristate "QorIQ Thermal Monitoring Unit"
-	depends on THERMAL_OF
-	depends on HAS_IOMEM
+	depends on THERMAL_OF && HAS_IOMEM
+	depends on PPC_E500MC || SOC_LS1021A || ARCH_LAYERSCAPE || (ARCH_MXC && ARM64) || COMPILE_TEST
+	select REGMAP_MMIO
 	help
 	  Support for Thermal Monitoring Unit (TMU) found on QorIQ platforms.
 	  It supports one critical trip point and one passive trip point. The
@@ -314,12 +352,21 @@ config RCAR_THERMAL
 	  thermal framework.
 
 config RCAR_GEN3_THERMAL
-	tristate "Renesas R-Car Gen3 thermal driver"
+	tristate "Renesas R-Car Gen3 and RZ/G2 thermal driver"
 	depends on ARCH_RENESAS || COMPILE_TEST
 	depends on HAS_IOMEM
 	depends on OF
 	help
-	  Enable this to plug the R-Car Gen3 thermal sensor driver into the Linux
+	  Enable this to plug the R-Car Gen3 or RZ/G2 thermal sensor driver into
+	  the Linux thermal framework.
+
+config RZG2L_THERMAL
+	tristate "Renesas RZ/G2L thermal driver"
+	depends on ARCH_RENESAS || COMPILE_TEST
+	depends on HAS_IOMEM
+	depends on OF
+	help
+	  Enable this to plug the RZ/G2L thermal sensor driver into the Linux
 	  thermal framework.
 
 config KIRKWOOD_THERMAL
@@ -369,16 +416,10 @@ config DA9062_THERMAL
 	  zone.
 	  Compatible with the DA9062 and DA9061 PMICs.
 
-config MTK_THERMAL
-	tristate "Temperature sensor driver for mediatek SoCs"
-	depends on ARCH_MEDIATEK || COMPILE_TEST
-	depends on HAS_IOMEM
-	depends on NVMEM || NVMEM=n
-	depends on RESET_CONTROLLER
-	default y
-	help
-	  Enable this option if you want to have support for thermal management
-	  controller present in Mediatek SoCs
+menu "Mediatek thermal drivers"
+depends on ARCH_MEDIATEK || COMPILE_TEST
+source "drivers/thermal/mediatek/Kconfig"
+endmenu
 
 config AMLOGIC_THERMAL
 	tristate "Amlogic Thermal Support"
@@ -418,15 +459,6 @@ depends on (ARCH_STI || ARCH_STM32) && OF
 source "drivers/thermal/st/Kconfig"
 endmenu
 
-config TANGO_THERMAL
-	tristate "Tango thermal management"
-	depends on ARCH_TANGO || COMPILE_TEST
-	help
-	  Enable the Tango thermal driver, which supports the primitive
-	  temperature sensor embedded in Tango chips since the SMP8758.
-	  This sensor only generates a 1-bit signal to indicate whether
-	  the die temperature exceeds a programmable threshold.
-
 source "drivers/thermal/tegra/Kconfig"
 
 config GENERIC_ADC_THERMAL
@@ -444,14 +476,6 @@ depends on (ARCH_QCOM && OF) || COMPILE_TEST
 source "drivers/thermal/qcom/Kconfig"
 endmenu
 
-config ZX2967_THERMAL
-	tristate "Thermal sensors on zx2967 SoC"
-	depends on ARCH_ZX || COMPILE_TEST
-	help
-	  Enable the zx2967 thermal sensors driver, which supports
-	  the primitive temperature sensor embedded in zx2967 SoCs.
-	  This sensor generates the real time die temperature.
-
 config UNIPHIER_THERMAL
 	tristate "Socionext UniPhier thermal driver"
 	depends on ARCH_UNIPHIER || COMPILE_TEST
@@ -460,4 +484,22 @@ config UNIPHIER_THERMAL
 	  Enable this to plug in UniPhier on-chip PVT thermal driver into the
 	  thermal framework. The driver supports CPU thermal zone temperature
 	  reporting and a couple of trip points.
+
+config SPRD_THERMAL
+	tristate "Temperature sensor on Spreadtrum SoCs"
+	depends on ARCH_SPRD || COMPILE_TEST
+	help
+	  Support for the Spreadtrum thermal sensor driver in the Linux thermal
+	  framework.
+
+config KHADAS_MCU_FAN_THERMAL
+	tristate "Khadas MCU controller FAN cooling support"
+	depends on OF
+	depends on MFD_KHADAS_MCU
+	select MFD_CORE
+	select REGMAP
+	help
+	  If you say yes here you get support for the FAN controlled
+	  by the Microcontroller found on the Khadas VIM boards.
+
 endif

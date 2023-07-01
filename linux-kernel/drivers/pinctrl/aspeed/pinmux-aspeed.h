@@ -5,7 +5,6 @@
 #define ASPEED_PINMUX_H
 
 #include <linux/regmap.h>
-#include <stdbool.h>
 
 /*
  * The ASPEED SoCs provide typically more than 200 pins for GPIO and other
@@ -452,10 +451,11 @@ struct aspeed_sig_desc {
  * evaluation of the descriptors.
  *
  * @signal: The signal name for the priority level on the pin. If the signal
- *          type is GPIO, then the signal name must begin with the string
- *          "GPIO", e.g. GPIOA0, GPIOT4 etc.
+ *          type is GPIO, then the signal name must begin with the
+ *          prefix "GPI", e.g. GPIOA0, GPIT0 etc.
  * @function: The name of the function the signal participates in for the
- *            associated expression
+ *            associated expression. For pin-specific GPIO, the function
+ *            name must match the signal name.
  * @ndescs: The number of signal descriptors in the expression
  * @descs: Pointer to an array of signal descriptors that comprise the
  *         function expression
@@ -632,7 +632,7 @@ struct aspeed_pin_desc {
 	SIG_EXPR_LIST_ALIAS(pin, sig, group)
 
 /**
- * Similar to the above, but for pins with a dual expressions (DE) and
+ * Similar to the above, but for pins with a dual expressions (DE)
  * and a single group (SG) of pins.
  *
  * @pin: The pin the signal will be routed to
@@ -727,6 +727,15 @@ struct aspeed_pin_desc {
 			SIG_EXPR_LIST_PTR(pin, high), \
 			SIG_EXPR_LIST_PTR(pin, medium), \
 			SIG_EXPR_LIST_PTR(pin, low), \
+			SIG_EXPR_LIST_PTR(pin, other))
+
+#define PIN_DECL_4(pin, other, prio1, prio2, prio3, prio4) \
+	SIG_EXPR_LIST_DECL_SESG(pin, other, other); \
+	PIN_DECL_(pin, \
+			SIG_EXPR_LIST_PTR(pin, prio1), \
+			SIG_EXPR_LIST_PTR(pin, prio2), \
+			SIG_EXPR_LIST_PTR(pin, prio3), \
+			SIG_EXPR_LIST_PTR(pin, prio4), \
 			SIG_EXPR_LIST_PTR(pin, other))
 
 #define GROUP_SYM(group) group_pins_ ## group

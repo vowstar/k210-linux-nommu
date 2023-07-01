@@ -8,7 +8,6 @@
 #include <linux/root_dev.h>
 #include <linux/security.h>
 #include <linux/delay.h>
-#include <linux/genhd.h>
 #include <linux/mount.h>
 #include <linux/device.h>
 #include <linux/init.h>
@@ -23,11 +22,10 @@
 #include <linux/nfs_fs.h>
 #include <linux/nfs_fs_sb.h>
 #include <linux/nfs_mount.h>
+#include <linux/raid/detect.h>
 #include <uapi/linux/mount.h>
 
 #include "do_mounts.h"
-
-int __initdata rd_doload;	/* 1 = load RAM disk, 0 = don't load */
 
 int root_mountflags = MS_RDONLY | MS_SILENT;
 static char * __initdata root_device_name;
@@ -38,7 +36,7 @@ dev_t ROOT_DEV;
 
 static int __init load_ramdisk(char *str)
 {
-	rd_doload = simple_strtol(str,NULL,0) & 3;
+	pr_warn("ignoring the deprecated load_ramdisk= option\n");
 	return 1;
 }
 __setup("load_ramdisk=", load_ramdisk);
@@ -77,20 +75,14 @@ struct uuidcmp {
  */
 static int match_dev_by_uuid(struct device *dev, const void *data)
 {
+	struct block_device *bdev = dev_to_bdev(dev);
 	const struct uuidcmp *cmp = data;
-	struct hd_struct *part = dev_to_part(dev);
 
-	if (!part->info)
-		goto no_match;
-
-	if (strncasecmp(cmp->uuid, part->info->uuid, cmp->len))
-		goto no_match;
-
+	if (!bdev->bd_meta_info ||
+	    strncasecmp(cmp->uuid, bdev->bd_meta_info->uuid, cmp->len))
+		return 0;
 	return 1;
-no_match:
-	return 0;
 }
-
 
 /**
  * devt_from_partuuid - looks up the dev_t of a partition by its UUID
@@ -107,13 +99,10 @@ no_match:
  */
 static dev_t devt_from_partuuid(const char *uuid_str)
 {
-	dev_t res = 0;
 	struct uuidcmp cmp;
 	struct device *dev = NULL;
-	struct gendisk *disk;
-	struct hd_struct *part;
+	dev_t devt = 0;
 	int offset = 0;
-	bool clear_root_wait = false;
 	char *slash;
 
 	cmp.uuid = uuid_str;
@@ -122,52 +111,43 @@ static dev_t devt_from_partuuid(const char *uuid_str)
 	/* Check for optional partition number offset attributes. */
 	if (slash) {
 		char c = 0;
+
 		/* Explicitly fail on poor PARTUUID syntax. */
-		if (sscanf(slash + 1,
-			   "PARTNROFF=%d%c", &offset, &c) != 1) {
-			clear_root_wait = true;
-			goto done;
-		}
+		if (sscanf(slash + 1, "PARTNROFF=%d%c", &offset, &c) != 1)
+			goto clear_root_wait;
 		cmp.len = slash - uuid_str;
 	} else {
 		cmp.len = strlen(uuid_str);
 	}
 
-	if (!cmp.len) {
-		clear_root_wait = true;
-		goto done;
-	}
+	if (!cmp.len)
+		goto clear_root_wait;
 
-	dev = class_find_device(&block_class, NULL, &cmp,
-				&match_dev_by_uuid);
+	dev = class_find_device(&block_class, NULL, &cmp, &match_dev_by_uuid);
 	if (!dev)
-		goto done;
+		return 0;
 
-	res = dev->devt;
-
-	/* Attempt to find the partition by offset. */
-	if (!offset)
-		goto no_offset;
-
-	res = 0;
-	disk = part_to_disk(dev_to_part(dev));
-	part = disk_get_part(disk, dev_to_part(dev)->partno + offset);
-	if (part) {
-		res = part_devt(part);
-		put_device(part_to_dev(part));
+	if (offset) {
+		/*
+		 * Attempt to find the requested partition by adding an offset
+		 * to the partition number found by UUID.
+		 */
+		devt = part_devt(dev_to_disk(dev),
+				 dev_to_bdev(dev)->bd_partno + offset);
+	} else {
+		devt = dev->devt;
 	}
 
-no_offset:
 	put_device(dev);
-done:
-	if (clear_root_wait) {
-		pr_err("VFS: PARTUUID= is invalid.\n"
-		       "Expected PARTUUID=<valid-uuid-id>[/PARTNROFF=%%d]\n");
-		if (root_wait)
-			pr_err("Disabling rootwait; root= is invalid.\n");
-		root_wait = 0;
-	}
-	return res;
+	return devt;
+
+clear_root_wait:
+	pr_err("VFS: PARTUUID= is invalid.\n"
+	       "Expected PARTUUID=<valid-uuid-id>[/PARTNROFF=%%d]\n");
+	if (root_wait)
+		pr_err("Disabling rootwait; root= is invalid.\n");
+	root_wait = 0;
+	return 0;
 }
 
 /**
@@ -179,15 +159,90 @@ done:
  */
 static int match_dev_by_label(struct device *dev, const void *data)
 {
+	struct block_device *bdev = dev_to_bdev(dev);
 	const char *label = data;
-	struct hd_struct *part = dev_to_part(dev);
 
-	if (part->info && !strcmp(label, part->info->volname))
-		return 1;
-
-	return 0;
+	if (!bdev->bd_meta_info || strcmp(label, bdev->bd_meta_info->volname))
+		return 0;
+	return 1;
 }
-#endif
+
+static dev_t devt_from_partlabel(const char *label)
+{
+	struct device *dev;
+	dev_t devt = 0;
+
+	dev = class_find_device(&block_class, NULL, label, &match_dev_by_label);
+	if (dev) {
+		devt = dev->devt;
+		put_device(dev);
+	}
+
+	return devt;
+}
+
+static dev_t devt_from_devname(const char *name)
+{
+	dev_t devt = 0;
+	int part;
+	char s[32];
+	char *p;
+
+	if (strlen(name) > 31)
+		return 0;
+	strcpy(s, name);
+	for (p = s; *p; p++) {
+		if (*p == '/')
+			*p = '!';
+	}
+
+	devt = blk_lookup_devt(s, 0);
+	if (devt)
+		return devt;
+
+	/*
+	 * Try non-existent, but valid partition, which may only exist after
+	 * opening the device, like partitioned md devices.
+	 */
+	while (p > s && isdigit(p[-1]))
+		p--;
+	if (p == s || !*p || *p == '0')
+		return 0;
+
+	/* try disk name without <part number> */
+	part = simple_strtoul(p, NULL, 10);
+	*p = '\0';
+	devt = blk_lookup_devt(s, part);
+	if (devt)
+		return devt;
+
+	/* try disk name without p<part number> */
+	if (p < s + 2 || !isdigit(p[-2]) || p[-1] != 'p')
+		return 0;
+	p[-1] = '\0';
+	return blk_lookup_devt(s, part);
+}
+#endif /* CONFIG_BLOCK */
+
+static dev_t devt_from_devnum(const char *name)
+{
+	unsigned maj, min, offset;
+	dev_t devt = 0;
+	char *p, dummy;
+
+	if (sscanf(name, "%u:%u%c", &maj, &min, &dummy) == 2 ||
+	    sscanf(name, "%u:%u:%u:%c", &maj, &min, &offset, &dummy) == 3) {
+		devt = MKDEV(maj, min);
+		if (maj != MAJOR(devt) || min != MINOR(devt))
+			return 0;
+	} else {
+		devt = new_decode_dev(simple_strtoul(name, &p, 16));
+		if (*p)
+			return 0;
+	}
+
+	return devt;
+}
 
 /*
  *	Convert a name into device number.  We accept the following variants:
@@ -219,107 +274,29 @@ static int match_dev_by_label(struct device *dev, const void *data)
  *	name contains slashes, the device name has them replaced with
  *	bangs.
  */
-
 dev_t name_to_dev_t(const char *name)
 {
-	char s[32];
-	char *p;
-	dev_t res = 0;
-	int part;
-
+	if (strcmp(name, "/dev/nfs") == 0)
+		return Root_NFS;
+	if (strcmp(name, "/dev/cifs") == 0)
+		return Root_CIFS;
+	if (strcmp(name, "/dev/ram") == 0)
+		return Root_RAM0;
 #ifdef CONFIG_BLOCK
-	if (strncmp(name, "PARTUUID=", 9) == 0) {
-		name += 9;
-		res = devt_from_partuuid(name);
-		if (!res)
-			goto fail;
-		goto done;
-	} else if (strncmp(name, "PARTLABEL=", 10) == 0) {
-		struct device *dev;
-
-		dev = class_find_device(&block_class, NULL, name + 10,
-					&match_dev_by_label);
-		if (!dev)
-			goto fail;
-
-		res = dev->devt;
-		put_device(dev);
-		goto done;
-	}
+	if (strncmp(name, "PARTUUID=", 9) == 0)
+		return devt_from_partuuid(name + 9);
+	if (strncmp(name, "PARTLABEL=", 10) == 0)
+		return devt_from_partlabel(name + 10);
+	if (strncmp(name, "/dev/", 5) == 0)
+		return devt_from_devname(name + 5);
 #endif
-
-	if (strncmp(name, "/dev/", 5) != 0) {
-		unsigned maj, min, offset;
-		char dummy;
-
-		if ((sscanf(name, "%u:%u%c", &maj, &min, &dummy) == 2) ||
-		    (sscanf(name, "%u:%u:%u:%c", &maj, &min, &offset, &dummy) == 3)) {
-			res = MKDEV(maj, min);
-			if (maj != MAJOR(res) || min != MINOR(res))
-				goto fail;
-		} else {
-			res = new_decode_dev(simple_strtoul(name, &p, 16));
-			if (*p)
-				goto fail;
-		}
-		goto done;
-	}
-
-	name += 5;
-	res = Root_NFS;
-	if (strcmp(name, "nfs") == 0)
-		goto done;
-	res = Root_CIFS;
-	if (strcmp(name, "cifs") == 0)
-		goto done;
-	res = Root_RAM0;
-	if (strcmp(name, "ram") == 0)
-		goto done;
-
-	if (strlen(name) > 31)
-		goto fail;
-	strcpy(s, name);
-	for (p = s; *p; p++)
-		if (*p == '/')
-			*p = '!';
-	res = blk_lookup_devt(s, 0);
-	if (res)
-		goto done;
-
-	/*
-	 * try non-existent, but valid partition, which may only exist
-	 * after revalidating the disk, like partitioned md devices
-	 */
-	while (p > s && isdigit(p[-1]))
-		p--;
-	if (p == s || !*p || *p == '0')
-		goto fail;
-
-	/* try disk name without <part number> */
-	part = simple_strtoul(p, NULL, 10);
-	*p = '\0';
-	res = blk_lookup_devt(s, part);
-	if (res)
-		goto done;
-
-	/* try disk name without p<part number> */
-	if (p < s + 2 || !isdigit(p[-2]) || p[-1] != 'p')
-		goto fail;
-	p[-1] = '\0';
-	res = blk_lookup_devt(s, part);
-	if (res)
-		goto done;
-
-fail:
-	return 0;
-done:
-	return res;
+	return devt_from_devnum(name);
 }
 EXPORT_SYMBOL_GPL(name_to_dev_t);
 
 static int __init root_dev_setup(char *line)
 {
-	strlcpy(saved_root_name, line, sizeof(saved_root_name));
+	strscpy(saved_root_name, line, sizeof(saved_root_name));
 	return 1;
 }
 
@@ -360,31 +337,21 @@ __setup("rootflags=", root_data_setup);
 __setup("rootfstype=", fs_names_setup);
 __setup("rootdelay=", root_delay_setup);
 
-static void __init get_fs_names(char *page)
+/* This can return zero length strings. Caller should check */
+static int __init split_fs_names(char *page, size_t size, char *names)
 {
-	char *s = page;
+	int count = 1;
+	char *p = page;
 
-	if (root_fs_names) {
-		strcpy(page, root_fs_names);
-		while (*s++) {
-			if (s[-1] == ',')
-				s[-1] = '\0';
-		}
-	} else {
-		int len = get_filesystem_list(page);
-		char *p, *next;
-
-		page[len] = '\0';
-		for (p = page-1; p; p = next) {
-			next = strchr(++p, '\n');
-			if (*p++ != '\t')
-				continue;
-			while ((*s++ = *p++) != '\n')
-				;
-			s[-1] = '\0';
+	strscpy(p, root_fs_names, size);
+	while (*p++) {
+		if (p[-1] == ',') {
+			p[-1] = '\0';
+			count++;
 		}
 	}
-	*s = '\0';
+
+	return count;
 }
 
 static int __init do_mount_root(const char *name, const char *fs,
@@ -396,20 +363,20 @@ static int __init do_mount_root(const char *name, const char *fs,
 	int ret;
 
 	if (data) {
-		/* do_mount() requires a full page as fifth argument */
+		/* init_mount() requires a full page as fifth argument */
 		p = alloc_page(GFP_KERNEL);
 		if (!p)
 			return -ENOMEM;
 		data_page = page_address(p);
-		/* zero-pad. do_mount() will make sure it's terminated */
+		/* zero-pad. init_mount() will make sure it's terminated */
 		strncpy(data_page, data, PAGE_SIZE);
 	}
 
-	ret = do_mount(name, "/root", fs, flags, data_page);
+	ret = init_mount(name, "/root", fs, flags, data_page);
 	if (ret)
 		goto out;
 
-	ksys_chdir("/root");
+	init_chdir("/root");
 	s = current->fs->pwd.dentry->d_sb;
 	ROOT_DEV = s->s_dev;
 	printk(KERN_INFO
@@ -429,16 +396,22 @@ void __init mount_block_root(char *name, int flags)
 	struct page *page = alloc_page(GFP_KERNEL);
 	char *fs_names = page_address(page);
 	char *p;
-#ifdef CONFIG_BLOCK
 	char b[BDEVNAME_SIZE];
-#else
-	const char *b = name;
-#endif
+	int num_fs, i;
 
-	get_fs_names(fs_names);
+	scnprintf(b, BDEVNAME_SIZE, "unknown-block(%u,%u)",
+		  MAJOR(ROOT_DEV), MINOR(ROOT_DEV));
+	if (root_fs_names)
+		num_fs = split_fs_names(fs_names, PAGE_SIZE, root_fs_names);
+	else
+		num_fs = list_bdev_fs_names(fs_names, PAGE_SIZE);
 retry:
-	for (p = fs_names; *p; p += strlen(p)+1) {
-		int err = do_mount_root(name, p, flags, root_mount_data);
+	for (i = 0, p = fs_names; i < num_fs; i++, p += strlen(p)+1) {
+		int err;
+
+		if (!*p)
+			continue;
+		err = do_mount_root(name, p, flags, root_mount_data);
 		switch (err) {
 			case 0:
 				goto out;
@@ -451,18 +424,11 @@ retry:
 		 * and bad superblock on root device.
 		 * and give them a list of the available devices
 		 */
-#ifdef CONFIG_BLOCK
-		__bdevname(ROOT_DEV, b);
-#endif
 		printk("VFS: Cannot open root device \"%s\" or %s: error %d\n",
 				root_device_name, b, err);
 		printk("Please append a correct \"root=\" boot option; here are the available partitions:\n");
 
 		printk_all_partitions();
-#ifdef CONFIG_DEBUG_BLOCK_EXT_DEVT
-		printk("DEBUG_BLOCK_EXT_DEVT is enabled, you need to specify "
-		       "explicit textual name for \"root=\" boot option.\n");
-#endif
 		panic("VFS: Unable to mount root fs on %s", b);
 	}
 	if (!(flags & SB_RDONLY)) {
@@ -473,12 +439,9 @@ retry:
 	printk("List of all partitions:\n");
 	printk_all_partitions();
 	printk("No filesystem could mount root, tried: ");
-	for (p = fs_names; *p; p += strlen(p)+1)
+	for (i = 0, p = fs_names; i < num_fs; i++, p += strlen(p)+1)
 		printk(" %s", p);
 	printk("\n");
-#ifdef CONFIG_BLOCK
-	__bdevname(ROOT_DEV, b);
-#endif
 	panic("VFS: Unable to mount root fs on %s", b);
 out:
 	put_page(page);
@@ -560,68 +523,66 @@ static int __init mount_cifs_root(void)
 }
 #endif
 
-#if defined(CONFIG_BLK_DEV_RAM) || defined(CONFIG_BLK_DEV_FD)
-void __init change_floppy(char *fmt, ...)
+static bool __init fs_is_nodev(char *fstype)
 {
-	struct termios termios;
-	char buf[80];
-	char c;
-	int fd;
-	va_list args;
-	va_start(args, fmt);
-	vsprintf(buf, fmt, args);
-	va_end(args);
-	fd = ksys_open("/dev/root", O_RDWR | O_NDELAY, 0);
-	if (fd >= 0) {
-		ksys_ioctl(fd, FDEJECT, 0);
-		ksys_close(fd);
+	struct file_system_type *fs = get_fs_type(fstype);
+	bool ret = false;
+
+	if (fs) {
+		ret = !(fs->fs_flags & FS_REQUIRES_DEV);
+		put_filesystem(fs);
 	}
-	printk(KERN_NOTICE "VFS: Insert %s and press ENTER\n", buf);
-	fd = ksys_open("/dev/console", O_RDWR, 0);
-	if (fd >= 0) {
-		ksys_ioctl(fd, TCGETS, (long)&termios);
-		termios.c_lflag &= ~ICANON;
-		ksys_ioctl(fd, TCSETSF, (long)&termios);
-		ksys_read(fd, &c, 1);
-		termios.c_lflag |= ICANON;
-		ksys_ioctl(fd, TCSETSF, (long)&termios);
-		ksys_close(fd);
-	}
+
+	return ret;
 }
-#endif
+
+static int __init mount_nodev_root(void)
+{
+	char *fs_names, *fstype;
+	int err = -EINVAL;
+	int num_fs, i;
+
+	fs_names = (void *)__get_free_page(GFP_KERNEL);
+	if (!fs_names)
+		return -EINVAL;
+	num_fs = split_fs_names(fs_names, PAGE_SIZE, root_fs_names);
+
+	for (i = 0, fstype = fs_names; i < num_fs;
+	     i++, fstype += strlen(fstype) + 1) {
+		if (!*fstype)
+			continue;
+		if (!fs_is_nodev(fstype))
+			continue;
+		err = do_mount_root(root_device_name, fstype, root_mountflags,
+				    root_mount_data);
+		if (!err)
+			break;
+	}
+
+	free_page((unsigned long)fs_names);
+	return err;
+}
 
 void __init mount_root(void)
 {
 #ifdef CONFIG_ROOT_NFS
 	if (ROOT_DEV == Root_NFS) {
-		if (mount_nfs_root())
-			return;
-
-		printk(KERN_ERR "VFS: Unable to mount root fs via NFS, trying floppy.\n");
-		ROOT_DEV = Root_FD0;
+		if (!mount_nfs_root())
+			printk(KERN_ERR "VFS: Unable to mount root fs via NFS.\n");
+		return;
 	}
 #endif
 #ifdef CONFIG_CIFS_ROOT
 	if (ROOT_DEV == Root_CIFS) {
-		if (mount_cifs_root())
+		if (!mount_cifs_root())
+			printk(KERN_ERR "VFS: Unable to mount root fs via SMB.\n");
+		return;
+	}
+#endif
+	if (ROOT_DEV == 0 && root_device_name && root_fs_names) {
+		if (mount_nodev_root() == 0)
 			return;
-
-		printk(KERN_ERR "VFS: Unable to mount root fs via SMB, trying floppy.\n");
-		ROOT_DEV = Root_FD0;
 	}
-#endif
-#ifdef CONFIG_BLK_DEV_FD
-	if (MAJOR(ROOT_DEV) == FLOPPY_MAJOR) {
-		/* rd_doload is 2 for a dual initrd/ramload setup */
-		if (rd_doload==2) {
-			if (rd_load_disk(1)) {
-				ROOT_DEV = Root_RAM1;
-				root_device_name = NULL;
-			}
-		} else
-			change_floppy("root floppy");
-	}
-#endif
 #ifdef CONFIG_BLOCK
 	{
 		int err = create_dev("/dev/root", ROOT_DEV);
@@ -638,8 +599,6 @@ void __init mount_root(void)
  */
 void __init prepare_namespace(void)
 {
-	int is_floppy;
-
 	if (root_delay) {
 		printk(KERN_INFO "Waiting %d sec before mounting root device...\n",
 		       root_delay);
@@ -682,16 +641,11 @@ void __init prepare_namespace(void)
 		async_synchronize_full();
 	}
 
-	is_floppy = MAJOR(ROOT_DEV) == FLOPPY_MAJOR;
-
-	if (is_floppy && rd_doload && rd_load_disk(0))
-		ROOT_DEV = Root_RAM0;
-
 	mount_root();
 out:
 	devtmpfs_mount();
-	do_mount(".", "/", NULL, MS_MOVE, NULL);
-	ksys_chroot(".");
+	init_mount(".", "/", NULL, MS_MOVE, NULL);
+	init_chroot(".");
 }
 
 static bool is_tmpfs;

@@ -15,12 +15,12 @@
 #include <linux/moduleparam.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
+#include <linux/pgtable.h>
 
 #include <linux/pci.h>
 #include <linux/vmalloc.h>
 #include <linux/pagemap.h>
 #include <asm/page.h>
-#include <asm/pgtable.h>
 
 #include <media/videobuf-vmalloc.h>
 
@@ -247,7 +247,7 @@ static int __videobuf_mmap_mapper(struct videobuf_queue *q,
 	}
 
 	vma->vm_ops          = &videobuf_vm_ops;
-	vma->vm_flags       |= VM_DONTEXPAND | VM_DONTDUMP;
+	vm_flags_set(vma, VM_DONTEXPAND | VM_DONTDUMP);
 	vma->vm_private_data = map;
 
 	dprintk(1, "mmap %p: q=%p %08lx-%08lx (%lx) pgoff %08lx buf %d\n",

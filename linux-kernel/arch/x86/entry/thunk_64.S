@@ -3,7 +3,6 @@
  * Save registers before calling assembly functions. This avoids
  * disturbance of register allocation in some inline assembly constructs.
  * Copyright 2001,2002 by Andi Kleen, SuSE Labs.
- * Added trace_hardirqs callers - Copyright 2007 Steven Rostedt, Red Hat, Inc.
  */
 #include <linux/linkage.h>
 #include "calling.h"
@@ -11,8 +10,8 @@
 #include <asm/export.h>
 
 	/* rdi:	arg1 ... normal C conventions. rax is saved/restored. */
-	.macro THUNK name, func, put_ret_addr_in_rdi=0
-SYM_FUNC_START_NOALIGN(\name)
+	.macro THUNK name, func
+SYM_FUNC_START(\name)
 	pushq %rbp
 	movq %rsp, %rbp
 
@@ -26,37 +25,18 @@ SYM_FUNC_START_NOALIGN(\name)
 	pushq %r10
 	pushq %r11
 
-	.if \put_ret_addr_in_rdi
-	/* 8(%rbp) is return addr on stack */
-	movq 8(%rbp), %rdi
-	.endif
-
 	call \func
-	jmp  .L_restore
+	jmp  __thunk_restore
 SYM_FUNC_END(\name)
 	_ASM_NOKPROBE(\name)
 	.endm
 
-#ifdef CONFIG_TRACE_IRQFLAGS
-	THUNK trace_hardirqs_on_thunk,trace_hardirqs_on_caller,1
-	THUNK trace_hardirqs_off_thunk,trace_hardirqs_off_caller,1
-#endif
+	THUNK preempt_schedule_thunk, preempt_schedule
+	THUNK preempt_schedule_notrace_thunk, preempt_schedule_notrace
+	EXPORT_SYMBOL(preempt_schedule_thunk)
+	EXPORT_SYMBOL(preempt_schedule_notrace_thunk)
 
-#ifdef CONFIG_DEBUG_LOCK_ALLOC
-	THUNK lockdep_sys_exit_thunk,lockdep_sys_exit
-#endif
-
-#ifdef CONFIG_PREEMPTION
-	THUNK ___preempt_schedule, preempt_schedule
-	THUNK ___preempt_schedule_notrace, preempt_schedule_notrace
-	EXPORT_SYMBOL(___preempt_schedule)
-	EXPORT_SYMBOL(___preempt_schedule_notrace)
-#endif
-
-#if defined(CONFIG_TRACE_IRQFLAGS) \
- || defined(CONFIG_DEBUG_LOCK_ALLOC) \
- || defined(CONFIG_PREEMPTION)
-SYM_CODE_START_LOCAL_NOALIGN(.L_restore)
+SYM_CODE_START_LOCAL(__thunk_restore)
 	popq %r11
 	popq %r10
 	popq %r9
@@ -67,7 +47,6 @@ SYM_CODE_START_LOCAL_NOALIGN(.L_restore)
 	popq %rsi
 	popq %rdi
 	popq %rbp
-	ret
-	_ASM_NOKPROBE(.L_restore)
-SYM_CODE_END(.L_restore)
-#endif
+	RET
+	_ASM_NOKPROBE(__thunk_restore)
+SYM_CODE_END(__thunk_restore)

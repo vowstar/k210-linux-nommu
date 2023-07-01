@@ -15,7 +15,7 @@
 #include <linux/dmaengine.h>
 #include <linux/platform_device.h>
 #include <linux/device.h>
-#include <linux/platform_data/dma-mmp_tdma.h>
+#include <linux/genalloc.h>
 #include <linux/of_device.h>
 #include <linux/of_dma.h>
 
@@ -235,7 +235,7 @@ static int mmp_tdma_config_chan(struct dma_chan *chan)
 			tdcr |= TDCR_BURSTSZ_128B;
 			break;
 		default:
-			dev_err(tdmac->dev, "mmp_tdma: unknown burst size.\n");
+			dev_err(tdmac->dev, "unknown burst size.\n");
 			return -EINVAL;
 		}
 
@@ -250,7 +250,7 @@ static int mmp_tdma_config_chan(struct dma_chan *chan)
 			tdcr |= TDCR_SSZ_32_BITS;
 			break;
 		default:
-			dev_err(tdmac->dev, "mmp_tdma: unknown bus size.\n");
+			dev_err(tdmac->dev, "unknown bus size.\n");
 			return -EINVAL;
 		}
 	} else if (tdmac->type == PXA910_SQU) {
@@ -276,7 +276,7 @@ static int mmp_tdma_config_chan(struct dma_chan *chan)
 			tdcr |= TDCR_BURSTSZ_SQU_32B;
 			break;
 		default:
-			dev_err(tdmac->dev, "mmp_tdma: unknown burst size.\n");
+			dev_err(tdmac->dev, "unknown burst size.\n");
 			return -EINVAL;
 		}
 	}
@@ -346,9 +346,9 @@ static irqreturn_t mmp_tdma_int_handler(int irq, void *dev_id)
 		return IRQ_NONE;
 }
 
-static void dma_do_tasklet(unsigned long data)
+static void dma_do_tasklet(struct tasklet_struct *t)
 {
-	struct mmp_tdma_chan *tdmac = (struct mmp_tdma_chan *)data;
+	struct mmp_tdma_chan *tdmac = from_tasklet(tdmac, t, tasklet);
 
 	dmaengine_desc_get_callback_invoke(&tdmac->desc, NULL);
 }
@@ -363,6 +363,8 @@ static void mmp_tdma_free_descriptor(struct mmp_tdma_chan *tdmac)
 		gen_pool_free(gpool, (unsigned long)tdmac->desc_arr,
 				size);
 	tdmac->desc_arr = NULL;
+	if (tdmac->status == DMA_ERROR)
+		tdmac->status = DMA_COMPLETE;
 
 	return;
 }
@@ -427,8 +429,15 @@ static struct dma_async_tx_descriptor *mmp_tdma_prep_dma_cyclic(
 	int num_periods = buf_len / period_len;
 	int i = 0, buf = 0;
 
-	if (tdmac->status != DMA_COMPLETE)
+	if (!is_slave_direction(direction)) {
+		dev_err(tdmac->dev, "unsupported transfer direction\n");
 		return NULL;
+	}
+
+	if (tdmac->status != DMA_COMPLETE) {
+		dev_err(tdmac->dev, "controller busy");
+		return NULL;
+	}
 
 	if (period_len > TDMA_MAX_XFER_BYTES) {
 		dev_err(tdmac->dev,
@@ -443,7 +452,8 @@ static struct dma_async_tx_descriptor *mmp_tdma_prep_dma_cyclic(
 	if (!desc)
 		goto err_out;
 
-	mmp_tdma_config_write(chan, direction, &tdmac->slave_config);
+	if (mmp_tdma_config_write(chan, direction, &tdmac->slave_config))
+		goto err_out;
 
 	while (buf < buf_len) {
 		desc = &tdmac->desc_arr[i];
@@ -576,7 +586,7 @@ static int mmp_tdma_chan_init(struct mmp_tdma_device *tdev,
 	tdmac->pool	   = pool;
 	tdmac->status = DMA_COMPLETE;
 	tdev->tdmac[tdmac->idx] = tdmac;
-	tasklet_init(&tdmac->tasklet, dma_do_tasklet, (unsigned long)tdmac);
+	tasklet_setup(&tdmac->tasklet, dma_do_tasklet);
 
 	/* add the channel to tdma_chan list */
 	list_add_tail(&tdmac->chan.device_node,
@@ -629,7 +639,6 @@ static int mmp_tdma_probe(struct platform_device *pdev)
 	enum mmp_tdma_type type;
 	const struct of_device_id *of_id;
 	struct mmp_tdma_device *tdev;
-	struct resource *iores;
 	int i, ret;
 	int irq = 0, irq_num = 0;
 	int chan_num = TDMA_CHANNEL_NUM;
@@ -653,17 +662,13 @@ static int mmp_tdma_probe(struct platform_device *pdev)
 			irq_num++;
 	}
 
-	iores = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	tdev->base = devm_ioremap_resource(&pdev->dev, iores);
+	tdev->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(tdev->base))
 		return PTR_ERR(tdev->base);
 
 	INIT_LIST_HEAD(&tdev->device.channels);
 
-	if (pdev->dev.of_node)
-		pool = of_gen_pool_get(pdev->dev.of_node, "asram", 0);
-	else
-		pool = sram_get_gpool("asram");
+	pool = of_gen_pool_get(pdev->dev.of_node, "asram", 0);
 	if (!pool) {
 		dev_err(&pdev->dev, "asram pool not available\n");
 		return -ENOMEM;
@@ -672,7 +677,7 @@ static int mmp_tdma_probe(struct platform_device *pdev)
 	if (irq_num != chan_num) {
 		irq = platform_get_irq(pdev, 0);
 		ret = devm_request_irq(&pdev->dev, irq,
-			mmp_tdma_int_handler, 0, "tdma", tdev);
+			mmp_tdma_int_handler, IRQF_SHARED, "tdma", tdev);
 		if (ret)
 			return ret;
 	}
@@ -700,6 +705,17 @@ static int mmp_tdma_probe(struct platform_device *pdev)
 	tdev->device.device_resume = mmp_tdma_resume_chan;
 	tdev->device.device_terminate_all = mmp_tdma_terminate_all;
 	tdev->device.copy_align = DMAENGINE_ALIGN_8_BYTES;
+
+	tdev->device.directions = BIT(DMA_DEV_TO_MEM) | BIT(DMA_MEM_TO_DEV);
+	if (type == MMP_AUD_TDMA) {
+		tdev->device.max_burst = SZ_128;
+		tdev->device.src_addr_widths = BIT(DMA_SLAVE_BUSWIDTH_4_BYTES);
+		tdev->device.dst_addr_widths = BIT(DMA_SLAVE_BUSWIDTH_4_BYTES);
+	} else if (type == PXA910_SQU) {
+		tdev->device.max_burst = SZ_32;
+	}
+	tdev->device.residue_granularity = DMA_RESIDUE_GRANULARITY_BURST;
+	tdev->device.descriptor_reuse = true;
 
 	dma_set_mask(&pdev->dev, DMA_BIT_MASK(64));
 	platform_set_drvdata(pdev, tdev);

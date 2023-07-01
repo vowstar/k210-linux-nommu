@@ -9,6 +9,7 @@
 
 #include <linux/kernel.h>
 #include <linux/device.h>
+#include <linux/kstrtox.h>
 #include <linux/module.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
@@ -109,7 +110,7 @@ static int enable_set(const char *s, const struct kernel_param *kp)
 	if (!s)	/* called for no-arg enable == default */
 		return 0;
 
-	ret = strtobool(s, &do_enable);
+	ret = kstrtobool(s, &do_enable);
 	if (ret || enable == do_enable)
 		return ret;
 
@@ -273,7 +274,7 @@ static struct usb_composite_driver gserial_driver = {
 static int switch_gserial_enable(bool do_enable)
 {
 	if (!serial_config_driver.label)
-		/* init() was not called, yet */
+		/* gserial_init() was not called, yet */
 		return 0;
 
 	if (do_enable)
@@ -283,7 +284,7 @@ static int switch_gserial_enable(bool do_enable)
 	return 0;
 }
 
-static int __init init(void)
+static int __init gserial_init(void)
 {
 	/* We *could* export two configs; that'd be much cleaner...
 	 * but neither of these product IDs was defined that way.
@@ -314,11 +315,11 @@ static int __init init(void)
 
 	return usb_composite_probe(&gserial_driver);
 }
-module_init(init);
+module_init(gserial_init);
 
-static void __exit cleanup(void)
+static void __exit gserial_cleanup(void)
 {
 	if (enable)
 		usb_composite_unregister(&gserial_driver);
 }
-module_exit(cleanup);
+module_exit(gserial_cleanup);

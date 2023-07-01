@@ -1,4 +1,4 @@
-/**
+/*
  * Copyright (c) 2018 Redpine Signals Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
@@ -63,7 +63,7 @@ static void rsi_coex_scheduler_thread(struct rsi_common *common)
 		rsi_coex_sched_tx_pkts(coex_cb);
 	} while (atomic_read(&coex_cb->coex_tx_thread.thread_done) == 0);
 
-	complete_and_exit(&coex_cb->coex_tx_thread.completion, 0);
+	kthread_complete_and_exit(&coex_cb->coex_tx_thread.completion, 0);
 }
 
 int rsi_coex_recv_pkt(struct rsi_common *common, u8 *msg)
@@ -160,6 +160,7 @@ int rsi_coex_attach(struct rsi_common *common)
 			       rsi_coex_scheduler_thread,
 			       "Coex-Tx-Thread")) {
 		rsi_dbg(ERR_ZONE, "%s: Unable to init tx thrd\n", __func__);
+		kfree(coex_cb);
 		return -EINVAL;
 	}
 	return 0;

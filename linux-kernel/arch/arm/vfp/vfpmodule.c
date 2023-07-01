@@ -23,6 +23,7 @@
 #include <asm/cputype.h>
 #include <asm/system_info.h>
 #include <asm/thread_notify.h>
+#include <asm/traps.h>
 #include <asm/vfp.h>
 
 #include "vfpinstr.h"
@@ -31,7 +32,6 @@
 /*
  * Our undef handlers (in entry.S)
  */
-asmlinkage void vfp_testing_entry(void);
 asmlinkage void vfp_support_entry(void);
 asmlinkage void vfp_null_entry(void);
 
@@ -42,7 +42,7 @@ asmlinkage void (*vfp_vector)(void) = vfp_null_entry;
  * Used in startup: set to non-zero if VFP checks fail
  * After startup, holds VFP architecture
  */
-unsigned int VFP_arch;
+static unsigned int __initdata VFP_arch;
 
 /*
  * The pointer to the vfpstate structure of the thread which currently
@@ -416,7 +416,7 @@ void VFP_bounce(u32 trigger, u32 fpexc, struct pt_regs *regs)
 	if (exceptions)
 		vfp_raise_exceptions(exceptions, trigger, orig_fpscr, regs);
  exit:
-	preempt_enable();
+	local_bh_enable();
 }
 
 static void vfp_enable(void *unused)
@@ -436,7 +436,7 @@ static void vfp_enable(void *unused)
  * present on all CPUs within a SMP complex. Needs to be called prior to
  * vfp_init().
  */
-void vfp_disable(void)
+void __init vfp_disable(void)
 {
 	if (VFP_arch) {
 		pr_debug("%s: should be called prior to vfp_init\n", __func__);
@@ -517,6 +517,8 @@ void vfp_sync_hwstate(struct thread_info *thread)
 {
 	unsigned int cpu = get_cpu();
 
+	local_bh_disable();
+
 	if (vfp_state_in_hw(cpu, thread)) {
 		u32 fpexc = fmrx(FPEXC);
 
@@ -528,6 +530,7 @@ void vfp_sync_hwstate(struct thread_info *thread)
 		fmxr(FPEXC, fpexc);
 	}
 
+	local_bh_enable();
 	put_cpu();
 }
 
@@ -642,7 +645,9 @@ static int vfp_starting_cpu(unsigned int unused)
 	return 0;
 }
 
-void vfp_kmode_exception(void)
+#ifdef CONFIG_KERNEL_MODE_NEON
+
+static int vfp_kmode_exception(struct pt_regs *regs, unsigned int instr)
 {
 	/*
 	 * If we reach this point, a floating point exception has been raised
@@ -660,9 +665,51 @@ void vfp_kmode_exception(void)
 		pr_crit("BUG: unsupported FP instruction in kernel mode\n");
 	else
 		pr_crit("BUG: FP instruction issued in kernel mode with FP unit disabled\n");
+	pr_crit("FPEXC == 0x%08x\n", fmrx(FPEXC));
+	return 1;
 }
 
-#ifdef CONFIG_KERNEL_MODE_NEON
+static struct undef_hook vfp_kmode_exception_hook[] = {{
+	.instr_mask	= 0xfe000000,
+	.instr_val	= 0xf2000000,
+	.cpsr_mask	= MODE_MASK | PSR_T_BIT,
+	.cpsr_val	= SVC_MODE,
+	.fn		= vfp_kmode_exception,
+}, {
+	.instr_mask	= 0xff100000,
+	.instr_val	= 0xf4000000,
+	.cpsr_mask	= MODE_MASK | PSR_T_BIT,
+	.cpsr_val	= SVC_MODE,
+	.fn		= vfp_kmode_exception,
+}, {
+	.instr_mask	= 0xef000000,
+	.instr_val	= 0xef000000,
+	.cpsr_mask	= MODE_MASK | PSR_T_BIT,
+	.cpsr_val	= SVC_MODE | PSR_T_BIT,
+	.fn		= vfp_kmode_exception,
+}, {
+	.instr_mask	= 0xff100000,
+	.instr_val	= 0xf9000000,
+	.cpsr_mask	= MODE_MASK | PSR_T_BIT,
+	.cpsr_val	= SVC_MODE | PSR_T_BIT,
+	.fn		= vfp_kmode_exception,
+}, {
+	.instr_mask	= 0x0c000e00,
+	.instr_val	= 0x0c000a00,
+	.cpsr_mask	= MODE_MASK,
+	.cpsr_val	= SVC_MODE,
+	.fn		= vfp_kmode_exception,
+}};
+
+static int __init vfp_kmode_exception_hook_init(void)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(vfp_kmode_exception_hook); i++)
+		register_undef_hook(&vfp_kmode_exception_hook[i]);
+	return 0;
+}
+subsys_initcall(vfp_kmode_exception_hook_init);
 
 /*
  * Kernel-side NEON support functions
@@ -673,13 +720,15 @@ void kernel_neon_begin(void)
 	unsigned int cpu;
 	u32 fpexc;
 
+	local_bh_disable();
+
 	/*
-	 * Kernel mode NEON is only allowed outside of interrupt context
-	 * with preemption disabled. This will make sure that the kernel
-	 * mode NEON register contents never need to be preserved.
+	 * Kernel mode NEON is only allowed outside of hardirq context with
+	 * preemption and softirq processing disabled. This will make sure that
+	 * the kernel mode NEON register contents never need to be preserved.
 	 */
-	BUG_ON(in_interrupt());
-	cpu = get_cpu();
+	BUG_ON(in_hardirq());
+	cpu = __smp_processor_id();
 
 	fpexc = fmrx(FPEXC) | FPEXC_EN;
 	fmxr(FPEXC, fpexc);
@@ -702,11 +751,26 @@ void kernel_neon_end(void)
 {
 	/* Disable the NEON/VFP unit. */
 	fmxr(FPEXC, fmrx(FPEXC) & ~FPEXC_EN);
-	put_cpu();
+	local_bh_enable();
 }
 EXPORT_SYMBOL(kernel_neon_end);
 
 #endif /* CONFIG_KERNEL_MODE_NEON */
+
+static int __init vfp_detect(struct pt_regs *regs, unsigned int instr)
+{
+	VFP_arch = UINT_MAX;	/* mark as not present */
+	regs->ARM_pc += 4;
+	return 0;
+}
+
+static struct undef_hook vfp_detect_hook __initdata = {
+	.instr_mask	= 0x0c000e00,
+	.instr_val	= 0x0c000a00,
+	.cpsr_mask	= MODE_MASK,
+	.cpsr_val	= SVC_MODE,
+	.fn		= vfp_detect,
+};
 
 /*
  * VFP support code initialisation.
@@ -715,6 +779,7 @@ static int __init vfp_init(void)
 {
 	unsigned int vfpsid;
 	unsigned int cpu_arch = cpu_architecture();
+	unsigned int isar6;
 
 	/*
 	 * Enable the access to the VFP on all online CPUs so the
@@ -728,10 +793,11 @@ static int __init vfp_init(void)
 	 * The handler is already setup to just log calls, so
 	 * we just need to read the VFPSID register.
 	 */
-	vfp_vector = vfp_testing_entry;
+	register_undef_hook(&vfp_detect_hook);
 	barrier();
 	vfpsid = fmrx(FPSID);
 	barrier();
+	unregister_undef_hook(&vfp_detect_hook);
 	vfp_vector = vfp_null_entry;
 
 	pr_info("VFP support v0.3: ");
@@ -771,7 +837,38 @@ static int __init vfp_init(void)
 
 			if ((fmrx(MVFR1) & 0xf0000000) == 0x10000000)
 				elf_hwcap |= HWCAP_VFPv4;
+			if (((fmrx(MVFR1) & MVFR1_ASIMDHP_MASK) >> MVFR1_ASIMDHP_BIT) == 0x2)
+				elf_hwcap |= HWCAP_ASIMDHP;
+			if (((fmrx(MVFR1) & MVFR1_FPHP_MASK) >> MVFR1_FPHP_BIT) == 0x3)
+				elf_hwcap |= HWCAP_FPHP;
 		}
+
+		/*
+		 * Check for the presence of Advanced SIMD Dot Product
+		 * instructions.
+		 */
+		isar6 = read_cpuid_ext(CPUID_EXT_ISAR6);
+		if (cpuid_feature_extract_field(isar6, 4) == 0x1)
+			elf_hwcap |= HWCAP_ASIMDDP;
+		/*
+		 * Check for the presence of Advanced SIMD Floating point
+		 * half-precision multiplication instructions.
+		 */
+		if (cpuid_feature_extract_field(isar6, 8) == 0x1)
+			elf_hwcap |= HWCAP_ASIMDFHM;
+		/*
+		 * Check for the presence of Advanced SIMD Bfloat16
+		 * floating point instructions.
+		 */
+		if (cpuid_feature_extract_field(isar6, 20) == 0x1)
+			elf_hwcap |= HWCAP_ASIMDBF16;
+		/*
+		 * Check for the presence of Advanced SIMD and floating point
+		 * Int8 matrix multiplication instructions instructions.
+		 */
+		if (cpuid_feature_extract_field(isar6, 24) == 0x1)
+			elf_hwcap |= HWCAP_I8MM;
+
 	/* Extract the architecture version on pre-cpuid scheme */
 	} else {
 		if (vfpsid & FPSID_NODOUBLE) {

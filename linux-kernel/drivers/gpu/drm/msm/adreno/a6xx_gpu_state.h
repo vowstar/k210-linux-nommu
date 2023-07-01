@@ -36,16 +36,21 @@ static const u32 a6xx_fe_cluster[] = {
 	0xa00e, 0xa0ef, 0xa0f8, 0xa0f8,
 };
 
+static const u32 a660_fe_cluster[] = {
+	0x9807, 0x9807,
+};
+
 static const u32 a6xx_pc_vs_cluster[] = {
 	0x9100, 0x9108, 0x9300, 0x9306, 0x9980, 0x9981, 0x9b00, 0x9b07,
 };
 
-#define CLUSTER_FE    0
-#define CLUSTER_SP_VS 1
-#define CLUSTER_PC_VS 2
-#define CLUSTER_GRAS  3
-#define CLUSTER_SP_PS 4
-#define CLUSTER_PS    5
+#define CLUSTER_FE	0
+#define CLUSTER_SP_VS	1
+#define CLUSTER_PC_VS	2
+#define CLUSTER_GRAS	3
+#define CLUSTER_SP_PS	4
+#define CLUSTER_PS	5
+#define CLUSTER_VPC_PS	6
 
 #define CLUSTER(_id, _reg, _sel_reg, _sel_val) \
 	{ .id = _id, .name = #_id,\
@@ -67,6 +72,7 @@ static const struct a6xx_cluster {
 	CLUSTER(CLUSTER_PS, a6xx_ps_cluster, 0, 0),
 	CLUSTER(CLUSTER_FE, a6xx_fe_cluster, 0, 0),
 	CLUSTER(CLUSTER_PC_VS, a6xx_pc_vs_cluster, 0, 0),
+	CLUSTER(CLUSTER_FE, a660_fe_cluster, 0, 0),
 };
 
 static const u32 a6xx_sp_vs_hlsq_cluster[] = {
@@ -105,7 +111,7 @@ static const u32 a6xx_sp_ps_hlsq_2d_cluster[] = {
 
 static const u32 a6xx_sp_ps_sp_cluster[] = {
 	0xa980, 0xa9a8, 0xa9b0, 0xa9bc, 0xa9d0, 0xa9d3, 0xa9e0, 0xa9f3,
-	0xaa00, 0xaa00, 0xaa30, 0xaa31,
+	0xaa00, 0xaa00, 0xaa30, 0xaa31, 0xaaf2, 0xaaf2,
 };
 
 static const u32 a6xx_sp_ps_sp_2d_cluster[] = {
@@ -229,6 +235,9 @@ static const struct a6xx_shader_block {
 	SHADER(A6XX_HLSQ_DATAPATH_META, 0x40),
 	SHADER(A6XX_HLSQ_FRONTEND_META, 0x40),
 	SHADER(A6XX_HLSQ_INDIRECT_META, 0x40),
+	SHADER(A6XX_SP_LB_6_DATA, 0x200),
+	SHADER(A6XX_SP_LB_7_DATA, 0x200),
+	SHADER(A6XX_HLSQ_INST_RAM_1, 0x200),
 };
 
 static const u32 a6xx_rb_rac_registers[] = {
@@ -251,7 +260,7 @@ static const u32 a6xx_registers[] = {
 	0x0540, 0x0555,
 	/* CP */
 	0x0800, 0x0808, 0x0810, 0x0813, 0x0820, 0x0821, 0x0823, 0x0824,
-	0x0826, 0x0827, 0x0830, 0x0833, 0x0840, 0x0843, 0x084f, 0x086f,
+	0x0826, 0x0827, 0x0830, 0x0833, 0x0840, 0x0845, 0x084f, 0x086f,
 	0x0880, 0x088a, 0x08a0, 0x08ab, 0x08c0, 0x08c4, 0x08d0, 0x08dd,
 	0x08f0, 0x08f3, 0x0900, 0x0903, 0x0908, 0x0911, 0x0928, 0x093e,
 	0x0942, 0x094d, 0x0980, 0x0984, 0x098d, 0x0996, 0x0998, 0x099e,
@@ -274,6 +283,13 @@ static const u32 a6xx_registers[] = {
 	/* VFD */
 	0xa600, 0xa601, 0xa603, 0xa603, 0xa60a, 0xa60a, 0xa610, 0xa617,
 	0xa630, 0xa630,
+	/* HLSQ */
+	0xd002, 0xd003,
+};
+
+static const u32 a660_registers[] = {
+	/* UCHE */
+	0x0e3c, 0x0e3c,
 };
 
 #define REGS(_array, _sel_reg, _sel_val) \
@@ -282,6 +298,7 @@ static const u32 a6xx_registers[] = {
 
 static const struct a6xx_registers a6xx_reglist[] = {
 	REGS(a6xx_registers, 0, 0),
+	REGS(a660_registers, 0, 0),
 	REGS(a6xx_rb_rac_registers, REG_A6XX_RB_RB_SUB_BLOCK_SEL_CNTL_CD, 0),
 	REGS(a6xx_rb_rbp_registers, REG_A6XX_RB_RB_SUB_BLOCK_SEL_CNTL_CD, 9),
 };
@@ -341,10 +358,6 @@ static const u32 a6xx_gmu_cx_registers[] = {
 	0x5157, 0x5158, 0x515d, 0x515d, 0x5162, 0x5162, 0x5164, 0x5165,
 	0x5180, 0x5186, 0x5190, 0x519e, 0x51c0, 0x51c0, 0x51c5, 0x51cc,
 	0x51e0, 0x51e2, 0x51f0, 0x51f0, 0x5200, 0x5201,
-	/* GPU RSCC */
-	0x8c8c, 0x8c8c, 0x8d01, 0x8d02, 0x8f40, 0x8f42, 0x8f44, 0x8f47,
-	0x8f4c, 0x8f87, 0x8fec, 0x8fef, 0x8ff4, 0x902f, 0x9094, 0x9097,
-	0x909c, 0x90d7, 0x913c, 0x913f, 0x9144, 0x917f,
 	/* GMU AO */
 	0x9300, 0x9316, 0x9400, 0x9400,
 	/* GPU CC */
@@ -357,30 +370,41 @@ static const u32 a6xx_gmu_cx_registers[] = {
 	0xbc00, 0xbc16, 0xbc20, 0xbc27,
 };
 
+static const u32 a6xx_gmu_cx_rscc_registers[] = {
+	/* GPU RSCC */
+	0x008c, 0x008c, 0x0101, 0x0102, 0x0340, 0x0342, 0x0344, 0x0347,
+	0x034c, 0x0387, 0x03ec, 0x03ef, 0x03f4, 0x042f, 0x0494, 0x0497,
+	0x049c, 0x04d7, 0x053c, 0x053f, 0x0544, 0x057f,
+};
+
 static const struct a6xx_registers a6xx_gmu_reglist[] = {
 	REGS(a6xx_gmu_cx_registers, 0, 0),
+	REGS(a6xx_gmu_cx_rscc_registers, 0, 0),
 	REGS(a6xx_gmu_gx_registers, 0, 0),
 };
 
-static const struct a6xx_indexed_registers {
+static u32 a6xx_get_cp_roq_size(struct msm_gpu *gpu);
+
+static struct a6xx_indexed_registers {
 	const char *name;
 	u32 addr;
 	u32 data;
 	u32 count;
+	u32 (*count_fn)(struct msm_gpu *gpu);
 } a6xx_indexed_reglist[] = {
-	{ "CP_SEQ_STAT", REG_A6XX_CP_SQE_STAT_ADDR,
-		REG_A6XX_CP_SQE_STAT_DATA, 0x33 },
+	{ "CP_SQE_STAT", REG_A6XX_CP_SQE_STAT_ADDR,
+		REG_A6XX_CP_SQE_STAT_DATA, 0x33, NULL },
 	{ "CP_DRAW_STATE", REG_A6XX_CP_DRAW_STATE_ADDR,
-		REG_A6XX_CP_DRAW_STATE_DATA, 0x100 },
+		REG_A6XX_CP_DRAW_STATE_DATA, 0x100, NULL },
 	{ "CP_UCODE_DBG_DATA", REG_A6XX_CP_SQE_UCODE_DBG_ADDR,
-		REG_A6XX_CP_SQE_UCODE_DBG_DATA, 0x6000 },
+		REG_A6XX_CP_SQE_UCODE_DBG_DATA, 0x8000, NULL },
 	{ "CP_ROQ", REG_A6XX_CP_ROQ_DBG_ADDR,
-		REG_A6XX_CP_ROQ_DBG_DATA, 0x400 },
+		REG_A6XX_CP_ROQ_DBG_DATA, 0, a6xx_get_cp_roq_size},
 };
 
-static const struct a6xx_indexed_registers a6xx_cp_mempool_indexed = {
-	"CP_MEMPOOOL", REG_A6XX_CP_MEM_POOL_DBG_ADDR,
-		REG_A6XX_CP_MEM_POOL_DBG_DATA, 0x2060,
+static struct a6xx_indexed_registers a6xx_cp_mempool_indexed = {
+	"CP_MEMPOOL", REG_A6XX_CP_MEM_POOL_DBG_ADDR,
+		REG_A6XX_CP_MEM_POOL_DBG_DATA, 0x2060, NULL,
 };
 
 #define DEBUGBUS(_id, _count) { .id = _id, .name = #_id, .count = _count }
@@ -437,6 +461,22 @@ static const struct a6xx_debugbus_block a6xx_gbif_debugbus_block =
 static const struct a6xx_debugbus_block a6xx_cx_debugbus_blocks[] = {
 	DEBUGBUS(A6XX_DBGBUS_GMU_CX, 0x100),
 	DEBUGBUS(A6XX_DBGBUS_CX, 0x100),
+};
+
+static const struct a6xx_debugbus_block a650_debugbus_blocks[] = {
+	DEBUGBUS(A6XX_DBGBUS_RB_2, 0x100),
+	DEBUGBUS(A6XX_DBGBUS_CCU_2, 0x100),
+	DEBUGBUS(A6XX_DBGBUS_VFD_4, 0x100),
+	DEBUGBUS(A6XX_DBGBUS_VFD_5, 0x100),
+	DEBUGBUS(A6XX_DBGBUS_SP_2, 0x100),
+	DEBUGBUS(A6XX_DBGBUS_TPL1_4, 0x100),
+	DEBUGBUS(A6XX_DBGBUS_TPL1_5, 0x100),
+	DEBUGBUS(A6XX_DBGBUS_SPTP_0, 0x100),
+	DEBUGBUS(A6XX_DBGBUS_SPTP_1, 0x100),
+	DEBUGBUS(A6XX_DBGBUS_SPTP_2, 0x100),
+	DEBUGBUS(A6XX_DBGBUS_SPTP_3, 0x100),
+	DEBUGBUS(A6XX_DBGBUS_SPTP_4, 0x100),
+	DEBUGBUS(A6XX_DBGBUS_SPTP_5, 0x100),
 };
 
 #endif

@@ -136,6 +136,17 @@ nvkm_gr_oneinit(struct nvkm_engine *engine)
 }
 
 static int
+nvkm_gr_reset(struct nvkm_engine *engine)
+{
+	struct nvkm_gr *gr = nvkm_gr(engine);
+
+	if (gr->func->reset)
+		return gr->func->reset(gr);
+
+	return -ENOSYS;
+}
+
+static int
 nvkm_gr_init(struct nvkm_engine *engine)
 {
 	struct nvkm_gr *gr = nvkm_gr(engine);
@@ -166,6 +177,7 @@ nvkm_gr = {
 	.oneinit = nvkm_gr_oneinit,
 	.init = nvkm_gr_init,
 	.fini = nvkm_gr_fini,
+	.reset = nvkm_gr_reset,
 	.intr = nvkm_gr_intr,
 	.tile = nvkm_gr_tile,
 	.chsw_load = nvkm_gr_chsw_load,
@@ -175,8 +187,8 @@ nvkm_gr = {
 
 int
 nvkm_gr_ctor(const struct nvkm_gr_func *func, struct nvkm_device *device,
-	     int index, bool enable, struct nvkm_gr *gr)
+	     enum nvkm_subdev_type type, int inst, bool enable, struct nvkm_gr *gr)
 {
 	gr->func = func;
-	return nvkm_engine_ctor(&nvkm_gr, device, index, enable, &gr->engine);
+	return nvkm_engine_ctor(&nvkm_gr, device, type, inst, enable, &gr->engine);
 }

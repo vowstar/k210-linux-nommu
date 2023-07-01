@@ -8,7 +8,9 @@
  */
 #ifndef _CRYPTO_ACOMP_INT_H
 #define _CRYPTO_ACOMP_INT_H
+
 #include <crypto/acompress.h>
+#include <crypto/algapi.h>
 
 /*
  * Transform internal helpers.
@@ -26,7 +28,7 @@ static inline void *acomp_tfm_ctx(struct crypto_acomp *tfm)
 static inline void acomp_request_complete(struct acomp_req *req,
 					  int err)
 {
-	req->base.complete(&req->base, err);
+	crypto_request_complete(&req->base, err);
 }
 
 static inline const char *acomp_alg_name(struct crypto_acomp *tfm)
@@ -46,7 +48,7 @@ static inline struct acomp_req *__acomp_request_alloc(struct crypto_acomp *tfm)
 
 static inline void __acomp_request_free(struct acomp_req *req)
 {
-	kzfree(req);
+	kfree_sensitive(req);
 }
 
 /**

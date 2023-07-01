@@ -48,6 +48,10 @@ KCFLAGS
 -------
 Additional options to the C compiler (for built-in and modules).
 
+KRUSTFLAGS
+----------
+Additional options to the Rust compiler (for built-in and modules).
+
 CFLAGS_KERNEL
 -------------
 Additional options for $(CC) when used to compile
@@ -56,6 +60,15 @@ code that is compiled as built-in.
 CFLAGS_MODULE
 -------------
 Additional module specific options to use for $(CC).
+
+RUSTFLAGS_KERNEL
+----------------
+Additional options for $(RUSTC) when used to compile
+code that is compiled as built-in.
+
+RUSTFLAGS_MODULE
+----------------
+Additional module specific options to use for $(RUSTC).
 
 LDFLAGS_MODULE
 --------------
@@ -69,6 +82,10 @@ HOSTCXXFLAGS
 ------------
 Additional flags to be passed to $(HOSTCXX) when building host programs.
 
+HOSTRUSTFLAGS
+-------------
+Additional flags to be passed to $(HOSTRUSTC) when building host programs.
+
 HOSTLDFLAGS
 -----------
 Additional flags to be passed when linking host programs.
@@ -76,6 +93,17 @@ Additional flags to be passed when linking host programs.
 HOSTLDLIBS
 ----------
 Additional libraries to link against when building host programs.
+
+.. _userkbuildflags:
+
+USERCFLAGS
+----------
+Additional options used for $(CC) when compiling userprogs.
+
+USERLDFLAGS
+-----------
+Additional options used for $(LD) when linking userprogs. userprogs are linked
+with CC, so $(USERLDFLAGS) should include "-Wl," prefix as applicable.
 
 KBUILD_KCONFIG
 --------------
@@ -237,7 +265,7 @@ This is solely useful to speed up test compiles.
 KBUILD_EXTRA_SYMBOLS
 --------------------
 For modules that use symbols from other modules.
-See more details in modules.txt.
+See more details in modules.rst.
 
 ALLSOURCE_ARCHS
 ---------------
@@ -249,6 +277,13 @@ to be included in the databases, separated by blank space. E.g.::
 To get all available archs you can also specify all. E.g.::
 
     $ make ALLSOURCE_ARCHS=all tags
+
+IGNORE_DIRS
+-----------
+For tags/TAGS/cscope targets, you can choose which directories won't
+be included in the databases, separated by blank space. E.g.::
+
+    $ make IGNORE_DIRS="drivers/gpu/drm/radeon tools" cscope
 
 KBUILD_BUILD_TIMESTAMP
 ----------------------
@@ -262,3 +297,8 @@ KBUILD_BUILD_USER, KBUILD_BUILD_HOST
 These two variables allow to override the user@host string displayed during
 boot and in /proc/version. The default value is the output of the commands
 whoami and host, respectively.
+
+LLVM
+----
+If this variable is set to 1, Kbuild will use Clang and LLVM utilities instead
+of GCC and GNU binutils to build the kernel.

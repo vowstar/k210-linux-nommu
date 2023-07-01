@@ -24,11 +24,8 @@ String Conversions
 .. kernel-doc:: lib/vsprintf.c
    :export:
 
-.. kernel-doc:: include/linux/kernel.h
-   :functions: kstrtol
-
-.. kernel-doc:: include/linux/kernel.h
-   :functions: kstrtoul
+.. kernel-doc:: include/linux/kstrtox.h
+   :functions: kstrtol kstrtoul
 
 .. kernel-doc:: lib/kstrtox.c
    :export:
@@ -38,6 +35,9 @@ String Conversions
 
 String Manipulation
 -------------------
+
+.. kernel-doc:: include/linux/fortify-string.h
+   :internal:
 
 .. kernel-doc:: lib/string.c
    :export:
@@ -121,6 +121,12 @@ Text Searching
 CRC and Math Functions in Linux
 ===============================
 
+Arithmetic Overflow Checking
+----------------------------
+
+.. kernel-doc:: include/linux/overflow.h
+   :internal:
+
 CRC Functions
 -------------
 
@@ -167,9 +173,6 @@ Division Functions
 
 .. kernel-doc:: include/linux/math64.h
    :internal:
-
-.. kernel-doc:: lib/math/div64.c
-   :functions: div_s64_rem div64_u64_rem div64_u64 div64_s64
 
 .. kernel-doc:: lib/math/gcd.c
    :export:
@@ -226,16 +229,10 @@ Module Loading
 Inter Module support
 --------------------
 
-Refer to the file kernel/module.c for more information.
+Refer to the files in kernel/module/ for more information.
 
 Hardware Interfaces
 ===================
-
-Interrupt Handling
-------------------
-
-.. kernel-doc:: kernel/irq/manage.c
-   :export:
 
 DMA Channels
 ------------
@@ -288,6 +285,7 @@ Accounting Framework
 Block Devices
 =============
 
+.. kernel-doc:: include/linux/bio.h
 .. kernel-doc:: block/blk-core.c
    :export:
 
@@ -301,9 +299,6 @@ Block Devices
    :internal:
 
 .. kernel-doc:: block/blk-settings.c
-   :export:
-
-.. kernel-doc:: block/blk-exec.c
    :export:
 
 .. kernel-doc:: block/blk-flush.c
@@ -322,6 +317,9 @@ Block Devices
    :internal:
 
 .. kernel-doc:: block/genhd.c
+   :export:
+
+.. kernel-doc:: block/bdev.c
    :export:
 
 Char devices

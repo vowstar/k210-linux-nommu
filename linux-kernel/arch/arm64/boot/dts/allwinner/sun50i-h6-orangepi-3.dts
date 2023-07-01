@@ -4,6 +4,7 @@
 /dts-v1/;
 
 #include "sun50i-h6.dtsi"
+#include "sun50i-h6-cpu-opp.dtsi"
 
 #include <dt-bindings/gpio/gpio.h>
 
@@ -32,16 +33,23 @@
 		};
 	};
 
+	ext_osc32k: ext_osc32k_clk {
+		#clock-cells = <0>;
+		compatible = "fixed-clock";
+		clock-frequency = <32768>;
+		clock-output-names = "ext_osc32k";
+	};
+
 	leds {
 		compatible = "gpio-leds";
 
-		power {
+		led-0 {
 			label = "orangepi:red:power";
 			gpios = <&r_pio 0 4 GPIO_ACTIVE_HIGH>; /* PL4 */
 			default-state = "on";
 		};
 
-		status {
+		led-1 {
 			label = "orangepi:green:status";
 			gpios = <&r_pio 0 7 GPIO_ACTIVE_HIGH>; /* PL7 */
 		};
@@ -78,7 +86,7 @@
 
 	wifi_pwrseq: wifi-pwrseq {
 		compatible = "mmc-pwrseq-simple";
-		clocks = <&rtc 1>;
+		clocks = <&rtc CLK_OSC32K_FANOUT>;
 		clock-names = "ext_clock";
 		reset-gpios = <&r_pio 1 3 GPIO_ACTIVE_LOW>; /* PM3 */
 		post-power-on-delay-ms = <200>;
@@ -144,6 +152,15 @@
 	};
 };
 
+&mmc2 {
+	vmmc-supply = <&reg_cldo1>;
+	vqmmc-supply = <&reg_bldo2>;
+	cap-mmc-hw-reset;
+	non-removable;
+	bus-width = <8>;
+	status = "okay";
+};
+
 &ohci0 {
 	status = "okay";
 };
@@ -158,14 +175,18 @@
 	vcc-pg-supply = <&reg_vcc_wifi_io>;
 };
 
-&r_i2c {
+&r_ir {
+	status = "okay";
+};
+
+&r_rsb {
 	status = "okay";
 
-	axp805: pmic@36 {
+	axp805: pmic@745 {
 		compatible = "x-powers,axp805", "x-powers,axp806";
-		reg = <0x36>;
+		reg = <0x745>;
 		interrupt-parent = <&r_intc>;
-		interrupts = <0 IRQ_TYPE_LEVEL_LOW>;
+		interrupts = <GIC_SPI 96 IRQ_TYPE_LEVEL_LOW>;
 		interrupt-controller;
 		#interrupt-cells = <1>;
 		x-powers,self-working-mode;
@@ -241,6 +262,7 @@
 				regulator-always-on;
 				regulator-min-microvolt = <800000>;
 				regulator-max-microvolt = <1160000>;
+				regulator-ramp-delay = <2500>;
 				regulator-name = "vdd-cpu";
 			};
 
@@ -248,6 +270,7 @@
 				regulator-enable-ramp-delay = <32000>;
 				regulator-min-microvolt = <810000>;
 				regulator-max-microvolt = <1080000>;
+				regulator-ramp-delay = <2500>;
 				regulator-name = "vdd-gpu";
 			};
 
@@ -272,8 +295,8 @@
 	};
 };
 
-&r_ir {
-	status = "okay";
+&rtc {
+	clocks = <&ext_osc32k>;
 };
 
 &uart0 {
@@ -291,7 +314,7 @@
 
 	bluetooth {
 		compatible = "brcm,bcm4345c5";
-		clocks = <&rtc 1>;
+		clocks = <&rtc CLK_OSC32K_FANOUT>;
 		clock-names = "lpo";
 		device-wakeup-gpios = <&r_pio 1 2 GPIO_ACTIVE_HIGH>; /* PM2 */
 		host-wakeup-gpios = <&r_pio 1 1 GPIO_ACTIVE_HIGH>; /* PM1 */

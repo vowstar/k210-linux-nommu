@@ -464,9 +464,10 @@ to address dependencies, since the address of a location accessed
 through a pointer will depend on the value read earlier from that
 pointer.
 
-Finally, a read event and another memory access event are linked by a
-control dependency if the value obtained by the read affects whether
-the second event is executed at all.  Simple example:
+Finally, a read event X and a write event Y are linked by a control
+dependency if Y syntactically lies within an arm of an if statement and
+X affects the evaluation of the if condition via a data or address
+dependency (or similarly for a switch statement).  Simple example:
 
 	int x, y;
 
@@ -484,6 +485,57 @@ R ->addr X, or R ->ctrl X (where R is a read event), then we must also
 have R ->po X.  It wouldn't make sense for a computation to depend
 somehow on a value that doesn't get loaded from shared memory until
 later in the code!
+
+Here's a trick question: When is a dependency not a dependency?  Answer:
+When it is purely syntactic rather than semantic.  We say a dependency
+between two accesses is purely syntactic if the second access doesn't
+actually depend on the result of the first.  Here is a trivial example:
+
+	r1 = READ_ONCE(x);
+	WRITE_ONCE(y, r1 * 0);
+
+There appears to be a data dependency from the load of x to the store
+of y, since the value to be stored is computed from the value that was
+loaded.  But in fact, the value stored does not really depend on
+anything since it will always be 0.  Thus the data dependency is only
+syntactic (it appears to exist in the code) but not semantic (the
+second access will always be the same, regardless of the value of the
+first access).  Given code like this, a compiler could simply discard
+the value returned by the load from x, which would certainly destroy
+any dependency.  (The compiler is not permitted to eliminate entirely
+the load generated for a READ_ONCE() -- that's one of the nice
+properties of READ_ONCE() -- but it is allowed to ignore the load's
+value.)
+
+It's natural to object that no one in their right mind would write
+code like the above.  However, macro expansions can easily give rise
+to this sort of thing, in ways that often are not apparent to the
+programmer.
+
+Another mechanism that can lead to purely syntactic dependencies is
+related to the notion of "undefined behavior".  Certain program
+behaviors are called "undefined" in the C language specification,
+which means that when they occur there are no guarantees at all about
+the outcome.  Consider the following example:
+
+	int a[1];
+	int i;
+
+	r1 = READ_ONCE(i);
+	r2 = READ_ONCE(a[r1]);
+
+Access beyond the end or before the beginning of an array is one kind
+of undefined behavior.  Therefore the compiler doesn't have to worry
+about what will happen if r1 is nonzero, and it can assume that r1
+will always be zero regardless of the value actually loaded from i.
+(If the assumption turns out to be wrong the resulting behavior will
+be undefined anyway, so the compiler doesn't care!)  Thus the value
+from the load can be discarded, breaking the address dependency.
+
+The LKMM is unaware that purely syntactic dependencies are different
+from semantic dependencies and therefore mistakenly predicts that the
+accesses in the two examples above will be ordered.  This is another
+example of how the compiler can undermine the memory model.  Be warned.
 
 
 THE READS-FROM RELATION: rf, rfi, and rfe
@@ -955,6 +1007,36 @@ order.  Equivalently,
 where the rmw relation links the read and write events making up each
 atomic update.  This is what the LKMM's "atomic" axiom says.
 
+Atomic rmw updates play one more role in the LKMM: They can form "rmw
+sequences".  An rmw sequence is simply a bunch of atomic updates where
+each update reads from the previous one.  Written using events, it
+looks like this:
+
+	Z0 ->rf Y1 ->rmw Z1 ->rf ... ->rf Yn ->rmw Zn,
+
+where Z0 is some store event and n can be any number (even 0, in the
+degenerate case).  We write this relation as: Z0 ->rmw-sequence Zn.
+Note that this implies Z0 and Zn are stores to the same variable.
+
+Rmw sequences have a special property in the LKMM: They can extend the
+cumul-fence relation.  That is, if we have:
+
+	U ->cumul-fence X -> rmw-sequence Y
+
+then also U ->cumul-fence Y.  Thinking about this in terms of the
+operational model, U ->cumul-fence X says that the store U propagates
+to each CPU before the store X does.  Then the fact that X and Y are
+linked by an rmw sequence means that U also propagates to each CPU
+before Y does.  In an analogous way, rmw sequences can also extend
+the w-post-bounded relation defined below in the PLAIN ACCESSES AND
+DATA RACES section.
+
+(The notion of rmw sequences in the LKMM is similar to, but not quite
+the same as, that of release sequences in the C11 memory model.  They
+were added to the LKMM to fix an obscure bug; without them, atomic
+updates with full-barrier semantics did not always guarantee ordering
+at least as strong as atomic updates with release-barrier semantics.)
+
 
 THE PRESERVED PROGRAM ORDER RELATION: ppo
 -----------------------------------------
@@ -1122,12 +1204,10 @@ maintain at least the appearance of FIFO order.
 In practice, this difficulty is solved by inserting a special fence
 between P1's two loads when the kernel is compiled for the Alpha
 architecture.  In fact, as of version 4.15, the kernel automatically
-adds this fence (called smp_read_barrier_depends() and defined as
-nothing at all on non-Alpha builds) after every READ_ONCE() and atomic
-load.  The effect of the fence is to cause the CPU not to execute any
-po-later instructions until after the local cache has finished
-processing all the stores it has already received.  Thus, if the code
-was changed to:
+adds this fence after every READ_ONCE() and atomic load on Alpha.  The
+effect of the fence is to cause the CPU not to execute any po-later
+instructions until after the local cache has finished processing all
+the stores it has already received.  Thus, if the code was changed to:
 
 	P1()
 	{
@@ -1146,14 +1226,14 @@ READ_ONCE() or another synchronization primitive rather than accessed
 directly.
 
 The LKMM requires that smp_rmb(), acquire fences, and strong fences
-share this property with smp_read_barrier_depends(): They do not allow
-the CPU to execute any po-later instructions (or po-later loads in the
-case of smp_rmb()) until all outstanding stores have been processed by
-the local cache.  In the case of a strong fence, the CPU first has to
-wait for all of its po-earlier stores to propagate to every other CPU
-in the system; then it has to wait for the local cache to process all
-the stores received as of that time -- not just the stores received
-when the strong fence began.
+share this property: They do not allow the CPU to execute any po-later
+instructions (or po-later loads in the case of smp_rmb()) until all
+outstanding stores have been processed by the local cache.  In the
+case of a strong fence, the CPU first has to wait for all of its
+po-earlier stores to propagate to every other CPU in the system; then
+it has to wait for the local cache to process all the stores received
+as of that time -- not just the stores received when the strong fence
+began.
 
 And of course, none of this matters for any architecture other than
 Alpha.
@@ -1815,15 +1895,16 @@ spin_trylock() -- we can call these things lock-releases and
 lock-acquires -- have two properties beyond those of ordinary releases
 and acquires.
 
-First, when a lock-acquire reads from a lock-release, the LKMM
-requires that every instruction po-before the lock-release must
-execute before any instruction po-after the lock-acquire.  This would
-naturally hold if the release and acquire operations were on different
-CPUs, but the LKMM says it holds even when they are on the same CPU.
-For example:
+First, when a lock-acquire reads from or is po-after a lock-release,
+the LKMM requires that every instruction po-before the lock-release
+must execute before any instruction po-after the lock-acquire.  This
+would naturally hold if the release and acquire operations were on
+different CPUs and accessed the same lock variable, but the LKMM says
+it also holds when they are on the same CPU, even if they access
+different lock variables.  For example:
 
 	int x, y;
-	spinlock_t s;
+	spinlock_t s, t;
 
 	P0()
 	{
@@ -1832,9 +1913,9 @@ For example:
 		spin_lock(&s);
 		r1 = READ_ONCE(x);
 		spin_unlock(&s);
-		spin_lock(&s);
+		spin_lock(&t);
 		r2 = READ_ONCE(y);
-		spin_unlock(&s);
+		spin_unlock(&t);
 	}
 
 	P1()
@@ -1844,10 +1925,10 @@ For example:
 		WRITE_ONCE(x, 1);
 	}
 
-Here the second spin_lock() reads from the first spin_unlock(), and
-therefore the load of x must execute before the load of y.  Thus we
-cannot have r1 = 1 and r2 = 0 at the end (this is an instance of the
-MP pattern).
+Here the second spin_lock() is po-after the first spin_unlock(), and
+therefore the load of x must execute before the load of y, even though
+the two locking operations use different locks.  Thus we cannot have
+r1 = 1 and r2 = 0 at the end (this is an instance of the MP pattern).
 
 This requirement does not apply to ordinary release and acquire
 fences, only to lock-related operations.  For instance, suppose P0()
@@ -1874,13 +1955,13 @@ instructions in the following order:
 
 and thus it could load y before x, obtaining r2 = 0 and r1 = 1.
 
-Second, when a lock-acquire reads from a lock-release, and some other
-stores W and W' occur po-before the lock-release and po-after the
-lock-acquire respectively, the LKMM requires that W must propagate to
-each CPU before W' does.  For example, consider:
+Second, when a lock-acquire reads from or is po-after a lock-release,
+and some other stores W and W' occur po-before the lock-release and
+po-after the lock-acquire respectively, the LKMM requires that W must
+propagate to each CPU before W' does.  For example, consider:
 
 	int x, y;
-	spinlock_t x;
+	spinlock_t s;
 
 	P0()
 	{
@@ -1910,7 +1991,12 @@ each CPU before W' does.  For example, consider:
 
 If r1 = 1 at the end then the spin_lock() in P1 must have read from
 the spin_unlock() in P0.  Hence the store to x must propagate to P2
-before the store to y does, so we cannot have r2 = 1 and r3 = 0.
+before the store to y does, so we cannot have r2 = 1 and r3 = 0.  But
+if P1 had used a lock variable different from s, the writes could have
+propagated in either order.  (On the other hand, if the code in P0 and
+P1 had all executed on a single CPU, as in the example before this
+one, then the writes would have propagated in order even if the two
+critical sections used different lock variables.)
 
 These two special requirements for lock-release and lock-acquire do
 not arise from the operational model.  Nevertheless, kernel developers
@@ -1987,28 +2073,36 @@ outcome undefined.
 
 In technical terms, the compiler is allowed to assume that when the
 program executes, there will not be any data races.  A "data race"
-occurs when two conflicting memory accesses execute concurrently;
-two memory accesses "conflict" if:
+occurs when there are two memory accesses such that:
 
-	they access the same location,
+1.	they access the same location,
 
-	they occur on different CPUs (or in different threads on the
-	same CPU),
+2.	at least one of them is a store,
 
-	at least one of them is a plain access,
+3.	at least one of them is plain,
 
-	and at least one of them is a store.
+4.	they occur on different CPUs (or in different threads on the
+	same CPU), and
 
-The LKMM tries to determine whether a program contains two conflicting
-accesses which may execute concurrently; if it does then the LKMM says
-there is a potential data race and makes no predictions about the
-program's outcome.
+5.	they execute concurrently.
 
-Determining whether two accesses conflict is easy; you can see that
-all the concepts involved in the definition above are already part of
-the memory model.  The hard part is telling whether they may execute
-concurrently.  The LKMM takes a conservative attitude, assuming that
-accesses may be concurrent unless it can prove they cannot.
+In the literature, two accesses are said to "conflict" if they satisfy
+1 and 2 above.  We'll go a little farther and say that two accesses
+are "race candidates" if they satisfy 1 - 4.  Thus, whether or not two
+race candidates actually do race in a given execution depends on
+whether they are concurrent.
+
+The LKMM tries to determine whether a program contains race candidates
+which may execute concurrently; if it does then the LKMM says there is
+a potential data race and makes no predictions about the program's
+outcome.
+
+Determining whether two accesses are race candidates is easy; you can
+see that all the concepts involved in the definition above are already
+part of the memory model.  The hard part is telling whether they may
+execute concurrently.  The LKMM takes a conservative attitude,
+assuming that accesses may be concurrent unless it can prove they
+are not.
 
 If two memory accesses aren't concurrent then one must execute before
 the other.  Therefore the LKMM decides two accesses aren't concurrent
@@ -2171,8 +2265,8 @@ again, now using plain accesses for buf:
 	}
 
 This program does not contain a data race.  Although the U and V
-accesses conflict, the LKMM can prove they are not concurrent as
-follows:
+accesses are race candidates, the LKMM can prove they are not
+concurrent as follows:
 
 	The smp_wmb() fence in P0 is both a compiler barrier and a
 	cumul-fence.  It guarantees that no matter what hash of
@@ -2326,12 +2420,11 @@ could now perform the load of x before the load of ptr (there might be
 a control dependency but no address dependency at the machine level).
 
 Finally, it turns out there is a situation in which a plain write does
-not need to be w-post-bounded: when it is separated from the
-conflicting access by a fence.  At first glance this may seem
-impossible.  After all, to be conflicting the second access has to be
-on a different CPU from the first, and fences don't link events on
-different CPUs.  Well, normal fences don't -- but rcu-fence can!
-Here's an example:
+not need to be w-post-bounded: when it is separated from the other
+race-candidate access by a fence.  At first glance this may seem
+impossible.  After all, to be race candidates the two accesses must
+be on different CPUs, and fences don't link events on different CPUs.
+Well, normal fences don't -- but rcu-fence can!  Here's an example:
 
 	int x, y;
 
@@ -2367,7 +2460,7 @@ concurrent and there is no race, even though P1's plain store to y
 isn't w-post-bounded by any marked accesses.
 
 Putting all this material together yields the following picture.  For
-two conflicting stores W and W', where W ->co W', the LKMM says the
+race-candidate stores W and W', where W ->co W', the LKMM says the
 stores don't race if W can be linked to W' by a
 
 	w-post-bounded ; vis ; w-pre-bounded
@@ -2380,8 +2473,8 @@ sequence, and if W' is plain then they also have to be linked by a
 
 	w-post-bounded ; vis ; r-pre-bounded
 
-sequence.  For a conflicting load R and store W, the LKMM says the two
-accesses don't race if R can be linked to W by an
+sequence.  For race-candidate load R and store W, the LKMM says the
+two accesses don't race if R can be linked to W by an
 
 	r-post-bounded ; xb* ; w-pre-bounded
 
@@ -2413,20 +2506,20 @@ is, the rules governing the memory subsystem's choice of a store to
 satisfy a load request and its determination of where a store will
 fall in the coherence order):
 
-	If R and W conflict and it is possible to link R to W by one
-	of the xb* sequences listed above, then W ->rfe R is not
-	allowed (i.e., a load cannot read from a store that it
+	If R and W are race candidates and it is possible to link R to
+	W by one of the xb* sequences listed above, then W ->rfe R is
+	not allowed (i.e., a load cannot read from a store that it
 	executes before, even if one or both is plain).
 
-	If W and R conflict and it is possible to link W to R by one
-	of the vis sequences listed above, then R ->fre W is not
-	allowed (i.e., if a store is visible to a load then the load
-	must read from that store or one coherence-after it).
+	If W and R are race candidates and it is possible to link W to
+	R by one of the vis sequences listed above, then R ->fre W is
+	not allowed (i.e., if a store is visible to a load then the
+	load must read from that store or one coherence-after it).
 
-	If W and W' conflict and it is possible to link W to W' by one
-	of the vis sequences listed above, then W' ->co W is not
-	allowed (i.e., if one store is visible to a second then the
-	second must come after the first in the coherence order).
+	If W and W' are race candidates and it is possible to link W
+	to W' by one of the vis sequences listed above, then W' ->co W
+	is not allowed (i.e., if one store is visible to a second then
+	the second must come after the first in the coherence order).
 
 This is the extent to which the LKMM deals with plain accesses.
 Perhaps it could say more (for example, plain accesses might
@@ -2482,7 +2575,7 @@ smp_store_release() -- which is basically how the Linux kernel treats
 them.
 
 Although we said that plain accesses are not linked by the ppo
-relation, they do contribute to it indirectly.  Namely, when there is
+relation, they do contribute to it indirectly.  Firstly, when there is
 an address dependency from a marked load R to a plain store W,
 followed by smp_wmb() and then a marked store W', the LKMM creates a
 ppo link from R to W'.  The reasoning behind this is perhaps a little
@@ -2490,6 +2583,13 @@ shaky, but essentially it says there is no way to generate object code
 for this source code in which W' could execute before R.  Just as with
 pre-bounding by address dependencies, it is possible for the compiler
 to undermine this relation if sufficient care is not taken.
+
+Secondly, plain accesses can carry dependencies: If a data dependency
+links a marked load R to a store W, and the store is read by a load R'
+from the same thread, then the data loaded by R' depends on the data
+loaded originally by R. Thus, if R' is linked to any access X by a
+dependency, R is also linked to access X by the same dependency, even
+if W' or R' (or both!) are plain.
 
 There are a few oddball fences which need special treatment:
 smp_mb__before_atomic(), smp_mb__after_atomic(), and
@@ -2505,7 +2605,7 @@ they behave as follows:
 	smp_mb__after_atomic() orders po-earlier atomic updates and
 	the events preceding them against all po-later events;
 
-	smp_mb_after_spinlock() orders po-earlier lock acquisition
+	smp_mb__after_spinlock() orders po-earlier lock acquisition
 	events and the events preceding them against all po-later
 	events.
 

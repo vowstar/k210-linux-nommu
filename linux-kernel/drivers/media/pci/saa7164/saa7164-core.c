@@ -352,7 +352,7 @@ static void saa7164_work_enchandler(struct work_struct *w)
 		container_of(w, struct saa7164_port, workenc);
 	struct saa7164_dev *dev = port->dev;
 
-	u32 wp, mcb, rp, cnt = 0;
+	u32 wp, mcb, rp;
 
 	port->last_svc_msecs_diff = port->last_svc_msecs;
 	port->last_svc_msecs = jiffies_to_msecs(jiffies);
@@ -405,7 +405,6 @@ static void saa7164_work_enchandler(struct work_struct *w)
 
 		saa7164_work_enchandler_helper(port, rp);
 		port->last_svc_rp = rp;
-		cnt++;
 
 		if (rp == mcb)
 			break;
@@ -429,7 +428,7 @@ static void saa7164_work_vbihandler(struct work_struct *w)
 		container_of(w, struct saa7164_port, workenc);
 	struct saa7164_dev *dev = port->dev;
 
-	u32 wp, mcb, rp, cnt = 0;
+	u32 wp, mcb, rp;
 
 	port->last_svc_msecs_diff = port->last_svc_msecs;
 	port->last_svc_msecs = jiffies_to_msecs(jiffies);
@@ -481,7 +480,6 @@ static void saa7164_work_vbihandler(struct work_struct *w)
 
 		saa7164_work_enchandler_helper(port, rp);
 		port->last_svc_rp = rp;
-		cnt++;
 
 		if (rp == mcb)
 			break;
@@ -575,8 +573,8 @@ static irqreturn_t saa7164_irq_ts(struct saa7164_port *port)
 
 	/* Find the current write point from the hardware */
 	wp = saa7164_readl(port->bufcounter);
-	if (wp > (port->hwcfg.buffercount - 1))
-		BUG();
+
+	BUG_ON(wp > (port->hwcfg.buffercount - 1));
 
 	/* Find the previous buffer to the current write point */
 	if (wp == 0)
@@ -588,8 +586,8 @@ static irqreturn_t saa7164_irq_ts(struct saa7164_port *port)
 	/* TODO: turn this into a worker thread */
 	list_for_each_safe(c, n, &port->dmaqueue.list) {
 		buf = list_entry(c, struct saa7164_buffer, list);
-		if (i++ > port->hwcfg.buffercount)
-			BUG();
+		BUG_ON(i > port->hwcfg.buffercount);
+		i++;
 
 		if (buf->idx == rp) {
 			/* Found the buffer, deal with it */
@@ -626,7 +624,7 @@ static irqreturn_t saa7164_irq(int irq, void *dev_id)
 	portf = &dev->ports[SAA7164_PORT_VBI2];
 
 	/* Check that the hardware is accessible. If the status bytes are
-	 * 0xFF then the device is not accessible, the the IRQ belongs
+	 * 0xFF then the device is not accessible, the IRQ belongs
 	 * to another driver.
 	 * 4 x u32 interrupt registers.
 	 */
@@ -894,8 +892,7 @@ static int saa7164_port_init(struct saa7164_dev *dev, int portnr)
 {
 	struct saa7164_port *port = NULL;
 
-	if ((portnr < 0) || (portnr >= SAA7164_MAX_PORTS))
-		BUG();
+	BUG_ON((portnr < 0) || (portnr >= SAA7164_MAX_PORTS));
 
 	port = &dev->ports[portnr];
 
@@ -1140,32 +1137,21 @@ static int saa7164_seq_show(struct seq_file *m, void *v)
 	return 0;
 }
 
-static const struct seq_operations saa7164_seq_ops = {
+static const struct seq_operations saa7164_sops = {
 	.start = saa7164_seq_start,
 	.next = saa7164_seq_next,
 	.stop = saa7164_seq_stop,
 	.show = saa7164_seq_show,
 };
 
-static int saa7164_open(struct inode *inode, struct file *file)
-{
-	return seq_open(file, &saa7164_seq_ops);
-}
-
-static const struct file_operations saa7164_operations = {
-	.owner          = THIS_MODULE,
-	.open           = saa7164_open,
-	.read           = seq_read,
-	.llseek         = seq_lseek,
-	.release        = seq_release,
-};
+DEFINE_SEQ_ATTRIBUTE(saa7164);
 
 static struct dentry *saa7614_dentry;
 
 static void __init saa7164_debugfs_create(void)
 {
 	saa7614_dentry = debugfs_create_file("saa7164", 0444, NULL, NULL,
-					     &saa7164_operations);
+					     &saa7164_fops);
 }
 
 static void __exit saa7164_debugfs_remove(void)
@@ -1271,7 +1257,7 @@ static int saa7164_initdev(struct pci_dev *pci_dev,
 
 	if (saa7164_dev_setup(dev) < 0) {
 		err = -EINVAL;
-		goto fail_free;
+		goto fail_dev;
 	}
 
 	/* print pci info */
@@ -1285,7 +1271,7 @@ static int saa7164_initdev(struct pci_dev *pci_dev,
 
 	pci_set_master(pci_dev);
 	/* TODO */
-	err = pci_set_dma_mask(pci_dev, 0xffffffff);
+	err = dma_set_mask(&pci_dev->dev, 0xffffffff);
 	if (err) {
 		printk("%s/0: Oops: no 32bit PCI DMA ???\n", dev->name);
 		goto fail_irq;
@@ -1439,6 +1425,8 @@ fail_fw:
 
 fail_irq:
 	saa7164_dev_unregister(dev);
+fail_dev:
+	pci_disable_device(pci_dev);
 fail_free:
 	v4l2_device_unregister(&dev->v4l2_dev);
 	kfree(dev);
@@ -1539,9 +1527,6 @@ static struct pci_driver saa7164_pci_driver = {
 	.id_table = saa7164_pci_tbl,
 	.probe    = saa7164_initdev,
 	.remove   = saa7164_finidev,
-	/* TODO */
-	.suspend  = NULL,
-	.resume   = NULL,
 };
 
 static int __init saa7164_init(void)
@@ -1566,4 +1551,3 @@ static void __exit saa7164_fini(void)
 
 module_init(saa7164_init);
 module_exit(saa7164_fini);
-

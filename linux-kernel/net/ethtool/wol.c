@@ -17,12 +17,9 @@ struct wol_reply_data {
 #define WOL_REPDATA(__reply_base) \
 	container_of(__reply_base, struct wol_reply_data, base)
 
-static const struct nla_policy
-wol_get_policy[ETHTOOL_A_WOL_MAX + 1] = {
-	[ETHTOOL_A_WOL_UNSPEC]		= { .type = NLA_REJECT },
-	[ETHTOOL_A_WOL_HEADER]		= { .type = NLA_NESTED },
-	[ETHTOOL_A_WOL_MODES]		= { .type = NLA_REJECT },
-	[ETHTOOL_A_WOL_SOPASS]		= { .type = NLA_REJECT },
+const struct nla_policy ethnl_wol_get_policy[] = {
+	[ETHTOOL_A_WOL_HEADER]		=
+		NLA_POLICY_NESTED(ethnl_header_policy),
 };
 
 static int wol_prepare_data(const struct ethnl_req_info *req_base,
@@ -85,93 +82,76 @@ static int wol_fill_reply(struct sk_buff *skb,
 	return 0;
 }
 
-const struct ethnl_request_ops ethnl_wol_request_ops = {
-	.request_cmd		= ETHTOOL_MSG_WOL_GET,
-	.reply_cmd		= ETHTOOL_MSG_WOL_GET_REPLY,
-	.hdr_attr		= ETHTOOL_A_WOL_HEADER,
-	.max_attr		= ETHTOOL_A_WOL_MAX,
-	.req_info_size		= sizeof(struct wol_req_info),
-	.reply_data_size	= sizeof(struct wol_reply_data),
-	.request_policy		= wol_get_policy,
-
-	.prepare_data		= wol_prepare_data,
-	.reply_size		= wol_reply_size,
-	.fill_reply		= wol_fill_reply,
-};
-
 /* WOL_SET */
 
-static const struct nla_policy
-wol_set_policy[ETHTOOL_A_WOL_MAX + 1] = {
-	[ETHTOOL_A_WOL_UNSPEC]		= { .type = NLA_REJECT },
-	[ETHTOOL_A_WOL_HEADER]		= { .type = NLA_NESTED },
+const struct nla_policy ethnl_wol_set_policy[] = {
+	[ETHTOOL_A_WOL_HEADER]		=
+		NLA_POLICY_NESTED(ethnl_header_policy),
 	[ETHTOOL_A_WOL_MODES]		= { .type = NLA_NESTED },
 	[ETHTOOL_A_WOL_SOPASS]		= { .type = NLA_BINARY,
 					    .len = SOPASS_MAX },
 };
 
-int ethnl_set_wol(struct sk_buff *skb, struct genl_info *info)
+static int
+ethnl_set_wol_validate(struct ethnl_req_info *req_info, struct genl_info *info)
+{
+	const struct ethtool_ops *ops = req_info->dev->ethtool_ops;
+
+	return ops->get_wol && ops->set_wol ? 1 : -EOPNOTSUPP;
+}
+
+static int
+ethnl_set_wol(struct ethnl_req_info *req_info, struct genl_info *info)
 {
 	struct ethtool_wolinfo wol = { .cmd = ETHTOOL_GWOL };
-	struct nlattr *tb[ETHTOOL_A_WOL_MAX + 1];
-	struct ethnl_req_info req_info = {};
-	struct net_device *dev;
+	struct net_device *dev = req_info->dev;
+	struct nlattr **tb = info->attrs;
 	bool mod = false;
 	int ret;
-
-	ret = nlmsg_parse(info->nlhdr, GENL_HDRLEN, tb, ETHTOOL_A_WOL_MAX,
-			  wol_set_policy, info->extack);
-	if (ret < 0)
-		return ret;
-	ret = ethnl_parse_header(&req_info, tb[ETHTOOL_A_WOL_HEADER],
-				 genl_info_net(info), info->extack, true);
-	if (ret < 0)
-		return ret;
-	dev = req_info.dev;
-	if (!dev->ethtool_ops->get_wol || !dev->ethtool_ops->set_wol)
-		return -EOPNOTSUPP;
-
-	rtnl_lock();
-	ret = ethnl_ops_begin(dev);
-	if (ret < 0)
-		goto out_rtnl;
 
 	dev->ethtool_ops->get_wol(dev, &wol);
 	ret = ethnl_update_bitset32(&wol.wolopts, WOL_MODE_COUNT,
 				    tb[ETHTOOL_A_WOL_MODES], wol_mode_names,
 				    info->extack, &mod);
 	if (ret < 0)
-		goto out_ops;
+		return ret;
 	if (wol.wolopts & ~wol.supported) {
 		NL_SET_ERR_MSG_ATTR(info->extack, tb[ETHTOOL_A_WOL_MODES],
 				    "cannot enable unsupported WoL mode");
-		ret = -EINVAL;
-		goto out_ops;
+		return -EINVAL;
 	}
 	if (tb[ETHTOOL_A_WOL_SOPASS]) {
 		if (!(wol.supported & WAKE_MAGICSECURE)) {
 			NL_SET_ERR_MSG_ATTR(info->extack,
 					    tb[ETHTOOL_A_WOL_SOPASS],
 					    "magicsecure not supported, cannot set password");
-			ret = -EINVAL;
-			goto out_ops;
+			return -EINVAL;
 		}
 		ethnl_update_binary(wol.sopass, sizeof(wol.sopass),
 				    tb[ETHTOOL_A_WOL_SOPASS], &mod);
 	}
 
 	if (!mod)
-		goto out_ops;
+		return 0;
 	ret = dev->ethtool_ops->set_wol(dev, &wol);
 	if (ret)
-		goto out_ops;
+		return ret;
 	dev->wol_enabled = !!wol.wolopts;
-	ethtool_notify(dev, ETHTOOL_MSG_WOL_NTF, NULL);
-
-out_ops:
-	ethnl_ops_complete(dev);
-out_rtnl:
-	rtnl_unlock();
-	dev_put(dev);
-	return ret;
+	return 1;
 }
+
+const struct ethnl_request_ops ethnl_wol_request_ops = {
+	.request_cmd		= ETHTOOL_MSG_WOL_GET,
+	.reply_cmd		= ETHTOOL_MSG_WOL_GET_REPLY,
+	.hdr_attr		= ETHTOOL_A_WOL_HEADER,
+	.req_info_size		= sizeof(struct wol_req_info),
+	.reply_data_size	= sizeof(struct wol_reply_data),
+
+	.prepare_data		= wol_prepare_data,
+	.reply_size		= wol_reply_size,
+	.fill_reply		= wol_fill_reply,
+
+	.set_validate		= ethnl_set_wol_validate,
+	.set			= ethnl_set_wol,
+	.set_ntf_cmd		= ETHTOOL_MSG_WOL_NTF,
+};

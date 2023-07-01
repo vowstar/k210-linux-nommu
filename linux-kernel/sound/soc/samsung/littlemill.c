@@ -23,7 +23,7 @@ static int littlemill_set_bias_level(struct snd_soc_card *card,
 	int ret;
 
 	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[0]);
-	aif1_dai = rtd->codec_dai;
+	aif1_dai = asoc_rtd_to_codec(rtd, 0);
 
 	if (dapm->dev != aif1_dai->dev)
 		return 0;
@@ -70,7 +70,7 @@ static int littlemill_set_bias_level_post(struct snd_soc_card *card,
 	int ret;
 
 	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[0]);
-	aif1_dai = rtd->codec_dai;
+	aif1_dai = asoc_rtd_to_codec(rtd, 0);
 
 	if (dapm->dev != aif1_dai->dev)
 		return 0;
@@ -104,8 +104,8 @@ static int littlemill_set_bias_level_post(struct snd_soc_card *card,
 static int littlemill_hw_params(struct snd_pcm_substream *substream,
 				struct snd_pcm_hw_params *params)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_dai *codec_dai = rtd->codec_dai;
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
+	struct snd_soc_dai *codec_dai = asoc_rtd_to_codec(rtd, 0);
 	int ret;
 
 	sample_rate = params_rate(params);
@@ -130,7 +130,7 @@ static int littlemill_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
-static struct snd_soc_ops littlemill_ops = {
+static const struct snd_soc_ops littlemill_ops = {
 	.hw_params = littlemill_hw_params,
 };
 
@@ -181,7 +181,7 @@ static int bbclk_ev(struct snd_soc_dapm_widget *w,
 	int ret;
 
 	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[1]);
-	aif2_dai = rtd->cpu_dai;
+	aif2_dai = asoc_rtd_to_cpu(rtd, 0);
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
@@ -228,7 +228,7 @@ static const struct snd_kcontrol_new controls[] = {
 	SOC_DAPM_PIN_SWITCH("WM1250 Output"),
 };
 
-static struct snd_soc_dapm_widget widgets[] = {
+static const struct snd_soc_dapm_widget widgets[] = {
 	SND_SOC_DAPM_HP("Headphone", NULL),
 
 	SND_SOC_DAPM_MIC("AMIC", NULL),
@@ -239,7 +239,7 @@ static struct snd_soc_dapm_widget widgets[] = {
 			      SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 };
 
-static struct snd_soc_dapm_route audio_paths[] = {
+static const struct snd_soc_dapm_route audio_paths[] = {
 	{ "Headphone", NULL, "HPOUT1L" },
 	{ "Headphone", NULL, "HPOUT1R" },
 
@@ -264,11 +264,11 @@ static int littlemill_late_probe(struct snd_soc_card *card)
 	int ret;
 
 	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[0]);
-	component = rtd->codec_dai->component;
-	aif1_dai = rtd->codec_dai;
+	component = asoc_rtd_to_codec(rtd, 0)->component;
+	aif1_dai = asoc_rtd_to_codec(rtd, 0);
 
 	rtd = snd_soc_get_pcm_runtime(card, &card->dai_link[1]);
-	aif2_dai = rtd->cpu_dai;
+	aif2_dai = asoc_rtd_to_cpu(rtd, 0);
 
 	ret = snd_soc_dai_set_sysclk(aif1_dai, WM8994_SYSCLK_MCLK2,
 				     32768, SND_SOC_CLOCK_IN);
@@ -285,7 +285,7 @@ static int littlemill_late_probe(struct snd_soc_card *card)
 				    SND_JACK_BTN_0 | SND_JACK_BTN_1 |
 				    SND_JACK_BTN_2 | SND_JACK_BTN_3 |
 				    SND_JACK_BTN_4 | SND_JACK_BTN_5,
-				    &littlemill_headset, NULL, 0);
+				    &littlemill_headset);
 	if (ret)
 		return ret;
 
@@ -326,8 +326,7 @@ static int littlemill_probe(struct platform_device *pdev)
 
 	ret = devm_snd_soc_register_card(&pdev->dev, card);
 	if (ret)
-		dev_err(&pdev->dev, "snd_soc_register_card() failed: %d\n",
-			ret);
+		dev_err_probe(&pdev->dev, ret, "snd_soc_register_card() failed\n");
 
 	return ret;
 }

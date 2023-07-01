@@ -160,6 +160,7 @@ static int usb3503_probe(struct usb3503 *hub)
 	struct usb3503_platform_data *pdata = dev_get_platdata(dev);
 	struct device_node *np = dev->of_node;
 	int err;
+	bool is_clk_enabled = false;
 	u32 mode = USB3503_MODE_HUB;
 	const u32 *property;
 	enum gpiod_flags flags;
@@ -217,6 +218,7 @@ static int usb3503_probe(struct usb3503 *hub)
 			return err;
 		}
 
+		is_clk_enabled = true;
 		property = of_get_property(np, "disabled-ports", &len);
 		if (property && (len / sizeof(u32)) > 0) {
 			int i;
@@ -236,20 +238,26 @@ static int usb3503_probe(struct usb3503 *hub)
 	else
 		flags = GPIOD_OUT_HIGH;
 	hub->intn = devm_gpiod_get_optional(dev, "intn", flags);
-	if (IS_ERR(hub->intn))
-		return PTR_ERR(hub->intn);
+	if (IS_ERR(hub->intn)) {
+		err = PTR_ERR(hub->intn);
+		goto err_clk;
+	}
 	if (hub->intn)
 		gpiod_set_consumer_name(hub->intn, "usb3503 intn");
 
 	hub->connect = devm_gpiod_get_optional(dev, "connect", GPIOD_OUT_LOW);
-	if (IS_ERR(hub->connect))
-		return PTR_ERR(hub->connect);
+	if (IS_ERR(hub->connect)) {
+		err = PTR_ERR(hub->connect);
+		goto err_clk;
+	}
 	if (hub->connect)
 		gpiod_set_consumer_name(hub->connect, "usb3503 connect");
 
 	hub->reset = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
-	if (IS_ERR(hub->reset))
-		return PTR_ERR(hub->reset);
+	if (IS_ERR(hub->reset)) {
+		err = PTR_ERR(hub->reset);
+		goto err_clk;
+	}
 	if (hub->reset) {
 		/* Datasheet defines a hardware reset to be at least 100us */
 		usleep_range(100, 10000);
@@ -265,10 +273,14 @@ static int usb3503_probe(struct usb3503 *hub)
 			(hub->mode == USB3503_MODE_HUB) ? "hub" : "standby");
 
 	return 0;
+
+err_clk:
+	if (is_clk_enabled)
+		clk_disable_unprepare(hub->clk);
+	return err;
 }
 
-static int usb3503_i2c_probe(struct i2c_client *i2c,
-			     const struct i2c_device_id *id)
+static int usb3503_i2c_probe(struct i2c_client *i2c)
 {
 	struct usb3503 *hub;
 	int err;
@@ -289,14 +301,12 @@ static int usb3503_i2c_probe(struct i2c_client *i2c,
 	return usb3503_probe(hub);
 }
 
-static int usb3503_i2c_remove(struct i2c_client *i2c)
+static void usb3503_i2c_remove(struct i2c_client *i2c)
 {
 	struct usb3503 *hub;
 
 	hub = i2c_get_clientdata(i2c);
 	clk_disable_unprepare(hub->clk);
-
-	return 0;
 }
 
 static int usb3503_platform_probe(struct platform_device *pdev)
@@ -322,8 +332,7 @@ static int usb3503_platform_remove(struct platform_device *pdev)
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
-static int usb3503_suspend(struct usb3503 *hub)
+static int __maybe_unused usb3503_suspend(struct usb3503 *hub)
 {
 	usb3503_switch_mode(hub, USB3503_MODE_STANDBY);
 	clk_disable_unprepare(hub->clk);
@@ -331,7 +340,7 @@ static int usb3503_suspend(struct usb3503 *hub)
 	return 0;
 }
 
-static int usb3503_resume(struct usb3503 *hub)
+static int __maybe_unused usb3503_resume(struct usb3503 *hub)
 {
 	clk_prepare_enable(hub->clk);
 	usb3503_switch_mode(hub, hub->mode);
@@ -339,30 +348,29 @@ static int usb3503_resume(struct usb3503 *hub)
 	return 0;
 }
 
-static int usb3503_i2c_suspend(struct device *dev)
+static int __maybe_unused usb3503_i2c_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 
 	return usb3503_suspend(i2c_get_clientdata(client));
 }
 
-static int usb3503_i2c_resume(struct device *dev)
+static int __maybe_unused usb3503_i2c_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 
 	return usb3503_resume(i2c_get_clientdata(client));
 }
 
-static int usb3503_platform_suspend(struct device *dev)
+static int __maybe_unused usb3503_platform_suspend(struct device *dev)
 {
 	return usb3503_suspend(dev_get_drvdata(dev));
 }
 
-static int usb3503_platform_resume(struct device *dev)
+static int __maybe_unused usb3503_platform_resume(struct device *dev)
 {
 	return usb3503_resume(dev_get_drvdata(dev));
 }
-#endif
 
 static SIMPLE_DEV_PM_OPS(usb3503_i2c_pm_ops, usb3503_i2c_suspend,
 		usb3503_i2c_resume);
@@ -388,10 +396,10 @@ MODULE_DEVICE_TABLE(of, usb3503_of_match);
 static struct i2c_driver usb3503_i2c_driver = {
 	.driver = {
 		.name = USB3503_I2C_NAME,
-		.pm = &usb3503_i2c_pm_ops,
+		.pm = pm_ptr(&usb3503_i2c_pm_ops),
 		.of_match_table = of_match_ptr(usb3503_of_match),
 	},
-	.probe		= usb3503_i2c_probe,
+	.probe_new	= usb3503_i2c_probe,
 	.remove		= usb3503_i2c_remove,
 	.id_table	= usb3503_id,
 };
@@ -400,7 +408,7 @@ static struct platform_driver usb3503_platform_driver = {
 	.driver = {
 		.name = USB3503_I2C_NAME,
 		.of_match_table = of_match_ptr(usb3503_of_match),
-		.pm = &usb3503_platform_pm_ops,
+		.pm = pm_ptr(&usb3503_platform_pm_ops),
 	},
 	.probe		= usb3503_platform_probe,
 	.remove		= usb3503_platform_remove,
@@ -411,13 +419,18 @@ static int __init usb3503_init(void)
 	int err;
 
 	err = i2c_add_driver(&usb3503_i2c_driver);
-	if (err != 0)
+	if (err) {
 		pr_err("usb3503: Failed to register I2C driver: %d\n", err);
+		return err;
+	}
 
 	err = platform_driver_register(&usb3503_platform_driver);
-	if (err != 0)
+	if (err) {
 		pr_err("usb3503: Failed to register platform driver: %d\n",
 		       err);
+		i2c_del_driver(&usb3503_i2c_driver);
+		return err;
+	}
 
 	return 0;
 }

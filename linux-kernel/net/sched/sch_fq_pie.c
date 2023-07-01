@@ -94,7 +94,7 @@ static unsigned int fq_pie_classify(struct sk_buff *skb, struct Qdisc *sch,
 		return fq_pie_hash(q, skb) + 1;
 
 	*qerr = NET_XMIT_SUCCESS | __NET_XMIT_BYPASS;
-	result = tcf_classify(skb, filter, &res, false);
+	result = tcf_classify(skb, NULL, filter, &res, false);
 	if (result >= 0) {
 #ifdef CONFIG_NET_CLS_ACT
 		switch (result) {
@@ -102,7 +102,7 @@ static unsigned int fq_pie_classify(struct sk_buff *skb, struct Qdisc *sch,
 		case TC_ACT_QUEUED:
 		case TC_ACT_TRAP:
 			*qerr = NET_XMIT_SUCCESS | __NET_XMIT_STOLEN;
-			/* fall through */
+			fallthrough;
 		case TC_ACT_SHOT:
 			return 0;
 		}
@@ -130,7 +130,7 @@ static int fq_pie_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 {
 	struct fq_pie_sched_data *q = qdisc_priv(sch);
 	struct fq_pie_flow *sel_flow;
-	int uninitialized_var(ret);
+	int ret;
 	u8 memory_limited = false;
 	u8 enqueue = false;
 	u32 pkt_len;
@@ -138,8 +138,15 @@ static int fq_pie_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 
 	/* Classifies packet into corresponding flow */
 	idx = fq_pie_classify(skb, sch, &ret);
-	sel_flow = &q->flows[idx];
+	if (idx == 0) {
+		if (ret & __NET_XMIT_BYPASS)
+			qdisc_qstats_drop(sch);
+		__qdisc_drop(skb, to_free);
+		return ret;
+	}
+	idx--;
 
+	sel_flow = &q->flows[idx];
 	/* Checks whether adding a new packet would exceed memory limit */
 	get_pie_cb(skb)->mem_usage = skb->truesize;
 	memory_limited = q->memory_usage > q->memory_limit + skb->truesize;
@@ -189,7 +196,6 @@ static int fq_pie_qdisc_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 out:
 	q->stats.dropped++;
 	sel_flow->vars.accu_prob = 0;
-	sel_flow->vars.accu_prob_overflows = 0;
 	__qdisc_drop(skb, to_free);
 	qdisc_qstats_drop(sch);
 	return NET_XMIT_CN;
@@ -277,9 +283,6 @@ static int fq_pie_change(struct Qdisc *sch, struct nlattr *opt,
 	unsigned int num_dropped = 0;
 	int err;
 
-	if (!opt)
-		return -EINVAL;
-
 	err = nla_parse_nested(tb, TCA_FQ_PIE_MAX, opt, fq_pie_policy, extack);
 	if (err < 0)
 		return err;
@@ -300,7 +303,7 @@ static int fq_pie_change(struct Qdisc *sch, struct nlattr *opt,
 		q->flows_cnt = nla_get_u32(tb[TCA_FQ_PIE_FLOWS]);
 		if (!q->flows_cnt || q->flows_cnt > 65536) {
 			NL_SET_ERR_MSG_MOD(extack,
-					   "Number of flows must be < 65536");
+					   "Number of flows must range in [1..65536]");
 			goto flow_error;
 		}
 	}
@@ -368,7 +371,7 @@ static void fq_pie_timer(struct timer_list *t)
 	struct fq_pie_sched_data *q = from_timer(q, t, adapt_timer);
 	struct Qdisc *sch = q->sch;
 	spinlock_t *root_lock; /* to lock qdisc for probability calculations */
-	u16 idx;
+	u32 idx;
 
 	root_lock = qdisc_lock(qdisc_root_sleeping(sch));
 	spin_lock(root_lock);
@@ -389,7 +392,7 @@ static int fq_pie_init(struct Qdisc *sch, struct nlattr *opt,
 {
 	struct fq_pie_sched_data *q = qdisc_priv(sch);
 	int err;
-	u16 idx;
+	u32 idx;
 
 	pie_params_init(&q->p_params);
 	sch->limit = 10 * 1024;
@@ -402,6 +405,7 @@ static int fq_pie_init(struct Qdisc *sch, struct nlattr *opt,
 
 	INIT_LIST_HEAD(&q->new_flows);
 	INIT_LIST_HEAD(&q->old_flows);
+	timer_setup(&q->adapt_timer, fq_pie_timer, 0);
 
 	if (opt) {
 		err = fq_pie_change(sch, opt, extack);
@@ -427,7 +431,6 @@ static int fq_pie_init(struct Qdisc *sch, struct nlattr *opt,
 		pie_vars_init(&flow->vars);
 	}
 
-	timer_setup(&q->adapt_timer, fq_pie_timer, 0);
 	mod_timer(&q->adapt_timer, jiffies + HZ / 2);
 
 	return 0;
@@ -501,7 +504,7 @@ static int fq_pie_dump_stats(struct Qdisc *sch, struct gnet_dump *d)
 static void fq_pie_reset(struct Qdisc *sch)
 {
 	struct fq_pie_sched_data *q = qdisc_priv(sch);
-	u16 idx;
+	u32 idx;
 
 	INIT_LIST_HEAD(&q->new_flows);
 	INIT_LIST_HEAD(&q->old_flows);
@@ -515,9 +518,6 @@ static void fq_pie_reset(struct Qdisc *sch)
 		INIT_LIST_HEAD(&flow->flowchain);
 		pie_vars_init(&flow->vars);
 	}
-
-	sch->q.qlen = 0;
-	sch->qstats.backlog = 0;
 }
 
 static void fq_pie_destroy(struct Qdisc *sch)
@@ -525,6 +525,7 @@ static void fq_pie_destroy(struct Qdisc *sch)
 	struct fq_pie_sched_data *q = qdisc_priv(sch);
 
 	tcf_block_put(q->block);
+	q->p_params.tupdate = 0;
 	del_timer_sync(&q->adapt_timer);
 	kvfree(q->flows);
 }

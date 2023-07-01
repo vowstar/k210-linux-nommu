@@ -37,6 +37,8 @@ static void amdgpu_jpeg_idle_work_handler(struct work_struct *work);
 int amdgpu_jpeg_sw_init(struct amdgpu_device *adev)
 {
 	INIT_DELAYED_WORK(&adev->jpeg.idle_work, amdgpu_jpeg_idle_work_handler);
+	mutex_init(&adev->jpeg.jpeg_pg_lock);
+	atomic_set(&adev->jpeg.total_submission_cnt, 0);
 
 	return 0;
 }
@@ -45,14 +47,14 @@ int amdgpu_jpeg_sw_fini(struct amdgpu_device *adev)
 {
 	int i;
 
-	cancel_delayed_work_sync(&adev->jpeg.idle_work);
-
 	for (i = 0; i < adev->jpeg.num_jpeg_inst; ++i) {
 		if (adev->jpeg.harvest_config & (1 << i))
 			continue;
 
 		amdgpu_ring_fini(&adev->jpeg.inst[i].ring_dec);
 	}
+
+	mutex_destroy(&adev->jpeg.jpeg_pg_lock);
 
 	return 0;
 }
@@ -83,7 +85,7 @@ static void amdgpu_jpeg_idle_work_handler(struct work_struct *work)
 		fences += amdgpu_fence_count_emitted(&adev->jpeg.inst[i].ring_dec);
 	}
 
-	if (fences == 0)
+	if (!fences && !atomic_read(&adev->jpeg.total_submission_cnt))
 		amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_JPEG,
 						       AMD_PG_STATE_GATE);
 	else
@@ -93,15 +95,19 @@ static void amdgpu_jpeg_idle_work_handler(struct work_struct *work)
 void amdgpu_jpeg_ring_begin_use(struct amdgpu_ring *ring)
 {
 	struct amdgpu_device *adev = ring->adev;
-	bool set_clocks = !cancel_delayed_work_sync(&adev->jpeg.idle_work);
 
-	if (set_clocks)
-		amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_JPEG,
+	atomic_inc(&adev->jpeg.total_submission_cnt);
+	cancel_delayed_work_sync(&adev->jpeg.idle_work);
+
+	mutex_lock(&adev->jpeg.jpeg_pg_lock);
+	amdgpu_device_ip_set_powergating_state(adev, AMD_IP_BLOCK_TYPE_JPEG,
 						       AMD_PG_STATE_UNGATE);
+	mutex_unlock(&adev->jpeg.jpeg_pg_lock);
 }
 
 void amdgpu_jpeg_ring_end_use(struct amdgpu_ring *ring)
 {
+	atomic_dec(&ring->adev->jpeg.total_submission_cnt);
 	schedule_delayed_work(&ring->adev->jpeg.idle_work, JPEG_IDLE_TIMEOUT);
 }
 
@@ -144,13 +150,15 @@ static int amdgpu_jpeg_dec_set_reg(struct amdgpu_ring *ring, uint32_t handle,
 	const unsigned ib_size_dw = 16;
 	int i, r;
 
-	r = amdgpu_job_alloc_with_ib(ring->adev, ib_size_dw * 4, &job);
+	r = amdgpu_job_alloc_with_ib(ring->adev, NULL, NULL, ib_size_dw * 4,
+				     AMDGPU_IB_POOL_DIRECT, &job);
 	if (r)
 		return r;
 
 	ib = &job->ibs[0];
 
-	ib->ptr[0] = PACKETJ(adev->jpeg.internal.jpeg_pitch, 0, 0, PACKETJ_TYPE0);
+	ib->ptr[0] = PACKETJ(adev->jpeg.internal.jpeg_pitch, 0, 0,
+			     PACKETJ_TYPE0);
 	ib->ptr[1] = 0xDEADBEEF;
 	for (i = 2; i < 16; i += 2) {
 		ib->ptr[i] = PACKETJ(0, 0, 0, PACKETJ_TYPE6);
@@ -208,4 +216,39 @@ int amdgpu_jpeg_dec_ring_test_ib(struct amdgpu_ring *ring, long timeout)
 	dma_fence_put(fence);
 error:
 	return r;
+}
+
+int amdgpu_jpeg_process_poison_irq(struct amdgpu_device *adev,
+				struct amdgpu_irq_src *source,
+				struct amdgpu_iv_entry *entry)
+{
+	struct ras_common_if *ras_if = adev->jpeg.ras_if;
+	struct ras_dispatch_if ih_data = {
+		.entry = entry,
+	};
+
+	if (!ras_if)
+		return 0;
+
+	ih_data.head = *ras_if;
+	amdgpu_ras_interrupt_dispatch(adev, &ih_data);
+
+	return 0;
+}
+
+void jpeg_set_ras_funcs(struct amdgpu_device *adev)
+{
+	if (!adev->jpeg.ras)
+		return;
+
+	amdgpu_ras_register_ras_block(adev, &adev->jpeg.ras->ras_block);
+
+	strcpy(adev->jpeg.ras->ras_block.ras_comm.name, "jpeg");
+	adev->jpeg.ras->ras_block.ras_comm.block = AMDGPU_RAS_BLOCK__JPEG;
+	adev->jpeg.ras->ras_block.ras_comm.type = AMDGPU_RAS_ERROR__POISON;
+	adev->jpeg.ras_if = &adev->jpeg.ras->ras_block.ras_comm;
+
+	/* If don't define special ras_late_init function, use default ras_late_init */
+	if (!adev->jpeg.ras->ras_block.ras_late_init)
+		adev->jpeg.ras->ras_block.ras_late_init = amdgpu_ras_block_late_init;
 }

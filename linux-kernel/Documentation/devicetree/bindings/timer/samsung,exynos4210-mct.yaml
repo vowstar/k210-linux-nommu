@@ -19,12 +19,45 @@ description: |+
 
 properties:
   compatible:
-    enum:
-      - samsung,exynos4210-mct
-      - samsung,exynos4412-mct
+    oneOf:
+      - enum:
+          - samsung,exynos4210-mct
+          - samsung,exynos4412-mct
+      - items:
+          - enum:
+              - axis,artpec8-mct
+              - samsung,exynos3250-mct
+              - samsung,exynos5250-mct
+              - samsung,exynos5260-mct
+              - samsung,exynos5420-mct
+              - samsung,exynos5433-mct
+              - samsung,exynos850-mct
+              - tesla,fsd-mct
+          - const: samsung,exynos4210-mct
+
+  clocks:
+    maxItems: 2
+
+  clock-names:
+    items:
+      - const: fin_pll
+      - const: mct
 
   reg:
     maxItems: 1
+
+  samsung,frc-shared:
+    type: boolean
+    description: |
+      Indicates that the hardware requires that this processor share the
+      free-running counter with a different (main) processor.
+
+  samsung,local-timers:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    minItems: 1
+    maxItems: 16
+    description: |
+      List of indices of local timers usable from this processor.
 
   interrupts:
     description: |
@@ -49,19 +82,89 @@ properties:
 
 required:
   - compatible
+  - clock-names
+  - clocks
   - interrupts
   - reg
+
+allOf:
+  - if:
+      not:
+        properties:
+          compatible:
+            contains:
+              enum:
+                - axis,artpec8-mct
+    then:
+      properties:
+        samsung,local-timers: false
+        samsung,frc-shared: false
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: samsung,exynos3250-mct
+    then:
+      properties:
+        interrupts:
+          minItems: 8
+          maxItems: 8
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: samsung,exynos5250-mct
+    then:
+      properties:
+        interrupts:
+          minItems: 6
+          maxItems: 6
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - axis,artpec8-mct
+              - samsung,exynos5260-mct
+              - samsung,exynos5420-mct
+              - samsung,exynos5433-mct
+              - samsung,exynos850-mct
+    then:
+      properties:
+        interrupts:
+          minItems: 12
+          maxItems: 12
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - tesla,fsd-mct
+    then:
+      properties:
+        interrupts:
+          minItems: 16
+          maxItems: 16
+
+additionalProperties: false
 
 examples:
   - |
     // In this example, the IP contains two local timers, using separate
     // interrupts, so two local timer interrupts have been specified,
     // in addition to four global timer interrupts.
+    #include <dt-bindings/clock/exynos4.h>
     #include <dt-bindings/interrupt-controller/arm-gic.h>
 
     timer@10050000 {
         compatible = "samsung,exynos4210-mct";
         reg = <0x10050000 0x800>;
+        clocks = <&clock CLK_FIN_PLL>, <&clock CLK_MCT>;
+        clock-names = "fin_pll", "mct";
+
         interrupts = <GIC_SPI 57 IRQ_TYPE_LEVEL_HIGH>,
                      <GIC_SPI 69 IRQ_TYPE_LEVEL_HIGH>,
                      <GIC_SPI 70 IRQ_TYPE_LEVEL_HIGH>,
@@ -73,11 +176,15 @@ examples:
   - |
     // In this example, the timer interrupts are connected to two separate
     // interrupt controllers. Hence, an interrupts-extended is needed.
+    #include <dt-bindings/clock/exynos4.h>
     #include <dt-bindings/interrupt-controller/arm-gic.h>
 
     timer@101c0000 {
         compatible = "samsung,exynos4210-mct";
         reg = <0x101C0000 0x800>;
+        clocks = <&clock CLK_FIN_PLL>, <&clock CLK_MCT>;
+        clock-names = "fin_pll", "mct";
+
         interrupts-extended = <&gic GIC_SPI 57 IRQ_TYPE_LEVEL_HIGH>,
                               <&gic GIC_SPI 69 IRQ_TYPE_LEVEL_HIGH>,
                               <&combiner 12 6>,
@@ -90,11 +197,14 @@ examples:
     // In this example, the IP contains four local timers, but using
     // a per-processor interrupt to handle them. Only one first local
     // interrupt is specified.
+    #include <dt-bindings/clock/exynos4.h>
     #include <dt-bindings/interrupt-controller/arm-gic.h>
 
     timer@10050000 {
         compatible = "samsung,exynos4412-mct";
         reg = <0x10050000 0x800>;
+        clocks = <&clock CLK_FIN_PLL>, <&clock CLK_MCT>;
+        clock-names = "fin_pll", "mct";
 
         interrupts = <GIC_SPI 57 IRQ_TYPE_LEVEL_HIGH>,
                      <GIC_SPI 69 IRQ_TYPE_LEVEL_HIGH>,
@@ -107,11 +217,14 @@ examples:
     // In this example, the IP contains four local timers, but using
     // a per-processor interrupt to handle them. All the local timer
     // interrupts are specified.
+    #include <dt-bindings/clock/exynos4.h>
     #include <dt-bindings/interrupt-controller/arm-gic.h>
 
     timer@10050000 {
         compatible = "samsung,exynos4412-mct";
         reg = <0x10050000 0x800>;
+        clocks = <&clock CLK_FIN_PLL>, <&clock CLK_MCT>;
+        clock-names = "fin_pll", "mct";
 
         interrupts = <GIC_SPI 57 IRQ_TYPE_LEVEL_HIGH>,
                      <GIC_SPI 69 IRQ_TYPE_LEVEL_HIGH>,

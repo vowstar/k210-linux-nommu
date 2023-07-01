@@ -262,7 +262,12 @@ static int blacklist_parse_proc_parameters(char *buf)
 
 	if (strcmp("free", parm) == 0) {
 		rc = blacklist_parse_parameters(buf, free, 0);
-		css_schedule_eval_all_unreg(0);
+		/*
+		 * Evaluate the subchannels without an online device. This way,
+		 * no path-verification will be triggered on those subchannels
+		 * and it avoids unnecessary delays.
+		 */
+		css_schedule_eval_cond(CSS_EVAL_NOT_ONLINE, 0);
 	} else if (strcmp("add", parm) == 0)
 		rc = blacklist_parse_parameters(buf, add, 0);
 	else if (strcmp("purge", parm) == 0)
@@ -303,8 +308,10 @@ static void *
 cio_ignore_proc_seq_next(struct seq_file *s, void *it, loff_t *offset)
 {
 	struct ccwdev_iter *iter;
+	loff_t p = *offset;
 
-	if (*offset >= (__MAX_SUBCHANNEL + 1) * (__MAX_SSID + 1))
+	(*offset)++;
+	if (p >= (__MAX_SUBCHANNEL + 1) * (__MAX_SSID + 1))
 		return NULL;
 	iter = it;
 	if (iter->devno == __MAX_SUBCHANNEL) {
@@ -314,7 +321,6 @@ cio_ignore_proc_seq_next(struct seq_file *s, void *it, loff_t *offset)
 			return NULL;
 	} else
 		iter->devno++;
-	(*offset)++;
 	return iter;
 }
 

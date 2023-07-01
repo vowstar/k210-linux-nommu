@@ -75,7 +75,7 @@ OPTIONS
 
 -q::
 --quiet::
-	Do not show any message.  (Suppress -v)
+	Do not show any warnings or messages.  (Suppress -v)
 
 -f::
 --force::
@@ -181,6 +181,10 @@ OPTIONS
 
 --tid=::
 	Only diff samples for given thread ID (comma separated list).
+
+--stream::
+	Enable hot streams comparison. Stream can be a callchain which is
+	aggregated by the branch records from samples.
 
 COMPARISON
 ----------

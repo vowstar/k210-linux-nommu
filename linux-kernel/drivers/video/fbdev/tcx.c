@@ -196,7 +196,7 @@ static int tcx_setcolreg(unsigned regno,
 
 /**
  *      tcx_blank - Optional function.  Blanks the display.
- *      @blank_mode: the blank mode we want.
+ *      @blank: the blank mode we want.
  *      @info: frame buffer structure that represents a single frame buffer
  */
 static int
@@ -333,7 +333,7 @@ tcx_init_fix(struct fb_info *info, int linebytes)
 	else
 		tcx_name = "TCX24";
 
-	strlcpy(info->fix.id, tcx_name, sizeof(info->fix.id));
+	strscpy(info->fix.id, tcx_name, sizeof(info->fix.id));
 
 	info->fix.type = FB_TYPE_PACKED_PIXELS;
 	info->fix.visual = FB_VISUAL_PSEUDOCOLOR;
@@ -379,8 +379,7 @@ static int tcx_probe(struct platform_device *op)
 
 	spin_lock_init(&par->lock);
 
-	par->lowdepth =
-		(of_find_property(dp, "tcx-8-bit", NULL) != NULL);
+	par->lowdepth = of_property_read_bool(dp, "tcx-8-bit");
 
 	sbusfb_fill_var(&info->var, dp, 8);
 	info->var.red.length = 8;

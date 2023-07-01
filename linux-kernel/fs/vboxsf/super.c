@@ -21,10 +21,7 @@
 
 #define VBOXSF_SUPER_MAGIC 0x786f4256 /* 'VBox' little endian */
 
-#define VBSF_MOUNT_SIGNATURE_BYTE_0 ('\000')
-#define VBSF_MOUNT_SIGNATURE_BYTE_1 ('\377')
-#define VBSF_MOUNT_SIGNATURE_BYTE_2 ('\376')
-#define VBSF_MOUNT_SIGNATURE_BYTE_3 ('\375')
+static const unsigned char VBSF_MOUNT_SIGNATURE[4] = "\000\377\376\375";
 
 static int follow_symlinks;
 module_param(follow_symlinks, int, 0444);
@@ -164,9 +161,11 @@ static int vboxsf_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto fail_free;
 	}
 
-	err = super_setup_bdi_name(sb, "vboxsf-%s.%d", fc->source, sbi->bdi_id);
+	err = super_setup_bdi_name(sb, "vboxsf-%d", sbi->bdi_id);
 	if (err)
 		goto fail_free;
+	sb->s_bdi->ra_pages = 0;
+	sb->s_bdi->io_pages = 0;
 
 	/* Turn source into a shfl_string and map the folder */
 	size = strlen(fc->source) + 1;
@@ -205,7 +204,7 @@ static int vboxsf_fill_super(struct super_block *sb, struct fs_context *fc)
 		err = -ENOMEM;
 		goto fail_unmap;
 	}
-	vboxsf_init_inode(sbi, iroot, &sbi->root_info);
+	vboxsf_init_inode(sbi, iroot, &sbi->root_info, false);
 	unlock_new_inode(iroot);
 
 	droot = d_make_root(iroot);
@@ -242,7 +241,7 @@ static struct inode *vboxsf_alloc_inode(struct super_block *sb)
 {
 	struct vboxsf_inode *sf_i;
 
-	sf_i = kmem_cache_alloc(vboxsf_inode_cachep, GFP_NOFS);
+	sf_i = alloc_inode_sb(sb, vboxsf_inode_cachep, GFP_NOFS);
 	if (!sf_i)
 		return NULL;
 
@@ -384,12 +383,7 @@ fail_nomem:
 
 static int vboxsf_parse_monolithic(struct fs_context *fc, void *data)
 {
-	char *options = data;
-
-	if (options && options[0] == VBSF_MOUNT_SIGNATURE_BYTE_0 &&
-		       options[1] == VBSF_MOUNT_SIGNATURE_BYTE_1 &&
-		       options[2] == VBSF_MOUNT_SIGNATURE_BYTE_2 &&
-		       options[3] == VBSF_MOUNT_SIGNATURE_BYTE_3) {
+	if (data && !memcmp(data, VBSF_MOUNT_SIGNATURE, 4)) {
 		vbg_err("vboxsf: Old binary mount data not supported, remove obsolete mount.vboxsf and/or update your VBoxService.\n");
 		return -EINVAL;
 	}
@@ -416,7 +410,7 @@ static int vboxsf_reconfigure(struct fs_context *fc)
 
 	/* Apply changed options to the root inode */
 	sbi->o = ctx->o;
-	vboxsf_init_inode(sbi, iroot, &sbi->root_info);
+	vboxsf_init_inode(sbi, iroot, &sbi->root_info, true);
 
 	return 0;
 }

@@ -32,11 +32,8 @@
 #include <linux/highmem.h>
 #include <linux/memblock.h>
 
-#include <asm/pgalloc.h>
-#include <asm/prom.h>
 #include <asm/io.h>
 #include <asm/mmu_context.h>
-#include <asm/pgtable.h>
 #include <asm/mmu.h>
 #include <linux/uaccess.h>
 #include <asm/smp.h>
@@ -46,7 +43,6 @@
 
 #include <mm/mmu_decl.h>
 
-extern int __map_without_ltlbs;
 /*
  * MMU_init_hw does the chip-specific initialization of the MMU hardware.
  */
@@ -97,14 +93,20 @@ unsigned long __init mmu_mapin_ram(unsigned long base, unsigned long top)
 	p = 0;
 	s = total_lowmem;
 
-	if (__map_without_ltlbs)
+	if (IS_ENABLED(CONFIG_KFENCE))
+		return 0;
+
+	if (debug_pagealloc_enabled())
+		return 0;
+
+	if (strict_kernel_rwx_enabled())
 		return 0;
 
 	while (s >= LARGE_PAGE_SIZE_16M) {
 		pmd_t *pmdp;
-		unsigned long val = p | _PMD_SIZE_16M | _PAGE_EXEC | _PAGE_HWWRITE;
+		unsigned long val = p | _PMD_SIZE_16M | _PAGE_EXEC | _PAGE_RW;
 
-		pmdp = pmd_offset(pud_offset(pgd_offset_k(v), v), v);
+		pmdp = pmd_off_k(v);
 		*pmdp++ = __pmd(val);
 		*pmdp++ = __pmd(val);
 		*pmdp++ = __pmd(val);
@@ -117,9 +119,9 @@ unsigned long __init mmu_mapin_ram(unsigned long base, unsigned long top)
 
 	while (s >= LARGE_PAGE_SIZE_4M) {
 		pmd_t *pmdp;
-		unsigned long val = p | _PMD_SIZE_4M | _PAGE_EXEC | _PAGE_HWWRITE;
+		unsigned long val = p | _PMD_SIZE_4M | _PAGE_EXEC | _PAGE_RW;
 
-		pmdp = pmd_offset(pud_offset(pgd_offset_k(v), v), v);
+		pmdp = pmd_off_k(v);
 		*pmdp = __pmd(val);
 
 		v += LARGE_PAGE_SIZE_4M;

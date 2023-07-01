@@ -8,6 +8,10 @@
 #include "rk3368.dtsi"
 
 / {
+	aliases {
+		mmc0 = &emmc;
+	};
+
 	chosen {
 		stdout-path = "serial2:115200n8";
 	};
@@ -57,7 +61,6 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&bl_en>;
 		pwms = <&pwm0 0 1000000 PWM_POLARITY_INVERTED>;
-		pwm-delay-us = <10000>;
 	};
 
 	emmc_pwrseq: emmc-pwrseq {
@@ -72,7 +75,7 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&pwr_key>;
 
-		power {
+		key-power {
 			wakeup-source;
 			gpios = <&gpio0 RK_PA2 GPIO_ACTIVE_LOW>;
 			label = "GPIO Power";
@@ -134,7 +137,7 @@
 	pinctrl-0 = <&rmii_pins>;
 	tx_delay = <0x30>;
 	rx_delay = <0x10>;
-	status = "ok";
+	status = "okay";
 };
 
 &i2c0 {

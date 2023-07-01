@@ -165,7 +165,6 @@ static const struct drm_display_mode default_mode = {
 	.vsync_start = 320 + 8,
 	.vsync_end = 320 + 8 + 4,
 	.vtotal = 320 + 8 + 4 + 4,
-	.vrefresh = 60,
 };
 
 static int st7789v_get_modes(struct drm_panel *panel,
@@ -177,7 +176,7 @@ static int st7789v_get_modes(struct drm_panel *panel,
 	if (!mode) {
 		dev_err(panel->dev, "failed to add mode %ux%ux@%u\n",
 			default_mode.hdisplay, default_mode.vdisplay,
-			default_mode.vrefresh);
+			drm_mode_vrefresh(&default_mode));
 		return -ENOMEM;
 	}
 
@@ -383,20 +382,16 @@ static int st7789v_probe(struct spi_device *spi)
 	if (ret)
 		return ret;
 
-	ret = drm_panel_add(&ctx->panel);
-	if (ret < 0)
-		return ret;
+	drm_panel_add(&ctx->panel);
 
 	return 0;
 }
 
-static int st7789v_remove(struct spi_device *spi)
+static void st7789v_remove(struct spi_device *spi)
 {
 	struct st7789v *ctx = spi_get_drvdata(spi);
 
 	drm_panel_remove(&ctx->panel);
-
-	return 0;
 }
 
 static const struct of_device_id st7789v_of_match[] = {

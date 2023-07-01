@@ -123,6 +123,7 @@ gm20b_gr = {
 	.init_rop_active_fbps = gk104_gr_init_rop_active_fbps,
 	.trap_mp = gf100_gr_trap_mp,
 	.set_hww_esr_report_mask = gm20b_gr_set_hww_esr_report_mask,
+	.fecs.reset = gf100_gr_fecs_reset,
 	.rops = gm200_gr_rops,
 	.ppc_nr = 1,
 	.grctx = &gm20b_grctx,
@@ -175,12 +176,13 @@ MODULE_FIRMWARE("nvidia/gm20b/gr/sw_method_init.bin");
 
 static const struct gf100_gr_fwif
 gm20b_gr_fwif[] = {
-	{ 0, gm20b_gr_load, &gm20b_gr, &gm20b_gr_fecs_acr },
+	{  0, gm20b_gr_load, &gm20b_gr, &gm20b_gr_fecs_acr },
+	{ -1, gm200_gr_nofw },
 	{}
 };
 
 int
-gm20b_gr_new(struct nvkm_device *device, int index, struct nvkm_gr **pgr)
+gm20b_gr_new(struct nvkm_device *device, enum nvkm_subdev_type type, int inst, struct nvkm_gr **pgr)
 {
-	return gf100_gr_new_(gm20b_gr_fwif, device, index, pgr);
+	return gf100_gr_new_(gm20b_gr_fwif, device, type, inst, pgr);
 }

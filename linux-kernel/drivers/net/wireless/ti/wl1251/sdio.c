@@ -12,12 +12,9 @@
 #include <linux/mmc/sdio_func.h>
 #include <linux/mmc/sdio_ids.h>
 #include <linux/platform_device.h>
-#include <linux/wl12xx.h>
 #include <linux/irq.h>
 #include <linux/pm_runtime.h>
-#include <linux/gpio.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
 #include <linux/of_irq.h>
 
 #include "wl1251.h"
@@ -160,15 +157,6 @@ static int wl1251_sdio_set_power(struct wl1251 *wl, bool enable)
 	int ret;
 
 	if (enable) {
-		/*
-		 * Power is controlled by runtime PM, but we still call board
-		 * callback in case it wants to do any additional setup,
-		 * for example enabling clock buffer for the module.
-		 */
-		if (gpio_is_valid(wl->power_gpio))
-			gpio_set_value(wl->power_gpio, true);
-
-
 		ret = pm_runtime_get_sync(&func->dev);
 		if (ret < 0) {
 			pm_runtime_put_sync(&func->dev);
@@ -186,9 +174,6 @@ static int wl1251_sdio_set_power(struct wl1251 *wl, bool enable)
 		ret = pm_runtime_put_sync(&func->dev);
 		if (ret < 0)
 			goto out;
-
-		if (gpio_is_valid(wl->power_gpio))
-			gpio_set_value(wl->power_gpio, false);
 	}
 
 out:
@@ -211,7 +196,6 @@ static int wl1251_sdio_probe(struct sdio_func *func,
 	struct wl1251 *wl;
 	struct ieee80211_hw *hw;
 	struct wl1251_sdio *wl_sdio;
-	const struct wl1251_platform_data *wl1251_board_data;
 	struct device_node *np = func->dev.of_node;
 
 	hw = wl1251_alloc_hw();
@@ -239,29 +223,11 @@ static int wl1251_sdio_probe(struct sdio_func *func,
 	wl->if_priv = wl_sdio;
 	wl->if_ops = &wl1251_sdio_ops;
 
-	wl1251_board_data = wl1251_get_platform_data();
-	if (!IS_ERR(wl1251_board_data)) {
-		wl->power_gpio = wl1251_board_data->power_gpio;
-		wl->irq = wl1251_board_data->irq;
-		wl->use_eeprom = wl1251_board_data->use_eeprom;
-	} else if (np) {
-		wl->use_eeprom = of_property_read_bool(np,
-						       "ti,wl1251-has-eeprom");
-		wl->power_gpio = of_get_named_gpio(np, "ti,power-gpio", 0);
+	if (np) {
+		wl->use_eeprom = of_property_read_bool(np, "ti,wl1251-has-eeprom");
 		wl->irq = of_irq_get(np, 0);
-
-		if (wl->power_gpio == -EPROBE_DEFER ||
-		    wl->irq == -EPROBE_DEFER) {
+		if (wl->irq == -EPROBE_DEFER) {
 			ret = -EPROBE_DEFER;
-			goto disable;
-		}
-	}
-
-	if (gpio_is_valid(wl->power_gpio)) {
-		ret = devm_gpio_request(&func->dev, wl->power_gpio,
-								"wl1251 power");
-		if (ret) {
-			wl1251_error("Failed to request gpio: %d\n", ret);
 			goto disable;
 		}
 	}

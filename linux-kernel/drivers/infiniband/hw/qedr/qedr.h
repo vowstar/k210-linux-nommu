@@ -103,7 +103,6 @@ struct qedr_device_attr {
 	u64	max_mr_size;
 	u32	max_cqe;
 	u32	max_mw;
-	u32	max_fmr;
 	u32	max_mr_mw_fmr_pbl;
 	u64	max_mr_mw_fmr_size;
 	u32	max_pd;
@@ -236,6 +235,7 @@ struct qedr_ucontext {
 	u32 dpi_size;
 	u16 dpi;
 	bool db_rec;
+	u8 edpm_mode;
 };
 
 union db_prod32 {
@@ -310,6 +310,11 @@ struct qedr_pd {
 	struct qedr_ucontext *uctx;
 };
 
+struct qedr_xrcd {
+	struct ib_xrcd ibxrcd;
+	u16 xrcd_id;
+};
+
 struct qedr_qp_hwq_info {
 	/* WQE Elements */
 	struct qed_chain pbl;
@@ -345,10 +350,10 @@ struct qedr_srq_hwq_info {
 	u32 wqe_prod;
 	u32 sge_prod;
 	u32 wr_prod_cnt;
-	u32 wr_cons_cnt;
+	atomic_t wr_cons_cnt;
 	u32 num_elems;
 
-	u32 *virt_prod_pair_addr;
+	struct rdma_srq_producers *virt_prod_pair_addr;
 	dma_addr_t phy_prod_pair_addr;
 };
 
@@ -361,6 +366,7 @@ struct qedr_srq {
 	struct ib_umem *prod_umem;
 	u16 srq_id;
 	u32 srq_limit;
+	bool is_xrc;
 	/* lock to protect srq recv post */
 	spinlock_t lock;
 };
@@ -412,6 +418,7 @@ struct qedr_qp {
 	u32 sq_psn;
 	u32 qkey;
 	u32 dest_qp_num;
+	u8 timeout;
 
 	/* Relevant to qps created from kernel space only (ULPs) */
 	u8 prev_wqe_size;
@@ -449,6 +456,7 @@ struct qedr_qp {
 	/* synchronization objects used with iwarp ep */
 	struct kref refcnt;
 	struct completion iwarp_cm_comp;
+	struct completion qp_rel_comp;
 	unsigned long iwarp_cm_flags; /* enum iwarp_cm_flags */
 };
 
@@ -573,6 +581,11 @@ static inline struct qedr_pd *get_qedr_pd(struct ib_pd *ibpd)
 	return container_of(ibpd, struct qedr_pd, ibpd);
 }
 
+static inline struct qedr_xrcd *get_qedr_xrcd(struct ib_xrcd *ibxrcd)
+{
+	return container_of(ibxrcd, struct qedr_xrcd, ibxrcd);
+}
+
 static inline struct qedr_cq *get_qedr_cq(struct ib_cq *ibcq)
 {
 	return container_of(ibcq, struct qedr_cq, ibcq);
@@ -596,6 +609,28 @@ static inline struct qedr_mr *get_qedr_mr(struct ib_mr *ibmr)
 static inline struct qedr_srq *get_qedr_srq(struct ib_srq *ibsrq)
 {
 	return container_of(ibsrq, struct qedr_srq, ibsrq);
+}
+
+static inline bool qedr_qp_has_srq(struct qedr_qp *qp)
+{
+	return qp->srq;
+}
+
+static inline bool qedr_qp_has_sq(struct qedr_qp *qp)
+{
+	if (qp->qp_type == IB_QPT_GSI || qp->qp_type == IB_QPT_XRC_TGT)
+		return false;
+
+	return true;
+}
+
+static inline bool qedr_qp_has_rq(struct qedr_qp *qp)
+{
+	if (qp->qp_type == IB_QPT_GSI || qp->qp_type == IB_QPT_XRC_INI ||
+	    qp->qp_type == IB_QPT_XRC_TGT || qedr_qp_has_srq(qp))
+		return false;
+
+	return true;
 }
 
 static inline struct qedr_user_mmap_entry *

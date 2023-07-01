@@ -201,7 +201,6 @@ static const struct drm_display_mode default_mode = {
 	.vsync_start = 960 + 3,
 	.vsync_end = 960 + 3 + 15,
 	.vtotal = 960 + 3 + 15 + 1,
-	.vrefresh = 60,
 };
 
 static int sharp_nt_panel_get_modes(struct drm_panel *panel,
@@ -213,7 +212,7 @@ static int sharp_nt_panel_get_modes(struct drm_panel *panel,
 	if (!mode) {
 		dev_err(panel->dev, "failed to add mode %ux%u@%u\n",
 			default_mode.hdisplay, default_mode.vdisplay,
-			default_mode.vrefresh);
+			drm_mode_vrefresh(&default_mode));
 		return -ENOMEM;
 	}
 
@@ -262,7 +261,9 @@ static int sharp_nt_panel_add(struct sharp_nt_panel *sharp_nt)
 	if (ret)
 		return ret;
 
-	return drm_panel_add(&sharp_nt->base);
+	drm_panel_add(&sharp_nt->base);
+
+	return 0;
 }
 
 static void sharp_nt_panel_del(struct sharp_nt_panel *sharp_nt)
@@ -281,7 +282,7 @@ static int sharp_nt_panel_probe(struct mipi_dsi_device *dsi)
 	dsi->mode_flags = MIPI_DSI_MODE_VIDEO |
 			MIPI_DSI_MODE_VIDEO_HSE |
 			MIPI_DSI_CLOCK_NON_CONTINUOUS |
-			MIPI_DSI_MODE_EOT_PACKET;
+			MIPI_DSI_MODE_NO_EOT_PACKET;
 
 	sharp_nt = devm_kzalloc(&dsi->dev, sizeof(*sharp_nt), GFP_KERNEL);
 	if (!sharp_nt)
@@ -295,10 +296,16 @@ static int sharp_nt_panel_probe(struct mipi_dsi_device *dsi)
 	if (ret < 0)
 		return ret;
 
-	return mipi_dsi_attach(dsi);
+	ret = mipi_dsi_attach(dsi);
+	if (ret < 0) {
+		sharp_nt_panel_del(sharp_nt);
+		return ret;
+	}
+
+	return 0;
 }
 
-static int sharp_nt_panel_remove(struct mipi_dsi_device *dsi)
+static void sharp_nt_panel_remove(struct mipi_dsi_device *dsi)
 {
 	struct sharp_nt_panel *sharp_nt = mipi_dsi_get_drvdata(dsi);
 	int ret;
@@ -312,8 +319,6 @@ static int sharp_nt_panel_remove(struct mipi_dsi_device *dsi)
 		dev_err(&dsi->dev, "failed to detach from DSI host: %d\n", ret);
 
 	sharp_nt_panel_del(sharp_nt);
-
-	return 0;
 }
 
 static void sharp_nt_panel_shutdown(struct mipi_dsi_device *dsi)

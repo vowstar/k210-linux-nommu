@@ -1,33 +1,7 @@
+/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-3-Clause) */
 /* QLogic qed NIC Driver
  * Copyright (c) 2015-2017  QLogic Corporation
- *
- * This software is available to you under a choice of one of two
- * licenses.  You may choose to be licensed under the terms of the GNU
- * General Public License (GPL) Version 2, available from the file
- * COPYING in the main directory of this source tree, or the
- * OpenIB.org BSD license below:
- *
- *     Redistribution and use in source and binary forms, with or
- *     without modification, are permitted provided that the following
- *     conditions are met:
- *
- *      - Redistributions of source code must retain the above
- *        copyright notice, this list of conditions and the following
- *        disclaimer.
- *
- *      - Redistributions in binary form must reproduce the above
- *        copyright notice, this list of conditions and the following
- *        disclaimer in the documentation and /or other materials
- *        provided with the distribution.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright (c) 2019-2020 Marvell International Ltd.
  */
 
 #ifndef _QED_LL2_IF_H
@@ -38,14 +12,13 @@
 #include <linux/netdevice.h>
 #include <linux/pci.h>
 #include <linux/skbuff.h>
-#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/qed/qed_if.h>
 
 enum qed_ll2_conn_type {
 	QED_LL2_TYPE_FCOE,
-	QED_LL2_TYPE_ISCSI,
+	QED_LL2_TYPE_TCP_ULP,
 	QED_LL2_TYPE_TEST,
 	QED_LL2_TYPE_OOO,
 	QED_LL2_TYPE_RESERVED2,
@@ -235,57 +208,57 @@ enum qed_ll2_xmit_flags {
 
 struct qed_ll2_ops {
 /**
- * @brief start - initializes ll2
+ * start(): Initializes ll2.
  *
- * @param cdev
- * @param params - protocol driver configuration for the ll2.
+ * @cdev: Qed dev pointer.
+ * @params: Protocol driver configuration for the ll2.
  *
- * @return 0 on success, otherwise error value.
+ * Return: 0 on success, otherwise error value.
  */
 	int (*start)(struct qed_dev *cdev, struct qed_ll2_params *params);
 
 /**
- * @brief stop - stops the ll2
+ * stop(): Stops the ll2
  *
- * @param cdev
+ * @cdev: Qed dev pointer.
  *
- * @return 0 on success, otherwise error value.
+ * Return: 0 on success, otherwise error value.
  */
 	int (*stop)(struct qed_dev *cdev);
 
 /**
- * @brief start_xmit - transmits an skb over the ll2 interface
+ * start_xmit(): Transmits an skb over the ll2 interface
  *
- * @param cdev
- * @param skb
- * @param xmit_flags - Transmit options defined by the enum qed_ll2_xmit_flags.
+ * @cdev: Qed dev pointer.
+ * @skb: SKB.
+ * @xmit_flags: Transmit options defined by the enum qed_ll2_xmit_flags.
  *
- * @return 0 on success, otherwise error value.
+ * Return: 0 on success, otherwise error value.
  */
 	int (*start_xmit)(struct qed_dev *cdev, struct sk_buff *skb,
 			  unsigned long xmit_flags);
 
 /**
- * @brief register_cb_ops - protocol driver register the callback for Rx/Tx
+ * register_cb_ops(): Protocol driver register the callback for Rx/Tx
  * packets. Should be called before `start'.
  *
- * @param cdev
- * @param cookie - to be passed to the callback functions.
- * @param ops - the callback functions to register for Rx / Tx.
+ * @cdev: Qed dev pointer.
+ * @cookie: to be passed to the callback functions.
+ * @ops: the callback functions to register for Rx / Tx.
  *
- * @return 0 on success, otherwise error value.
+ * Return: 0 on success, otherwise error value.
  */
 	void (*register_cb_ops)(struct qed_dev *cdev,
 				const struct qed_ll2_cb_ops *ops,
 				void *cookie);
 
 /**
- * @brief get LL2 related statistics
+ * get_stats(): Get LL2 related statistics.
  *
- * @param cdev
- * @param stats - pointer to struct that would be filled with stats
+ * @cdev: Qed dev pointer.
+ * @stats: Pointer to struct that would be filled with stats.
  *
- * @return 0 on success, error otherwise.
+ * Return: 0 on success, error otherwise.
  */
 	int (*get_stats)(struct qed_dev *cdev, struct qed_ll2_stats *stats);
 };

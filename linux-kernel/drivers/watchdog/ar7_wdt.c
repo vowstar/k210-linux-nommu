@@ -63,8 +63,6 @@ static DEFINE_SPINLOCK(wdt_lock);
 /* XXX currently fixed, allows max margin ~68.72 secs */
 #define prescale_value 0xffff
 
-/* Resource of the WDT registers */
-static struct resource *ar7_regs_wdt;
 /* Pointer to the remapped WDT IO space */
 static struct ar7_wdt *ar7_wdt;
 
@@ -235,8 +233,7 @@ static long ar7_wdt_ioctl(struct file *file,
 		ar7_wdt_update_margin(new_margin);
 		ar7_wdt_kick(1);
 		spin_unlock(&wdt_lock);
-		/* Fall through */
-
+		fallthrough;
 	case WDIOC_GETTIMEOUT:
 		if (put_user(margin, (int *)arg))
 			return -EFAULT;
@@ -266,9 +263,7 @@ static int ar7_wdt_probe(struct platform_device *pdev)
 {
 	int rc;
 
-	ar7_regs_wdt =
-		platform_get_resource_byname(pdev, IORESOURCE_MEM, "regs");
-	ar7_wdt = devm_ioremap_resource(&pdev->dev, ar7_regs_wdt);
+	ar7_wdt = devm_platform_ioremap_resource_byname(pdev, "regs");
 	if (IS_ERR(ar7_wdt))
 		return PTR_ERR(ar7_wdt);
 

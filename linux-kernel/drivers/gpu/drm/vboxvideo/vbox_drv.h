@@ -127,6 +127,7 @@ struct vbox_encoder {
 #define to_vbox_crtc(x) container_of(x, struct vbox_crtc, base)
 #define to_vbox_connector(x) container_of(x, struct vbox_connector, base)
 #define to_vbox_encoder(x) container_of(x, struct vbox_encoder, base)
+#define to_vbox_dev(x) container_of(x, struct vbox_private, ddev)
 
 bool vbox_check_supported(u16 id);
 int vbox_hw_init(struct vbox_private *vbox);
@@ -138,13 +139,11 @@ void vbox_mode_fini(struct vbox_private *vbox);
 void vbox_report_caps(struct vbox_private *vbox);
 
 int vbox_mm_init(struct vbox_private *vbox);
-void vbox_mm_fini(struct vbox_private *vbox);
 
 /* vbox_irq.c */
 int vbox_irq_init(struct vbox_private *vbox);
 void vbox_irq_fini(struct vbox_private *vbox);
 void vbox_report_hotplug(struct vbox_private *vbox);
-irqreturn_t vbox_irq_handler(int irq, void *arg);
 
 /* vbox_hgsmi.c */
 void *hgsmi_buffer_alloc(struct gen_pool *guest_pool, size_t size,

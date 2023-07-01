@@ -87,8 +87,9 @@ static int snd_cs5535audio_playback_open(struct snd_pcm_substream *substream)
 	snd_pcm_limit_hw_rates(runtime);
 	cs5535au->playback_substream = substream;
 	runtime->private_data = &(cs5535au->dmas[CS5535AUDIO_DMA_PLAYBACK]);
-	if ((err = snd_pcm_hw_constraint_integer(runtime,
-				SNDRV_PCM_HW_PARAM_PERIODS)) < 0)
+	err = snd_pcm_hw_constraint_integer(runtime,
+					    SNDRV_PCM_HW_PARAM_PERIODS);
+	if (err < 0)
 		return err;
 
 	return 0;
@@ -109,7 +110,7 @@ static int cs5535audio_build_dma_packets(struct cs5535audio *cs5535au,
 					 unsigned int period_bytes)
 {
 	unsigned int i;
-	u32 addr, desc_addr, jmpprd_addr;
+	u32 addr, jmpprd_addr;
 	struct cs5535audio_dma_desc *lastdesc;
 
 	if (periods > CS5535AUDIO_MAX_DESCRIPTORS)
@@ -128,16 +129,14 @@ static int cs5535audio_build_dma_packets(struct cs5535audio *cs5535au,
 		return 0;
 
 	/* the u32 cast is okay because in snd*create we successfully told
-   	   pci alloc that we're only 32 bit capable so the uppper will be 0 */
+	   pci alloc that we're only 32 bit capable so the upper will be 0 */
 	addr = (u32) substream->runtime->dma_addr;
-	desc_addr = (u32) dma->desc_buf.addr;
 	for (i = 0; i < periods; i++) {
 		struct cs5535audio_dma_desc *desc =
 			&((struct cs5535audio_dma_desc *) dma->desc_buf.area)[i];
 		desc->addr = cpu_to_le32(addr);
 		desc->size = cpu_to_le16(period_bytes);
 		desc->ctlreserved = cpu_to_le16(PRD_EOP);
-		desc_addr += sizeof(struct cs5535audio_dma_desc);
 		addr += period_bytes;
 	}
 	/* we reserved one dummy descriptor at the end to do the PRD jump */
@@ -342,8 +341,9 @@ static int snd_cs5535audio_capture_open(struct snd_pcm_substream *substream)
 	snd_pcm_limit_hw_rates(runtime);
 	cs5535au->capture_substream = substream;
 	runtime->private_data = &(cs5535au->dmas[CS5535AUDIO_DMA_CAPTURE]);
-	if ((err = snd_pcm_hw_constraint_integer(runtime,
-					 SNDRV_PCM_HW_PARAM_PERIODS)) < 0)
+	err = snd_pcm_hw_constraint_integer(runtime,
+					    SNDRV_PCM_HW_PARAM_PERIODS);
+	if (err < 0)
 		return err;
 	olpc_capture_open(cs5535au->ac97);
 	return 0;

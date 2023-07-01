@@ -8,6 +8,15 @@
 
 struct xfs_scrub;
 
+/*
+ * Standard flags for allocating memory within scrub.  NOFS context is
+ * configured by the process allocation scope.  Scrub and repair must be able
+ * to back out gracefully if there isn't enough memory.  Force-cast to avoid
+ * complaints from static checkers.
+ */
+#define XCHK_GFP_FLAGS	((__force gfp_t)(GFP_KERNEL | __GFP_NOWARN | \
+					 __GFP_RETRY_MAYFAIL))
+
 /* Type info and names for the scrub types. */
 enum xchk_type {
 	ST_NONE = 1,	/* disabled */
@@ -18,8 +27,7 @@ enum xchk_type {
 
 struct xchk_meta_ops {
 	/* Acquire whatever resources are needed for the operation. */
-	int		(*setup)(struct xfs_scrub *,
-				 struct xfs_inode *);
+	int		(*setup)(struct xfs_scrub *sc);
 
 	/* Examine metadata for errors. */
 	int		(*scrub)(struct xfs_scrub *);
@@ -28,7 +36,7 @@ struct xchk_meta_ops {
 	int		(*repair)(struct xfs_scrub *);
 
 	/* Decide if we even have this piece of metadata. */
-	bool		(*has)(struct xfs_sb *);
+	bool		(*has)(struct xfs_mount *);
 
 	/* type describing required/allowed inputs */
 	enum xchk_type	type;
@@ -36,12 +44,10 @@ struct xchk_meta_ops {
 
 /* Buffer pointers and btree cursors for an entire AG. */
 struct xchk_ag {
-	xfs_agnumber_t		agno;
 	struct xfs_perag	*pag;
 
 	/* AG btree roots */
 	struct xfs_buf		*agf_bp;
-	struct xfs_buf		*agfl_bp;
 	struct xfs_buf		*agi_bp;
 
 	/* AG btrees */
@@ -59,7 +65,18 @@ struct xfs_scrub {
 	struct xfs_scrub_metadata	*sm;
 	const struct xchk_meta_ops	*ops;
 	struct xfs_trans		*tp;
+
+	/* File that scrub was called with. */
+	struct file			*file;
+
+	/*
+	 * File that is undergoing the scrub operation.  This can differ from
+	 * the file that scrub was called with if we're checking file-based fs
+	 * metadata (e.g. rt bitmaps) or if we're doing a scrub-by-handle for
+	 * something that can't be opened directly (e.g. symlinks).
+	 */
 	struct xfs_inode		*ip;
+
 	void				*buf;
 	uint				ilock_flags;
 
@@ -79,7 +96,6 @@ struct xfs_scrub {
 
 /* XCHK state flags grow up from zero, XREP state flags grown down from 2^31 */
 #define XCHK_TRY_HARDER		(1 << 0)  /* can't get resources, try again */
-#define XCHK_HAS_QUOTAOFFLOCK	(1 << 1)  /* we hold the quotaoff lock */
 #define XCHK_REAPING_DISABLED	(1 << 2)  /* background block reaping paused */
 #define XREP_ALREADY_FIXED	(1 << 31) /* checking our repair work */
 
@@ -152,13 +168,5 @@ void xchk_xref_is_used_rt_space(struct xfs_scrub *sc, xfs_rtblock_t rtbno,
 #else
 # define xchk_xref_is_used_rt_space(sc, rtbno, len) do { } while (0)
 #endif
-
-struct xchk_fscounters {
-	uint64_t		icount;
-	uint64_t		ifree;
-	uint64_t		fdblocks;
-	unsigned long long	icount_min;
-	unsigned long long	icount_max;
-};
 
 #endif	/* __XFS_SCRUB_SCRUB_H__ */

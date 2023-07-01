@@ -20,7 +20,6 @@
 
 static struct amdtee_driver_data *drv_data;
 static DEFINE_MUTEX(session_list_mutex);
-static struct amdtee_shm_context shmctx;
 
 static void amdtee_get_version(struct tee_device *teedev,
 			       struct tee_ioctl_version_data *vers)
@@ -42,7 +41,8 @@ static int amdtee_open(struct tee_context *ctx)
 		return -ENOMEM;
 
 	INIT_LIST_HEAD(&ctxdata->sess_list);
-	INIT_LIST_HEAD(&shmctx.shmdata_list);
+	INIT_LIST_HEAD(&ctxdata->shm_list);
+	mutex_init(&ctxdata->shm_mutex);
 
 	ctx->data = ctxdata;
 	return 0;
@@ -59,10 +59,9 @@ static void release_session(struct amdtee_session *sess)
 			continue;
 
 		handle_close_session(sess->ta_handle, sess->session_info[i]);
+		handle_unload_ta(sess->ta_handle);
 	}
 
-	/* Unload Trusted Application once all sessions are closed */
-	handle_unload_ta(sess->ta_handle);
 	kfree(sess);
 }
 
@@ -86,6 +85,7 @@ static void amdtee_release(struct tee_context *ctx)
 		list_del(&sess->list_node);
 		release_session(sess);
 	}
+	mutex_destroy(&ctxdata->shm_mutex);
 	kfree(ctxdata);
 
 	ctx->data = NULL;
@@ -139,6 +139,9 @@ static struct amdtee_session *find_session(struct amdtee_context_data *ctxdata,
 	u32 index = get_session_index(session);
 	struct amdtee_session *sess;
 
+	if (index >= TEE_NUM_SESSIONS)
+		return NULL;
+
 	list_for_each_entry(sess, &ctxdata->sess_list, list_node)
 		if (ta_handle == sess->ta_handle &&
 		    test_bit(index, sess->sess_mask))
@@ -149,14 +152,17 @@ static struct amdtee_session *find_session(struct amdtee_context_data *ctxdata,
 
 u32 get_buffer_id(struct tee_shm *shm)
 {
-	u32 buf_id = 0;
+	struct amdtee_context_data *ctxdata = shm->ctx->data;
 	struct amdtee_shm_data *shmdata;
+	u32 buf_id = 0;
 
-	list_for_each_entry(shmdata, &shmctx.shmdata_list, shm_node)
+	mutex_lock(&ctxdata->shm_mutex);
+	list_for_each_entry(shmdata, &ctxdata->shm_list, shm_node)
 		if (shmdata->kaddr == shm->kaddr) {
 			buf_id = shmdata->buf_id;
 			break;
 		}
+	mutex_unlock(&ctxdata->shm_mutex);
 
 	return buf_id;
 }
@@ -197,9 +203,8 @@ static int copy_ta_binary(struct tee_context *ctx, void *ptr, void **ta,
 
 	*ta_size = roundup(fw->size, PAGE_SIZE);
 	*ta = (void *)__get_free_pages(GFP_KERNEL, get_order(*ta_size));
-	if (IS_ERR(*ta)) {
-		pr_err("%s: get_free_pages failed 0x%llx\n", __func__,
-		       (u64)*ta);
+	if (!*ta) {
+		pr_err("%s: get_free_pages failed\n", __func__);
 		rc = -ENOMEM;
 		goto rel_fw;
 	}
@@ -212,13 +217,24 @@ unlock:
 	return rc;
 }
 
+static void destroy_session(struct kref *ref)
+{
+	struct amdtee_session *sess = container_of(ref, struct amdtee_session,
+						   refcount);
+
+	mutex_lock(&session_list_mutex);
+	list_del(&sess->list_node);
+	mutex_unlock(&session_list_mutex);
+	kfree(sess);
+}
+
 int amdtee_open_session(struct tee_context *ctx,
 			struct tee_ioctl_open_session_arg *arg,
 			struct tee_param *param)
 {
 	struct amdtee_context_data *ctxdata = ctx->data;
 	struct amdtee_session *sess = NULL;
-	u32 session_info;
+	u32 session_info, ta_handle;
 	size_t ta_size;
 	int rc, i;
 	void *ta;
@@ -236,61 +252,52 @@ int amdtee_open_session(struct tee_context *ctx,
 
 	/* Load the TA binary into TEE environment */
 	handle_load_ta(ta, ta_size, arg);
-	if (arg->ret == TEEC_SUCCESS) {
-		mutex_lock(&session_list_mutex);
-		sess = alloc_session(ctxdata, arg->session);
-		mutex_unlock(&session_list_mutex);
-	}
-
 	if (arg->ret != TEEC_SUCCESS)
 		goto out;
 
+	ta_handle = get_ta_handle(arg->session);
+
+	mutex_lock(&session_list_mutex);
+	sess = alloc_session(ctxdata, arg->session);
+	mutex_unlock(&session_list_mutex);
+
 	if (!sess) {
-		rc = -ENOMEM;
-		goto out;
-	}
-
-	/* Find an empty session index for the given TA */
-	spin_lock(&sess->lock);
-	i = find_first_zero_bit(sess->sess_mask, TEE_NUM_SESSIONS);
-	if (i < TEE_NUM_SESSIONS)
-		set_bit(i, sess->sess_mask);
-	spin_unlock(&sess->lock);
-
-	if (i >= TEE_NUM_SESSIONS) {
-		pr_err("reached maximum session count %d\n", TEE_NUM_SESSIONS);
+		handle_unload_ta(ta_handle);
 		rc = -ENOMEM;
 		goto out;
 	}
 
 	/* Open session with loaded TA */
 	handle_open_session(arg, &session_info, param);
-
-	if (arg->ret == TEEC_SUCCESS) {
-		sess->session_info[i] = session_info;
-		set_session_id(sess->ta_handle, i, &arg->session);
-	} else {
+	if (arg->ret != TEEC_SUCCESS) {
 		pr_err("open_session failed %d\n", arg->ret);
-		spin_lock(&sess->lock);
-		clear_bit(i, sess->sess_mask);
-		spin_unlock(&sess->lock);
+		handle_unload_ta(ta_handle);
+		kref_put(&sess->refcount, destroy_session);
+		goto out;
 	}
+
+	/* Find an empty session index for the given TA */
+	spin_lock(&sess->lock);
+	i = find_first_zero_bit(sess->sess_mask, TEE_NUM_SESSIONS);
+	if (i < TEE_NUM_SESSIONS) {
+		sess->session_info[i] = session_info;
+		set_session_id(ta_handle, i, &arg->session);
+		set_bit(i, sess->sess_mask);
+	}
+	spin_unlock(&sess->lock);
+
+	if (i >= TEE_NUM_SESSIONS) {
+		pr_err("reached maximum session count %d\n", TEE_NUM_SESSIONS);
+		handle_close_session(ta_handle, session_info);
+		handle_unload_ta(ta_handle);
+		kref_put(&sess->refcount, destroy_session);
+		rc = -ENOMEM;
+		goto out;
+	}
+
 out:
 	free_pages((u64)ta, get_order(ta_size));
 	return rc;
-}
-
-static void destroy_session(struct kref *ref)
-{
-	struct amdtee_session *sess = container_of(ref, struct amdtee_session,
-						   refcount);
-
-	/* Unload the TA from TEE */
-	handle_unload_ta(sess->ta_handle);
-	mutex_lock(&session_list_mutex);
-	list_del(&sess->list_node);
-	mutex_unlock(&session_list_mutex);
-	kfree(sess);
 }
 
 int amdtee_close_session(struct tee_context *ctx, u32 session)
@@ -322,6 +329,7 @@ int amdtee_close_session(struct tee_context *ctx, u32 session)
 
 	/* Close the session */
 	handle_close_session(ta_handle, session_info);
+	handle_unload_ta(ta_handle);
 
 	kref_put(&sess->refcount, destroy_session);
 
@@ -330,8 +338,9 @@ int amdtee_close_session(struct tee_context *ctx, u32 session)
 
 int amdtee_map_shmem(struct tee_shm *shm)
 {
-	struct shmem_desc shmem;
+	struct amdtee_context_data *ctxdata;
 	struct amdtee_shm_data *shmnode;
+	struct shmem_desc shmem;
 	int rc, count;
 	u32 buf_id;
 
@@ -359,7 +368,10 @@ int amdtee_map_shmem(struct tee_shm *shm)
 
 	shmnode->kaddr = shm->kaddr;
 	shmnode->buf_id = buf_id;
-	list_add(&shmnode->shm_node, &shmctx.shmdata_list);
+	ctxdata = shm->ctx->data;
+	mutex_lock(&ctxdata->shm_mutex);
+	list_add(&shmnode->shm_node, &ctxdata->shm_list);
+	mutex_unlock(&ctxdata->shm_mutex);
 
 	pr_debug("buf_id :[%x] kaddr[%p]\n", shmnode->buf_id, shmnode->kaddr);
 
@@ -368,6 +380,7 @@ int amdtee_map_shmem(struct tee_shm *shm)
 
 void amdtee_unmap_shmem(struct tee_shm *shm)
 {
+	struct amdtee_context_data *ctxdata;
 	struct amdtee_shm_data *shmnode;
 	u32 buf_id;
 
@@ -378,12 +391,15 @@ void amdtee_unmap_shmem(struct tee_shm *shm)
 	/* Unmap the shared memory from TEE */
 	handle_unmap_shmem(buf_id);
 
-	list_for_each_entry(shmnode, &shmctx.shmdata_list, shm_node)
+	ctxdata = shm->ctx->data;
+	mutex_lock(&ctxdata->shm_mutex);
+	list_for_each_entry(shmnode, &ctxdata->shm_list, shm_node)
 		if (buf_id == shmnode->buf_id) {
 			list_del(&shmnode->shm_node);
 			kfree(shmnode);
 			break;
 		}
+	mutex_unlock(&ctxdata->shm_mutex);
 }
 
 int amdtee_invoke_func(struct tee_context *ctx,

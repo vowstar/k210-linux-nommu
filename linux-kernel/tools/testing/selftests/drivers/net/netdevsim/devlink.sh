@@ -5,16 +5,29 @@ lib_dir=$(dirname $0)/../../../net/forwarding
 
 ALL_TESTS="fw_flash_test params_test regions_test reload_test \
 	   netns_reload_test resource_test dev_info_test \
-	   empty_reporter_test dummy_reporter_test"
+	   empty_reporter_test dummy_reporter_test rate_test"
 NUM_NETIFS=0
 source $lib_dir/lib.sh
 
 BUS_ADDR=10
 PORT_COUNT=4
+VF_COUNT=4
 DEV_NAME=netdevsim$BUS_ADDR
 SYSFS_NET_DIR=/sys/bus/netdevsim/devices/$DEV_NAME/net/
 DEBUGFS_DIR=/sys/kernel/debug/netdevsim/$DEV_NAME/
 DL_HANDLE=netdevsim/$DEV_NAME
+
+wait_for_devlink()
+{
+	"$@" | grep -q $DL_HANDLE
+}
+
+devlink_wait()
+{
+	local timeout=$1
+
+	busywait "$timeout" wait_for_devlink devlink dev
+}
 
 fw_flash_test()
 {
@@ -22,6 +35,27 @@ fw_flash_test()
 
 	devlink dev flash $DL_HANDLE file dummy
 	check_err $? "Failed to flash with status updates on"
+
+	devlink dev flash $DL_HANDLE file dummy component fw.mgmt
+	check_err $? "Failed to flash with component attribute"
+
+	devlink dev flash $DL_HANDLE file dummy overwrite settings
+	check_fail $? "Flash with overwrite settings should be rejected"
+
+	echo "1"> $DEBUGFS_DIR/fw_update_overwrite_mask
+	check_err $? "Failed to change allowed overwrite mask"
+
+	devlink dev flash $DL_HANDLE file dummy overwrite settings
+	check_err $? "Failed to flash with settings overwrite enabled"
+
+	devlink dev flash $DL_HANDLE file dummy overwrite identifiers
+	check_fail $? "Flash with overwrite settings should be identifiers"
+
+	echo "3"> $DEBUGFS_DIR/fw_update_overwrite_mask
+	check_err $? "Failed to change allowed overwrite mask"
+
+	devlink dev flash $DL_HANDLE file dummy overwrite identifiers overwrite settings
+	check_err $? "Failed to flash with settings and identifiers overwrite enabled"
 
 	echo "n"> $DEBUGFS_DIR/fw_update_status
 	check_err $? "Failed to disable status updates"
@@ -141,6 +175,44 @@ regions_test()
 
 	check_region_snapshot_count dummy post-first-delete 2
 
+	devlink region new $DL_HANDLE/dummy snapshot 25
+	check_err $? "Failed to create a new snapshot with id 25"
+
+	check_region_snapshot_count dummy post-first-request 3
+
+	devlink region dump $DL_HANDLE/dummy snapshot 25 >> /dev/null
+	check_err $? "Failed to dump snapshot with id 25"
+
+	devlink region read $DL_HANDLE/dummy snapshot 25 addr 0 len 1 >> /dev/null
+	check_err $? "Failed to read snapshot with id 25 (1 byte)"
+
+	devlink region read $DL_HANDLE/dummy snapshot 25 addr 128 len 128 >> /dev/null
+	check_err $? "Failed to read snapshot with id 25 (128 bytes)"
+
+	devlink region read $DL_HANDLE/dummy snapshot 25 addr 128 len $((1<<32)) >> /dev/null
+	check_err $? "Failed to read snapshot with id 25 (oversized)"
+
+	devlink region read $DL_HANDLE/dummy snapshot 25 addr $((1<<32)) len 128 >> /dev/null 2>&1
+	check_fail $? "Bad read of snapshot with id 25 did not fail"
+
+	devlink region del $DL_HANDLE/dummy snapshot 25
+	check_err $? "Failed to delete snapshot with id 25"
+
+	check_region_snapshot_count dummy post-second-delete 2
+
+	sid=$(devlink -j region new $DL_HANDLE/dummy | jq '.[][][][]')
+	check_err $? "Failed to create a new snapshot with id allocated by the kernel"
+
+	check_region_snapshot_count dummy post-first-request 3
+
+	devlink region dump $DL_HANDLE/dummy snapshot $sid >> /dev/null
+	check_err $? "Failed to dump a snapshot with id allocated by the kernel"
+
+	devlink region del $DL_HANDLE/dummy snapshot $sid
+	check_err $? "Failed to delete snapshot with id allocated by the kernel"
+
+	check_region_snapshot_count dummy post-first-request 2
+
 	log_test "regions test"
 }
 
@@ -195,6 +267,9 @@ netns_reload_test()
 
 	ip netns del testns2
 	ip netns del testns1
+
+	# Wait until netns async cleanup is done.
+	devlink_wait 2000
 
 	log_test "netns reload test"
 }
@@ -288,6 +363,9 @@ resource_test()
 	ip netns del testns2
 	ip netns del testns1
 
+	# Wait until netns async cleanup is done.
+	devlink_wait 2000
+
 	log_test "resource test"
 }
 
@@ -367,6 +445,11 @@ dummy_reporter_test()
 {
 	RET=0
 
+	check_reporter_info dummy healthy 0 0 0 true
+
+	devlink health set $DL_HANDLE reporter dummy auto_recover false
+	check_err $? "Failed to dummy reporter auto_recover option"
+
 	check_reporter_info dummy healthy 0 0 0 false
 
 	local BREAK_MSG="foo bar"
@@ -431,8 +514,8 @@ dummy_reporter_test()
 
 	check_reporter_info dummy healthy 3 3 10 true
 
-	echo 8192> $DEBUGFS_DIR/health/binary_len
-	check_fail $? "Failed set dummy reporter binary len to 8192"
+	echo 8192 > $DEBUGFS_DIR/health/binary_len
+	check_err $? "Failed set dummy reporter binary len to 8192"
 
 	local dump=$(devlink health dump show $DL_HANDLE reporter dummy -j)
 	check_err $? "Failed show dump of dummy reporter"
@@ -441,6 +524,170 @@ dummy_reporter_test()
 	check_err $? "Failed clear dump of dummy reporter"
 
 	log_test "dummy reporter test"
+}
+
+rate_leafs_get()
+{
+	local handle=$1
+
+	cmd_jq "devlink port function rate show -j" \
+	       '.[] | to_entries | .[] | select(.value.type == "leaf") | .key | select(contains("'$handle'"))'
+}
+
+rate_nodes_get()
+{
+	local handle=$1
+
+	cmd_jq "devlink port function rate show -j" \
+		'.[] | to_entries | .[] | select(.value.type == "node") | .key | select(contains("'$handle'"))'
+}
+
+rate_attr_set()
+{
+	local handle=$1
+	local name=$2
+	local value=$3
+	local units=$4
+
+	devlink port function rate set $handle $name $value$units
+}
+
+rate_attr_get()
+{
+	local handle=$1
+	local name=$2
+
+	cmd_jq "devlink port function rate show $handle -j" '.[][].'$name
+}
+
+rate_attr_tx_rate_check()
+{
+	local handle=$1
+	local name=$2
+	local rate=$3
+	local debug_file=$4
+
+	rate_attr_set $handle $name $rate mbit
+	check_err $? "Failed to set $name value"
+
+	local debug_value=$(cat $debug_file)
+	check_err $? "Failed to read $name value from debugfs"
+	[ "$debug_value" == "$rate" ]
+	check_err $? "Unexpected $name debug value $debug_value != $rate"
+
+	local api_value=$(( $(rate_attr_get $handle $name) * 8 / 1000000 ))
+	check_err $? "Failed to get $name attr value"
+	[ "$api_value" == "$rate" ]
+	check_err $? "Unexpected $name attr value $api_value != $rate"
+}
+
+rate_attr_parent_check()
+{
+	local handle=$1
+	local parent=$2
+	local debug_file=$3
+
+	rate_attr_set $handle parent $parent
+	check_err $? "Failed to set parent"
+
+	debug_value=$(cat $debug_file)
+	check_err $? "Failed to get parent debugfs value"
+	[ "$debug_value" == "$parent" ]
+	check_err $? "Unexpected parent debug value $debug_value != $parent"
+
+	api_value=$(rate_attr_get $r_obj parent)
+	check_err $? "Failed to get parent attr value"
+	[ "$api_value" == "$parent" ]
+	check_err $? "Unexpected parent attr value $api_value != $parent"
+}
+
+rate_node_add()
+{
+	local handle=$1
+
+	devlink port function rate add $handle
+}
+
+rate_node_del()
+{
+	local handle=$1
+
+	devlink port function rate del $handle
+}
+
+rate_test()
+{
+	RET=0
+
+	echo $VF_COUNT > /sys/bus/netdevsim/devices/$DEV_NAME/sriov_numvfs
+	devlink dev eswitch set $DL_HANDLE mode switchdev
+	local leafs=`rate_leafs_get $DL_HANDLE`
+	local num_leafs=`echo $leafs | wc -w`
+	[ "$num_leafs" == "$VF_COUNT" ]
+	check_err $? "Expected $VF_COUNT rate leafs but got $num_leafs"
+
+	rate=10
+	for r_obj in $leafs
+	do
+		rate_attr_tx_rate_check $r_obj tx_share $rate \
+			$DEBUGFS_DIR/ports/${r_obj##*/}/tx_share
+		rate=$(($rate+10))
+	done
+
+	rate=100
+	for r_obj in $leafs
+	do
+		rate_attr_tx_rate_check $r_obj tx_max $rate \
+			$DEBUGFS_DIR/ports/${r_obj##*/}/tx_max
+		rate=$(($rate+100))
+	done
+
+	local node1_name='group1'
+	local node1="$DL_HANDLE/$node1_name"
+	rate_node_add "$node1"
+	check_err $? "Failed to add node $node1"
+
+	local num_nodes=`rate_nodes_get $DL_HANDLE | wc -w`
+	[ $num_nodes == 1 ]
+	check_err $? "Expected 1 rate node in output but got $num_nodes"
+
+	local node_tx_share=10
+	rate_attr_tx_rate_check $node1 tx_share $node_tx_share \
+		$DEBUGFS_DIR/rate_nodes/${node1##*/}/tx_share
+
+	local node_tx_max=100
+	rate_attr_tx_rate_check $node1 tx_max $node_tx_max \
+		$DEBUGFS_DIR/rate_nodes/${node1##*/}/tx_max
+
+	rate_node_del "$node1"
+	check_err $? "Failed to delete node $node1"
+	local num_nodes=`rate_nodes_get $DL_HANDLE | wc -w`
+	[ $num_nodes == 0 ]
+	check_err $? "Expected 0 rate node but got $num_nodes"
+
+	local node1_name='group1'
+	local node1="$DL_HANDLE/$node1_name"
+	rate_node_add "$node1"
+	check_err $? "Failed to add node $node1"
+
+	rate_attr_parent_check $r_obj $node1_name \
+		$DEBUGFS_DIR/ports/${r_obj##*/}/rate_parent
+
+	local node2_name='group2'
+	local node2="$DL_HANDLE/$node2_name"
+	rate_node_add "$node2"
+	check_err $? "Failed to add node $node2"
+
+	rate_attr_parent_check $node2 $node1_name \
+		$DEBUGFS_DIR/rate_nodes/$node2_name/rate_parent
+	rate_node_del "$node2"
+	check_err $? "Failed to delete node $node2"
+	rate_attr_set "$r_obj" noparent
+	check_err $? "Failed to unset $r_obj parent node"
+	rate_node_del "$node1"
+	check_err $? "Failed to delete node $node1"
+
+	log_test "rate test"
 }
 
 setup_prepare()

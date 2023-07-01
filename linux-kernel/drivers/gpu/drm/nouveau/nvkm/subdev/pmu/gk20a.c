@@ -197,7 +197,6 @@ gk20a_dvfs_data= {
 static const struct nvkm_pmu_func
 gk20a_pmu = {
 	.flcn = &gt215_pmu_flcn,
-	.enabled = gf100_pmu_enabled,
 	.init = gk20a_pmu_init,
 	.fini = gk20a_pmu_fini,
 	.reset = gf100_pmu_reset,
@@ -210,7 +209,8 @@ gk20a_pmu_fwif[] = {
 };
 
 int
-gk20a_pmu_new(struct nvkm_device *device, int index, struct nvkm_pmu **ppmu)
+gk20a_pmu_new(struct nvkm_device *device, enum nvkm_subdev_type type, int inst,
+	      struct nvkm_pmu **ppmu)
 {
 	struct gk20a_pmu *pmu;
 	int ret;
@@ -219,7 +219,7 @@ gk20a_pmu_new(struct nvkm_device *device, int index, struct nvkm_pmu **ppmu)
 		return -ENOMEM;
 	*ppmu = &pmu->base;
 
-	ret = nvkm_pmu_ctor(gk20a_pmu_fwif, device, index, &pmu->base);
+	ret = nvkm_pmu_ctor(gk20a_pmu_fwif, device, type, inst, &pmu->base);
 	if (ret)
 		return ret;
 

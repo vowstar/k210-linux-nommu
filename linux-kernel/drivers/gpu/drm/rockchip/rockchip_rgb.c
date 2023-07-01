@@ -6,17 +6,21 @@
  */
 
 #include <linux/component.h>
+#include <linux/media-bus-format.h>
 #include <linux/of_graph.h>
 
+#include <drm/display/drm_dp_helper.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_bridge.h>
-#include <drm/drm_dp_helper.h>
+#include <drm/drm_bridge_connector.h>
 #include <drm/drm_of.h>
 #include <drm/drm_panel.h>
 #include <drm/drm_probe_helper.h>
+#include <drm/drm_simple_kms_helper.h>
 
 #include "rockchip_drm_drv.h"
 #include "rockchip_drm_vop.h"
+#include "rockchip_rgb.h"
 
 #define encoder_to_rgb(c) container_of(c, struct rockchip_rgb, encoder)
 
@@ -25,6 +29,7 @@ struct rockchip_rgb {
 	struct drm_device *drm_dev;
 	struct drm_bridge *bridge;
 	struct drm_encoder encoder;
+	struct drm_connector connector;
 	int output_mode;
 };
 
@@ -67,10 +72,6 @@ struct drm_encoder_helper_funcs rockchip_rgb_encoder_helper_funcs = {
 	.atomic_check = rockchip_rgb_encoder_atomic_check,
 };
 
-static const struct drm_encoder_funcs rockchip_rgb_encoder_funcs = {
-	.destroy = drm_encoder_cleanup,
-};
-
 struct rockchip_rgb *rockchip_rgb_init(struct device *dev,
 				       struct drm_crtc *crtc,
 				       struct drm_device *drm_dev)
@@ -82,6 +83,7 @@ struct rockchip_rgb *rockchip_rgb_init(struct device *dev,
 	int ret = 0, child_count = 0;
 	struct drm_panel *panel;
 	struct drm_bridge *bridge;
+	struct drm_connector *connector;
 
 	rgb = devm_kzalloc(dev, sizeof(*rgb), GFP_KERNEL);
 	if (!rgb)
@@ -98,7 +100,8 @@ struct rockchip_rgb *rockchip_rgb_init(struct device *dev,
 		if (of_property_read_u32(endpoint, "reg", &endpoint_id))
 			endpoint_id = 0;
 
-		if (rockchip_drm_endpoint_is_subdriver(endpoint) > 0)
+		/* if subdriver (> 0) or error case (< 0), ignore entry */
+		if (rockchip_drm_endpoint_is_subdriver(endpoint) != 0)
 			continue;
 
 		child_count++;
@@ -125,8 +128,7 @@ struct rockchip_rgb *rockchip_rgb_init(struct device *dev,
 	encoder = &rgb->encoder;
 	encoder->possible_crtcs = drm_crtc_mask(crtc);
 
-	ret = drm_encoder_init(drm_dev, encoder, &rockchip_rgb_encoder_funcs,
-			       DRM_MODE_ENCODER_NONE, NULL);
+	ret = drm_simple_encoder_init(drm_dev, encoder, DRM_MODE_ENCODER_NONE);
 	if (ret < 0) {
 		DRM_DEV_ERROR(drm_dev->dev,
 			      "failed to initialize encoder: %d\n", ret);
@@ -144,15 +146,32 @@ struct rockchip_rgb *rockchip_rgb_init(struct device *dev,
 
 	rgb->bridge = bridge;
 
-	ret = drm_bridge_attach(encoder, rgb->bridge, NULL);
-	if (ret) {
-		DRM_DEV_ERROR(drm_dev->dev,
-			      "failed to attach bridge: %d\n", ret);
+	ret = drm_bridge_attach(encoder, rgb->bridge, NULL,
+				DRM_BRIDGE_ATTACH_NO_CONNECTOR);
+	if (ret)
 		goto err_free_encoder;
+
+	connector = &rgb->connector;
+	connector = drm_bridge_connector_init(rgb->drm_dev, encoder);
+	if (IS_ERR(connector)) {
+		DRM_DEV_ERROR(drm_dev->dev,
+			      "failed to initialize bridge connector: %pe\n",
+			      connector);
+		ret = PTR_ERR(connector);
+		goto err_free_encoder;
+	}
+
+	ret = drm_connector_attach_encoder(connector, encoder);
+	if (ret < 0) {
+		DRM_DEV_ERROR(drm_dev->dev,
+			      "failed to attach encoder: %d\n", ret);
+		goto err_free_connector;
 	}
 
 	return rgb;
 
+err_free_connector:
+	drm_connector_cleanup(connector);
 err_free_encoder:
 	drm_encoder_cleanup(encoder);
 	return ERR_PTR(ret);
@@ -162,6 +181,7 @@ EXPORT_SYMBOL_GPL(rockchip_rgb_init);
 void rockchip_rgb_fini(struct rockchip_rgb *rgb)
 {
 	drm_panel_bridge_remove(rgb->bridge);
+	drm_connector_cleanup(&rgb->connector);
 	drm_encoder_cleanup(&rgb->encoder);
 }
 EXPORT_SYMBOL_GPL(rockchip_rgb_fini);

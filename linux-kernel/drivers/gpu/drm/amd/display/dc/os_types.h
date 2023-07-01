@@ -27,13 +27,16 @@
 #ifndef _OS_TYPES_H_
 #define _OS_TYPES_H_
 
+#include <linux/slab.h>
 #include <linux/kgdb.h>
 #include <linux/kref.h>
 #include <linux/types.h>
-#include <linux/slab.h>
+#include <linux/delay.h>
+#include <linux/mm.h>
 
 #include <asm/byteorder.h>
 
+#include <drm/display/drm_dp_helper.h>
 #include <drm/drm_print.h>
 
 #include "cgs_common.h"
@@ -51,38 +54,9 @@
 #define dm_error(fmt, ...) DRM_ERROR(fmt, ##__VA_ARGS__)
 
 #if defined(CONFIG_DRM_AMD_DC_DCN)
-#if defined(CONFIG_X86)
-#include <asm/fpu/api.h>
-#define DC_FP_START() kernel_fpu_begin()
-#define DC_FP_END() kernel_fpu_end()
-#elif defined(CONFIG_PPC64)
-#include <asm/switch_to.h>
-#include <asm/cputable.h>
-#define DC_FP_START() { \
-	if (cpu_has_feature(CPU_FTR_VSX_COMP)) { \
-		preempt_disable(); \
-		enable_kernel_vsx(); \
-	} else if (cpu_has_feature(CPU_FTR_ALTIVEC_COMP)) { \
-		preempt_disable(); \
-		enable_kernel_altivec(); \
-	} else if (!cpu_has_feature(CPU_FTR_FPU_UNAVAILABLE)) { \
-		preempt_disable(); \
-		enable_kernel_fp(); \
-	} \
-}
-#define DC_FP_END() { \
-	if (cpu_has_feature(CPU_FTR_VSX_COMP)) { \
-		disable_kernel_vsx(); \
-		preempt_enable(); \
-	} else if (cpu_has_feature(CPU_FTR_ALTIVEC_COMP)) { \
-		disable_kernel_altivec(); \
-		preempt_enable(); \
-	} else if (!cpu_has_feature(CPU_FTR_FPU_UNAVAILABLE)) { \
-		disable_kernel_fp(); \
-		preempt_enable(); \
-	} \
-}
-#endif
+#include "amdgpu_dm/dc_fpu.h"
+#define DC_FP_START() dc_fpu_begin(__func__, __LINE__)
+#define DC_FP_END() dc_fpu_end(__func__, __LINE__)
 #endif
 
 /*
@@ -90,28 +64,27 @@
  * general debug capabilities
  *
  */
-#if defined(CONFIG_HAVE_KGDB) || defined(CONFIG_KGDB)
-#define ASSERT_CRITICAL(expr) do {	\
-	if (WARN_ON(!(expr))) { \
-		kgdb_breakpoint(); \
-	} \
-} while (0)
+#ifdef CONFIG_DEBUG_KERNEL_DC
+#define dc_breakpoint()		kgdb_breakpoint()
 #else
-#define ASSERT_CRITICAL(expr) do {	\
-	if (WARN_ON(!(expr))) { \
-		; \
-	} \
-} while (0)
+#define dc_breakpoint()		do {} while (0)
 #endif
 
-#if defined(CONFIG_DEBUG_KERNEL_DC)
-#define ASSERT(expr) ASSERT_CRITICAL(expr)
+#define ASSERT_CRITICAL(expr) do {		\
+		if (WARN_ON(!(expr)))		\
+			dc_breakpoint();	\
+	} while (0)
 
-#else
-#define ASSERT(expr) WARN_ON(!(expr))
-#endif
+#define ASSERT(expr) do {			\
+		if (WARN_ON_ONCE(!(expr)))	\
+			dc_breakpoint();	\
+	} while (0)
 
-#define BREAK_TO_DEBUGGER() ASSERT(0)
+#define BREAK_TO_DEBUGGER() \
+	do { \
+		DRM_DEBUG_DRIVER("%s():%d\n", __func__, __LINE__); \
+		dc_breakpoint(); \
+	} while (0)
 
 #define DC_ERR(...)  do { \
 	dm_error(__VA_ARGS__); \

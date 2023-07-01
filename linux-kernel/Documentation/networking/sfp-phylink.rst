@@ -74,10 +74,13 @@ phylib to the sfp/phylink support.  Please send patches to improve
 this documentation.
 
 1. Optionally split the network driver's phylib update function into
-   three parts dealing with link-down, link-up and reconfiguring the
-   MAC settings. This can be done as a separate preparation commit.
+   two parts dealing with link-down and link-up. This can be done as
+   a separate preparation commit.
 
-   An example of this preparation can be found in git commit fc548b991fb0.
+   An older example of this preparation can be found in git commit
+   fc548b991fb0, although this was splitting into three parts; the
+   link-up part now includes configuring the MAC for the link settings.
+   Please see :c:func:`mac_link_up` for more information on this.
 
 2. Replace::
 
@@ -135,32 +138,32 @@ this documentation.
 
    .. code-block:: c
 
-    static int foo_ethtool_set_link_ksettings(struct net_device *dev,
-					     const struct ethtool_link_ksettings *cmd)
-    {
-	struct foo_priv *priv = netdev_priv(dev);
+	static int foo_ethtool_set_link_ksettings(struct net_device *dev,
+						  const struct ethtool_link_ksettings *cmd)
+	{
+		struct foo_priv *priv = netdev_priv(dev);
+	
+		return phylink_ethtool_ksettings_set(priv->phylink, cmd);
+	}
 
-	return phylink_ethtool_ksettings_set(priv->phylink, cmd);
-    }
+	static int foo_ethtool_get_link_ksettings(struct net_device *dev,
+						  struct ethtool_link_ksettings *cmd)
+	{
+		struct foo_priv *priv = netdev_priv(dev);
+	
+		return phylink_ethtool_ksettings_get(priv->phylink, cmd);
+	}
 
-    static int foo_ethtool_get_link_ksettings(struct net_device *dev,
-					     struct ethtool_link_ksettings *cmd)
-    {
-	struct foo_priv *priv = netdev_priv(dev);
-
-	return phylink_ethtool_ksettings_get(priv->phylink, cmd);
-    }
-
-7. Replace the call to:
+7. Replace the call to::
 
 	phy_dev = of_phy_connect(dev, node, link_func, flags, phy_interface);
 
-   and associated code with a call to:
+   and associated code with a call to::
 
 	err = phylink_of_phy_connect(priv->phylink, node, flags);
 
    For the most part, ``flags`` can be zero; these flags are passed to
-   the of_phy_attach() inside this function call if a PHY is specified
+   the phy_attach_direct() inside this function call if a PHY is specified
    in the DT node ``node``.
 
    ``node`` should be the DT node which contains the network phy property,
@@ -200,12 +203,20 @@ this documentation.
    The :c:func:`validate` method should mask the supplied supported mask,
    and ``state->advertising`` with the supported ethtool link modes.
    These are the new ethtool link modes, so bitmask operations must be
-   used. For an example, see drivers/net/ethernet/marvell/mvneta.c.
+   used. For an example, see ``drivers/net/ethernet/marvell/mvneta.c``.
 
    The :c:func:`mac_link_state` method is used to read the link state
    from the MAC, and report back the settings that the MAC is currently
    using. This is particularly important for in-band negotiation
    methods such as 1000base-X and SGMII.
+
+   The :c:func:`mac_link_up` method is used to inform the MAC that the
+   link has come up. The call includes the negotiation mode and interface
+   for reference only. The finalised link parameters are also supplied
+   (speed, duplex and flow control/pause enablement settings) which
+   should be used to configure the MAC when the MAC and PCS are not
+   tightly integrated, or when the settings are not coming from in-band
+   negotiation.
 
    The :c:func:`mac_config` method is used to update the MAC with the
    requested state, and must avoid unnecessarily taking the link down
@@ -213,7 +224,7 @@ this documentation.
    function should modify the state and only take the link down when
    absolutely necessary to change the MAC configuration.  An example
    of how to do this can be found in :c:func:`mvneta_mac_config` in
-   drivers/net/ethernet/marvell/mvneta.c.
+   ``drivers/net/ethernet/marvell/mvneta.c``.
 
    For further information on these methods, please see the inline
    documentation in :c:type:`struct phylink_mac_ops <phylink_mac_ops>`.
@@ -270,4 +281,4 @@ as necessary.
 
 For information describing the SFP cage in DT, please see the binding
 documentation in the kernel source tree
-``Documentation/devicetree/bindings/net/sff,sfp.txt``
+``Documentation/devicetree/bindings/net/sff,sfp.yaml``.

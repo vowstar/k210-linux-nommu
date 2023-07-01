@@ -2,14 +2,13 @@
 /*
  * Copyright 2013-2016 Freescale Semiconductor Inc.
  * Copyright 2016-2018 NXP
+ * Copyright 2020 NXP
  */
 
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/msi.h>
 #include <linux/fsl/mc.h>
-#include <linux/fsl/ptp_qoriq.h>
 
 #include "dpaa2-ptp.h"
 
@@ -129,7 +128,6 @@ static irqreturn_t dpaa2_ptp_irq_handler_thread(int irq, void *priv)
 static int dpaa2_ptp_probe(struct fsl_mc_device *mc_dev)
 {
 	struct device *dev = &mc_dev->dev;
-	struct fsl_mc_device_irq *irq;
 	struct ptp_qoriq *ptp_qoriq;
 	struct device_node *node;
 	void __iomem *base;
@@ -168,7 +166,7 @@ static int dpaa2_ptp_probe(struct fsl_mc_device *mc_dev)
 	base = of_iomap(node, 0);
 	if (!base) {
 		err = -ENOMEM;
-		goto err_close;
+		goto err_put;
 	}
 
 	err = fsl_mc_allocate_irqs(mc_dev);
@@ -177,8 +175,7 @@ static int dpaa2_ptp_probe(struct fsl_mc_device *mc_dev)
 		goto err_unmap;
 	}
 
-	irq = mc_dev->irqs[0];
-	ptp_qoriq->irq = irq->msi_desc->irq;
+	ptp_qoriq->irq = mc_dev->irqs[0]->virq;
 
 	err = request_threaded_irq(ptp_qoriq->irq, NULL,
 				   dpaa2_ptp_irq_handler_thread,
@@ -201,6 +198,7 @@ static int dpaa2_ptp_probe(struct fsl_mc_device *mc_dev)
 		goto err_free_threaded_irq;
 
 	dpaa2_phc_index = ptp_qoriq->phc_index;
+	dpaa2_ptp = ptp_qoriq;
 	dev_set_drvdata(dev, ptp_qoriq);
 
 	return 0;
@@ -211,6 +209,8 @@ err_free_mc_irq:
 	fsl_mc_free_irqs(mc_dev);
 err_unmap:
 	iounmap(base);
+err_put:
+	of_node_put(node);
 err_close:
 	dprtc_close(mc_dev->mc_io, 0, mc_dev->mc_handle);
 err_free_mcp:

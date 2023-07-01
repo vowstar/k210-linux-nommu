@@ -13,6 +13,7 @@
 
 #include <linux/dm-bufio.h>
 #include <linux/device-mapper.h>
+#include <linux/interrupt.h>
 #include <crypto/hash.h>
 
 #define DM_VERITY_MAX_LEVELS		63
@@ -20,7 +21,8 @@
 enum verity_mode {
 	DM_VERITY_MODE_EIO,
 	DM_VERITY_MODE_LOGGING,
-	DM_VERITY_MODE_RESTART
+	DM_VERITY_MODE_RESTART,
+	DM_VERITY_MODE_PANIC
 };
 
 enum verity_block_type {
@@ -40,7 +42,7 @@ struct dm_verity {
 	u8 *root_digest;	/* digest of the root block */
 	u8 *salt;		/* salt: its size is salt_size */
 	u8 *zero_digest;	/* digest for a zero block */
-	unsigned salt_size;
+	unsigned int salt_size;
 	sector_t data_start;	/* data offset in 512-byte sectors */
 	sector_t hash_start;	/* hash start in blocks */
 	sector_t data_blocks;	/* the number of data blocks */
@@ -50,11 +52,12 @@ struct dm_verity {
 	unsigned char hash_per_block_bits;	/* log2(hashes in hash block) */
 	unsigned char levels;	/* the number of tree levels */
 	unsigned char version;
-	unsigned digest_size;	/* digest size for the current hash algorithm */
+	bool hash_failed:1;	/* set if hash of any block failed */
+	bool use_tasklet:1;	/* try to verify in tasklet before work-queue */
+	unsigned int digest_size;	/* digest size for the current hash algorithm */
 	unsigned int ahash_reqsize;/* the size of temporary space for crypto */
-	int hash_failed;	/* set to 1 if hash of any block failed */
 	enum verity_mode mode;	/* mode for handling verification errors */
-	unsigned corrupted_errs;/* Number of errors for corrupted blocks */
+	unsigned int corrupted_errs;/* Number of errors for corrupted blocks */
 
 	struct workqueue_struct *verify_wq;
 
@@ -74,11 +77,13 @@ struct dm_verity_io {
 	bio_end_io_t *orig_bi_end_io;
 
 	sector_t block;
-	unsigned n_blocks;
+	unsigned int n_blocks;
+	bool in_tasklet;
 
 	struct bvec_iter iter;
 
 	struct work_struct work;
+	struct tasklet_struct tasklet;
 
 	/*
 	 * Three variably-size fields follow this struct:
@@ -127,5 +132,10 @@ extern int verity_hash(struct dm_verity *v, struct ahash_request *req,
 
 extern int verity_hash_for_block(struct dm_verity *v, struct dm_verity_io *io,
 				 sector_t block, u8 *digest, bool *is_zero);
+
+extern bool dm_is_verity_target(struct dm_target *ti);
+extern int dm_verity_get_mode(struct dm_target *ti);
+extern int dm_verity_get_root_digest(struct dm_target *ti, u8 **root_digest,
+				     unsigned int *digest_size);
 
 #endif /* DM_VERITY_H */

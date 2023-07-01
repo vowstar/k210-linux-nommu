@@ -173,23 +173,20 @@ static int stm32_sai_probe(struct platform_device *pdev)
 
 	if (!STM_SAI_IS_F4(sai)) {
 		sai->pclk = devm_clk_get(&pdev->dev, "pclk");
-		if (IS_ERR(sai->pclk)) {
-			dev_err(&pdev->dev, "missing bus clock pclk\n");
-			return PTR_ERR(sai->pclk);
-		}
+		if (IS_ERR(sai->pclk))
+			return dev_err_probe(&pdev->dev, PTR_ERR(sai->pclk),
+					     "missing bus clock pclk\n");
 	}
 
 	sai->clk_x8k = devm_clk_get(&pdev->dev, "x8k");
-	if (IS_ERR(sai->clk_x8k)) {
-		dev_err(&pdev->dev, "missing x8k parent clock\n");
-		return PTR_ERR(sai->clk_x8k);
-	}
+	if (IS_ERR(sai->clk_x8k))
+		return dev_err_probe(&pdev->dev, PTR_ERR(sai->clk_x8k),
+				     "missing x8k parent clock\n");
 
 	sai->clk_x11k = devm_clk_get(&pdev->dev, "x11k");
-	if (IS_ERR(sai->clk_x11k)) {
-		dev_err(&pdev->dev, "missing x11k parent clock\n");
-		return PTR_ERR(sai->clk_x11k);
-	}
+	if (IS_ERR(sai->clk_x11k))
+		return dev_err_probe(&pdev->dev, PTR_ERR(sai->clk_x11k),
+				     "missing x11k parent clock\n");
 
 	/* init irqs */
 	sai->irq = platform_get_irq(pdev, 0);
@@ -197,12 +194,14 @@ static int stm32_sai_probe(struct platform_device *pdev)
 		return sai->irq;
 
 	/* reset */
-	rst = devm_reset_control_get_exclusive(&pdev->dev, NULL);
-	if (!IS_ERR(rst)) {
-		reset_control_assert(rst);
-		udelay(2);
-		reset_control_deassert(rst);
-	}
+	rst = devm_reset_control_get_optional_exclusive(&pdev->dev, NULL);
+	if (IS_ERR(rst))
+		return dev_err_probe(&pdev->dev, PTR_ERR(rst),
+				     "Reset controller error\n");
+
+	reset_control_assert(rst);
+	udelay(2);
+	reset_control_deassert(rst);
 
 	/* Enable peripheral clock to allow register access */
 	ret = clk_prepare_enable(sai->pclk);

@@ -42,7 +42,6 @@ static const struct constant_table common_set_sb_flag[] = {
 	{ "dirsync",	SB_DIRSYNC },
 	{ "lazytime",	SB_LAZYTIME },
 	{ "mand",	SB_MANDLOCK },
-	{ "posixacl",	SB_POSIXACL },
 	{ "ro",		SB_RDONLY },
 	{ "sync",	SB_SYNCHRONOUS },
 	{ },
@@ -53,31 +52,7 @@ static const struct constant_table common_clear_sb_flag[] = {
 	{ "nolazytime",	SB_LAZYTIME },
 	{ "nomand",	SB_MANDLOCK },
 	{ "rw",		SB_RDONLY },
-	{ "silent",	SB_SILENT },
 	{ },
-};
-
-static const char *const forbidden_sb_flag[] = {
-	"bind",
-	"dev",
-	"exec",
-	"move",
-	"noatime",
-	"nodev",
-	"nodiratime",
-	"noexec",
-	"norelatime",
-	"nostrictatime",
-	"nosuid",
-	"private",
-	"rec",
-	"relatime",
-	"remount",
-	"shared",
-	"slave",
-	"strictatime",
-	"suid",
-	"unbindable",
 };
 
 /*
@@ -86,11 +61,6 @@ static const char *const forbidden_sb_flag[] = {
 static int vfs_parse_sb_flag(struct fs_context *fc, const char *key)
 {
 	unsigned int token;
-	unsigned int i;
-
-	for (i = 0; i < ARRAY_SIZE(forbidden_sb_flag); i++)
-		if (strcmp(key, forbidden_sb_flag[i]) == 0)
-			return -EINVAL;
 
 	token = lookup_constant(common_set_sb_flag, key, 0);
 	if (token) {
@@ -108,6 +78,35 @@ static int vfs_parse_sb_flag(struct fs_context *fc, const char *key)
 
 	return -ENOPARAM;
 }
+
+/**
+ * vfs_parse_fs_param_source - Handle setting "source" via parameter
+ * @fc: The filesystem context to modify
+ * @param: The parameter
+ *
+ * This is a simple helper for filesystems to verify that the "source" they
+ * accept is sane.
+ *
+ * Returns 0 on success, -ENOPARAM if this is not  "source" parameter, and
+ * -EINVAL otherwise. In the event of failure, supplementary error information
+ *  is logged.
+ */
+int vfs_parse_fs_param_source(struct fs_context *fc, struct fs_parameter *param)
+{
+	if (strcmp(param->key, "source") != 0)
+		return -ENOPARAM;
+
+	if (param->type != fs_value_is_string)
+		return invalf(fc, "Non-string source");
+
+	if (fc->source)
+		return invalf(fc, "Multiple sources");
+
+	fc->source = param->string;
+	param->string = NULL;
+	return 0;
+}
+EXPORT_SYMBOL(vfs_parse_fs_param_source);
 
 /**
  * vfs_parse_fs_param - Add a single parameter to a superblock config
@@ -152,15 +151,9 @@ int vfs_parse_fs_param(struct fs_context *fc, struct fs_parameter *param)
 	/* If the filesystem doesn't take any arguments, give it the
 	 * default handling of source.
 	 */
-	if (strcmp(param->key, "source") == 0) {
-		if (param->type != fs_value_is_string)
-			return invalf(fc, "VFS: Non-string source");
-		if (fc->source)
-			return invalf(fc, "VFS: Multiple sources");
-		fc->source = param->string;
-		param->string = NULL;
-		return 0;
-	}
+	ret = vfs_parse_fs_param_source(fc, param);
+	if (ret != -ENOPARAM)
+		return ret;
 
 	return invalf(fc, "%s: Unknown parameter '%s'",
 		      fc->fs_type->name, param->key);
@@ -261,7 +254,7 @@ static struct fs_context *alloc_fs_context(struct file_system_type *fs_type,
 	struct fs_context *fc;
 	int ret = -ENOMEM;
 
-	fc = kzalloc(sizeof(struct fs_context), GFP_KERNEL);
+	fc = kzalloc(sizeof(struct fs_context), GFP_KERNEL_ACCOUNT);
 	if (!fc)
 		return ERR_PTR(-ENOMEM);
 
@@ -534,16 +527,11 @@ static int legacy_parse_param(struct fs_context *fc, struct fs_parameter *param)
 	struct legacy_fs_context *ctx = fc->fs_private;
 	unsigned int size = ctx->data_size;
 	size_t len = 0;
+	int ret;
 
-	if (strcmp(param->key, "source") == 0) {
-		if (param->type != fs_value_is_string)
-			return invalf(fc, "VFS: Legacy: Non-string source");
-		if (fc->source)
-			return invalf(fc, "VFS: Legacy: Multiple sources");
-		fc->source = param->string;
-		param->string = NULL;
-		return 0;
-	}
+	ret = vfs_parse_fs_param_source(fc, param);
+	if (ret != -ENOPARAM)
+		return ret;
 
 	if (ctx->param_type == LEGACY_FS_MONOLITHIC_PARAMS)
 		return invalf(fc, "VFS: Legacy: Can't mix monolithic and individual options");
@@ -551,7 +539,7 @@ static int legacy_parse_param(struct fs_context *fc, struct fs_parameter *param)
 	switch (param->type) {
 	case fs_value_is_string:
 		len = 1 + param->size;
-		/* Fall through */
+		fallthrough;
 	case fs_value_is_flag:
 		len += strlen(param->key);
 		break;
@@ -560,7 +548,7 @@ static int legacy_parse_param(struct fs_context *fc, struct fs_parameter *param)
 			      param->key);
 	}
 
-	if (len > PAGE_SIZE - 2 - size)
+	if (size + len + 2 > PAGE_SIZE)
 		return invalf(fc, "VFS: Legacy: Cumulative options too large");
 	if (strchr(param->key, ',') ||
 	    (param->type == fs_value_is_string &&
@@ -661,7 +649,7 @@ const struct fs_context_operations legacy_fs_context_ops = {
  */
 static int legacy_init_fs_context(struct fs_context *fc)
 {
-	fc->fs_private = kzalloc(sizeof(struct legacy_fs_context), GFP_KERNEL);
+	fc->fs_private = kzalloc(sizeof(struct legacy_fs_context), GFP_KERNEL_ACCOUNT);
 	if (!fc->fs_private)
 		return -ENOMEM;
 	fc->ops = &legacy_fs_context_ops;

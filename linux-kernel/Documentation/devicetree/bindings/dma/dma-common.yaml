@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/dma/dma-common.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: DMA Engine Generic Binding
+title: DMA Engine Common Properties
 
 maintainers:
   - Vinod Koul <vkoul@kernel.org>
@@ -31,22 +31,23 @@ properties:
       kernel. i.e. first channel corresponds to LSB.
       The first item in the array is for channels 0-31, the second is for
       channels 32-63, etc.
-    allOf:
-      - $ref: /schemas/types.yaml#/definitions/uint32-array
+    $ref: /schemas/types.yaml#/definitions/uint32-array
     items:
       minItems: 1
       # Should be enough
       maxItems: 255
 
   dma-channels:
-    $ref: /schemas/types.yaml#definitions/uint32
+    $ref: /schemas/types.yaml#/definitions/uint32
     description:
       Number of DMA channels supported by the controller.
 
   dma-requests:
-    $ref: /schemas/types.yaml#definitions/uint32
+    $ref: /schemas/types.yaml#/definitions/uint32
     description:
       Number of DMA request signals supported by the controller.
 
 required:
   - "#dma-cells"
+
+additionalProperties: true

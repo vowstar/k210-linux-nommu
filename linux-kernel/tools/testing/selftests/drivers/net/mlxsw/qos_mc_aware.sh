@@ -129,9 +129,10 @@ switch_create()
 	vlan_create $swp2 111
 	vlan_create $swp3 111
 
-	ethtool -s $swp3 speed 1000 autoneg off
-	tc qdisc replace dev $swp3 root handle 3: \
-	   prio bands 8 priomap 7 7 7 7 7 7 7 7
+	tc qdisc replace dev $swp3 root handle 3: tbf rate 1gbit \
+		burst 128K limit 1G
+	tc qdisc replace dev $swp3 parent 3:3 handle 33: \
+		prio bands 8 priomap 7 7 7 7 7 7 7 7
 
 	ip link add name br1 type bridge vlan_filtering 0
 	ip link set dev br1 up
@@ -145,12 +146,17 @@ switch_create()
 
 	# Make sure that ingress quotas are smaller than egress so that there is
 	# room for both streams of traffic to be admitted to shared buffer.
+	devlink_port_pool_th_save $swp1 0
 	devlink_port_pool_th_set $swp1 0 5
+	devlink_tc_bind_pool_th_save $swp1 0 ingress
 	devlink_tc_bind_pool_th_set $swp1 0 ingress 0 5
 
+	devlink_port_pool_th_save $swp2 0
 	devlink_port_pool_th_set $swp2 0 5
+	devlink_tc_bind_pool_th_save $swp2 1 ingress
 	devlink_tc_bind_pool_th_set $swp2 1 ingress 0 5
 
+	devlink_port_pool_th_save $swp3 4
 	devlink_port_pool_th_set $swp3 4 12
 }
 
@@ -167,8 +173,8 @@ switch_destroy()
 	ip link del dev br111
 	ip link del dev br1
 
+	tc qdisc del dev $swp3 parent 3:3 handle 33:
 	tc qdisc del dev $swp3 root handle 3:
-	ethtool -s $swp3 autoneg on
 
 	vlan_destroy $swp3 111
 	vlan_destroy $swp2 111
@@ -300,7 +306,7 @@ test_uc_aware()
 	local i
 
 	for ((i = 0; i < attempts; ++i)); do
-		if $ARPING -c 1 -I $h1 -b 192.0.2.66 -q -w 0.1; then
+		if $ARPING -c 1 -I $h1 -b 192.0.2.66 -q -w 1; then
 			((passes++))
 		fi
 

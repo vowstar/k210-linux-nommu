@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
+/* SPDX-License-Identifier: LGPL-2.1 WITH Linux-syscall-note */
 /* Copyright(c) 2019 Intel Corporation. All rights rsvd. */
 #ifndef _USR_IDXD_H_
 #define _USR_IDXD_H_
@@ -8,6 +8,32 @@
 #else
 #include <stdint.h>
 #endif
+
+/* Driver command error status */
+enum idxd_scmd_stat {
+	IDXD_SCMD_DEV_ENABLED = 0x80000010,
+	IDXD_SCMD_DEV_NOT_ENABLED = 0x80000020,
+	IDXD_SCMD_WQ_ENABLED = 0x80000021,
+	IDXD_SCMD_DEV_DMA_ERR = 0x80020000,
+	IDXD_SCMD_WQ_NO_GRP = 0x80030000,
+	IDXD_SCMD_WQ_NO_NAME = 0x80040000,
+	IDXD_SCMD_WQ_NO_SVM = 0x80050000,
+	IDXD_SCMD_WQ_NO_THRESH = 0x80060000,
+	IDXD_SCMD_WQ_PORTAL_ERR = 0x80070000,
+	IDXD_SCMD_WQ_RES_ALLOC_ERR = 0x80080000,
+	IDXD_SCMD_PERCPU_ERR = 0x80090000,
+	IDXD_SCMD_DMA_CHAN_ERR = 0x800a0000,
+	IDXD_SCMD_CDEV_ERR = 0x800b0000,
+	IDXD_SCMD_WQ_NO_SWQ_SUPPORT = 0x800c0000,
+	IDXD_SCMD_WQ_NONE_CONFIGURED = 0x800d0000,
+	IDXD_SCMD_WQ_NO_SIZE = 0x800e0000,
+	IDXD_SCMD_WQ_NO_PRIV = 0x800f0000,
+	IDXD_SCMD_WQ_IRQ_ERR = 0x80100000,
+	IDXD_SCMD_WQ_USER_NO_IOMMU = 0x80110000,
+};
+
+#define IDXD_SCMD_SOFTERR_MASK	0x80000000
+#define IDXD_SCMD_SOFTERR_SHIFT	16
 
 /* Descriptor flags */
 #define IDXD_OP_FLAG_FENCE	0x0001
@@ -25,6 +51,14 @@
 #define IDXD_OP_FLAG_STORD	0x2000
 #define IDXD_OP_FLAG_DRDBK	0x4000
 #define IDXD_OP_FLAG_DSTS	0x8000
+
+/* IAX */
+#define IDXD_OP_FLAG_RD_SRC2_AECS	0x010000
+#define IDXD_OP_FLAG_RD_SRC2_2ND	0x020000
+#define IDXD_OP_FLAG_WR_SRC2_AECS_COMP	0x040000
+#define IDXD_OP_FLAG_WR_SRC2_AECS_OVFL	0x080000
+#define IDXD_OP_FLAG_SRC2_STS		0x100000
+#define IDXD_OP_FLAG_CRC_RFC3720	0x200000
 
 /* Opcode */
 enum dsa_opcode {
@@ -45,6 +79,26 @@ enum dsa_opcode {
 	DSA_OPCODE_DIF_STRP,
 	DSA_OPCODE_DIF_UPDT,
 	DSA_OPCODE_CFLUSH = 0x20,
+};
+
+enum iax_opcode {
+	IAX_OPCODE_NOOP = 0,
+	IAX_OPCODE_DRAIN = 2,
+	IAX_OPCODE_MEMMOVE,
+	IAX_OPCODE_DECOMPRESS = 0x42,
+	IAX_OPCODE_COMPRESS,
+	IAX_OPCODE_CRC64,
+	IAX_OPCODE_ZERO_DECOMP_32 = 0x48,
+	IAX_OPCODE_ZERO_DECOMP_16,
+	IAX_OPCODE_ZERO_COMP_32 = 0x4c,
+	IAX_OPCODE_ZERO_COMP_16,
+	IAX_OPCODE_SCAN = 0x50,
+	IAX_OPCODE_SET_MEMBER,
+	IAX_OPCODE_EXTRACT,
+	IAX_OPCODE_SELECT,
+	IAX_OPCODE_RLE_BURST,
+	IAX_OPCODE_FIND_UNIQUE,
+	IAX_OPCODE_EXPAND,
 };
 
 /* Completion record status */
@@ -80,23 +134,39 @@ enum dsa_completion_status {
 	DSA_COMP_TRANSLATION_FAIL,
 };
 
+enum iax_completion_status {
+	IAX_COMP_NONE = 0,
+	IAX_COMP_SUCCESS,
+	IAX_COMP_PAGE_FAULT_IR = 0x04,
+	IAX_COMP_ANALYTICS_ERROR = 0x0a,
+	IAX_COMP_OUTBUF_OVERFLOW,
+	IAX_COMP_BAD_OPCODE = 0x10,
+	IAX_COMP_INVALID_FLAGS,
+	IAX_COMP_NOZERO_RESERVE,
+	IAX_COMP_INVALID_SIZE,
+	IAX_COMP_OVERLAP_BUFFERS = 0x16,
+	IAX_COMP_INT_HANDLE_INVAL = 0x19,
+	IAX_COMP_CRA_XLAT,
+	IAX_COMP_CRA_ALIGN,
+	IAX_COMP_ADDR_ALIGN,
+	IAX_COMP_PRIV_BAD,
+	IAX_COMP_TRAFFIC_CLASS_CONF,
+	IAX_COMP_PFAULT_RDBA,
+	IAX_COMP_HW_ERR1,
+	IAX_COMP_HW_ERR_DRB,
+	IAX_COMP_TRANSLATION_FAIL,
+	IAX_COMP_PRS_TIMEOUT,
+	IAX_COMP_WATCHDOG,
+	IAX_COMP_INVALID_COMP_FLAG = 0x30,
+	IAX_COMP_INVALID_FILTER_FLAG,
+	IAX_COMP_INVALID_INPUT_SIZE,
+	IAX_COMP_INVALID_NUM_ELEMS,
+	IAX_COMP_INVALID_SRC1_WIDTH,
+	IAX_COMP_INVALID_INVERT_OUT,
+};
+
 #define DSA_COMP_STATUS_MASK		0x7f
 #define DSA_COMP_STATUS_WRITE		0x80
-
-struct dsa_batch_desc {
-	uint32_t	pasid:20;
-	uint32_t	rsvd:11;
-	uint32_t	priv:1;
-	uint32_t	flags:24;
-	uint32_t	opcode:8;
-	uint64_t	completion_addr;
-	uint64_t	desc_list_addr;
-	uint64_t	rsvd1;
-	uint32_t	desc_count;
-	uint16_t	interrupt_handle;
-	uint16_t	rsvd2;
-	uint8_t		rsvd3[24];
-} __attribute__((packed));
 
 struct dsa_hw_desc {
 	uint32_t	pasid:20;
@@ -109,6 +179,7 @@ struct dsa_hw_desc {
 		uint64_t	src_addr;
 		uint64_t	rdback_addr;
 		uint64_t	pattern;
+		uint64_t	desc_list_addr;
 	};
 	union {
 		uint64_t	dst_addr;
@@ -116,14 +187,20 @@ struct dsa_hw_desc {
 		uint64_t	src2_addr;
 		uint64_t	comp_pattern;
 	};
-	uint32_t	xfer_size;
+	union {
+		uint32_t	xfer_size;
+		uint32_t	desc_count;
+	};
 	uint16_t	int_handle;
 	uint16_t	rsvd1;
 	union {
 		uint8_t		expected_res;
+		/* create delta record */
 		struct {
 			uint64_t	delta_addr;
 			uint32_t	max_delta_size;
+			uint32_t 	delt_rsvd;
+			uint8_t 	expected_res_mask;
 		};
 		uint32_t	delta_rec_size;
 		uint64_t	dest2;
@@ -171,6 +248,28 @@ struct dsa_hw_desc {
 	};
 } __attribute__((packed));
 
+struct iax_hw_desc {
+	uint32_t        pasid:20;
+	uint32_t        rsvd:11;
+	uint32_t        priv:1;
+	uint32_t        flags:24;
+	uint32_t        opcode:8;
+	uint64_t        completion_addr;
+	uint64_t        src1_addr;
+	uint64_t        dst_addr;
+	uint32_t        src1_size;
+	uint16_t        int_handle;
+	union {
+		uint16_t        compr_flags;
+		uint16_t        decompr_flags;
+	};
+	uint64_t        src2_addr;
+	uint32_t        max_dst_size;
+	uint32_t        src2_size;
+	uint32_t	filter_flags;
+	uint32_t	num_inputs;
+} __attribute__((packed));
+
 struct dsa_raw_desc {
 	uint64_t	field[8];
 } __attribute__((packed));
@@ -189,8 +288,14 @@ struct dsa_completion_record {
 	uint32_t		bytes_completed;
 	uint64_t		fault_addr;
 	union {
-		uint16_t	delta_rec_size;
-		uint16_t	crc_val;
+		/* common record */
+		struct {
+			uint32_t	invalid_flags:24;
+			uint32_t	rsvd2:8;
+		};
+
+		uint32_t	delta_rec_size;
+		uint64_t	crc_val;
 
 		/* DIF check & strip */
 		struct {
@@ -223,6 +328,29 @@ struct dsa_completion_record {
 
 struct dsa_raw_completion_record {
 	uint64_t	field[4];
+} __attribute__((packed));
+
+struct iax_completion_record {
+	volatile uint8_t        status;
+	uint8_t                 error_code;
+	uint16_t                rsvd;
+	uint32_t                bytes_completed;
+	uint64_t                fault_addr;
+	uint32_t                invalid_flags;
+	uint32_t                rsvd2;
+	uint32_t                output_size;
+	uint8_t                 output_bits;
+	uint8_t                 rsvd3;
+	uint16_t                xor_csum;
+	uint32_t                crc;
+	uint32_t                min;
+	uint32_t                max;
+	uint32_t                sum;
+	uint64_t                rsvd4[2];
+} __attribute__((packed));
+
+struct iax_raw_completion_record {
+	uint64_t	field[8];
 } __attribute__((packed));
 
 #endif

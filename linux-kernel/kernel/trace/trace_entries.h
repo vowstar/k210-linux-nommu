@@ -32,7 +32,7 @@
  *	to be deciphered for the format file. Although these macros
  *	may become out of sync with the internal structure, they
  *	will create a compile error if it happens. Since the
- *	internel structures are just tracing helpers, this is not
+ *	internal structures are just tracing helpers, this is not
  *	an issue.
  *
  *	When an internal structure is used, it should use:
@@ -78,8 +78,8 @@ FTRACE_ENTRY_PACKED(funcgraph_entry, ftrace_graph_ent_entry,
 
 	F_STRUCT(
 		__field_struct(	struct ftrace_graph_ent,	graph_ent	)
-		__field_desc(	unsigned long,	graph_ent,	func		)
-		__field_desc(	int,		graph_ent,	depth		)
+		__field_packed(	unsigned long,	graph_ent,	func		)
+		__field_packed(	int,		graph_ent,	depth		)
 	),
 
 	F_printk("--> %ps (%d)", (void *)__entry->func, __entry->depth)
@@ -92,11 +92,11 @@ FTRACE_ENTRY_PACKED(funcgraph_exit, ftrace_graph_ret_entry,
 
 	F_STRUCT(
 		__field_struct(	struct ftrace_graph_ret,	ret	)
-		__field_desc(	unsigned long,	ret,		func	)
-		__field_desc(	unsigned long,	ret,		overrun	)
-		__field_desc(	unsigned long long, ret,	calltime)
-		__field_desc(	unsigned long long, ret,	rettime	)
-		__field_desc(	int,		ret,		depth	)
+		__field_packed(	unsigned long,	ret,		func	)
+		__field_packed(	int,		ret,		depth	)
+		__field_packed(	unsigned int,	ret,		overrun	)
+		__field_packed(	unsigned long long, ret,	calltime)
+		__field_packed(	unsigned long long, ret,	rettime	)
 	),
 
 	F_printk("<-- %ps (%d) (start: %llx  end: %llx) over: %d",
@@ -325,14 +325,79 @@ FTRACE_ENTRY(hwlat, hwlat_entry,
 		__field_desc(	long,	timestamp,	tv_nsec		)
 		__field(	unsigned int,		nmi_count	)
 		__field(	unsigned int,		seqnum		)
+		__field(	unsigned int,		count		)
 	),
 
-	F_printk("cnt:%u\tts:%010llu.%010lu\tinner:%llu\touter:%llu\tnmi-ts:%llu\tnmi-count:%u\n",
+	F_printk("cnt:%u\tts:%010llu.%010lu\tinner:%llu\touter:%llu\tcount:%d\tnmi-ts:%llu\tnmi-count:%u\n",
 		 __entry->seqnum,
 		 __entry->tv_sec,
 		 __entry->tv_nsec,
 		 __entry->duration,
 		 __entry->outer_duration,
+		 __entry->count,
 		 __entry->nmi_total_ts,
 		 __entry->nmi_count)
+);
+
+#define FUNC_REPEATS_GET_DELTA_TS(entry)				\
+	(((u64)(entry)->top_delta_ts << 32) | (entry)->bottom_delta_ts)	\
+
+FTRACE_ENTRY(func_repeats, func_repeats_entry,
+
+	TRACE_FUNC_REPEATS,
+
+	F_STRUCT(
+		__field(	unsigned long,	ip		)
+		__field(	unsigned long,	parent_ip	)
+		__field(	u16	,	count		)
+		__field(	u16	,	top_delta_ts	)
+		__field(	u32	,	bottom_delta_ts	)
+	),
+
+	F_printk(" %ps <-%ps\t(repeats:%u  delta: -%llu)",
+		 (void *)__entry->ip,
+		 (void *)__entry->parent_ip,
+		 __entry->count,
+		 FUNC_REPEATS_GET_DELTA_TS(__entry))
+);
+
+FTRACE_ENTRY(osnoise, osnoise_entry,
+
+	TRACE_OSNOISE,
+
+	F_STRUCT(
+		__field(	u64,			noise		)
+		__field(	u64,			runtime		)
+		__field(	u64,			max_sample	)
+		__field(	unsigned int,		hw_count	)
+		__field(	unsigned int,		nmi_count	)
+		__field(	unsigned int,		irq_count	)
+		__field(	unsigned int,		softirq_count	)
+		__field(	unsigned int,		thread_count	)
+	),
+
+	F_printk("noise:%llu\tmax_sample:%llu\thw:%u\tnmi:%u\tirq:%u\tsoftirq:%u\tthread:%u\n",
+		 __entry->noise,
+		 __entry->max_sample,
+		 __entry->hw_count,
+		 __entry->nmi_count,
+		 __entry->irq_count,
+		 __entry->softirq_count,
+		 __entry->thread_count)
+);
+
+FTRACE_ENTRY(timerlat, timerlat_entry,
+
+	TRACE_TIMERLAT,
+
+	F_STRUCT(
+		__field(	unsigned int,		seqnum		)
+		__field(	int,			context		)
+		__field(	u64,			timer_latency	)
+	),
+
+	F_printk("seq:%u\tcontext:%d\ttimer_latency:%llu\n",
+		 __entry->seqnum,
+		 __entry->context,
+		 __entry->timer_latency)
 );

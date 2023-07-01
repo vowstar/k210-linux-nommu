@@ -27,50 +27,63 @@
 		stdout-path = "serial2:115200n8";
 	};
 
-	gpio_keys {
+	gpio-keys {
 		compatible = "gpio-keys";
 
-		menu {
+		key-menu {
 			label = "SW-TACT2";
 			gpios = <&gpx1 4 GPIO_ACTIVE_LOW>;
 			linux,code = <KEY_MENU>;
 			wakeup-source;
 		};
 
-		home {
+		key-home {
 			label = "SW-TACT3";
 			gpios = <&gpx1 5 GPIO_ACTIVE_LOW>;
 			linux,code = <KEY_HOME>;
 			wakeup-source;
 		};
 
-		up {
+		key-up {
 			label = "SW-TACT4";
 			gpios = <&gpx1 6 GPIO_ACTIVE_LOW>;
 			linux,code = <KEY_UP>;
 			wakeup-source;
 		};
 
-		down {
+		key-down {
 			label = "SW-TACT5";
 			gpios = <&gpx1 7 GPIO_ACTIVE_LOW>;
 			linux,code = <KEY_DOWN>;
 			wakeup-source;
 		};
 
-		back {
+		key-back {
 			label = "SW-TACT6";
 			gpios = <&gpx2 0 GPIO_ACTIVE_LOW>;
 			linux,code = <KEY_BACK>;
 			wakeup-source;
 		};
 
-		wakeup {
+		key-wakeup {
 			label = "SW-TACT7";
 			gpios = <&gpx2 1 GPIO_ACTIVE_LOW>;
 			linux,code = <KEY_WAKEUP>;
 			wakeup-source;
 		};
+	};
+
+	/*
+	 * For unknown reasons HDMI-DDC does not work with Exynos I2C
+	 * controllers. Lets use software I2C over GPIO pins as a workaround.
+	 */
+	i2c_ddc: i2c-10 {
+		compatible = "i2c-gpio";
+		pinctrl-names = "default";
+		pinctrl-0 = <&i2c2_gpio_bus>;
+		sda-gpios = <&gpa0 6 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpa0 7 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <2>;
 	};
 
 	panel: panel {
@@ -84,56 +97,48 @@
 		};
 	};
 
-	regulators {
-		compatible = "simple-bus";
-		#address-cells = <1>;
-		#size-cells = <0>;
+	main_dc_reg: regulator-0 {
+		compatible = "regulator-fixed";
+		regulator-name = "MAIN_DC";
+		regulator-always-on;
+	};
 
-		main_dc_reg: regulator@0 {
-			compatible = "regulator-fixed";
-			reg = <0>;
-			regulator-name = "MAIN_DC";
-		};
+	mmc_reg: regulator-1 {
+		compatible = "regulator-fixed";
+		regulator-name = "VDD_MMC";
+		regulator-min-microvolt = <2800000>;
+		regulator-max-microvolt = <2800000>;
+		regulator-always-on;
+	};
 
-		mmc_reg: regulator@1 {
-			compatible = "regulator-fixed";
-			reg = <1>;
-			regulator-name = "VDD_33ON_2.8V";
-			regulator-min-microvolt = <2800000>;
-			regulator-max-microvolt = <2800000>;
-			gpio = <&gpx1 1 GPIO_ACTIVE_HIGH>;
-			enable-active-high;
-		};
+	reg_hdmi_en: regulator-2 {
+		compatible = "regulator-fixed";
+		regulator-name = "hdmi-en";
+		regulator-always-on;
+	};
 
-		reg_hdmi_en: regulator@2 {
-			compatible = "regulator-fixed";
-			reg = <2>;
-			regulator-name = "hdmi-en";
-		};
+	vcc_1v2_reg: regulator-3 {
+		compatible = "regulator-fixed";
+		regulator-name = "VCC_1V2";
+		regulator-min-microvolt = <1200000>;
+		regulator-max-microvolt = <1200000>;
+		regulator-always-on;
+	};
 
-		vcc_1v2_reg: regulator@3 {
-			compatible = "regulator-fixed";
-			reg = <3>;
-			regulator-name = "VCC_1V2";
-			regulator-min-microvolt = <1200000>;
-			regulator-max-microvolt = <1200000>;
-		};
+	vcc_1v8_reg: regulator-4 {
+		compatible = "regulator-fixed";
+		regulator-name = "VCC_1V8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+	};
 
-		vcc_1v8_reg: regulator@4 {
-			compatible = "regulator-fixed";
-			reg = <4>;
-			regulator-name = "VCC_1V8";
-			regulator-min-microvolt = <1800000>;
-			regulator-max-microvolt = <1800000>;
-		};
-
-		vcc_3v3_reg: regulator@5 {
-			compatible = "regulator-fixed";
-			reg = <5>;
-			regulator-name = "VCC_3V3";
-			regulator-min-microvolt = <3300000>;
-			regulator-max-microvolt = <3300000>;
-		};
+	vcc_3v3_reg: regulator-5 {
+		compatible = "regulator-fixed";
+		regulator-name = "VCC_3V3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
 	};
 
 	sound {
@@ -219,13 +224,14 @@
 	samsung,i2c-max-bus-freq = <20000>;
 	samsung,i2c-slave-addr = <0x66>;
 
-	s5m8767_pmic@66 {
+	pmic@66 {
 		compatible = "samsung,s5m8767-pmic";
 		reg = <0x66>;
 		interrupt-parent = <&gpx3>;
 		interrupts = <2 IRQ_TYPE_LEVEL_LOW>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&s5m8767_irq>;
+		wakeup-source;
 
 		vinb1-supply = <&main_dc_reg>;
 		vinb2-supply = <&main_dc_reg>;
@@ -247,15 +253,12 @@
 		vinl8-supply = <&buck8_reg>;
 		vinl9-supply = <&buck8_reg>;
 
-		s5m8767,pmic-buck2-dvs-voltage = <1300000>;
-		s5m8767,pmic-buck3-dvs-voltage = <1100000>;
-		s5m8767,pmic-buck4-dvs-voltage = <1200000>;
 		s5m8767,pmic-buck-dvs-gpios = <&gpd1 0 GPIO_ACTIVE_HIGH>,
-		                              <&gpd1 1 GPIO_ACTIVE_HIGH>,
-		                              <&gpd1 2 GPIO_ACTIVE_HIGH>;
+					      <&gpd1 1 GPIO_ACTIVE_HIGH>,
+					      <&gpd1 2 GPIO_ACTIVE_HIGH>;
 		s5m8767,pmic-buck-ds-gpios = <&gpx2 3 GPIO_ACTIVE_HIGH>,
-		                             <&gpx2 4 GPIO_ACTIVE_HIGH>,
-		                             <&gpx2 5 GPIO_ACTIVE_HIGH>;
+					     <&gpx2 4 GPIO_ACTIVE_HIGH>,
+					     <&gpx2 5 GPIO_ACTIVE_HIGH>;
 
 		s5m8767_osc: clocks {
 			compatible = "samsung,s5m8767-clk";
@@ -450,7 +453,7 @@
 			};
 
 			buck1_reg: BUCK1 {
-				regulator-name = "vdd_mif";
+				regulator-name = "VDD_MIF";
 				regulator-min-microvolt = <950000>;
 				regulator-max-microvolt = <1200000>;
 				regulator-always-on;
@@ -459,7 +462,7 @@
 			};
 
 			buck2_reg: BUCK2 {
-				regulator-name = "vdd_arm";
+				regulator-name = "VDD_ARM";
 				regulator-min-microvolt = <912500>;
 				regulator-max-microvolt = <1300000>;
 				regulator-always-on;
@@ -468,7 +471,7 @@
 			};
 
 			buck3_reg: BUCK3 {
-				regulator-name = "vdd_int";
+				regulator-name = "VDD_INT";
 				regulator-min-microvolt = <900000>;
 				regulator-max-microvolt = <1200000>;
 				regulator-always-on;
@@ -477,7 +480,7 @@
 			};
 
 			buck4_reg: BUCK4 {
-				regulator-name = "vdd_g3d";
+				regulator-name = "VDD_G3D";
 				regulator-min-microvolt = <850000>;
 				regulator-max-microvolt = <1300000>;
 				regulator-always-on;
@@ -519,7 +522,7 @@
 &i2c_3 {
 	status = "okay";
 
-	wm1811: codec@1a {
+	wm1811: audio-codec@1a {
 		compatible = "wlf,wm1811";
 		reg = <0x1a>;
 		clocks = <&i2s0 CLK_I2S_CDCLK>;
@@ -534,8 +537,8 @@
 		SPKVDD1-supply = <&main_dc_reg>;
 		SPKVDD2-supply = <&main_dc_reg>;
 
-		wlf,ldo1ena = <&gpb0 0 GPIO_ACTIVE_HIGH>;
-		wlf,ldo2ena = <&gpb0 1 GPIO_ACTIVE_HIGH>;
+		wlf,ldo1ena-gpios = <&gpb0 0 GPIO_ACTIVE_HIGH>;
+		wlf,ldo2ena-gpios = <&gpb0 1 GPIO_ACTIVE_HIGH>;
 	};
 };
 
@@ -550,12 +553,6 @@
 	status = "okay";
 	samsung,i2c-sda-delay = <100>;
 	samsung,i2c-max-bus-freq = <40000>;
-	samsung,i2c-slave-addr = <0x38>;
-
-	sata_phy_i2c:sata-phy@38 {
-		compatible = "samsung,exynos-sataphy-i2c";
-		reg = <0x38>;
-	};
 };
 
 &i2s0 {
@@ -606,7 +603,7 @@
 };
 
 &pinctrl_0 {
-	s5m8767_irq: s5m8767-irq {
+	s5m8767_irq: s5m8767-irq-pins {
 		samsung,pins = "gpx3-2";
 		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
 	};
@@ -627,21 +624,11 @@
 	samsung,exynos-sataphy-i2c-phandle = <&sata_phy_i2c>;
 };
 
-&soc {
-	/*
-	 * For unknown reasons HDMI-DDC does not work with Exynos I2C
-	 * controllers. Lets use software I2C over GPIO pins as a workaround.
-	 */
-	i2c_ddc: i2c-gpio {
-		pinctrl-names = "default";
-		pinctrl-0 = <&i2c2_gpio_bus>;
-		status = "okay";
-		compatible = "i2c-gpio";
-		gpios = <&gpa0 6 0 /* sda */
-			 &gpa0 7 0 /* scl */
-			>;
-		i2c-gpio,delay-us = <2>;
-		#address-cells = <1>;
-		#size-cells = <0>;
-	};
+&sata_phy_i2c {
+	status = "okay";
+};
+
+&usbdrd {
+	vdd10-supply = <&ldo15_reg>;
+	vdd33-supply = <&ldo12_reg>;
 };

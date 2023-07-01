@@ -6,6 +6,7 @@
 
 MAX_RETRIES=600
 RETRY_INTERVAL=".1"	# seconds
+KLP_SYSFS_DIR="/sys/kernel/livepatch"
 
 # Kselftest framework requirement - SKIP code is 4
 ksft_skip=4
@@ -41,6 +42,17 @@ function die() {
 	exit 1
 }
 
+# save existing dmesg so we can detect new content
+function save_dmesg() {
+	SAVED_DMESG=$(mktemp --tmpdir -t klp-dmesg-XXXXXX)
+	dmesg > "$SAVED_DMESG"
+}
+
+# cleanup temporary dmesg file from save_dmesg()
+function cleanup_dmesg_file() {
+	rm -f "$SAVED_DMESG"
+}
+
 function push_config() {
 	DYNAMIC_DEBUG=$(grep '^kernel/livepatch' /sys/kernel/debug/dynamic_debug/control | \
 			awk -F'[: ]' '{print "file " $1 " line " $2 " " $4}')
@@ -64,8 +76,30 @@ function set_dynamic_debug() {
 }
 
 function set_ftrace_enabled() {
-	result=$(sysctl kernel.ftrace_enabled="$1" 2>&1 | paste --serial --delimiters=' ')
-	echo "livepatch: $result" > /dev/kmsg
+	local can_fail=0
+	if [[ "$1" == "--fail" ]] ; then
+		can_fail=1
+		shift
+	fi
+
+	local err=$(sysctl -q kernel.ftrace_enabled="$1" 2>&1)
+	local result=$(sysctl --values kernel.ftrace_enabled)
+
+	if [[ "$result" != "$1" ]] ; then
+		if [[ $can_fail -eq 1 ]] ; then
+			echo "livepatch: $err" | sed 's#/proc/sys/kernel/#kernel.#' > /dev/kmsg
+			return
+		fi
+
+		skip "failed to set kernel.ftrace_enabled = $1"
+	fi
+
+	echo "livepatch: kernel.ftrace_enabled = $result" > /dev/kmsg
+}
+
+function cleanup() {
+	pop_config
+	cleanup_dmesg_file
 }
 
 # setup_config - save the current config and set a script exit trap that
@@ -77,7 +111,7 @@ function setup_config() {
 	push_config
 	set_dynamic_debug
 	set_ftrace_enabled 1
-	trap pop_config EXIT INT TERM HUP
+	trap cleanup EXIT INT TERM HUP
 }
 
 # loop_until(cmd) - loop a command until it is successful or $MAX_RETRIES,
@@ -243,18 +277,68 @@ function set_pre_patch_ret {
 		die "failed to set pre_patch_ret parameter for $mod module"
 }
 
+function start_test {
+	local test="$1"
+
+	save_dmesg
+	echo -n "TEST: $test ... "
+	log "===== TEST: $test ====="
+}
+
 # check_result() - verify dmesg output
 #	TODO - better filter, out of order msgs, etc?
 function check_result {
 	local expect="$*"
 	local result
 
-	result=$(dmesg | grep -v 'tainting' | grep -e 'livepatch:' -e 'test_klp' | sed 's/^\[[ 0-9.]*\] //')
+	# Note: when comparing dmesg output, the kernel log timestamps
+	# help differentiate repeated testing runs.  Remove them with a
+	# post-comparison sed filter.
+
+	result=$(dmesg | comm --nocheck-order -13 "$SAVED_DMESG" - | \
+		 grep -e 'livepatch:' -e 'test_klp' | \
+		 grep -v '\(tainting\|taints\) kernel' | \
+		 sed 's/^\[[ 0-9.]*\] //')
 
 	if [[ "$expect" == "$result" ]] ; then
 		echo "ok"
 	else
 		echo -e "not ok\n\n$(diff -upr --label expected --label result <(echo "$expect") <(echo "$result"))\n"
 		die "livepatch kselftest(s) failed"
+	fi
+
+	cleanup_dmesg_file
+}
+
+# check_sysfs_rights(modname, rel_path, expected_rights) - check sysfs
+# path permissions
+#	modname - livepatch module creating the sysfs interface
+#	rel_path - relative path of the sysfs interface
+#	expected_rights - expected access rights
+function check_sysfs_rights() {
+	local mod="$1"; shift
+	local rel_path="$1"; shift
+	local expected_rights="$1"; shift
+
+	local path="$KLP_SYSFS_DIR/$mod/$rel_path"
+	local rights=$(/bin/stat --format '%A' "$path")
+	if test "$rights" != "$expected_rights" ; then
+		die "Unexpected access rights of $path: $expected_rights vs. $rights"
+	fi
+}
+
+# check_sysfs_value(modname, rel_path, expected_value) - check sysfs value
+#	modname - livepatch module creating the sysfs interface
+#	rel_path - relative path of the sysfs interface
+#	expected_value - expected value read from the file
+function check_sysfs_value() {
+	local mod="$1"; shift
+	local rel_path="$1"; shift
+	local expected_value="$1"; shift
+
+	local path="$KLP_SYSFS_DIR/$mod/$rel_path"
+	local value=`cat $path`
+	if test "$value" != "$expected_value" ; then
+		die "Unexpected value in $path: $expected_value vs. $value"
 	fi
 }

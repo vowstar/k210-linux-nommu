@@ -18,39 +18,46 @@ allOf:
 properties:
   compatible:
     oneOf:
-       - const: ti,davinci_mdio
-       - items:
-         - const: ti,keystone_mdio
-         - const: ti,davinci_mdio
-       - items:
-         - const: ti,cpsw-mdio
-         - const: ti,davinci_mdio
-       - items:
-         - const: ti,am4372-mdio
-         - const: ti,cpsw-mdio
-         - const: ti,davinci_mdio
+      - const: ti,davinci_mdio
+      - items:
+          - const: ti,keystone_mdio
+          - const: ti,davinci_mdio
+      - items:
+          - const: ti,cpsw-mdio
+          - const: ti,davinci_mdio
+      - items:
+          - const: ti,am4372-mdio
+          - const: ti,cpsw-mdio
+          - const: ti,davinci_mdio
 
   reg:
     maxItems: 1
 
   bus_freq:
-      maximum: 2500000
-      description:
-        MDIO Bus frequency
+    $ref: /schemas/types.yaml#/definitions/uint32
+    maximum: 2500000
+    description: MDIO Bus frequency
+
+  clocks:
+    maxItems: 1
+
+  clock-names:
+    items:
+      - const: fck
 
   ti,hwmods:
     description: TI hwmod name
     deprecated: true
-    allOf:
-      - $ref: /schemas/types.yaml#/definitions/string-array
-      - items:
-          const: davinci_mdio
+    $ref: /schemas/types.yaml#/definitions/string-array
+    items:
+      const: davinci_mdio
 
 if:
   properties:
     compatible:
       contains:
         const: ti,davinci_mdio
+then:
   required:
     - bus_freq
 
@@ -59,6 +66,8 @@ required:
   - reg
   - "#address-cells"
   - "#size-cells"
+
+unevaluatedProperties: false
 
 examples:
   - |

@@ -6,10 +6,12 @@
  *		 2015 Ludovic Desroches <ludovic.desroches@atmel.com>
  */
 
+#include <linux/bitfield.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/kernel.h>
 #include <linux/mmc/host.h>
 #include <linux/mmc/slot-gpio.h>
@@ -60,7 +62,6 @@ static void sdhci_at91_set_force_card_detect(struct sdhci_host *host)
 static void sdhci_at91_set_clock(struct sdhci_host *host, unsigned int clock)
 {
 	u16 clk;
-	unsigned long timeout;
 
 	host->mmc->actual_clock = 0;
 
@@ -85,43 +86,27 @@ static void sdhci_at91_set_clock(struct sdhci_host *host, unsigned int clock)
 	sdhci_writew(host, clk, SDHCI_CLOCK_CONTROL);
 
 	/* Wait max 20 ms */
-	timeout = 20;
-	while (!((clk = sdhci_readw(host, SDHCI_CLOCK_CONTROL))
-		& SDHCI_CLOCK_INT_STABLE)) {
-		if (timeout == 0) {
-			pr_err("%s: Internal clock never stabilised.\n",
-			       mmc_hostname(host->mmc));
-			return;
-		}
-		timeout--;
-		mdelay(1);
+	if (read_poll_timeout(sdhci_readw, clk, (clk & SDHCI_CLOCK_INT_STABLE),
+			      1000, 20000, false, host, SDHCI_CLOCK_CONTROL)) {
+		pr_err("%s: Internal clock never stabilised.\n",
+		       mmc_hostname(host->mmc));
+		return;
 	}
 
 	clk |= SDHCI_CLOCK_CARD_EN;
 	sdhci_writew(host, clk, SDHCI_CLOCK_CONTROL);
 }
 
-/*
- * In this specific implementation of the SDHCI controller, the power register
- * needs to have a valid voltage set even when the power supply is managed by
- * an external regulator.
- */
-static void sdhci_at91_set_power(struct sdhci_host *host, unsigned char mode,
-		     unsigned short vdd)
-{
-	if (!IS_ERR(host->mmc->supply.vmmc)) {
-		struct mmc_host *mmc = host->mmc;
-
-		mmc_regulator_set_ocr(mmc, mmc->supply.vmmc, vdd);
-	}
-	sdhci_set_power_noreg(host, mode, vdd);
-}
-
 static void sdhci_at91_set_uhs_signaling(struct sdhci_host *host,
 					 unsigned int timing)
 {
-	if (timing == MMC_TIMING_MMC_DDR52)
-		sdhci_writeb(host, SDMMC_MC1R_DDR, SDMMC_MC1R);
+	u8 mc1r;
+
+	if (timing == MMC_TIMING_MMC_DDR52) {
+		mc1r = sdhci_readb(host, SDMMC_MC1R);
+		mc1r |= SDMMC_MC1R_DDR;
+		sdhci_writeb(host, mc1r, SDMMC_MC1R);
+	}
 	sdhci_set_uhs_signaling(host, timing);
 }
 
@@ -129,15 +114,24 @@ static void sdhci_at91_reset(struct sdhci_host *host, u8 mask)
 {
 	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
 	struct sdhci_at91_priv *priv = sdhci_pltfm_priv(pltfm_host);
+	unsigned int tmp;
 
 	sdhci_reset(host, mask);
 
-	if (host->mmc->caps & MMC_CAP_NONREMOVABLE)
+	if ((host->mmc->caps & MMC_CAP_NONREMOVABLE)
+	    || mmc_gpio_get_cd(host->mmc) >= 0)
 		sdhci_at91_set_force_card_detect(host);
 
-	if (priv->cal_always_on && (mask & SDHCI_RESET_ALL))
-		sdhci_writel(host, SDMMC_CALCR_ALWYSON | SDMMC_CALCR_EN,
+	if (priv->cal_always_on && (mask & SDHCI_RESET_ALL)) {
+		u32 calcr = sdhci_readl(host, SDMMC_CALCR);
+
+		sdhci_writel(host, calcr | SDMMC_CALCR_ALWYSON | SDMMC_CALCR_EN,
 			     SDMMC_CALCR);
+
+		if (read_poll_timeout(sdhci_readl, tmp, !(tmp & SDMMC_CALCR_EN),
+				      10, 20000, false, host, SDMMC_CALCR))
+			dev_err(mmc_dev(host->mmc), "Failed to calibrate\n");
+	}
 }
 
 static const struct sdhci_ops sdhci_at91_sama5d2_ops = {
@@ -145,7 +139,7 @@ static const struct sdhci_ops sdhci_at91_sama5d2_ops = {
 	.set_bus_width		= sdhci_set_bus_width,
 	.reset			= sdhci_at91_reset,
 	.set_uhs_signaling	= sdhci_at91_set_uhs_signaling,
-	.set_power		= sdhci_at91_set_power,
+	.set_power		= sdhci_set_power_and_bus_voltage,
 };
 
 static const struct sdhci_pltfm_data sdhci_sama5d2_pdata = {
@@ -194,9 +188,9 @@ static int sdhci_at91_set_clks_presets(struct device *dev)
 	clk_mul = gck_rate / clk_base_rate - 1;
 
 	caps0 &= ~SDHCI_CLOCK_V3_BASE_MASK;
-	caps0 |= (clk_base << SDHCI_CLOCK_BASE_SHIFT) & SDHCI_CLOCK_V3_BASE_MASK;
+	caps0 |= FIELD_PREP(SDHCI_CLOCK_V3_BASE_MASK, clk_base);
 	caps1 &= ~SDHCI_CLOCK_MUL_MASK;
-	caps1 |= (clk_mul << SDHCI_CLOCK_MUL_SHIFT) & SDHCI_CLOCK_MUL_MASK;
+	caps1 |= FIELD_PREP(SDHCI_CLOCK_MUL_MASK, clk_mul);
 	/* Set capabilities in r/w mode. */
 	writel(SDMMC_CACR_KEY | SDMMC_CACR_CAPWREN, host->ioaddr + SDMMC_CACR);
 	writel(caps0, host->ioaddr + SDHCI_CAPABILITIES);
@@ -204,8 +198,8 @@ static int sdhci_at91_set_clks_presets(struct device *dev)
 	/* Set capabilities in ro mode. */
 	writel(0, host->ioaddr + SDMMC_CACR);
 
-	dev_info(dev, "update clk mul to %u as gck rate is %u Hz and clk base is %u Hz\n",
-		 clk_mul, gck_rate, clk_base_rate);
+	dev_dbg(dev, "update clk mul to %u as gck rate is %u Hz and clk base is %u Hz\n",
+		clk_mul, gck_rate, clk_base_rate);
 
 	/*
 	 * We have to set preset values because it depends on the clk_mul
@@ -319,17 +313,15 @@ static const struct dev_pm_ops sdhci_at91_dev_pm_ops = {
 
 static int sdhci_at91_probe(struct platform_device *pdev)
 {
-	const struct of_device_id	*match;
 	const struct sdhci_at91_soc_data	*soc_data;
 	struct sdhci_host		*host;
 	struct sdhci_pltfm_host		*pltfm_host;
 	struct sdhci_at91_priv		*priv;
 	int				ret;
 
-	match = of_match_device(sdhci_at91_dt_match, &pdev->dev);
-	if (!match)
+	soc_data = of_device_get_match_data(&pdev->dev);
+	if (!soc_data)
 		return -EINVAL;
-	soc_data = match->data;
 
 	host = sdhci_pltfm_init(pdev, soc_data->pdata, sizeof(*priv));
 	if (IS_ERR(host))
@@ -427,8 +419,11 @@ static int sdhci_at91_probe(struct platform_device *pdev)
 	 * detection procedure using the SDMCC_CD signal is bypassed.
 	 * This bit is reset when a software reset for all command is performed
 	 * so we need to implement our own reset function to set back this bit.
+	 *
+	 * WA: SAMA5D2 doesn't drive CMD if using CD GPIO line.
 	 */
-	if (host->mmc->caps & MMC_CAP_NONREMOVABLE)
+	if ((host->mmc->caps & MMC_CAP_NONREMOVABLE)
+	    || mmc_gpio_get_cd(host->mmc) >= 0)
 		sdhci_at91_set_force_card_detect(host);
 
 	pm_runtime_put_autosuspend(&pdev->dev);
@@ -473,6 +468,7 @@ static int sdhci_at91_remove(struct platform_device *pdev)
 static struct platform_driver sdhci_at91_driver = {
 	.driver		= {
 		.name	= "sdhci-at91",
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		.of_match_table = sdhci_at91_dt_match,
 		.pm	= &sdhci_at91_dev_pm_ops,
 	},

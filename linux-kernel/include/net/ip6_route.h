@@ -2,6 +2,16 @@
 #ifndef _NET_IP6_ROUTE_H
 #define _NET_IP6_ROUTE_H
 
+#include <net/addrconf.h>
+#include <net/flow.h>
+#include <net/ip6_fib.h>
+#include <net/sock.h>
+#include <net/lwtunnel.h>
+#include <linux/ip.h>
+#include <linux/ipv6.h>
+#include <linux/route.h>
+#include <net/nexthop.h>
+
 struct route_info {
 	__u8			type;
 	__u8			length;
@@ -16,18 +26,8 @@ struct route_info {
 				reserved_h:3;
 #endif
 	__be32			lifetime;
-	__u8			prefix[0];	/* 0,8 or 16 */
+	__u8			prefix[];	/* 0,8 or 16 */
 };
-
-#include <net/addrconf.h>
-#include <net/flow.h>
-#include <net/ip6_fib.h>
-#include <net/sock.h>
-#include <net/lwtunnel.h>
-#include <linux/ip.h>
-#include <linux/ipv6.h>
-#include <linux/route.h>
-#include <net/nexthop.h>
 
 #define RT6_LOOKUP_F_IFACE		0x00000001
 #define RT6_LOOKUP_F_REACHABLE		0x00000002
@@ -84,10 +84,6 @@ struct dst_entry *ip6_route_input_lookup(struct net *net,
 					 struct flowi6 *fl6,
 					 const struct sk_buff *skb, int flags);
 
-struct dst_entry *ip6_route_output_flags_noref(struct net *net,
-					       const struct sock *sk,
-					       struct flowi6 *fl6, int flags);
-
 struct dst_entry *ip6_route_output_flags(struct net *net, const struct sock *sk,
 					 struct flowi6 *fl6, int flags);
 
@@ -118,12 +114,13 @@ void ip6_route_init_special_entries(void);
 int ip6_route_init(void);
 void ip6_route_cleanup(void);
 
-int ipv6_route_ioctl(struct net *net, unsigned int cmd, void __user *arg);
+int ipv6_route_ioctl(struct net *net, unsigned int cmd,
+		struct in6_rtmsg *rtmsg);
 
 int ip6_route_add(struct fib6_config *cfg, gfp_t gfp_flags,
 		  struct netlink_ext_ack *extack);
 int ip6_ins_rt(struct net *net, struct fib6_info *f6i);
-int ip6_del_rt(struct net *net, struct fib6_info *f6i);
+int ip6_del_rt(struct net *net, struct fib6_info *f6i, bool skip_notify);
 
 void rt6_flush_exceptions(struct fib6_info *f6i);
 void rt6_age_exceptions(struct fib6_info *f6i, struct fib6_gc_args *gc_args,
@@ -173,7 +170,8 @@ struct fib6_info *rt6_get_dflt_router(struct net *net,
 				     struct net_device *dev);
 struct fib6_info *rt6_add_dflt_router(struct net *net,
 				     const struct in6_addr *gwaddr,
-				     struct net_device *dev, unsigned int pref);
+				     struct net_device *dev, unsigned int pref,
+				     u32 defrtr_usr_metric);
 
 void rt6_purge_dflt_routers(struct net *net);
 
@@ -254,19 +252,27 @@ static inline bool ipv6_anycast_destination(const struct dst_entry *dst,
 
 	return rt->rt6i_flags & RTF_ANYCAST ||
 		(rt->rt6i_dst.plen < 127 &&
+		 !(rt->rt6i_flags & (RTF_GATEWAY | RTF_NONEXTHOP)) &&
 		 ipv6_addr_equal(&rt->rt6i_dst.addr, daddr));
 }
 
 int ip6_fragment(struct net *net, struct sock *sk, struct sk_buff *skb,
 		 int (*output)(struct net *, struct sock *, struct sk_buff *));
 
-static inline int ip6_skb_dst_mtu(struct sk_buff *skb)
+static inline unsigned int ip6_skb_dst_mtu(const struct sk_buff *skb)
 {
-	struct ipv6_pinfo *np = skb->sk && !dev_recursion_level() ?
+	const struct ipv6_pinfo *np = skb->sk && !dev_recursion_level() ?
 				inet6_sk(skb->sk) : NULL;
+	const struct dst_entry *dst = skb_dst(skb);
+	unsigned int mtu;
 
-	return (np && np->pmtudisc >= IPV6_PMTUDISC_PROBE) ?
-	       skb_dst(skb)->dev->mtu : dst_mtu(skb_dst(skb));
+	if (np && np->pmtudisc >= IPV6_PMTUDISC_PROBE) {
+		mtu = READ_ONCE(dst->dev->mtu);
+		mtu -= lwtunnel_headroom(dst->lwtstate, mtu);
+	} else {
+		mtu = dst_mtu(dst);
+	}
+	return mtu;
 }
 
 static inline bool ip6_sk_accept_pmtu(const struct sock *sk)
@@ -306,15 +312,16 @@ static inline bool rt6_duplicate_nexthop(struct fib6_info *a, struct fib6_info *
 	       !lwtunnel_cmp_encap(nha->fib_nh_lws, nhb->fib_nh_lws);
 }
 
-static inline unsigned int ip6_dst_mtu_forward(const struct dst_entry *dst)
+static inline unsigned int ip6_dst_mtu_maybe_forward(const struct dst_entry *dst,
+						     bool forwarding)
 {
 	struct inet6_dev *idev;
 	unsigned int mtu;
 
-	if (dst_metric_locked(dst, RTAX_MTU)) {
+	if (!forwarding || dst_metric_locked(dst, RTAX_MTU)) {
 		mtu = dst_metric_raw(dst, RTAX_MTU);
 		if (mtu)
-			return mtu;
+			goto out;
 	}
 
 	mtu = IPV6_MIN_MTU;
@@ -324,7 +331,8 @@ static inline unsigned int ip6_dst_mtu_forward(const struct dst_entry *dst)
 		mtu = idev->cnf.mtu6;
 	rcu_read_unlock();
 
-	return mtu;
+out:
+	return mtu - lwtunnel_headroom(dst->lwtstate, mtu);
 }
 
 u32 ip6_mtu_from_fib6(const struct fib6_result *res,

@@ -9,10 +9,12 @@
 #include <linux/io.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
+
+#include <linux/pinctrl/pinconf-generic.h>
+#include <linux/pinctrl/pinconf.h>
 #include <linux/pinctrl/pinctrl.h>
 #include <linux/pinctrl/pinmux.h>
-#include <linux/pinctrl/pinconf-generic.h>
-#include <linux/slab.h>
 
 #include "core.h"
 #include "pinctrl-utils.h"
@@ -22,12 +24,12 @@
 /**
  * struct bm1880_pinctrl - driver data
  * @base:	Pinctrl base address
- * @pctrl:	Pinctrl device
+ * @pctrldev:	Pinctrl device
  * @groups:	Pingroups
  * @ngroups:	Number of @groups
  * @funcs:	Pinmux functions
  * @nfuncs:	Number of @funcs
- * @pconf:	Pinconf data
+ * @pinconf:	Pinconf data
  */
 struct bm1880_pinctrl {
 	void __iomem *base;
@@ -408,6 +410,7 @@ static const struct bm1880_pctrl_group bm1880_pctrl_groups[] = {
 	BM1880_PINCTRL_GRP(pwm34),
 	BM1880_PINCTRL_GRP(pwm35),
 	BM1880_PINCTRL_GRP(pwm36),
+	BM1880_PINCTRL_GRP(pwm37),
 	BM1880_PINCTRL_GRP(i2c0),
 	BM1880_PINCTRL_GRP(i2c1),
 	BM1880_PINCTRL_GRP(i2c2),

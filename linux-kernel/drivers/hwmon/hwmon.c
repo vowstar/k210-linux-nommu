@@ -15,8 +15,11 @@
 #include <linux/gfp.h>
 #include <linux/hwmon.h>
 #include <linux/idr.h>
+#include <linux/kstrtox.h>
+#include <linux/list.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/property.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/thermal.h>
@@ -29,9 +32,10 @@
 
 struct hwmon_device {
 	const char *name;
+	const char *label;
 	struct device dev;
 	const struct hwmon_chip_info *chip;
-
+	struct list_head tzdata;
 	struct attribute_group group;
 	const struct attribute_group **groups;
 };
@@ -55,12 +59,12 @@ struct hwmon_device_attribute {
 
 /*
  * Thermal zone information
- * In addition to the reference to the hwmon device,
- * also provides the sensor index.
  */
 struct hwmon_thermal_data {
+	struct list_head node;		/* hwmon tzdata list entry */
 	struct device *dev;		/* Reference to hwmon device */
 	int index;			/* sensor index */
+	struct thermal_zone_device *tzd;/* thermal zone device */
 };
 
 static ssize_t
@@ -70,17 +74,29 @@ name_show(struct device *dev, struct device_attribute *attr, char *buf)
 }
 static DEVICE_ATTR_RO(name);
 
+static ssize_t
+label_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%s\n", to_hwmon_device(dev)->label);
+}
+static DEVICE_ATTR_RO(label);
+
 static struct attribute *hwmon_dev_attrs[] = {
 	&dev_attr_name.attr,
+	&dev_attr_label.attr,
 	NULL
 };
 
-static umode_t hwmon_dev_name_is_visible(struct kobject *kobj,
+static umode_t hwmon_dev_attr_is_visible(struct kobject *kobj,
 					 struct attribute *attr, int n)
 {
-	struct device *dev = container_of(kobj, struct device, kobj);
+	struct device *dev = kobj_to_dev(kobj);
+	struct hwmon_device *hdev = to_hwmon_device(dev);
 
-	if (to_hwmon_device(dev)->name == NULL)
+	if (attr == &dev_attr_name.attr && hdev->name == NULL)
+		return 0;
+
+	if (attr == &dev_attr_label.attr && hdev->label == NULL)
 		return 0;
 
 	return attr->mode;
@@ -88,7 +104,7 @@ static umode_t hwmon_dev_name_is_visible(struct kobject *kobj,
 
 static const struct attribute_group hwmon_dev_attr_group = {
 	.attrs		= hwmon_dev_attrs,
-	.is_visible	= hwmon_dev_name_is_visible,
+	.is_visible	= hwmon_dev_attr_is_visible,
 };
 
 static const struct attribute_group *hwmon_dev_attr_groups[] = {
@@ -116,6 +132,7 @@ static void hwmon_dev_release(struct device *dev)
 	if (hwdev->group.attrs)
 		hwmon_free_attrs(hwdev->group.attrs);
 	kfree(hwdev->groups);
+	kfree(hwdev->label);
 	kfree(hwdev);
 }
 
@@ -135,9 +152,9 @@ static DEFINE_IDA(hwmon_ida);
  * between hwmon and thermal_sys modules.
  */
 #ifdef CONFIG_THERMAL_OF
-static int hwmon_thermal_get_temp(void *data, int *temp)
+static int hwmon_thermal_get_temp(struct thermal_zone_device *tz, int *temp)
 {
-	struct hwmon_thermal_data *tdata = data;
+	struct hwmon_thermal_data *tdata = tz->devdata;
 	struct hwmon_device *hwdev = to_hwmon_device(tdata->dev);
 	int ret;
 	long t;
@@ -152,14 +169,57 @@ static int hwmon_thermal_get_temp(void *data, int *temp)
 	return 0;
 }
 
-static const struct thermal_zone_of_device_ops hwmon_thermal_ops = {
+static int hwmon_thermal_set_trips(struct thermal_zone_device *tz, int low, int high)
+{
+	struct hwmon_thermal_data *tdata = tz->devdata;
+	struct hwmon_device *hwdev = to_hwmon_device(tdata->dev);
+	const struct hwmon_chip_info *chip = hwdev->chip;
+	const struct hwmon_channel_info **info = chip->info;
+	unsigned int i;
+	int err;
+
+	if (!chip->ops->write)
+		return 0;
+
+	for (i = 0; info[i] && info[i]->type != hwmon_temp; i++)
+		continue;
+
+	if (!info[i])
+		return 0;
+
+	if (info[i]->config[tdata->index] & HWMON_T_MIN) {
+		err = chip->ops->write(tdata->dev, hwmon_temp,
+				       hwmon_temp_min, tdata->index, low);
+		if (err && err != -EOPNOTSUPP)
+			return err;
+	}
+
+	if (info[i]->config[tdata->index] & HWMON_T_MAX) {
+		err = chip->ops->write(tdata->dev, hwmon_temp,
+				       hwmon_temp_max, tdata->index, high);
+		if (err && err != -EOPNOTSUPP)
+			return err;
+	}
+
+	return 0;
+}
+
+static const struct thermal_zone_device_ops hwmon_thermal_ops = {
 	.get_temp = hwmon_thermal_get_temp,
+	.set_trips = hwmon_thermal_set_trips,
 };
+
+static void hwmon_thermal_remove_sensor(void *data)
+{
+	list_del(data);
+}
 
 static int hwmon_thermal_add_sensor(struct device *dev, int index)
 {
+	struct hwmon_device *hwdev = to_hwmon_device(dev);
 	struct hwmon_thermal_data *tdata;
 	struct thermal_zone_device *tzd;
+	int err;
 
 	tdata = devm_kzalloc(dev, sizeof(*tdata), GFP_KERNEL);
 	if (!tdata)
@@ -168,22 +228,79 @@ static int hwmon_thermal_add_sensor(struct device *dev, int index)
 	tdata->dev = dev;
 	tdata->index = index;
 
-	tzd = devm_thermal_zone_of_sensor_register(dev, index, tdata,
-						   &hwmon_thermal_ops);
-	/*
-	 * If CONFIG_THERMAL_OF is disabled, this returns -ENODEV,
-	 * so ignore that error but forward any other error.
-	 */
-	if (IS_ERR(tzd) && (PTR_ERR(tzd) != -ENODEV))
-		return PTR_ERR(tzd);
+	tzd = devm_thermal_of_zone_register(dev, index, tdata,
+					    &hwmon_thermal_ops);
+	if (IS_ERR(tzd)) {
+		if (PTR_ERR(tzd) != -ENODEV)
+			return PTR_ERR(tzd);
+		dev_info(dev, "temp%d_input not attached to any thermal zone\n",
+			 index + 1);
+		devm_kfree(dev, tdata);
+		return 0;
+	}
+
+	err = devm_add_action(dev, hwmon_thermal_remove_sensor, &tdata->node);
+	if (err)
+		return err;
+
+	tdata->tzd = tzd;
+	list_add(&tdata->node, &hwdev->tzdata);
 
 	return 0;
 }
+
+static int hwmon_thermal_register_sensors(struct device *dev)
+{
+	struct hwmon_device *hwdev = to_hwmon_device(dev);
+	const struct hwmon_chip_info *chip = hwdev->chip;
+	const struct hwmon_channel_info **info = chip->info;
+	void *drvdata = dev_get_drvdata(dev);
+	int i;
+
+	for (i = 1; info[i]; i++) {
+		int j;
+
+		if (info[i]->type != hwmon_temp)
+			continue;
+
+		for (j = 0; info[i]->config[j]; j++) {
+			int err;
+
+			if (!(info[i]->config[j] & HWMON_T_INPUT) ||
+			    !chip->ops->is_visible(drvdata, hwmon_temp,
+						   hwmon_temp_input, j))
+				continue;
+
+			err = hwmon_thermal_add_sensor(dev, j);
+			if (err)
+				return err;
+		}
+	}
+
+	return 0;
+}
+
+static void hwmon_thermal_notify(struct device *dev, int index)
+{
+	struct hwmon_device *hwdev = to_hwmon_device(dev);
+	struct hwmon_thermal_data *tzdata;
+
+	list_for_each_entry(tzdata, &hwdev->tzdata, node) {
+		if (tzdata->index == index) {
+			thermal_zone_device_update(tzdata->tzd,
+						   THERMAL_EVENT_UNSPECIFIED);
+		}
+	}
+}
+
 #else
-static int hwmon_thermal_add_sensor(struct device *dev, int index)
+static int hwmon_thermal_register_sensors(struct device *dev)
 {
 	return 0;
 }
+
+static void hwmon_thermal_notify(struct device *dev, int index) { }
+
 #endif /* IS_REACHABLE(CONFIG_THERMAL) && ... */
 
 static int hwmon_attr_base(enum hwmon_sensor_types type)
@@ -368,6 +485,8 @@ static const char * const hwmon_temp_attr_templates[] = {
 	[hwmon_temp_lowest] = "temp%d_lowest",
 	[hwmon_temp_highest] = "temp%d_highest",
 	[hwmon_temp_reset_history] = "temp%d_reset_history",
+	[hwmon_temp_rated_min] = "temp%d_rated_min",
+	[hwmon_temp_rated_max] = "temp%d_rated_max",
 };
 
 static const char * const hwmon_in_attr_templates[] = {
@@ -387,6 +506,8 @@ static const char * const hwmon_in_attr_templates[] = {
 	[hwmon_in_max_alarm] = "in%d_max_alarm",
 	[hwmon_in_lcrit_alarm] = "in%d_lcrit_alarm",
 	[hwmon_in_crit_alarm] = "in%d_crit_alarm",
+	[hwmon_in_rated_min] = "in%d_rated_min",
+	[hwmon_in_rated_max] = "in%d_rated_max",
 };
 
 static const char * const hwmon_curr_attr_templates[] = {
@@ -406,6 +527,8 @@ static const char * const hwmon_curr_attr_templates[] = {
 	[hwmon_curr_max_alarm] = "curr%d_max_alarm",
 	[hwmon_curr_lcrit_alarm] = "curr%d_lcrit_alarm",
 	[hwmon_curr_crit_alarm] = "curr%d_crit_alarm",
+	[hwmon_curr_rated_min] = "curr%d_rated_min",
+	[hwmon_curr_rated_max] = "curr%d_rated_max",
 };
 
 static const char * const hwmon_power_attr_templates[] = {
@@ -438,6 +561,8 @@ static const char * const hwmon_power_attr_templates[] = {
 	[hwmon_power_max_alarm] = "power%d_max_alarm",
 	[hwmon_power_lcrit_alarm] = "power%d_lcrit_alarm",
 	[hwmon_power_crit_alarm] = "power%d_crit_alarm",
+	[hwmon_power_rated_min] = "power%d_rated_min",
+	[hwmon_power_rated_max] = "power%d_rated_max",
 };
 
 static const char * const hwmon_energy_attr_templates[] = {
@@ -456,6 +581,8 @@ static const char * const hwmon_humidity_attr_templates[] = {
 	[hwmon_humidity_max_hyst] = "humidity%d_max_hyst",
 	[hwmon_humidity_alarm] = "humidity%d_alarm",
 	[hwmon_humidity_fault] = "humidity%d_fault",
+	[hwmon_humidity_rated_min] = "humidity%d_rated_min",
+	[hwmon_humidity_rated_max] = "humidity%d_rated_max",
 };
 
 static const char * const hwmon_fan_attr_templates[] = {
@@ -478,6 +605,7 @@ static const char * const hwmon_pwm_attr_templates[] = {
 	[hwmon_pwm_enable] = "pwm%d_enable",
 	[hwmon_pwm_mode] = "pwm%d_mode",
 	[hwmon_pwm_freq] = "pwm%d_freq",
+	[hwmon_pwm_auto_channels_temp] = "pwm%d_auto_channels_temp",
 };
 
 static const char * const hwmon_intrusion_attr_templates[] = {
@@ -510,6 +638,38 @@ static const int __templates_size[] = {
 	[hwmon_pwm] = ARRAY_SIZE(hwmon_pwm_attr_templates),
 	[hwmon_intrusion] = ARRAY_SIZE(hwmon_intrusion_attr_templates),
 };
+
+int hwmon_notify_event(struct device *dev, enum hwmon_sensor_types type,
+		       u32 attr, int channel)
+{
+	char event[MAX_SYSFS_ATTR_NAME_LENGTH + 5];
+	char sattr[MAX_SYSFS_ATTR_NAME_LENGTH];
+	char *envp[] = { event, NULL };
+	const char * const *templates;
+	const char *template;
+	int base;
+
+	if (type >= ARRAY_SIZE(__templates))
+		return -EINVAL;
+	if (attr >= __templates_size[type])
+		return -EINVAL;
+
+	templates = __templates[type];
+	template = templates[attr];
+
+	base = hwmon_attr_base(type);
+
+	scnprintf(sattr, MAX_SYSFS_ATTR_NAME_LENGTH, template, base + channel);
+	scnprintf(event, sizeof(event), "NAME=%s", sattr);
+	sysfs_notify(&dev->kobj, NULL, sattr);
+	kobject_uevent_env(&dev->kobj, KOBJ_CHANGE, envp);
+
+	if (type == hwmon_temp)
+		hwmon_thermal_notify(dev, channel);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(hwmon_notify_event);
 
 static int hwmon_num_channel_attrs(const struct hwmon_channel_info *info)
 {
@@ -595,8 +755,10 @@ __hwmon_device_register(struct device *dev, const char *name, void *drvdata,
 			const struct attribute_group **groups)
 {
 	struct hwmon_device *hwdev;
+	const char *label;
 	struct device *hdev;
-	int i, j, err, id;
+	struct device *tdev = dev;
+	int i, err, id;
 
 	/* Complain about invalid characters in hwmon name attribute */
 	if (name && (!strlen(name) || strpbrk(name, "-* \t\n")))
@@ -604,7 +766,7 @@ __hwmon_device_register(struct device *dev, const char *name, void *drvdata,
 			 "hwmon: '%s' is not a valid name attribute, please fix\n",
 			 name);
 
-	id = ida_simple_get(&hwmon_ida, 0, 0, GFP_KERNEL);
+	id = ida_alloc(&hwmon_ida, GFP_KERNEL);
 	if (id < 0)
 		return ERR_PTR(id);
 
@@ -650,44 +812,46 @@ __hwmon_device_register(struct device *dev, const char *name, void *drvdata,
 		hdev->groups = groups;
 	}
 
+	if (dev && device_property_present(dev, "label")) {
+		err = device_property_read_string(dev, "label", &label);
+		if (err < 0)
+			goto free_hwmon;
+
+		hwdev->label = kstrdup(label, GFP_KERNEL);
+		if (hwdev->label == NULL) {
+			err = -ENOMEM;
+			goto free_hwmon;
+		}
+	}
+
 	hwdev->name = name;
 	hdev->class = &hwmon_class;
 	hdev->parent = dev;
-	hdev->of_node = dev ? dev->of_node : NULL;
+	while (tdev && !tdev->of_node)
+		tdev = tdev->parent;
+	hdev->of_node = tdev ? tdev->of_node : NULL;
 	hwdev->chip = chip;
 	dev_set_drvdata(hdev, drvdata);
 	dev_set_name(hdev, HWMON_ID_FORMAT, id);
 	err = device_register(hdev);
-	if (err)
-		goto free_hwmon;
+	if (err) {
+		put_device(hdev);
+		goto ida_remove;
+	}
 
-	if (dev && dev->of_node && chip && chip->ops->read &&
+	INIT_LIST_HEAD(&hwdev->tzdata);
+
+	if (hdev->of_node && chip && chip->ops->read &&
 	    chip->info[0]->type == hwmon_chip &&
 	    (chip->info[0]->config[0] & HWMON_C_REGISTER_TZ)) {
-		const struct hwmon_channel_info **info = chip->info;
-
-		for (i = 1; info[i]; i++) {
-			if (info[i]->type != hwmon_temp)
-				continue;
-
-			for (j = 0; info[i]->config[j]; j++) {
-				if (!chip->ops->is_visible(drvdata, hwmon_temp,
-							   hwmon_temp_input, j))
-					continue;
-				if (info[i]->config[j] & HWMON_T_INPUT) {
-					err = hwmon_thermal_add_sensor(hdev, j);
-					if (err) {
-						device_unregister(hdev);
-						/*
-						 * Don't worry about hwdev;
-						 * hwmon_dev_release(), called
-						 * from device_unregister(),
-						 * will free it.
-						 */
-						goto ida_remove;
-					}
-				}
-			}
+		err = hwmon_thermal_register_sensors(hdev);
+		if (err) {
+			device_unregister(hdev);
+			/*
+			 * Don't worry about hwdev; hwmon_dev_release(), called
+			 * from device_unregister(), will free it.
+			 */
+			goto ida_remove;
 		}
 	}
 
@@ -696,7 +860,7 @@ __hwmon_device_register(struct device *dev, const char *name, void *drvdata,
 free_hwmon:
 	hwmon_dev_release(hdev);
 ida_remove:
-	ida_simple_remove(&hwmon_ida, id);
+	ida_free(&hwmon_ida, id);
 	return ERR_PTR(err);
 }
 
@@ -726,11 +890,12 @@ EXPORT_SYMBOL_GPL(hwmon_device_register_with_groups);
 
 /**
  * hwmon_device_register_with_info - register w/ hwmon
- * @dev: the parent device
- * @name: hwmon name attribute
- * @drvdata: driver data to attach to created device
- * @chip: pointer to hwmon chip information
+ * @dev: the parent device (mandatory)
+ * @name: hwmon name attribute (mandatory)
+ * @drvdata: driver data to attach to created device (optional)
+ * @chip: pointer to hwmon chip information (mandatory)
  * @extra_groups: pointer to list of additional non-standard attribute groups
+ *	(optional)
  *
  * hwmon_device_unregister() must be called when the device is no
  * longer needed.
@@ -743,18 +908,40 @@ hwmon_device_register_with_info(struct device *dev, const char *name,
 				const struct hwmon_chip_info *chip,
 				const struct attribute_group **extra_groups)
 {
-	if (!name)
+	if (!dev || !name || !chip)
 		return ERR_PTR(-EINVAL);
 
-	if (chip && (!chip->ops || !chip->ops->is_visible || !chip->info))
-		return ERR_PTR(-EINVAL);
-
-	if (chip && !dev)
+	if (!chip->ops || !chip->ops->is_visible || !chip->info)
 		return ERR_PTR(-EINVAL);
 
 	return __hwmon_device_register(dev, name, drvdata, chip, extra_groups);
 }
 EXPORT_SYMBOL_GPL(hwmon_device_register_with_info);
+
+/**
+ * hwmon_device_register_for_thermal - register hwmon device for thermal subsystem
+ * @dev: the parent device
+ * @name: hwmon name attribute
+ * @drvdata: driver data to attach to created device
+ *
+ * The use of this function is restricted. It is provided for legacy reasons
+ * and must only be called from the thermal subsystem.
+ *
+ * hwmon_device_unregister() must be called when the device is no
+ * longer needed.
+ *
+ * Returns the pointer to the new device.
+ */
+struct device *
+hwmon_device_register_for_thermal(struct device *dev, const char *name,
+				  void *drvdata)
+{
+	if (!name || !dev)
+		return ERR_PTR(-EINVAL);
+
+	return __hwmon_device_register(dev, name, drvdata, NULL, NULL);
+}
+EXPORT_SYMBOL_NS_GPL(hwmon_device_register_for_thermal, HWMON_THERMAL);
 
 /**
  * hwmon_device_register - register w/ hwmon
@@ -785,7 +972,7 @@ void hwmon_device_unregister(struct device *dev)
 
 	if (likely(sscanf(dev_name(dev), HWMON_ID_FORMAT, &id) == 1)) {
 		device_unregister(dev);
-		ida_simple_remove(&hwmon_ida, id);
+		ida_free(&hwmon_ida, id);
 	} else
 		dev_dbg(dev->parent,
 			"hwmon_device_unregister() failed: bad class ID!\n");
@@ -896,6 +1083,59 @@ void devm_hwmon_device_unregister(struct device *dev)
 	WARN_ON(devres_release(dev, devm_hwmon_release, devm_hwmon_match, dev));
 }
 EXPORT_SYMBOL_GPL(devm_hwmon_device_unregister);
+
+static char *__hwmon_sanitize_name(struct device *dev, const char *old_name)
+{
+	char *name, *p;
+
+	if (dev)
+		name = devm_kstrdup(dev, old_name, GFP_KERNEL);
+	else
+		name = kstrdup(old_name, GFP_KERNEL);
+	if (!name)
+		return ERR_PTR(-ENOMEM);
+
+	for (p = name; *p; p++)
+		if (hwmon_is_bad_char(*p))
+			*p = '_';
+
+	return name;
+}
+
+/**
+ * hwmon_sanitize_name - Replaces invalid characters in a hwmon name
+ * @name: NUL-terminated name
+ *
+ * Allocates a new string where any invalid characters will be replaced
+ * by an underscore. It is the responsibility of the caller to release
+ * the memory.
+ *
+ * Returns newly allocated name, or ERR_PTR on error.
+ */
+char *hwmon_sanitize_name(const char *name)
+{
+	return __hwmon_sanitize_name(NULL, name);
+}
+EXPORT_SYMBOL_GPL(hwmon_sanitize_name);
+
+/**
+ * devm_hwmon_sanitize_name - resource managed hwmon_sanitize_name()
+ * @dev: device to allocate memory for
+ * @name: NUL-terminated name
+ *
+ * Allocates a new string where any invalid characters will be replaced
+ * by an underscore.
+ *
+ * Returns newly allocated name, or ERR_PTR on error.
+ */
+char *devm_hwmon_sanitize_name(struct device *dev, const char *name)
+{
+	if (!dev)
+		return ERR_PTR(-EINVAL);
+
+	return __hwmon_sanitize_name(dev, name);
+}
+EXPORT_SYMBOL_GPL(devm_hwmon_sanitize_name);
 
 static void __init hwmon_pci_quirks(void)
 {

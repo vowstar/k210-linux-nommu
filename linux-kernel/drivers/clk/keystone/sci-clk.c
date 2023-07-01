@@ -1,17 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * SCI Clock driver for keystone based devices
  *
- * Copyright (C) 2015-2016 Texas Instruments Incorporated - http://www.ti.com/
+ * Copyright (C) 2015-2016 Texas Instruments Incorporated - https://www.ti.com/
  *	Tero Kristo <t-kristo@ti.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed "as is" WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 #include <linux/clk-provider.h>
 #include <linux/err.h>
@@ -54,6 +46,8 @@ struct sci_clk_provider {
  * @provider:	 Master clock provider
  * @flags:	 Flags for the clock
  * @node:	 Link for handling clocks probed via DT
+ * @cached_req:	 Cached requested freq for determine rate calls
+ * @cached_res:	 Cached result freq for determine rate calls
  */
 struct sci_clk {
 	struct clk_hw hw;
@@ -63,6 +57,8 @@ struct sci_clk {
 	struct sci_clk_provider *provider;
 	u8 flags;
 	struct list_head node;
+	unsigned long cached_req;
+	unsigned long cached_res;
 };
 
 #define to_sci_clk(_hw) container_of(_hw, struct sci_clk, hw)
@@ -175,6 +171,11 @@ static int sci_clk_determine_rate(struct clk_hw *hw,
 	int ret;
 	u64 new_rate;
 
+	if (clk->cached_req && clk->cached_req == req->rate) {
+		req->rate = clk->cached_res;
+		return 0;
+	}
+
 	ret = clk->provider->ops->get_best_match_freq(clk->provider->sci,
 						      clk->dev_id,
 						      clk->clk_id,
@@ -188,6 +189,9 @@ static int sci_clk_determine_rate(struct clk_hw *hw,
 			clk->dev_id, clk->clk_id, ret);
 		return ret;
 	}
+
+	clk->cached_req = req->rate;
+	clk->cached_res = new_rate;
 
 	req->rate = new_rate;
 
@@ -209,7 +213,8 @@ static int sci_clk_set_rate(struct clk_hw *hw, unsigned long rate,
 	struct sci_clk *clk = to_sci_clk(hw);
 
 	return clk->provider->ops->set_freq(clk->provider->sci, clk->dev_id,
-					    clk->clk_id, rate, rate, rate);
+					    clk->clk_id, rate / 10 * 9, rate,
+					    rate / 10 * 11);
 }
 
 /**
@@ -248,6 +253,8 @@ static u8 sci_clk_get_parent(struct clk_hw *hw)
 static int sci_clk_set_parent(struct clk_hw *hw, u8 index)
 {
 	struct sci_clk *clk = to_sci_clk(hw);
+
+	clk->cached_req = 0;
 
 	return clk->provider->ops->set_parent(clk->provider->sci, clk->dev_id,
 					      clk->clk_id,
@@ -488,8 +495,8 @@ static int ti_sci_scan_clocks_from_fw(struct sci_clk_provider *provider)
 
 #else
 
-static int _cmp_sci_clk_list(void *priv, struct list_head *a,
-			     struct list_head *b)
+static int _cmp_sci_clk_list(void *priv, const struct list_head *a,
+			     const struct list_head *b)
 {
 	struct sci_clk *ca = container_of(a, struct sci_clk, node);
 	struct sci_clk *cb = container_of(b, struct sci_clk, node);
@@ -522,7 +529,7 @@ static int ti_sci_scan_clocks_from_dt(struct sci_clk_provider *provider)
 		np = of_find_node_with_property(np, *clk_name);
 		if (!np) {
 			clk_name++;
-			break;
+			continue;
 		}
 
 		if (!of_device_is_available(np))

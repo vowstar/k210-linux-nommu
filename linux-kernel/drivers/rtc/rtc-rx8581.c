@@ -248,8 +248,7 @@ static const struct rx85x1_config rx8571_config = {
 	.num_nvram = 2
 };
 
-static int rx8581_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int rx8581_probe(struct i2c_client *client)
 {
 	struct rx8581 *rx8581;
 	const struct rx85x1_config *config = &rx8581_config;
@@ -298,11 +297,11 @@ static int rx8581_probe(struct i2c_client *client,
 	rx8581->rtc->start_secs = 0;
 	rx8581->rtc->set_start_time = true;
 
-	ret = rtc_register_device(rx8581->rtc);
+	ret = devm_rtc_register_device(rx8581->rtc);
 
 	for (i = 0; i < config->num_nvram; i++) {
 		nvmem_cfg[i].priv = rx8581;
-		rtc_nvmem_register(rx8581->rtc, &nvmem_cfg[i]);
+		devm_rtc_nvmem_register(rx8581->rtc, &nvmem_cfg[i]);
 	}
 
 	return ret;
@@ -314,7 +313,7 @@ static const struct i2c_device_id rx8581_id[] = {
 };
 MODULE_DEVICE_TABLE(i2c, rx8581_id);
 
-static const struct of_device_id rx8581_of_match[] = {
+static const __maybe_unused struct of_device_id rx8581_of_match[] = {
 	{ .compatible = "epson,rx8571", .data = &rx8571_config },
 	{ .compatible = "epson,rx8581", .data = &rx8581_config },
 	{ /* sentinel */ }
@@ -326,7 +325,7 @@ static struct i2c_driver rx8581_driver = {
 		.name	= "rtc-rx8581",
 		.of_match_table = of_match_ptr(rx8581_of_match),
 	},
-	.probe		= rx8581_probe,
+	.probe_new	= rx8581_probe,
 	.id_table	= rx8581_id,
 };
 

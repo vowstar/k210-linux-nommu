@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: (GPL-2.0 OR MPL-1.1) */
 /*
- * p80211types.h
+ *
  *
  * Macros, constants, types, and funcs for p80211 data types
  *
@@ -204,7 +204,7 @@ struct p80211pstr {
 
 struct p80211pstrd {
 	u8 len;
-	u8 data[0];
+	u8 data[];
 } __packed;
 
 /* Maximum pascal string */
@@ -231,12 +231,6 @@ struct p80211pstr32 {
 	u8 data[MAXLEN_PSTR32];
 } __packed;
 
-/* MAC address array */
-struct p80211macarray {
-	u32 cnt;
-	u8 data[1][MAXLEN_PSTR6];
-} __packed;
-
 /* prototype template */
 struct p80211item {
 	u32 did;
@@ -249,7 +243,7 @@ struct p80211itemd {
 	u32 did;
 	u16 status;
 	u16 len;
-	u8 data[0];
+	u8 data[];
 } __packed;
 
 /* message data item for int, BOUNDEDINT, ENUMINT */

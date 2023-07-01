@@ -8,7 +8,7 @@ endif
 
 feature_check = $(eval $(feature_check_code))
 define feature_check_code
-  feature-$(1) := $(shell $(MAKE) OUTPUT=$(OUTPUT_FEATURES) CFLAGS="$(EXTRA_CFLAGS) $(FEATURE_CHECK_CFLAGS-$(1))" CXXFLAGS="$(EXTRA_CXXFLAGS) $(FEATURE_CHECK_CXXFLAGS-$(1))" LDFLAGS="$(LDFLAGS) $(FEATURE_CHECK_LDFLAGS-$(1))" -C $(feature_dir) $(OUTPUT_FEATURES)test-$1.bin >/dev/null 2>/dev/null && echo 1 || echo 0)
+  feature-$(1) := $(shell $(MAKE) OUTPUT=$(OUTPUT_FEATURES) CC="$(CC)" CXX="$(CXX)" CFLAGS="$(EXTRA_CFLAGS) $(FEATURE_CHECK_CFLAGS-$(1))" CXXFLAGS="$(EXTRA_CXXFLAGS) $(FEATURE_CHECK_CXXFLAGS-$(1))" LDFLAGS="$(LDFLAGS) $(FEATURE_CHECK_LDFLAGS-$(1))" -C $(feature_dir) $(OUTPUT_FEATURES)test-$1.bin >/dev/null 2>/dev/null && echo 1 || echo 0)
 endef
 
 feature_set = $(eval $(feature_set_code))
@@ -34,27 +34,24 @@ FEATURE_TESTS_BASIC :=                  \
         dwarf_getlocations              \
         eventfd                         \
         fortify-source                  \
-        sync-compare-and-swap           \
         get_current_dir_name            \
         gettid				\
         glibc                           \
-        gtk2                            \
-        gtk2-infobar                    \
-        libaudit                        \
         libbfd                          \
+        libbfd-buildid			\
         libcap                          \
         libelf                          \
         libelf-getphdrnum               \
         libelf-gelf_getnote             \
         libelf-getshdrstrndx            \
-        libelf-mmap                     \
         libnuma                         \
         numa_num_possible_cpus          \
         libperl                         \
         libpython                       \
-        libpython-version               \
         libslang                        \
         libslang-include-subdir         \
+        libtraceevent                   \
+        libtracefs                      \
         libcrypto                       \
         libunwind                       \
         pthread-attr-setaffinity-np     \
@@ -72,7 +69,9 @@ FEATURE_TESTS_BASIC :=                  \
         setns				\
         libaio				\
         libzstd				\
-        disassembler-four-args
+        disassembler-four-args		\
+        disassembler-init-styled	\
+        file-handle
 
 # FEATURE_TESTS_BASIC + FEATURE_TESTS_EXTRA is the complete list
 # of all feature tests
@@ -81,6 +80,8 @@ FEATURE_TESTS_EXTRA :=                  \
          compile-32                     \
          compile-x32                    \
          cplus-demangle                 \
+         gtk2                           \
+         gtk2-infobar                   \
          hello                          \
          libbabeltrace                  \
          libbfd-liberty                 \
@@ -97,7 +98,17 @@ FEATURE_TESTS_EXTRA :=                  \
          llvm                           \
          llvm-version                   \
          clang                          \
-         libbpf
+         libbpf                         \
+         libbpf-btf__load_from_kernel_by_id \
+         libbpf-bpf_prog_load           \
+         libbpf-bpf_object__next_program \
+         libbpf-bpf_object__next_map    \
+         libbpf-bpf_program__set_insns  \
+         libbpf-bpf_create_map		\
+         libpfm4                        \
+         libdebuginfod			\
+         clang-bpf-co-re
+
 
 FEATURE_TESTS ?= $(FEATURE_TESTS_BASIC)
 
@@ -109,9 +120,8 @@ FEATURE_DISPLAY ?=              \
          dwarf                  \
          dwarf_getlocations     \
          glibc                  \
-         gtk2                   \
-         libaudit               \
          libbfd                 \
+         libbfd-buildid		\
          libcap                 \
          libelf                 \
          libnuma                \
@@ -126,8 +136,13 @@ FEATURE_DISPLAY ?=              \
          get_cpuid              \
          bpf			\
          libaio			\
-         libzstd		\
-         disassembler-four-args
+         libzstd
+
+#
+# Declare group members of a feature to display the logical OR of the detection
+# result instead of each member result.
+#
+FEATURE_GROUP_MEMBERS-libbfd = libbfd-liberty libbfd-liberty-z
 
 # Set FEATURE_CHECK_(C|LD)FLAGS-all for all FEATURE_TESTS features.
 # If in the future we need per-feature checks/flags for features not
@@ -169,19 +184,28 @@ endif
 #
 # Print the result of the feature test:
 #
-feature_print_status = $(eval $(feature_print_status_code)) $(info $(MSG))
+feature_print_status = $(eval $(feature_print_status_code))
 
-define feature_print_status_code
-  ifeq ($(feature-$(1)), 1)
-    MSG = $(shell printf '...%30s: [ \033[32mon\033[m  ]' $(1))
-  else
-    MSG = $(shell printf '...%30s: [ \033[31mOFF\033[m ]' $(1))
+feature_group = $(eval $(feature_gen_group)) $(GROUP)
+
+define feature_gen_group
+  GROUP := $(1)
+  ifneq ($(feature_verbose),1)
+    GROUP += $(FEATURE_GROUP_MEMBERS-$(1))
   endif
 endef
 
-feature_print_text = $(eval $(feature_print_text_code)) $(info $(MSG))
+define feature_print_status_code
+  ifneq (,$(filter 1,$(foreach feat,$(call feature_group,$(feat)),$(feature-$(feat)))))
+    MSG = $(shell printf '...%40s: [ \033[32mon\033[m  ]' $(1))
+  else
+    MSG = $(shell printf '...%40s: [ \033[31mOFF\033[m ]' $(1))
+  endif
+endef
+
+feature_print_text = $(eval $(feature_print_text_code))
 define feature_print_text_code
-    MSG = $(shell printf '...%30s: %s' $(1) $(2))
+    MSG = $(shell printf '...%40s: %s' $(1) $(2))
 endef
 
 #
@@ -236,17 +260,29 @@ ifeq ($(VF),1)
   feature_verbose := 1
 endif
 
-ifeq ($(feature_display),1)
-  $(info )
-  $(info Auto-detecting system features:)
-  $(foreach feat,$(FEATURE_DISPLAY),$(call feature_print_status,$(feat),))
-  ifneq ($(feature_verbose),1)
-    $(info )
-  endif
+ifneq ($(feature_verbose),1)
+  #
+  # Determine the features to omit from the displayed message, as only the
+  # logical OR of the detection result will be shown.
+  #
+  FEATURE_OMIT := $(foreach feat,$(FEATURE_DISPLAY),$(FEATURE_GROUP_MEMBERS-$(feat)))
 endif
 
-ifeq ($(feature_verbose),1)
-  TMP := $(filter-out $(FEATURE_DISPLAY),$(FEATURE_TESTS))
-  $(foreach feat,$(TMP),$(call feature_print_status,$(feat),))
+feature_display_entries = $(eval $(feature_display_entries_code))
+define feature_display_entries_code
+  ifeq ($(feature_display),1)
+    $$(info )
+    $$(info Auto-detecting system features:)
+    $(foreach feat,$(filter-out $(FEATURE_OMIT),$(FEATURE_DISPLAY)),$(call feature_print_status,$(feat),) $$(info $(MSG)))
+  endif
+
+  ifeq ($(feature_verbose),1)
+    $(eval TMP := $(filter-out $(FEATURE_DISPLAY),$(FEATURE_TESTS)))
+    $(foreach feat,$(TMP),$(call feature_print_status,$(feat),) $$(info $(MSG)))
+  endif
+endef
+
+ifeq ($(FEATURE_DISPLAY_DEFERRED),)
+  $(call feature_display_entries)
   $(info )
 endif

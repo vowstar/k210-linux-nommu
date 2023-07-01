@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-#ifndef GIT_COMPAT_UTIL_H
-#define GIT_COMPAT_UTIL_H
+#ifndef __PERF_UTIL_H
+#define __PERF_UTIL_H
 
 #define _BSD_SOURCE 1
 /* glibc 2.20 deprecates _BSD_SOURCE in favour of _DEFAULT_SOURCE */
@@ -11,6 +11,9 @@
 #include <stddef.h>
 #include <linux/compiler.h>
 #include <sys/types.h>
+#ifndef __cplusplus
+#include <internal/cpumap.h>
+#endif
 
 /* General helper functions */
 void usage(const char *err) __noreturn;
@@ -29,6 +32,8 @@ size_t hex_width(u64 v);
 
 int sysctl__max_stack(void);
 
+bool sysctl__nmi_watchdog_enabled(void);
+
 int fetch_kernel_version(unsigned int *puint,
 			 char *str, size_t str_sz);
 #define KVER_VERSION(x)		(((x) >> 16) & 0xff)
@@ -37,7 +42,7 @@ int fetch_kernel_version(unsigned int *puint,
 #define KVER_FMT	"%d.%d.%d"
 #define KVER_PARAM(x)	KVER_VERSION(x), KVER_PATCHLEVEL(x), KVER_SUBLEVEL(x)
 
-const char *perf_tip(const char *dirpath);
+int perf_tip(char **strp, const char *dirpath);
 
 #ifndef HAVE_SCHED_GETCPU_SUPPORT
 int sched_getcpu(void);
@@ -60,4 +65,52 @@ char *perf_exe(char *buf, int len);
 #endif
 #endif
 
-#endif /* GIT_COMPAT_UTIL_H */
+extern bool test_attr__enabled;
+void test_attr__ready(void);
+void test_attr__init(void);
+struct perf_event_attr;
+void test_attr__open(struct perf_event_attr *attr, pid_t pid, struct perf_cpu cpu,
+		     int fd, int group_fd, unsigned long flags);
+
+struct perf_debuginfod {
+	const char	*urls;
+	bool		 set;
+};
+void perf_debuginfod_setup(struct perf_debuginfod *di);
+
+char *filename_with_chroot(int pid, const char *filename);
+
+int do_realloc_array_as_needed(void **arr, size_t *arr_sz, size_t x,
+			       size_t msz, const void *init_val);
+
+#define realloc_array_as_needed(a, n, x, v) ({			\
+	typeof(x) __x = (x);					\
+	__x >= (n) ?						\
+		do_realloc_array_as_needed((void **)&(a),	\
+					   &(n),		\
+					   __x,			\
+					   sizeof(*(a)),	\
+					   (const void *)(v)) :	\
+		0;						\
+	})
+
+static inline bool host_is_bigendian(void)
+{
+#ifdef __BYTE_ORDER__
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+	return false;
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+	return true;
+#else
+#error "Unrecognized __BYTE_ORDER__"
+#endif
+#else /* !__BYTE_ORDER__ */
+	unsigned char str[] = { 0x1, 0x2, 0x3, 0x4, 0x0, 0x0, 0x0, 0x0};
+	unsigned int *ptr;
+
+	ptr = (unsigned int *)(void *)str;
+	return *ptr == 0x01020304;
+#endif
+}
+
+#endif /* __PERF_UTIL_H */

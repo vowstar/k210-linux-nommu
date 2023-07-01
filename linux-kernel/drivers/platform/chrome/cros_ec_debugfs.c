@@ -25,6 +25,9 @@
 
 #define CIRC_ADD(idx, size, value)	(((idx) + (value)) & ((size) - 1))
 
+/* waitqueue for log readers */
+static DECLARE_WAIT_QUEUE_HEAD(cros_ec_debugfs_log_wq);
+
 /**
  * struct cros_ec_debugfs - EC debugging information.
  *
@@ -33,9 +36,10 @@
  * @log_buffer: circular buffer for console log information
  * @read_msg: preallocated EC command and buffer to read console log
  * @log_mutex: mutex to protect circular buffer
- * @log_wq: waitqueue for log readers
  * @log_poll_work: recurring task to poll EC for new console log data
  * @panicinfo_blob: panicinfo debugfs blob
+ * @notifier_panic: notifier_block to let kernel to flush buffered log
+ *                  when EC panic
  */
 struct cros_ec_debugfs {
 	struct cros_ec_dev *ec;
@@ -44,10 +48,10 @@ struct cros_ec_debugfs {
 	struct circ_buf log_buffer;
 	struct cros_ec_command *read_msg;
 	struct mutex log_mutex;
-	wait_queue_head_t log_wq;
 	struct delayed_work log_poll_work;
 	/* EC panicinfo */
 	struct debugfs_blob_wrapper panicinfo_blob;
+	struct notifier_block notifier_panic;
 };
 
 /*
@@ -107,7 +111,7 @@ static void cros_ec_console_log_work(struct work_struct *__work)
 			buf_space--;
 		}
 
-		wake_up(&debug_info->log_wq);
+		wake_up(&cros_ec_debugfs_log_wq);
 	}
 
 	mutex_unlock(&debug_info->log_mutex);
@@ -141,7 +145,7 @@ static ssize_t cros_ec_console_log_read(struct file *file, char __user *buf,
 
 		mutex_unlock(&debug_info->log_mutex);
 
-		ret = wait_event_interruptible(debug_info->log_wq,
+		ret = wait_event_interruptible(cros_ec_debugfs_log_wq,
 					CIRC_CNT(cb->head, cb->tail, LOG_SIZE));
 		if (ret < 0)
 			return ret;
@@ -173,7 +177,7 @@ static __poll_t cros_ec_console_log_poll(struct file *file,
 	struct cros_ec_debugfs *debug_info = file->private_data;
 	__poll_t mask = 0;
 
-	poll_wait(file, &debug_info->log_wq, wait);
+	poll_wait(file, &cros_ec_debugfs_log_wq, wait);
 
 	mutex_lock(&debug_info->log_mutex);
 	if (CIRC_CNT(debug_info->log_buffer.head,
@@ -240,6 +244,25 @@ static ssize_t cros_ec_pdinfo_read(struct file *file,
 
 	return simple_read_from_buffer(user_buf, count, ppos,
 				       read_buf, p - read_buf);
+}
+
+static bool cros_ec_uptime_is_supported(struct cros_ec_device *ec_dev)
+{
+	struct {
+		struct cros_ec_command cmd;
+		struct ec_response_uptime_info resp;
+	} __packed msg = {};
+	int ret;
+
+	msg.cmd.command = EC_CMD_GET_UPTIME_INFO;
+	msg.cmd.insize = sizeof(msg.resp);
+
+	ret = cros_ec_cmd_xfer_status(ec_dev, &msg.cmd);
+	if (ret == -EPROTO && msg.cmd.result == EC_RES_INVALID_COMMAND)
+		return false;
+
+	/* Other errors maybe a transient error, do not rule about support. */
+	return true;
 }
 
 static ssize_t cros_ec_uptime_read(struct file *file, char __user *user_buf,
@@ -358,7 +381,6 @@ static int cros_ec_create_console_log(struct cros_ec_debugfs *debug_info)
 	debug_info->log_buffer.tail = 0;
 
 	mutex_init(&debug_info->log_mutex);
-	init_waitqueue_head(&debug_info->log_wq);
 
 	debugfs_create_file("console_log", S_IFREG | 0444, debug_info->dir,
 			    debug_info, &cros_ec_console_log_fops);
@@ -418,6 +440,22 @@ free:
 	return ret;
 }
 
+static int cros_ec_debugfs_panic_event(struct notifier_block *nb,
+				       unsigned long queued_during_suspend, void *_notify)
+{
+	struct cros_ec_debugfs *debug_info =
+		container_of(nb, struct cros_ec_debugfs, notifier_panic);
+
+	if (debug_info->log_buffer.buf) {
+		/* Force log poll work to run immediately */
+		mod_delayed_work(debug_info->log_poll_work.wq, &debug_info->log_poll_work, 0);
+		/* Block until log poll work finishes */
+		flush_delayed_work(&debug_info->log_poll_work);
+	}
+
+	return NOTIFY_DONE;
+}
+
 static int cros_ec_debugfs_probe(struct platform_device *pd)
 {
 	struct cros_ec_dev *ec = dev_get_drvdata(pd->dev.parent);
@@ -444,11 +482,21 @@ static int cros_ec_debugfs_probe(struct platform_device *pd)
 	debugfs_create_file("pdinfo", 0444, debug_info->dir, debug_info,
 			    &cros_ec_pdinfo_fops);
 
-	debugfs_create_file("uptime", 0444, debug_info->dir, debug_info,
-			    &cros_ec_uptime_fops);
+	if (cros_ec_uptime_is_supported(ec->ec_dev))
+		debugfs_create_file("uptime", 0444, debug_info->dir, debug_info,
+				    &cros_ec_uptime_fops);
 
 	debugfs_create_x32("last_resume_result", 0444, debug_info->dir,
 			   &ec->ec_dev->last_resume_result);
+
+	debugfs_create_u16("suspend_timeout_ms", 0664, debug_info->dir,
+			   &ec->ec_dev->suspend_timeout_ms);
+
+	debug_info->notifier_panic.notifier_call = cros_ec_debugfs_panic_event;
+	ret = blocking_notifier_chain_register(&ec->ec_dev->panic_notifier,
+					       &debug_info->notifier_panic);
+	if (ret)
+		goto remove_debugfs;
 
 	ec->debug_info = debug_info;
 
@@ -498,6 +546,7 @@ static struct platform_driver cros_ec_debugfs_driver = {
 	.driver = {
 		.name = DRV_NAME,
 		.pm = &cros_ec_debugfs_pm_ops,
+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	},
 	.probe = cros_ec_debugfs_probe,
 	.remove = cros_ec_debugfs_remove,

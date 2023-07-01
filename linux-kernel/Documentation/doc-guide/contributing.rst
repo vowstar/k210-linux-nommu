@@ -79,8 +79,9 @@ simplistic idea of what C comment blocks look like.  This problem had been
 present since that comment was added in 2016 — a full four years.  Fixing
 it was a matter of adding the missing asterisks.  A quick look at the
 history for that file showed what the normal format for subject lines is,
-and ``scripts/get_maintainer.pl`` told me who should receive it.  The
-resulting patch looked like this::
+and ``scripts/get_maintainer.pl`` told me who should receive it (pass paths to
+your patches as arguments to scripts/get_maintainer.pl).  The resulting patch
+looked like this::
 
   [PATCH] PM / devfreq: Fix two malformed kerneldoc comments
 
@@ -237,10 +238,10 @@ We have been trying to improve the situation through the creation of
 a set of "books" that group documentation for specific readers.  These
 include:
 
- - :doc:`../admin-guide/index`
- - :doc:`../core-api/index`
- - :doc:`../driver-api/index`
- - :doc:`../userspace-api/index`
+ - Documentation/admin-guide/index.rst
+ - Documentation/core-api/index.rst
+ - Documentation/driver-api/index.rst
+ - Documentation/userspace-api/index.rst
 
 As well as this book on documentation itself.
 

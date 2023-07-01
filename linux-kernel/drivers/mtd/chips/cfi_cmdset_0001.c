@@ -72,7 +72,8 @@ static int cfi_intelext_is_locked(struct mtd_info *mtd, loff_t ofs,
 #ifdef CONFIG_MTD_OTP
 static int cfi_intelext_read_fact_prot_reg (struct mtd_info *, loff_t, size_t, size_t *, u_char *);
 static int cfi_intelext_read_user_prot_reg (struct mtd_info *, loff_t, size_t, size_t *, u_char *);
-static int cfi_intelext_write_user_prot_reg (struct mtd_info *, loff_t, size_t, size_t *, u_char *);
+static int cfi_intelext_write_user_prot_reg(struct mtd_info *, loff_t, size_t,
+					    size_t *, const u_char *);
 static int cfi_intelext_lock_user_prot_reg (struct mtd_info *, loff_t, size_t);
 static int cfi_intelext_get_fact_prot_info(struct mtd_info *, size_t,
 					   size_t *, struct otp_info *);
@@ -420,8 +421,9 @@ read_pri_intelext(struct map_info *map, __u16 adr)
 		extra_size = 0;
 
 		/* Protection Register info */
-		extra_size += (extp->NumProtectionFields - 1) *
-			      sizeof(struct cfi_intelext_otpinfo);
+		if (extp->NumProtectionFields)
+			extra_size += (extp->NumProtectionFields - 1) *
+				      sizeof(struct cfi_intelext_otpinfo);
 	}
 
 	if (extp->MinorVersion >= '1') {
@@ -695,14 +697,16 @@ static int cfi_intelext_partition_fixup(struct mtd_info *mtd,
 	 */
 	if (extp && extp->MajorVersion == '1' && extp->MinorVersion >= '3'
 	    && extp->FeatureSupport & (1 << 9)) {
+		int offs = 0;
 		struct cfi_private *newcfi;
 		struct flchip *chip;
 		struct flchip_shared *shared;
-		int offs, numregions, numparts, partshift, numvirtchips, i, j;
+		int numregions, numparts, partshift, numvirtchips, i, j;
 
 		/* Protection Register info */
-		offs = (extp->NumProtectionFields - 1) *
-		       sizeof(struct cfi_intelext_otpinfo);
+		if (extp->NumProtectionFields)
+			offs = (extp->NumProtectionFields - 1) *
+			       sizeof(struct cfi_intelext_otpinfo);
 
 		/* Burst Read info */
 		offs += extp->extra[offs+1]+2;
@@ -834,7 +838,7 @@ static int chip_ready (struct map_info *map, struct flchip *chip, unsigned long 
 			/* Someone else might have been playing with it. */
 			return -EAGAIN;
 		}
-		/* Fall through */
+		fallthrough;
 	case FL_READY:
 	case FL_CFI_QUERY:
 	case FL_JEDEC_QUERY:
@@ -907,7 +911,7 @@ static int chip_ready (struct map_info *map, struct flchip *chip, unsigned long 
 		/* Only if there's no operation suspended... */
 		if (mode == FL_READY && chip->oldstate == FL_READY)
 			return 0;
-		/* Fall through */
+		fallthrough;
 	default:
 	sleep:
 		set_current_state(TASK_UNINTERRUPTIBLE);
@@ -2444,10 +2448,10 @@ static int cfi_intelext_read_user_prot_reg(struct mtd_info *mtd, loff_t from,
 
 static int cfi_intelext_write_user_prot_reg(struct mtd_info *mtd, loff_t from,
 					    size_t len, size_t *retlen,
-					     u_char *buf)
+					    const u_char *buf)
 {
 	return cfi_intelext_otp_walk(mtd, from, len, retlen,
-				     buf, do_otp_write, 1);
+				     (u_char *)buf, do_otp_write, 1);
 }
 
 static int cfi_intelext_lock_user_prot_reg(struct mtd_info *mtd,
@@ -2546,6 +2550,7 @@ static int cfi_intelext_suspend(struct mtd_info *mtd)
 			   anyway? The latter for now. */
 			printk(KERN_NOTICE "Flash device refused suspend due to active operation (state %d)\n", chip->state);
 			ret = -EAGAIN;
+			break;
 		case FL_PM_SUSPENDED:
 			break;
 		}

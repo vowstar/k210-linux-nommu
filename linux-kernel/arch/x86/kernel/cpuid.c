@@ -74,10 +74,9 @@ static ssize_t cpuid_read(struct file *file, char __user *buf,
 
 	init_completion(&cmd.done);
 	for (; count; count -= 16) {
-		call_single_data_t csd = {
-			.func = cpuid_smp_cpuid,
-			.info = &cmd,
-		};
+		call_single_data_t csd;
+
+		INIT_CSD(&csd, cpuid_smp_cpuid, &cmd);
 
 		cmd.regs.eax = pos;
 		cmd.regs.ecx = pos >> 32;
@@ -140,7 +139,7 @@ static int cpuid_device_destroy(unsigned int cpu)
 	return 0;
 }
 
-static char *cpuid_devnode(struct device *dev, umode_t *mode)
+static char *cpuid_devnode(const struct device *dev, umode_t *mode)
 {
 	return kasprintf(GFP_KERNEL, "cpu/%u/cpuid", MINOR(dev->devt));
 }

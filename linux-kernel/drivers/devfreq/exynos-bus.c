@@ -24,6 +24,7 @@
 
 struct exynos_bus {
 	struct device *dev;
+	struct platform_device *icc_pdev;
 
 	struct devfreq *devfreq;
 	struct devfreq_event_dev **edev;
@@ -32,7 +33,7 @@ struct exynos_bus {
 
 	unsigned long curr_freq;
 
-	struct opp_table *opp_table;
+	int opp_token;
 	struct clk *clk;
 	unsigned int ratio;
 };
@@ -156,17 +157,18 @@ static void exynos_bus_exit(struct device *dev)
 	if (ret < 0)
 		dev_warn(dev, "failed to disable the devfreq-event devices\n");
 
+	platform_device_unregister(bus->icc_pdev);
+
 	dev_pm_opp_of_remove_table(dev);
 	clk_disable_unprepare(bus->clk);
-	if (bus->opp_table) {
-		dev_pm_opp_put_regulators(bus->opp_table);
-		bus->opp_table = NULL;
-	}
+	dev_pm_opp_put_regulators(bus->opp_token);
 }
 
 static void exynos_bus_passive_exit(struct device *dev)
 {
 	struct exynos_bus *bus = dev_get_drvdata(dev);
+
+	platform_device_unregister(bus->icc_pdev);
 
 	dev_pm_opp_of_remove_table(dev);
 	clk_disable_unprepare(bus->clk);
@@ -176,24 +178,22 @@ static int exynos_bus_parent_parse_of(struct device_node *np,
 					struct exynos_bus *bus)
 {
 	struct device *dev = bus->dev;
-	struct opp_table *opp_table;
-	const char *vdd = "vdd";
+	const char *supplies[] = { "vdd", NULL };
 	int i, ret, count, size;
 
-	opp_table = dev_pm_opp_set_regulators(dev, &vdd, 1);
-	if (IS_ERR(opp_table)) {
-		ret = PTR_ERR(opp_table);
+	ret = dev_pm_opp_set_regulators(dev, supplies);
+	if (ret < 0) {
 		dev_err(dev, "failed to set regulators %d\n", ret);
 		return ret;
 	}
 
-	bus->opp_table = opp_table;
+	bus->opp_token = ret;
 
 	/*
 	 * Get the devfreq-event devices to get the current utilization of
 	 * buses. This raw data will be used in devfreq ondemand governor.
 	 */
-	count = devfreq_event_get_edev_count(dev);
+	count = devfreq_event_get_edev_count(dev, "devfreq-events");
 	if (count < 0) {
 		dev_err(dev, "failed to get the count of devfreq-event dev\n");
 		ret = count;
@@ -209,7 +209,8 @@ static int exynos_bus_parent_parse_of(struct device_node *np,
 	}
 
 	for (i = 0; i < count; i++) {
-		bus->edev[i] = devfreq_event_get_edev_by_phandle(dev, i);
+		bus->edev[i] = devfreq_event_get_edev_by_phandle(dev,
+							"devfreq-events", i);
 		if (IS_ERR(bus->edev[i])) {
 			ret = -EPROBE_DEFER;
 			goto err_regulator;
@@ -232,8 +233,7 @@ static int exynos_bus_parent_parse_of(struct device_node *np,
 	return 0;
 
 err_regulator:
-	dev_pm_opp_put_regulators(bus->opp_table);
-	bus->opp_table = NULL;
+	dev_pm_opp_put_regulators(bus->opp_token);
 
 	return ret;
 }
@@ -360,7 +360,7 @@ static int exynos_bus_profile_init_passive(struct exynos_bus *bus,
 	profile->exit = exynos_bus_passive_exit;
 
 	/* Get the instance of parent devfreq device */
-	parent_devfreq = devfreq_get_devfreq_by_phandle(dev, 0);
+	parent_devfreq = devfreq_get_devfreq_by_phandle(dev, "devfreq", 0);
 	if (IS_ERR(parent_devfreq))
 		return -EPROBE_DEFER;
 
@@ -431,9 +431,21 @@ static int exynos_bus_probe(struct platform_device *pdev)
 	if (ret < 0)
 		goto err;
 
-	max_state = bus->devfreq->profile->max_state;
-	min_freq = (bus->devfreq->profile->freq_table[0] / 1000);
-	max_freq = (bus->devfreq->profile->freq_table[max_state - 1] / 1000);
+	/* Create child platform device for the interconnect provider */
+	if (of_get_property(dev->of_node, "#interconnect-cells", NULL)) {
+		bus->icc_pdev = platform_device_register_data(
+						dev, "exynos-generic-icc",
+						PLATFORM_DEVID_AUTO, NULL, 0);
+
+		if (IS_ERR(bus->icc_pdev)) {
+			ret = PTR_ERR(bus->icc_pdev);
+			goto err;
+		}
+	}
+
+	max_state = bus->devfreq->max_state;
+	min_freq = (bus->devfreq->freq_table[0] / 1000);
+	max_freq = (bus->devfreq->freq_table[max_state - 1] / 1000);
 	pr_info("exynos-bus: new bus device registered: %s (%6ld KHz ~ %6ld KHz)\n",
 			dev_name(dev), min_freq, max_freq);
 
@@ -443,10 +455,7 @@ err:
 	dev_pm_opp_of_remove_table(dev);
 	clk_disable_unprepare(bus->clk);
 err_reg:
-	if (!passive) {
-		dev_pm_opp_put_regulators(bus->opp_table);
-		bus->opp_table = NULL;
-	}
+	dev_pm_opp_put_regulators(bus->opp_token);
 
 	return ret;
 }

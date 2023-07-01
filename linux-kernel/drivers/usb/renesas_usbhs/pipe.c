@@ -308,7 +308,7 @@ static void __usbhsp_pid_try_nak_if_stall(struct usbhs_pipe *pipe)
 	switch (pid) {
 	case PID_STALL11:
 		usbhsp_pipectrl_set(pipe, PID_MASK, PID_STALL10);
-		/* fall-through */
+		fallthrough;
 	case PID_STALL10:
 		usbhsp_pipectrl_set(pipe, PID_MASK, PID_NAK);
 	}
@@ -746,6 +746,8 @@ struct usbhs_pipe *usbhs_pipe_malloc(struct usbhs_priv *priv,
 
 void usbhs_pipe_free(struct usbhs_pipe *pipe)
 {
+	usbhsp_pipe_select(pipe);
+	usbhsp_pipe_cfg_set(pipe, 0xFFFF, 0);
 	usbhsp_put_pipe(pipe);
 }
 

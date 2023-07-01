@@ -9,7 +9,13 @@ char _license[] SEC("license") = "GPL";
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 512 * 4); /* at least 4 pages of data */
+	__uint(map_flags, BPF_F_MMAPABLE | BPF_F_RDONLY_PROG);
+	__type(key, __u32);
+	__type(value, char);
+} rdonly_map SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(map_flags, BPF_F_MMAPABLE);
 	__type(key, __u32);
 	__type(value, __u64);

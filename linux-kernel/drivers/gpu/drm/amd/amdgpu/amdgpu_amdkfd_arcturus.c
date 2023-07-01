@@ -22,10 +22,10 @@
 #include <linux/module.h>
 #include <linux/fdtable.h>
 #include <linux/uaccess.h>
-#include <linux/mmu_context.h>
 #include <linux/firmware.h>
 #include "amdgpu.h"
 #include "amdgpu_amdkfd.h"
+#include "amdgpu_amdkfd_arcturus.h"
 #include "sdma0/sdma0_4_2_2_offset.h"
 #include "sdma0/sdma0_4_2_2_sh_mask.h"
 #include "sdma1/sdma1_4_2_2_offset.h"
@@ -57,11 +57,6 @@
 		(*dump)[i++][1] = RREG32(addr);		\
 	} while (0)
 
-static inline struct amdgpu_device *get_amdgpu_device(struct kgd_dev *kgd)
-{
-	return (struct amdgpu_device *)kgd;
-}
-
 static inline struct v9_sdma_mqd *get_sdma_mqd(void *mqd)
 {
 	return (struct v9_sdma_mqd *)mqd;
@@ -79,7 +74,7 @@ static uint32_t get_sdma_rlc_reg_offset(struct amdgpu_device *adev,
 		dev_warn(adev->dev,
 			 "Invalid sdma engine id (%d), using engine id 0\n",
 			 engine_id);
-		/* fall through */
+		fallthrough;
 	case 0:
 		sdma_engine_reg_base = SOC15_REG_OFFSET(SDMA0, 0,
 				mmSDMA0_RLC0_RB_CNTL) - mmSDMA0_RLC0_RB_CNTL;
@@ -123,10 +118,9 @@ static uint32_t get_sdma_rlc_reg_offset(struct amdgpu_device *adev,
 	return sdma_rlc_reg_offset;
 }
 
-static int kgd_hqd_sdma_load(struct kgd_dev *kgd, void *mqd,
+int kgd_arcturus_hqd_sdma_load(struct amdgpu_device *adev, void *mqd,
 			     uint32_t __user *wptr, struct mm_struct *mm)
 {
-	struct amdgpu_device *adev = get_amdgpu_device(kgd);
 	struct v9_sdma_mqd *m;
 	uint32_t sdma_rlc_reg_offset;
 	unsigned long end_jiffies;
@@ -193,11 +187,10 @@ static int kgd_hqd_sdma_load(struct kgd_dev *kgd, void *mqd,
 	return 0;
 }
 
-static int kgd_hqd_sdma_dump(struct kgd_dev *kgd,
+int kgd_arcturus_hqd_sdma_dump(struct amdgpu_device *adev,
 			     uint32_t engine_id, uint32_t queue_id,
 			     uint32_t (**dump)[2], uint32_t *n_regs)
 {
-	struct amdgpu_device *adev = get_amdgpu_device(kgd);
 	uint32_t sdma_rlc_reg_offset = get_sdma_rlc_reg_offset(adev,
 			engine_id, queue_id);
 	uint32_t i = 0, reg;
@@ -225,9 +218,9 @@ static int kgd_hqd_sdma_dump(struct kgd_dev *kgd,
 	return 0;
 }
 
-static bool kgd_hqd_sdma_is_occupied(struct kgd_dev *kgd, void *mqd)
+bool kgd_arcturus_hqd_sdma_is_occupied(struct amdgpu_device *adev,
+				void *mqd)
 {
-	struct amdgpu_device *adev = get_amdgpu_device(kgd);
 	struct v9_sdma_mqd *m;
 	uint32_t sdma_rlc_reg_offset;
 	uint32_t sdma_rlc_rb_cntl;
@@ -244,10 +237,9 @@ static bool kgd_hqd_sdma_is_occupied(struct kgd_dev *kgd, void *mqd)
 	return false;
 }
 
-static int kgd_hqd_sdma_destroy(struct kgd_dev *kgd, void *mqd,
+int kgd_arcturus_hqd_sdma_destroy(struct amdgpu_device *adev, void *mqd,
 				unsigned int utimeout)
 {
-	struct amdgpu_device *adev = get_amdgpu_device(kgd);
 	struct v9_sdma_mqd *m;
 	uint32_t sdma_rlc_reg_offset;
 	uint32_t temp;
@@ -284,42 +276,24 @@ static int kgd_hqd_sdma_destroy(struct kgd_dev *kgd, void *mqd,
 	return 0;
 }
 
-static void kgd_set_vm_context_page_table_base(struct kgd_dev *kgd, uint32_t vmid,
-		uint64_t page_table_base)
-{
-	struct amdgpu_device *adev = get_amdgpu_device(kgd);
-
-	if (!amdgpu_amdkfd_is_kfd_vmid(adev, vmid)) {
-		pr_err("trying to set page table base for wrong VMID %u\n",
-		       vmid);
-		return;
-	}
-
-	mmhub_v9_4_setup_vm_pt_regs(adev, vmid, page_table_base);
-
-	gfxhub_v1_0_setup_vm_pt_regs(adev, vmid, page_table_base);
-}
-
 const struct kfd2kgd_calls arcturus_kfd2kgd = {
 	.program_sh_mem_settings = kgd_gfx_v9_program_sh_mem_settings,
 	.set_pasid_vmid_mapping = kgd_gfx_v9_set_pasid_vmid_mapping,
 	.init_interrupts = kgd_gfx_v9_init_interrupts,
 	.hqd_load = kgd_gfx_v9_hqd_load,
 	.hiq_mqd_load = kgd_gfx_v9_hiq_mqd_load,
-	.hqd_sdma_load = kgd_hqd_sdma_load,
+	.hqd_sdma_load = kgd_arcturus_hqd_sdma_load,
 	.hqd_dump = kgd_gfx_v9_hqd_dump,
-	.hqd_sdma_dump = kgd_hqd_sdma_dump,
+	.hqd_sdma_dump = kgd_arcturus_hqd_sdma_dump,
 	.hqd_is_occupied = kgd_gfx_v9_hqd_is_occupied,
-	.hqd_sdma_is_occupied = kgd_hqd_sdma_is_occupied,
+	.hqd_sdma_is_occupied = kgd_arcturus_hqd_sdma_is_occupied,
 	.hqd_destroy = kgd_gfx_v9_hqd_destroy,
-	.hqd_sdma_destroy = kgd_hqd_sdma_destroy,
-	.address_watch_disable = kgd_gfx_v9_address_watch_disable,
-	.address_watch_execute = kgd_gfx_v9_address_watch_execute,
+	.hqd_sdma_destroy = kgd_arcturus_hqd_sdma_destroy,
 	.wave_control_execute = kgd_gfx_v9_wave_control_execute,
-	.address_watch_get_offset = kgd_gfx_v9_address_watch_get_offset,
 	.get_atc_vmid_pasid_mapping_info =
-			kgd_gfx_v9_get_atc_vmid_pasid_mapping_info,
-	.get_tile_config = kgd_gfx_v9_get_tile_config,
-	.set_vm_context_page_table_base = kgd_set_vm_context_page_table_base,
-	.get_hive_id = amdgpu_amdkfd_get_hive_id,
+				kgd_gfx_v9_get_atc_vmid_pasid_mapping_info,
+	.set_vm_context_page_table_base =
+				kgd_gfx_v9_set_vm_context_page_table_base,
+	.get_cu_occupancy = kgd_gfx_v9_get_cu_occupancy,
+	.program_trap_handler_settings = kgd_gfx_v9_program_trap_handler_settings
 };

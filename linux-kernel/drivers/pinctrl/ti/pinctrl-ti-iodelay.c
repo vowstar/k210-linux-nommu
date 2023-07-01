@@ -2,7 +2,7 @@
  * Support for configuration of IO Delay module found on Texas Instruments SoCs
  * such as DRA7
  *
- * Copyright (C) 2015-2017 Texas Instruments Incorporated - http://www.ti.com/
+ * Copyright (C) 2015-2017 Texas Instruments Incorporated - https://www.ti.com/
  *
  * This file is licensed under the terms of the GNU General Public
  * License version 2. This program is licensed "as is" without any
@@ -15,11 +15,13 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
-#include <linux/pinctrl/pinconf.h>
-#include <linux/pinctrl/pinconf-generic.h>
-#include <linux/pinctrl/pinctrl.h>
 #include <linux/regmap.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
+
+#include <linux/pinctrl/pinconf-generic.h>
+#include <linux/pinctrl/pinconf.h>
+#include <linux/pinctrl/pinctrl.h>
 
 #include "../core.h"
 #include "../devicetree.h"
@@ -511,8 +513,10 @@ static int ti_iodelay_dt_node_to_map(struct pinctrl_dev *pctldev,
 	}
 
 	pins = devm_kcalloc(iod->dev, rows, sizeof(*pins), GFP_KERNEL);
-	if (!pins)
+	if (!pins) {
+		error = -ENOMEM;
 		goto free_group;
+	}
 
 	cfg = devm_kcalloc(iod->dev, rows, sizeof(*cfg), GFP_KERNEL);
 	if (!cfg) {
@@ -704,10 +708,9 @@ static void ti_iodelay_pinconf_group_dbg_show(struct pinctrl_dev *pctldev,
 		u32 reg = 0;
 
 		cfg = &group->cfg[i];
-		regmap_read(iod->regmap, cfg->offset, &reg),
-			seq_printf(s, "\n\t0x%08x = 0x%08x (%3d, %3d)",
-				   cfg->offset, reg, cfg->a_delay,
-				   cfg->g_delay);
+		regmap_read(iod->regmap, cfg->offset, &reg);
+		seq_printf(s, "\n\t0x%08x = 0x%08x (%3d, %3d)",
+			cfg->offset, reg, cfg->a_delay, cfg->g_delay);
 	}
 }
 #endif
@@ -868,7 +871,8 @@ static int ti_iodelay_probe(struct platform_device *pdev)
 		goto exit_out;
 	}
 
-	if (ti_iodelay_pinconf_init_dev(iod))
+	ret = ti_iodelay_pinconf_init_dev(iod);
+	if (ret)
 		goto exit_out;
 
 	ret = ti_iodelay_alloc_pins(dev, iod, res->start);

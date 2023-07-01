@@ -23,18 +23,20 @@
 #include <linux/list.h>
 #include <linux/rcupdate.h>
 #include <linux/export.h>
+#include <net/inet_dscp.h>
 #include <net/ip.h>
 #include <net/route.h>
 #include <net/tcp.h>
 #include <net/ip_fib.h>
 #include <net/nexthop.h>
 #include <net/fib_rules.h>
+#include <linux/indirect_call_wrapper.h>
 
 struct fib4_rule {
 	struct fib_rule		common;
 	u8			dst_len;
 	u8			src_len;
-	u8			tos;
+	dscp_t			dscp;
 	__be32			src;
 	__be32			srcmask;
 	__be32			dst;
@@ -48,7 +50,7 @@ static bool fib4_rule_matchall(const struct fib_rule *rule)
 {
 	struct fib4_rule *r = container_of(rule, struct fib4_rule, common);
 
-	if (r->dst_len || r->src_len || r->tos)
+	if (r->dst_len || r->src_len || r->dscp)
 		return false;
 	return fib_rule_matchall(rule);
 }
@@ -103,8 +105,9 @@ int __fib_lookup(struct net *net, struct flowi4 *flp,
 }
 EXPORT_SYMBOL_GPL(__fib_lookup);
 
-static int fib4_rule_action(struct fib_rule *rule, struct flowi *flp,
-			    int flags, struct fib_lookup_arg *arg)
+INDIRECT_CALLABLE_SCOPE int fib4_rule_action(struct fib_rule *rule,
+					     struct flowi *flp, int flags,
+					     struct fib_lookup_arg *arg)
 {
 	int err = -EAGAIN;
 	struct fib_table *tbl;
@@ -138,9 +141,11 @@ static int fib4_rule_action(struct fib_rule *rule, struct flowi *flp,
 	return err;
 }
 
-static bool fib4_rule_suppress(struct fib_rule *rule, struct fib_lookup_arg *arg)
+INDIRECT_CALLABLE_SCOPE bool fib4_rule_suppress(struct fib_rule *rule,
+						int flags,
+						struct fib_lookup_arg *arg)
 {
-	struct fib_result *result = (struct fib_result *) arg->result;
+	struct fib_result *result = arg->result;
 	struct net_device *dev = NULL;
 
 	if (result->fi) {
@@ -169,7 +174,8 @@ suppress_route:
 	return true;
 }
 
-static int fib4_rule_match(struct fib_rule *rule, struct flowi *fl, int flags)
+INDIRECT_CALLABLE_SCOPE int fib4_rule_match(struct fib_rule *rule,
+					    struct flowi *fl, int flags)
 {
 	struct fib4_rule *r = (struct fib4_rule *) rule;
 	struct flowi4 *fl4 = &fl->u.ip4;
@@ -180,7 +186,7 @@ static int fib4_rule_match(struct fib_rule *rule, struct flowi *fl, int flags)
 	    ((daddr ^ r->dst) & r->dstmask))
 		return 0;
 
-	if (r->tos && (r->tos != fl4->flowi4_tos))
+	if (r->dscp && r->dscp != inet_dsfield_to_dscp(fl4->flowi4_tos))
 		return 0;
 
 	if (rule->ip_proto && (rule->ip_proto != fl4->flowi4_proto))
@@ -211,11 +217,6 @@ static struct fib_table *fib_empty_table(struct net *net)
 	return NULL;
 }
 
-static const struct nla_policy fib4_rule_policy[FRA_MAX+1] = {
-	FRA_GENERIC_POLICY,
-	[FRA_FLOW]	= { .type = NLA_U32 },
-};
-
 static int fib4_rule_configure(struct fib_rule *rule, struct sk_buff *skb,
 			       struct fib_rule_hdr *frh,
 			       struct nlattr **tb,
@@ -225,10 +226,17 @@ static int fib4_rule_configure(struct fib_rule *rule, struct sk_buff *skb,
 	int err = -EINVAL;
 	struct fib4_rule *rule4 = (struct fib4_rule *) rule;
 
+	if (!inet_validate_dscp(frh->tos)) {
+		NL_SET_ERR_MSG(extack,
+			       "Invalid dsfield (tos): ECN bits must be 0");
+		goto errout;
+	}
+	/* IPv4 currently doesn't handle high order DSCP bits correctly */
 	if (frh->tos & ~IPTOS_TOS_MASK) {
 		NL_SET_ERR_MSG(extack, "Invalid tos");
 		goto errout;
 	}
+	rule4->dscp = inet_dsfield_to_dscp(frh->tos);
 
 	/* split local/main if they are not already split */
 	err = fib_unmerge(net);
@@ -259,7 +267,7 @@ static int fib4_rule_configure(struct fib_rule *rule, struct sk_buff *skb,
 	if (tb[FRA_FLOW]) {
 		rule4->tclassid = nla_get_u32(tb[FRA_FLOW]);
 		if (rule4->tclassid)
-			net->ipv4.fib_num_tclassid_users++;
+			atomic_inc(&net->ipv4.fib_num_tclassid_users);
 	}
 #endif
 
@@ -270,7 +278,6 @@ static int fib4_rule_configure(struct fib_rule *rule, struct sk_buff *skb,
 	rule4->srcmask = inet_make_mask(rule4->src_len);
 	rule4->dst_len = frh->dst_len;
 	rule4->dstmask = inet_make_mask(rule4->dst_len);
-	rule4->tos = frh->tos;
 
 	net->ipv4.fib_has_custom_rules = true;
 
@@ -291,7 +298,7 @@ static int fib4_rule_delete(struct fib_rule *rule)
 
 #ifdef CONFIG_IP_ROUTE_CLASSID
 	if (((struct fib4_rule *)rule)->tclassid)
-		net->ipv4.fib_num_tclassid_users--;
+		atomic_dec(&net->ipv4.fib_num_tclassid_users);
 #endif
 	net->ipv4.fib_has_custom_rules = true;
 
@@ -313,7 +320,7 @@ static int fib4_rule_compare(struct fib_rule *rule, struct fib_rule_hdr *frh,
 	if (frh->dst_len && (rule4->dst_len != frh->dst_len))
 		return 0;
 
-	if (frh->tos && (rule4->tos != frh->tos))
+	if (frh->tos && inet_dscp_to_dsfield(rule4->dscp) != frh->tos)
 		return 0;
 
 #ifdef CONFIG_IP_ROUTE_CLASSID
@@ -337,7 +344,7 @@ static int fib4_rule_fill(struct fib_rule *rule, struct sk_buff *skb,
 
 	frh->dst_len = rule4->dst_len;
 	frh->src_len = rule4->src_len;
-	frh->tos = rule4->tos;
+	frh->tos = inet_dscp_to_dsfield(rule4->dscp);
 
 	if ((rule4->dst_len &&
 	     nla_put_in_addr(skb, FRA_DST, rule4->dst)) ||
@@ -381,7 +388,6 @@ static const struct fib_rules_ops __net_initconst fib4_rules_ops_template = {
 	.nlmsg_payload	= fib4_rule_nlmsg_payload,
 	.flush_cache	= fib4_rule_flush_cache,
 	.nlgroup	= RTNLGRP_IPV4_RULE,
-	.policy		= fib4_rule_policy,
 	.owner		= THIS_MODULE,
 };
 

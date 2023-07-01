@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright 2008 Cisco Systems, Inc.  All rights reserved.
  * Copyright 2007 Nuova Systems, Inc.  All rights reserved.
- *
- * This program is free software; you may redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
  */
 #include <linux/module.h>
 #include <linux/mempool.h>
@@ -49,8 +37,8 @@
 
 static struct kmem_cache *fnic_sgl_cache[FNIC_SGL_NUM_CACHES];
 static struct kmem_cache *fnic_io_req_cache;
-LIST_HEAD(fnic_list);
-DEFINE_SPINLOCK(fnic_list_lock);
+static LIST_HEAD(fnic_list);
+static DEFINE_SPINLOCK(fnic_list_lock);
 
 /* Supported devices by fnic module */
 static struct pci_device_id fnic_id_table[] = {
@@ -122,8 +110,9 @@ static struct scsi_host_template fnic_host_template = {
 	.can_queue = FNIC_DFLT_IO_REQ,
 	.sg_tablesize = FNIC_MAX_SG_DESC_CNT,
 	.max_sectors = 0xffff,
-	.shost_attrs = fnic_attrs,
+	.shost_groups = fnic_host_groups,
 	.track_queue_depth = 1,
+	.cmd_size = sizeof(struct fnic_cmd_priv),
 };
 
 static void
@@ -443,7 +432,7 @@ static void fnic_notify_timer_start(struct fnic *fnic)
 	default:
 		/* Using intr for notification for INTx/MSI-X */
 		break;
-	};
+	}
 }
 
 static int fnic_dev_wait(struct vnic_dev *vdev,
@@ -552,8 +541,40 @@ static u8 *fnic_get_mac(struct fc_lport *lport)
 
 static void fnic_set_vlan(struct fnic *fnic, u16 vlan_id)
 {
-	u16 old_vlan;
-	old_vlan = vnic_dev_set_default_vlan(fnic->vdev, vlan_id);
+	vnic_dev_set_default_vlan(fnic->vdev, vlan_id);
+}
+
+static int fnic_scsi_drv_init(struct fnic *fnic)
+{
+	struct Scsi_Host *host = fnic->lport->host;
+
+	/* Configure maximum outstanding IO reqs*/
+	if (fnic->config.io_throttle_count != FNIC_UCSM_DFLT_THROTTLE_CNT_BLD)
+		host->can_queue = min_t(u32, FNIC_MAX_IO_REQ,
+					max_t(u32, FNIC_MIN_IO_REQ,
+					fnic->config.io_throttle_count));
+
+	fnic->fnic_max_tag_id = host->can_queue;
+	host->max_lun = fnic->config.luns_per_tgt;
+	host->max_id = FNIC_MAX_FCP_TARGET;
+	host->max_cmd_len = FCOE_MAX_CMD_LEN;
+
+	host->nr_hw_queues = fnic->wq_copy_count;
+	if (host->nr_hw_queues > 1)
+		shost_printk(KERN_ERR, host,
+				"fnic: blk-mq is not supported");
+
+	host->nr_hw_queues = fnic->wq_copy_count = 1;
+
+	shost_printk(KERN_INFO, host,
+			"fnic: can_queue: %d max_lun: %llu",
+			host->can_queue, host->max_lun);
+
+	shost_printk(KERN_INFO, host,
+			"fnic: max_id: %d max_cmd_len: %d nr_hw_queues: %d",
+			host->max_id, host->max_cmd_len, host->nr_hw_queues);
+
+	return 0;
 }
 
 static int fnic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
@@ -580,6 +601,8 @@ static int fnic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	fnic = lport_priv(lp);
 	fnic->lport = lp;
 	fnic->ctlr.lp = lp;
+
+	fnic->link_events = 0;
 
 	snprintf(fnic->name, sizeof(fnic->name) - 1, "%s%d", DRV_NAME,
 		 host->host_no);
@@ -610,10 +633,10 @@ static int fnic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	pci_set_master(pdev);
 
 	/* Query PCI controller on system for DMA addressing
-	 * limitation for the device.  Try 64-bit first, and
-	 * fail to 32-bit.
+	 * limitation for the device.  Try 47-bit first, and
+	 * fail to 32-bit. Cisco VIC supports 47 bits only.
 	 */
-	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(47));
 	if (err) {
 		err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 		if (err) {
@@ -694,17 +717,7 @@ static int fnic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		goto err_out_dev_close;
 	}
 
-	/* Configure Maximum Outstanding IO reqs*/
-	if (fnic->config.io_throttle_count != FNIC_UCSM_DFLT_THROTTLE_CNT_BLD) {
-		host->can_queue = min_t(u32, FNIC_MAX_IO_REQ,
-					max_t(u32, FNIC_MIN_IO_REQ,
-					fnic->config.io_throttle_count));
-	}
-	fnic->fnic_max_tag_id = host->can_queue;
-
-	host->max_lun = fnic->config.luns_per_tgt;
-	host->max_id = FNIC_MAX_FCP_TARGET;
-	host->max_cmd_len = FCOE_MAX_CMD_LEN;
+	fnic_scsi_drv_init(fnic);
 
 	fnic_get_res_counts(fnic);
 
@@ -741,6 +754,7 @@ static int fnic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	for (i = 0; i < FNIC_IO_LOCKS; i++)
 		spin_lock_init(&fnic->io_req_lock[i]);
 
+	err = -ENOMEM;
 	fnic->io_req_pool = mempool_create_slab_pool(2, fnic_io_req_cache);
 	if (!fnic->io_req_pool)
 		goto err_out_free_resources;
@@ -1098,9 +1112,6 @@ static int __init fnic_init_module(void)
 		goto err_create_fnic_workq;
 	}
 
-	spin_lock_init(&fnic_list_lock);
-	INIT_LIST_HEAD(&fnic_list);
-
 	fnic_fip_queue = create_singlethread_workqueue("fnic_fip_q");
 	if (!fnic_fip_queue) {
 		printk(KERN_ERR PFX "fnic FIP work queue create failed\n");
@@ -1146,10 +1157,8 @@ static void __exit fnic_cleanup_module(void)
 {
 	pci_unregister_driver(&fnic_driver);
 	destroy_workqueue(fnic_event_queue);
-	if (fnic_fip_queue) {
-		flush_workqueue(fnic_fip_queue);
+	if (fnic_fip_queue)
 		destroy_workqueue(fnic_fip_queue);
-	}
 	kmem_cache_destroy(fnic_sgl_cache[FNIC_SGL_CACHE_MAX]);
 	kmem_cache_destroy(fnic_sgl_cache[FNIC_SGL_CACHE_DFLT]);
 	kmem_cache_destroy(fnic_io_req_cache);
@@ -1161,4 +1170,3 @@ static void __exit fnic_cleanup_module(void)
 
 module_init(fnic_init_module);
 module_exit(fnic_cleanup_module);
-

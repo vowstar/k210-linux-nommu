@@ -11,10 +11,9 @@
 #include <linux/kernel.h>
 #include <linux/printk.h>
 #include <linux/slab.h>
-#include <linux/of.h>
-#include <linux/of_device.h>
 #include <linux/sysfs.h>
 #include <linux/io.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/wait.h>
@@ -321,7 +320,6 @@ static int dht11_probe(struct platform_device *pdev)
 	init_completion(&dht11->completion);
 	mutex_init(&dht11->lock);
 	iio->name = pdev->name;
-	iio->dev.parent = &pdev->dev;
 	iio->info = &dht11_iio_info;
 	iio->modes = INDIO_DIRECT_MODE;
 	iio->channels = dht11_chan_spec;

@@ -7,13 +7,16 @@
  */
 
 #include <linux/ctype.h>
+#include <linux/mod_devicetable.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/err.h>
+#include <linux/property.h>
 #include <linux/spi/spi.h>
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
 #include <linux/util_macros.h>
+#include <asm/unaligned.h>
 #include <dt-bindings/iio/temperature/thermocouple.h>
 /*
  * The MSB of the register value determines whether the following byte will
@@ -168,7 +171,7 @@ static int max31856_thermocouple_read(struct max31856_data *data,
 		if (ret)
 			return ret;
 		/* Skip last 5 dead bits of LTCBL */
-		*val = (reg_val[0] << 16 | reg_val[1] << 8 | reg_val[2]) >> 5;
+		*val = get_unaligned_be24(&reg_val[0]) >> 5;
 		/* Check 7th bit of LTCBH reg. value for sign*/
 		if (reg_val[0] & 0x80)
 			*val -= 0x80000;
@@ -185,7 +188,7 @@ static int max31856_thermocouple_read(struct max31856_data *data,
 		/* Get Cold Junction Temp. offset register value */
 		offset_cjto = reg_val[0];
 		/* Get CJTH and CJTL value and skip last 2 dead bits of CJTL */
-		*val = (reg_val[1] << 8 | reg_val[2]) >> 2;
+		*val = get_unaligned_be16(&reg_val[1]) >> 2;
 		/* As per datasheet add offset into CJTH and CJTL */
 		*val += offset_cjto;
 		/* Check 7th bit of CJTH reg. value for sign */
@@ -319,7 +322,7 @@ static ssize_t show_fault(struct device *dev, u8 faultbit, char *buf)
 
 	fault = reg_val & faultbit;
 
-	return sprintf(buf, "%d\n", fault);
+	return sysfs_emit(buf, "%d\n", fault);
 }
 
 static ssize_t show_fault_ovuv(struct device *dev,
@@ -343,7 +346,7 @@ static ssize_t show_filter(struct device *dev,
 	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
 	struct max31856_data *data = iio_priv(indio_dev);
 
-	return sprintf(buf, "%d\n", data->filter_50hz ? 50 : 60);
+	return sysfs_emit(buf, "%d\n", data->filter_50hz ? 50 : 60);
 }
 
 static ssize_t set_filter(struct device *dev,
@@ -416,16 +419,12 @@ static int max31856_probe(struct spi_device *spi)
 	spi_set_drvdata(spi, indio_dev);
 
 	indio_dev->info = &max31856_info;
-	indio_dev->dev.parent = &spi->dev;
-	indio_dev->dev.of_node = spi->dev.of_node;
 	indio_dev->name = id->name;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels = max31856_channels;
 	indio_dev->num_channels = ARRAY_SIZE(max31856_channels);
 
-	ret = of_property_read_u32(spi->dev.of_node, "thermocouple-type",
-				   &data->thermocouple_type);
-
+	ret = device_property_read_u32(&spi->dev, "thermocouple-type", &data->thermocouple_type);
 	if (ret) {
 		dev_info(&spi->dev,
 			 "Could not read thermocouple type DT property, configuring as a K-Type\n");

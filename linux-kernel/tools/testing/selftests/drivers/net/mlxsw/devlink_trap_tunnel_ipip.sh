@@ -13,7 +13,7 @@
 #                     |
 # +-------------------|-----+
 # | SW1               |     |
-# |              $swp1 +    |
+# |             $swp1 +     |
 # |      192.0.2.2/28       |
 # |                         |
 # |  + g1a (gre)            |
@@ -27,8 +27,8 @@
 #    |
 # +--|----------------------+
 # |  |                 VRF2 |
-# | + $rp2                  |
-# |   198.51.100.2/28       |
+# |  + $rp2                 |
+# |    198.51.100.2/28      |
 # +-------------------------+
 
 lib_dir=$(dirname $0)/../../../net/forwarding
@@ -116,62 +116,6 @@ cleanup()
 	forwarding_restore
 }
 
-ecn_payload_get()
-{
-	p=$(:
-		)"0"$(		              : GRE flags
-	        )"0:00:"$(                    : Reserved + version
-		)"08:00:"$(		      : ETH protocol type
-		)"4"$(	                      : IP version
-		)"5:"$(                       : IHL
-		)"00:"$(                      : IP TOS
-		)"00:14:"$(                   : IP total length
-		)"00:00:"$(                   : IP identification
-		)"20:00:"$(                   : IP flags + frag off
-		)"30:"$(                      : IP TTL
-		)"01:"$(                      : IP proto
-		)"E7:E6:"$(    	              : IP header csum
-		)"C0:00:01:01:"$(             : IP saddr : 192.0.1.1
-		)"C0:00:02:01:"$(             : IP daddr : 192.0.2.1
-		)
-	echo $p
-}
-
-ecn_decap_test()
-{
-	local trap_name="decap_error"
-	local group_name="tunnel_drops"
-	local desc=$1; shift
-	local ecn_desc=$1; shift
-	local outer_tos=$1; shift
-	local mz_pid
-
-	RET=0
-
-	tc filter add dev $swp1 egress protocol ip pref 1 handle 101 \
-		flower src_ip 192.0.1.1 dst_ip 192.0.2.1 action pass
-
-	rp1_mac=$(mac_get $rp1)
-	rp2_mac=$(mac_get $rp2)
-	payload=$(ecn_payload_get)
-
-	ip vrf exec v$rp2 $MZ $rp2 -c 0 -d 1msec -a $rp2_mac -b $rp1_mac \
-		-A 192.0.2.66 -B 192.0.2.65 -t ip \
-			len=48,tos=$outer_tos,proto=47,p=$payload -q &
-
-	mz_pid=$!
-
-	devlink_trap_exception_test $trap_name $group_name
-
-	tc_check_packets "dev $swp1 egress" 101 0
-	check_err $? "Packets were not dropped"
-
-	log_test "$desc: Inner ECN is not ECT and outer is $ecn_desc"
-
-	kill $mz_pid && wait $mz_pid &> /dev/null
-	tc filter del dev $swp1 egress protocol ip pref 1 handle 101 flower
-}
-
 ipip_payload_get()
 {
 	local flags=$1; shift
@@ -197,10 +141,48 @@ ipip_payload_get()
 	echo $p
 }
 
+ecn_payload_get()
+{
+	echo $(ipip_payload_get "0")
+}
+
+ecn_decap_test()
+{
+	local trap_name="decap_error"
+	local desc=$1; shift
+	local ecn_desc=$1; shift
+	local outer_tos=$1; shift
+	local mz_pid
+
+	RET=0
+
+	tc filter add dev $swp1 egress protocol ip pref 1 handle 101 \
+		flower src_ip 192.0.1.1 dst_ip 192.0.2.1 action pass
+
+	rp1_mac=$(mac_get $rp1)
+	rp2_mac=$(mac_get $rp2)
+	payload=$(ecn_payload_get)
+
+	ip vrf exec v$rp2 $MZ $rp2 -c 0 -d 1msec -a $rp2_mac -b $rp1_mac \
+		-A 192.0.2.66 -B 192.0.2.65 -t ip \
+			len=48,tos=$outer_tos,proto=47,p=$payload -q &
+
+	mz_pid=$!
+
+	devlink_trap_exception_test $trap_name
+
+	tc_check_packets "dev $swp1 egress" 101 0
+	check_err $? "Packets were not dropped"
+
+	log_test "$desc: Inner ECN is not ECT and outer is $ecn_desc"
+
+	kill $mz_pid && wait $mz_pid &> /dev/null
+	tc filter del dev $swp1 egress protocol ip pref 1 handle 101 flower
+}
+
 no_matching_tunnel_test()
 {
 	local trap_name="decap_error"
-	local group_name="tunnel_drops"
 	local desc=$1; shift
 	local sip=$1; shift
 	local mz_pid
@@ -218,7 +200,7 @@ no_matching_tunnel_test()
 		-A $sip -B 192.0.2.65 -t ip len=48,proto=47,p=$payload -q &
 	mz_pid=$!
 
-	devlink_trap_exception_test $trap_name $group_name
+	devlink_trap_exception_test $trap_name
 
 	tc_check_packets "dev $swp1 egress" 101 0
 	check_err $? "Packets were not dropped"
@@ -241,7 +223,8 @@ decap_error_test()
 	no_matching_tunnel_test "Decap error: Source IP check failed" \
 		192.0.2.68 "0"
 	no_matching_tunnel_test \
-		"Decap error: Key exists but was not expected" $sip "2" ":E9:"
+		"Decap error: Key exists but was not expected" $sip "2" \
+		"00:00:00:E9:"
 
 	# Destroy the tunnel and create new one with key
 	__addr_add_del g1 del 192.0.2.65/32
@@ -253,7 +236,8 @@ decap_error_test()
 	no_matching_tunnel_test \
 		"Decap error: Key does not exist but was expected" $sip "0"
 	no_matching_tunnel_test \
-		"Decap error: Packet has a wrong key field" $sip "2" "E8:"
+		"Decap error: Packet has a wrong key field" $sip "2" \
+		"00:00:00:E8:"
 }
 
 trap cleanup EXIT

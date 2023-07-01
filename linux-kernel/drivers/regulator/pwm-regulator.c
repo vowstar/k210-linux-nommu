@@ -48,7 +48,7 @@ struct pwm_voltages {
 	unsigned int dutycycle;
 };
 
-/**
+/*
  * Voltage table call-backs
  */
 static void pwm_regulator_init_state(struct regulator_dev *rdev)
@@ -279,7 +279,7 @@ static int pwm_regulator_init_table(struct platform_device *pdev,
 		return ret;
 	}
 
-	drvdata->state			= -EINVAL;
+	drvdata->state			= -ENOTRECOVERABLE;
 	drvdata->duty_cycle_table	= duty_cycle_table;
 	drvdata->desc.ops = &pwm_regulator_voltage_table_ops;
 	drvdata->desc.n_voltages	= length / sizeof(*duty_cycle_table);
@@ -352,11 +352,9 @@ static int pwm_regulator_probe(struct platform_device *pdev)
 	config.init_data = init_data;
 
 	drvdata->pwm = devm_pwm_get(&pdev->dev, NULL);
-	if (IS_ERR(drvdata->pwm)) {
-		ret = PTR_ERR(drvdata->pwm);
-		dev_err(&pdev->dev, "Failed to get PWM: %d\n", ret);
-		return ret;
-	}
+	if (IS_ERR(drvdata->pwm))
+		return dev_err_probe(&pdev->dev, PTR_ERR(drvdata->pwm),
+				     "Failed to get PWM\n");
 
 	if (init_data->constraints.boot_on || init_data->constraints.always_on)
 		gpio_flags = GPIOD_OUT_HIGH;
@@ -386,7 +384,7 @@ static int pwm_regulator_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static const struct of_device_id pwm_of_match[] = {
+static const struct of_device_id __maybe_unused pwm_of_match[] = {
 	{ .compatible = "pwm-regulator" },
 	{ },
 };

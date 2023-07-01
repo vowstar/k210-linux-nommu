@@ -18,7 +18,7 @@
  * Clean patches should be sent to the ARM Linux Patch System.  Please see the
  * following web page for more information:
  *
- *	http://www.arm.linux.org.uk/developer/patches/info.shtml
+ *	https://www.arm.linux.org.uk/developer/patches/info.shtml
  *
  * Thank you.
  *
@@ -173,7 +173,7 @@
 #include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/cpufreq.h>
-#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/dma-mapping.h>
 #include <linux/mutex.h>
@@ -184,7 +184,6 @@
 
 #include <mach/hardware.h>
 #include <asm/mach-types.h>
-#include <mach/shannon.h>
 
 /*
  * Complain if VAR is out of range.
@@ -799,8 +798,8 @@ static void sa1100fb_enable_controller(struct sa1100fb_info *fbi)
 	writel_relaxed(fbi->dbar2, fbi->base + DBAR2);
 	writel_relaxed(fbi->reg_lccr0 | LCCR0_LEN, fbi->base + LCCR0);
 
-	if (machine_is_shannon())
-		gpio_set_value(SHANNON_GPIO_DISP_EN, 1);
+	if (fbi->shannon_lcden)
+		gpiod_set_value(fbi->shannon_lcden, 1);
 
 	dev_dbg(fbi->dev, "DBAR1: 0x%08x\n", readl_relaxed(fbi->base + DBAR1));
 	dev_dbg(fbi->dev, "DBAR2: 0x%08x\n", readl_relaxed(fbi->base + DBAR2));
@@ -817,8 +816,8 @@ static void sa1100fb_disable_controller(struct sa1100fb_info *fbi)
 
 	dev_dbg(fbi->dev, "Disabling LCD controller\n");
 
-	if (machine_is_shannon())
-		gpio_set_value(SHANNON_GPIO_DISP_EN, 0);
+	if (fbi->shannon_lcden)
+		gpiod_set_value(fbi->shannon_lcden, 0);
 
 	set_current_state(TASK_UNINTERRUPTIBLE);
 	add_wait_queue(&fbi->ctrlr_wait, &wait);
@@ -935,7 +934,7 @@ static void set_ctrlr_state(struct sa1100fb_info *fbi, u_int state)
 		 */
 		if (old_state != C_DISABLE_PM)
 			break;
-		/* fall through */
+		fallthrough;
 
 	case C_ENABLE:
 		/*
@@ -1053,7 +1052,7 @@ static int sa1100fb_map_video_memory(struct sa1100fb_info *fbi)
 }
 
 /* Fake monspecs to fill in fbinfo structure */
-static struct fb_monspecs monspecs = {
+static const struct fb_monspecs monspecs = {
 	.hfmin	= 30000,
 	.hfmax	= 70000,
 	.vfmin	= 50,
@@ -1173,12 +1172,10 @@ static int sa1100fb_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	if (machine_is_shannon()) {
-		ret = devm_gpio_request_one(&pdev->dev, SHANNON_GPIO_DISP_EN,
-			GPIOF_OUT_INIT_LOW, "display enable");
-		if (ret)
-			return ret;
-	}
+	fbi->shannon_lcden = gpiod_get_optional(&pdev->dev, "shannon-lcden",
+						GPIOD_OUT_LOW);
+	if (IS_ERR(fbi->shannon_lcden))
+		return PTR_ERR(fbi->shannon_lcden);
 
 	/* Initialize video memory */
 	ret = sa1100fb_map_video_memory(fbi);
@@ -1224,47 +1221,6 @@ int __init sa1100fb_init(void)
 		return -ENODEV;
 
 	return platform_driver_register(&sa1100fb_driver);
-}
-
-int __init sa1100fb_setup(char *options)
-{
-#if 0
-	char *this_opt;
-
-	if (!options || !*options)
-		return 0;
-
-	while ((this_opt = strsep(&options, ",")) != NULL) {
-
-		if (!strncmp(this_opt, "bpp:", 4))
-			current_par.max_bpp =
-			    simple_strtoul(this_opt + 4, NULL, 0);
-
-		if (!strncmp(this_opt, "lccr0:", 6))
-			lcd_shadow.lccr0 =
-			    simple_strtoul(this_opt + 6, NULL, 0);
-		if (!strncmp(this_opt, "lccr1:", 6)) {
-			lcd_shadow.lccr1 =
-			    simple_strtoul(this_opt + 6, NULL, 0);
-			current_par.max_xres =
-			    (lcd_shadow.lccr1 & 0x3ff) + 16;
-		}
-		if (!strncmp(this_opt, "lccr2:", 6)) {
-			lcd_shadow.lccr2 =
-			    simple_strtoul(this_opt + 6, NULL, 0);
-			current_par.max_yres =
-			    (lcd_shadow.
-			     lccr0 & LCCR0_SDS) ? ((lcd_shadow.
-						    lccr2 & 0x3ff) +
-						   1) *
-			    2 : ((lcd_shadow.lccr2 & 0x3ff) + 1);
-		}
-		if (!strncmp(this_opt, "lccr3:", 6))
-			lcd_shadow.lccr3 =
-			    simple_strtoul(this_opt + 6, NULL, 0);
-	}
-#endif
-	return 0;
 }
 
 module_init(sa1100fb_init);

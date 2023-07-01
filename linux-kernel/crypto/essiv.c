@@ -30,6 +30,7 @@
 
 #include <crypto/authenc.h>
 #include <crypto/internal/aead.h>
+#include <crypto/internal/cipher.h>
 #include <crypto/internal/hash.h>
 #include <crypto/internal/skcipher.h>
 #include <crypto/scatterwalk.h>
@@ -66,7 +67,6 @@ static int essiv_skcipher_setkey(struct crypto_skcipher *tfm,
 				 const u8 *key, unsigned int keylen)
 {
 	struct essiv_tfm_ctx *tctx = crypto_skcipher_ctx(tfm);
-	SHASH_DESC_ON_STACK(desc, tctx->hash);
 	u8 salt[HASH_MAX_DIGESTSIZE];
 	int err;
 
@@ -78,8 +78,7 @@ static int essiv_skcipher_setkey(struct crypto_skcipher *tfm,
 	if (err)
 		return err;
 
-	desc->tfm = tctx->hash;
-	err = crypto_shash_digest(desc, key, keylen, salt);
+	err = crypto_shash_tfm_digest(tctx->hash, key, keylen, salt);
 	if (err)
 		return err;
 
@@ -132,9 +131,9 @@ static int essiv_aead_setauthsize(struct crypto_aead *tfm,
 	return crypto_aead_setauthsize(tctx->u.aead, authsize);
 }
 
-static void essiv_skcipher_done(struct crypto_async_request *areq, int err)
+static void essiv_skcipher_done(void *data, int err)
 {
-	struct skcipher_request *req = areq->data;
+	struct skcipher_request *req = data;
 
 	skcipher_request_complete(req, err);
 }
@@ -167,12 +166,17 @@ static int essiv_skcipher_decrypt(struct skcipher_request *req)
 	return essiv_skcipher_crypt(req, false);
 }
 
-static void essiv_aead_done(struct crypto_async_request *areq, int err)
+static void essiv_aead_done(void *data, int err)
 {
-	struct aead_request *req = areq->data;
+	struct aead_request *req = data;
 	struct essiv_aead_request_ctx *rctx = aead_request_ctx(req);
 
+	if (err == -EINPROGRESS)
+		goto out;
+
 	kfree(rctx->assoc);
+
+out:
 	aead_request_complete(req, err);
 }
 
@@ -248,7 +252,7 @@ static int essiv_aead_crypt(struct aead_request *req, bool enc)
 	err = enc ? crypto_aead_encrypt(subreq) :
 		    crypto_aead_decrypt(subreq);
 
-	if (rctx->assoc && err != -EINPROGRESS)
+	if (rctx->assoc && err != -EINPROGRESS && err != -EBUSY)
 		kfree(rctx->assoc);
 	return err;
 }
@@ -468,7 +472,7 @@ static int essiv_create(struct crypto_template *tmpl, struct rtattr **tb)
 		return PTR_ERR(shash_name);
 
 	type = algt->type & algt->mask;
-	mask = crypto_requires_sync(algt->type, algt->mask);
+	mask = crypto_algt_inherited_mask(algt);
 
 	switch (type) {
 	case CRYPTO_ALG_TYPE_SKCIPHER:
@@ -527,7 +531,7 @@ static int essiv_create(struct crypto_template *tmpl, struct rtattr **tb)
 	/* Synchronous hash, e.g., "sha256" */
 	_hash_alg = crypto_alg_mod_lookup(shash_name,
 					  CRYPTO_ALG_TYPE_SHASH,
-					  CRYPTO_ALG_TYPE_MASK);
+					  CRYPTO_ALG_TYPE_MASK | mask);
 	if (IS_ERR(_hash_alg)) {
 		err = PTR_ERR(_hash_alg);
 		goto out_drop_skcipher;
@@ -544,7 +548,7 @@ static int essiv_create(struct crypto_template *tmpl, struct rtattr **tb)
 	}
 
 	/* record the driver name so we can instantiate this exact algo later */
-	strlcpy(ictx->shash_driver_name, hash_alg->base.cra_driver_name,
+	strscpy(ictx->shash_driver_name, hash_alg->base.cra_driver_name,
 		CRYPTO_MAX_ALG_NAME);
 
 	/* Instance fields */
@@ -559,7 +563,12 @@ static int essiv_create(struct crypto_template *tmpl, struct rtattr **tb)
 		     hash_alg->base.cra_driver_name) >= CRYPTO_MAX_ALG_NAME)
 		goto out_free_hash;
 
-	base->cra_flags		= block_base->cra_flags & CRYPTO_ALG_ASYNC;
+	/*
+	 * hash_alg wasn't gotten via crypto_grab*(), so we need to inherit its
+	 * flags manually.
+	 */
+	base->cra_flags        |= (hash_alg->base.cra_flags &
+				   CRYPTO_ALG_INHERITED_FLAGS);
 	base->cra_blocksize	= block_base->cra_blocksize;
 	base->cra_ctxsize	= sizeof(struct essiv_tfm_ctx);
 	base->cra_alignmask	= block_base->cra_alignmask;
@@ -640,3 +649,4 @@ module_exit(essiv_module_exit);
 MODULE_DESCRIPTION("ESSIV skcipher/aead wrapper for block encryption");
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS_CRYPTO("essiv");
+MODULE_IMPORT_NS(CRYPTO_INTERNAL);

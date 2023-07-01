@@ -7,8 +7,6 @@
 ccflags-y += -I $(srctree)/$(src)		# needed for trace events
 ccflags-y += -I $(srctree)/$(src)/libxfs
 
-ccflags-$(CONFIG_XFS_DEBUG) += -g
-
 obj-$(CONFIG_XFS_FS)		+= xfs.o
 
 # this one should be compiled first, as the tracing macros can easily blow up
@@ -26,6 +24,7 @@ xfs-y				+= $(addprefix libxfs/, \
 				   xfs_bmap.o \
 				   xfs_bmap_btree.o \
 				   xfs_btree.o \
+				   xfs_btree_staging.o \
 				   xfs_da_btree.o \
 				   xfs_defer.o \
 				   xfs_dir2.o \
@@ -64,6 +63,7 @@ xfs-y				+= xfs_aops.o \
 				   xfs_bmap_util.o \
 				   xfs_bio_io.o \
 				   xfs_buf.o \
+				   xfs_dahash_test.o \
 				   xfs_dir2_readdir.o \
 				   xfs_discard.o \
 				   xfs_error.o \
@@ -100,9 +100,14 @@ xfs-y				+= xfs_log.o \
 				   xfs_log_cil.o \
 				   xfs_bmap_item.o \
 				   xfs_buf_item.o \
+				   xfs_buf_item_recover.o \
+				   xfs_dquot_item_recover.o \
 				   xfs_extfree_item.o \
+				   xfs_attr_item.o \
 				   xfs_icreate_item.o \
 				   xfs_inode_item.o \
+				   xfs_inode_item_recover.o \
+				   xfs_iunlink_item.o \
 				   xfs_refcount_item.o \
 				   xfs_rmap_item.o \
 				   xfs_log_recover.o \
@@ -125,6 +130,11 @@ xfs-$(CONFIG_XFS_POSIX_ACL)	+= xfs_acl.o
 xfs-$(CONFIG_SYSCTL)		+= xfs_sysctl.o
 xfs-$(CONFIG_COMPAT)		+= xfs_ioctl32.o
 xfs-$(CONFIG_EXPORTFS_BLOCK_OPS)	+= xfs_pnfs.o
+
+# notify failure
+ifeq ($(CONFIG_MEMORY_FAILURE),y)
+xfs-$(CONFIG_FS_DAX)		+= xfs_notify_failure.o
+endif
 
 # online scrub/repair
 ifeq ($(CONFIG_XFS_ONLINE_SCRUB),y)

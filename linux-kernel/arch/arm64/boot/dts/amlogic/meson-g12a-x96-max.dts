@@ -111,7 +111,6 @@
 		vin-supply = <&dc_in>;
 
 		gpio = <&gpio GPIOH_8 GPIO_OPEN_DRAIN>;
-		enable-active-low;
 	};
 
 	vddao_1v8: regulator-vddao_1v8 {
@@ -139,7 +138,7 @@
 		regulator-min-microvolt = <721000>;
 		regulator-max-microvolt = <1022000>;
 
-		vin-supply = <&dc_in>;
+		pwm-supply = <&dc_in>;
 
 		pwms = <&pwm_AO_cd 1 1250 0>;
 		pwm-dutycycle-range = <100 0>;
@@ -150,7 +149,7 @@
 
 	sound {
 		compatible = "amlogic,axg-sound-card";
-		model = "G12A-X96-MAX";
+		model = "X96-MAX";
 		audio-aux-devs = <&tdmout_b>;
 		audio-routing = "TDMOUT_B IN 0", "FRDDR_A OUT 1",
 				"TDMOUT_B IN 1", "FRDDR_B OUT 1",
@@ -340,7 +339,7 @@
 		eee-broken-1000t;
 
 		reset-assert-us = <10000>;
-		reset-deassert-us = <30000>;
+		reset-deassert-us = <80000>;
 		reset-gpios = <&gpio GPIOZ_15 (GPIO_ACTIVE_LOW | GPIO_OPEN_DRAIN)>;
 
 		interrupt-parent = <&gpio_intc>;
@@ -443,7 +442,7 @@
 /* eMMC */
 &sd_emmc_c {
 	status = "okay";
-	pinctrl-0 = <&emmc_pins>, <&emmc_ds_pins>;
+	pinctrl-0 = <&emmc_ctrl_pins>, <&emmc_data_8b_pins>, <&emmc_ds_pins>;
 	pinctrl-1 = <&emmc_clk_gate_pins>;
 	pinctrl-names = "default", "clk-gate";
 

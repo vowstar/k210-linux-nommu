@@ -78,7 +78,7 @@ struct lm95241_data {
 	struct mutex update_lock;
 	unsigned long last_updated;	/* in jiffies */
 	unsigned long interval;		/* in milli-seconds */
-	char valid;		/* zero until following fields are valid */
+	bool valid;		/* false until following fields are valid */
 	/* registers values */
 	u8 temp[ARRAY_SIZE(lm95241_reg_address)];
 	u8 status, config, model, trutherm;
@@ -118,7 +118,7 @@ static struct lm95241_data *lm95241_update_device(struct device *dev)
 		data->status = i2c_smbus_read_byte_data(client,
 							LM95241_REG_R_STATUS);
 		data->last_updated = jiffies;
-		data->valid = 1;
+		data->valid = true;
 	}
 
 	mutex_unlock(&data->update_lock);
@@ -257,7 +257,7 @@ static int lm95241_write_temp(struct device *dev, u32 attr, int channel,
 			else
 				data->config &= ~R2DF_MASK;
 		}
-		data->valid = 0;
+		data->valid = false;
 		ret = i2c_smbus_write_byte_data(client, LM95241_REG_RW_CONFIG,
 						data->config);
 		break;
@@ -273,7 +273,7 @@ static int lm95241_write_temp(struct device *dev, u32 attr, int channel,
 			else
 				data->config &= ~R2DF_MASK;
 		}
-		data->valid = 0;
+		data->valid = false;
 		ret = i2c_smbus_write_byte_data(client, LM95241_REG_RW_CONFIG,
 						data->config);
 		break;
@@ -389,7 +389,7 @@ static int lm95241_detect(struct i2c_client *new_client,
 	}
 
 	/* Fill the i2c board info */
-	strlcpy(info->type, name, I2C_NAME_SIZE);
+	strscpy(info->type, name, I2C_NAME_SIZE);
 	return 0;
 }
 
@@ -432,8 +432,7 @@ static const struct hwmon_chip_info lm95241_chip_info = {
 	.info = lm95241_info,
 };
 
-static int lm95241_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+static int lm95241_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct lm95241_data *data;
@@ -469,7 +468,7 @@ static struct i2c_driver lm95241_driver = {
 	.driver = {
 		.name	= DEVNAME,
 	},
-	.probe		= lm95241_probe,
+	.probe_new	= lm95241_probe,
 	.id_table	= lm95241_id,
 	.detect		= lm95241_detect,
 	.address_list	= normal_i2c,

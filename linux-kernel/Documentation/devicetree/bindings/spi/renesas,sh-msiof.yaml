@@ -21,6 +21,7 @@ properties:
                                             # device
       - items:
           - enum:
+              - renesas,msiof-r8a7742       # RZ/G1H
               - renesas,msiof-r8a7743       # RZ/G1M
               - renesas,msiof-r8a7744       # RZ/G1N
               - renesas,msiof-r8a7745       # RZ/G1E
@@ -37,14 +38,23 @@ properties:
               - renesas,msiof-r8a774a1      # RZ/G2M
               - renesas,msiof-r8a774b1      # RZ/G2N
               - renesas,msiof-r8a774c0      # RZ/G2E
+              - renesas,msiof-r8a774e1      # RZ/G2H
               - renesas,msiof-r8a7795       # R-Car H3
               - renesas,msiof-r8a7796       # R-Car M3-W
+              - renesas,msiof-r8a77961      # R-Car M3-W+
               - renesas,msiof-r8a77965      # R-Car M3-N
               - renesas,msiof-r8a77970      # R-Car V3M
               - renesas,msiof-r8a77980      # R-Car V3H
               - renesas,msiof-r8a77990      # R-Car E3
               - renesas,msiof-r8a77995      # R-Car D3
           - const: renesas,rcar-gen3-msiof  # generic R-Car Gen3 and RZ/G2
+                                            # compatible device
+      - items:
+          - enum:
+              - renesas,msiof-r8a779a0      # R-Car V3U
+              - renesas,msiof-r8a779f0      # R-Car S4-8
+              - renesas,msiof-r8a779g0      # R-Car V4H
+          - const: renesas,rcar-gen4-msiof  # generic R-Car Gen4
                                             # compatible device
       - items:
           - const: renesas,sh-msiof  # deprecated
@@ -63,6 +73,12 @@ properties:
     maxItems: 1
 
   clocks:
+    maxItems: 1
+
+  power-domains:
+    maxItems: 1
+
+  resets:
     maxItems: 1
 
   num-cs:
@@ -96,43 +112,37 @@ properties:
 
   renesas,dtdl:
     description: delay sync signal (setup) in transmit mode.
-    allOf:
-      - $ref: /schemas/types.yaml#/definitions/uint32
-      - enum:
-          - 0    # no bit delay
-          - 50   # 0.5-clock-cycle delay
-          - 100  # 1-clock-cycle delay
-          - 150  # 1.5-clock-cycle delay
-          - 200  # 2-clock-cycle delay
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum:
+      - 0        # no bit delay
+      - 50       # 0.5-clock-cycle delay
+      - 100      # 1-clock-cycle delay
+      - 150      # 1.5-clock-cycle delay
+      - 200      # 2-clock-cycle delay
 
   renesas,syncdl:
     description: delay sync signal (hold) in transmit mode
-    allOf:
-      - $ref: /schemas/types.yaml#/definitions/uint32
-      - enum:
-          - 0    # no bit delay
-          - 50   # 0.5-clock-cycle delay
-          - 100  # 1-clock-cycle delay
-          - 150  # 1.5-clock-cycle delay
-          - 200  # 2-clock-cycle delay
-          - 300  # 3-clock-cycle delay
+    $ref: /schemas/types.yaml#/definitions/uint32
+    enum:
+      - 0        # no bit delay
+      - 50       # 0.5-clock-cycle delay
+      - 100      # 1-clock-cycle delay
+      - 150      # 1.5-clock-cycle delay
+      - 200      # 2-clock-cycle delay
+      - 300      # 3-clock-cycle delay
 
   renesas,tx-fifo-size:
     # deprecated for soctype-specific bindings
     description: |
       Override the default TX fifo size.  Unit is words.  Ignored if 0.
-    allOf:
-      - $ref: /schemas/types.yaml#/definitions/uint32
-      - maxItems: 1
+    $ref: /schemas/types.yaml#/definitions/uint32
     default: 64
 
   renesas,rx-fifo-size:
     # deprecated for soctype-specific bindings
     description: |
       Override the default RX fifo size.  Unit is words.  Ignored if 0.
-    allOf:
-      - $ref: /schemas/types.yaml#/definitions/uint32
-      - maxItems: 1
+    $ref: /schemas/types.yaml#/definitions/uint32
     default: 64
 
 required:
@@ -142,6 +152,8 @@ required:
   - '#address-cells'
   - '#size-cells'
 
+unevaluatedProperties: false
+
 examples:
   - |
     #include <dt-bindings/clock/r8a7791-clock.h>
@@ -149,7 +161,7 @@ examples:
 
     msiof0: spi@e6e20000 {
         compatible = "renesas,msiof-r8a7791", "renesas,rcar-gen2-msiof";
-        reg = <0 0xe6e20000 0 0x0064>;
+        reg = <0xe6e20000 0x0064>;
         interrupts = <0 156 IRQ_TYPE_LEVEL_HIGH>;
         clocks = <&mstp0_clks R8A7791_CLK_MSIOF0>;
         dmas = <&dmac0 0x51>, <&dmac0 0x52>;

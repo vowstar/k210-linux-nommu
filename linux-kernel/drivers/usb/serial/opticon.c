@@ -208,15 +208,13 @@ static int opticon_write(struct tty_struct *tty, struct usb_serial_port *port,
 	priv->outstanding_bytes += count;
 	spin_unlock_irqrestore(&priv->lock, flags);
 
-	buffer = kmalloc(count, GFP_ATOMIC);
+	buffer = kmemdup(buf, count, GFP_ATOMIC);
 	if (!buffer)
 		goto error_no_buffer;
 
 	urb = usb_alloc_urb(0, GFP_ATOMIC);
 	if (!urb)
 		goto error_no_urb;
-
-	memcpy(buffer, buf, count);
 
 	usb_serial_debug_data(&port->dev, __func__, count, buffer);
 
@@ -267,7 +265,7 @@ error_no_buffer:
 	return ret;
 }
 
-static int opticon_write_room(struct tty_struct *tty)
+static unsigned int opticon_write_room(struct tty_struct *tty)
 {
 	struct usb_serial_port *port = tty->driver_data;
 	struct opticon_private *priv = usb_get_serial_port_data(port);
@@ -289,12 +287,12 @@ static int opticon_write_room(struct tty_struct *tty)
 	return 2048;
 }
 
-static int opticon_chars_in_buffer(struct tty_struct *tty)
+static unsigned int opticon_chars_in_buffer(struct tty_struct *tty)
 {
 	struct usb_serial_port *port = tty->driver_data;
 	struct opticon_private *priv = usb_get_serial_port_data(port);
 	unsigned long flags;
-	int count;
+	unsigned int count;
 
 	spin_lock_irqsave(&priv->lock, flags);
 	count = priv->outstanding_bytes;
@@ -352,23 +350,6 @@ static int opticon_tiocmset(struct tty_struct *tty,
 	return 0;
 }
 
-static int get_serial_info(struct tty_struct *tty,
-			   struct serial_struct *ss)
-{
-	struct usb_serial_port *port = tty->driver_data;
-
-	/* fake emulate a 16550 uart to make userspace code happy */
-	ss->type		= PORT_16550A;
-	ss->line		= port->minor;
-	ss->port		= 0;
-	ss->irq			= 0;
-	ss->xmit_fifo_size	= 1024;
-	ss->baud_base		= 9600;
-	ss->close_delay		= 5*HZ;
-	ss->closing_wait	= 30*HZ;
-	return 0;
-}
-
 static int opticon_port_probe(struct usb_serial_port *port)
 {
 	struct opticon_private *priv;
@@ -385,13 +366,11 @@ static int opticon_port_probe(struct usb_serial_port *port)
 	return 0;
 }
 
-static int opticon_port_remove(struct usb_serial_port *port)
+static void opticon_port_remove(struct usb_serial_port *port)
 {
 	struct opticon_private *priv = usb_get_serial_port_data(port);
 
 	kfree(priv);
-
-	return 0;
 }
 
 static struct usb_serial_driver opticon_device = {
@@ -412,7 +391,6 @@ static struct usb_serial_driver opticon_device = {
 	.chars_in_buffer =	opticon_chars_in_buffer,
 	.throttle =		usb_serial_generic_throttle,
 	.unthrottle =		usb_serial_generic_unthrottle,
-	.get_serial =		get_serial_info,
 	.tiocmget =		opticon_tiocmget,
 	.tiocmset =		opticon_tiocmset,
 	.process_read_urb =	opticon_process_read_urb,

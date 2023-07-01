@@ -226,7 +226,7 @@ static void return_all_buffers(struct sun4i_csi *csi,
 static int sun4i_csi_start_streaming(struct vb2_queue *vq, unsigned int count)
 {
 	struct sun4i_csi *csi = vb2_get_drv_priv(vq);
-	struct v4l2_fwnode_bus_parallel *bus = &csi->bus;
+	struct v4l2_mbus_config_parallel *bus = &csi->bus;
 	const struct sun4i_csi_format *csi_fmt;
 	unsigned long href_pol, pclk_pol, vref_pol;
 	unsigned long flags;
@@ -245,7 +245,7 @@ static int sun4i_csi_start_streaming(struct vb2_queue *vq, unsigned int count)
 	 * We need a scratch buffer in case where we'll not have any
 	 * more buffer queued so that we don't error out. One of those
 	 * cases is when you end up at the last frame to capture, you
-	 * don't havea any buffer queued any more, and yet it doesn't
+	 * don't have any buffer queued any more, and yet it doesn't
 	 * really matter since you'll never reach the next buffer.
 	 *
 	 * Since we support the multi-planar API, we need to have a
@@ -266,7 +266,7 @@ static int sun4i_csi_start_streaming(struct vb2_queue *vq, unsigned int count)
 		goto err_clear_dma_queue;
 	}
 
-	ret = media_pipeline_start(&csi->vdev.entity, &csi->vdev.pipe);
+	ret = video_device_pipeline_alloc_start(&csi->vdev);
 	if (ret < 0)
 		goto err_free_scratch_buffer;
 
@@ -311,7 +311,7 @@ static int sun4i_csi_start_streaming(struct vb2_queue *vq, unsigned int count)
 	writel(CSI_BUF_CTRL_DBE, csi->regs + CSI_BUF_CTRL_REG);
 
 	/* Clear the pending interrupts */
-	writel(CSI_INT_FRM_DONE, csi->regs + 0x34);
+	writel(CSI_INT_FRM_DONE, csi->regs + CSI_INT_STA_REG);
 
 	/* Enable frame done interrupt */
 	writel(CSI_INT_FRM_DONE, csi->regs + CSI_INT_EN_REG);
@@ -330,7 +330,7 @@ err_disable_device:
 	sun4i_csi_capture_stop(csi);
 
 err_disable_pipeline:
-	media_pipeline_stop(&csi->vdev.entity);
+	video_device_pipeline_stop(&csi->vdev);
 
 err_free_scratch_buffer:
 	dma_free_coherent(csi->dev, csi->scratch.size, csi->scratch.vaddr,
@@ -359,7 +359,7 @@ static void sun4i_csi_stop_streaming(struct vb2_queue *vq)
 	return_all_buffers(csi, VB2_BUF_STATE_ERROR);
 	spin_unlock_irqrestore(&csi->qlock, flags);
 
-	media_pipeline_stop(&csi->vdev.entity);
+	video_device_pipeline_stop(&csi->vdev);
 
 	dma_free_coherent(csi->dev, csi->scratch.size, csi->scratch.vaddr,
 			  csi->scratch.paddr);
@@ -413,7 +413,7 @@ int sun4i_csi_dma_register(struct sun4i_csi *csi, int irq)
 
 	q->min_buffers_needed = 3;
 	q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-	q->io_modes = VB2_MMAP;
+	q->io_modes = VB2_MMAP | VB2_DMABUF;
 	q->lock = &csi->lock;
 	q->drv_priv = csi;
 	q->buf_struct_size = sizeof(struct sun4i_csi_buffer);
@@ -431,7 +431,7 @@ int sun4i_csi_dma_register(struct sun4i_csi *csi, int irq)
 	ret = v4l2_device_register(csi->dev, &csi->v4l);
 	if (ret) {
 		dev_err(csi->dev, "Couldn't register the v4l2 device\n");
-		goto err_free_queue;
+		goto err_free_mutex;
 	}
 
 	ret = devm_request_irq(csi->dev, irq, sun4i_csi_irq, 0,
@@ -446,9 +446,6 @@ int sun4i_csi_dma_register(struct sun4i_csi *csi, int irq)
 err_unregister_device:
 	v4l2_device_unregister(&csi->v4l);
 
-err_free_queue:
-	vb2_queue_release(q);
-
 err_free_mutex:
 	mutex_destroy(&csi->lock);
 	return ret;
@@ -457,6 +454,5 @@ err_free_mutex:
 void sun4i_csi_dma_unregister(struct sun4i_csi *csi)
 {
 	v4l2_device_unregister(&csi->v4l);
-	vb2_queue_release(&csi->queue);
 	mutex_destroy(&csi->lock);
 }

@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * arch/arm/mach-dove/common.c
  *
  * Core functions for Marvell Dove 88AP510 System On Chip
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2.  This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 #include <linux/clk-provider.h>
@@ -48,7 +45,7 @@
 /*****************************************************************************
  * I/O Address Mapping
  ****************************************************************************/
-static struct map_desc dove_io_desc[] __initdata = {
+static struct map_desc __maybe_unused dove_io_desc[] __initdata = {
 	{
 		.virtual	= (unsigned long) DOVE_SB_REGS_VIRT_BASE,
 		.pfn		= __phys_to_pfn(DOVE_SB_REGS_PHYS_BASE),

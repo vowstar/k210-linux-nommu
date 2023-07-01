@@ -80,16 +80,9 @@ typedef struct page *pgtable_t;
 
 #define page_to_phys(page)      ((dma_addr_t)page_to_pfn(page) << PAGE_SHIFT)
 
-#define pfn_valid(pfn)          ((pfn) < max_mapnr)
-
 #define virt_addr_valid(kaddr)	(pfn_valid(virt_to_pfn(kaddr)))
 
 #endif /* __ASSEMBLY__ */
-
-
-#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
-				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
-
 
 #include <asm-generic/memory_model.h>
 #include <asm-generic/getorder.h>

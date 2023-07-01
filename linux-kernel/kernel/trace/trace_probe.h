@@ -16,7 +16,6 @@
 #include <linux/tracefs.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/ctype.h>
 #include <linux/ptrace.h>
 #include <linux/perf_event.h>
 #include <linux/kprobes.h>
@@ -99,10 +98,12 @@ enum fetch_op {
 	FETCH_OP_ST_UMEM,	/* Mem: .offset, .size */
 	FETCH_OP_ST_STRING,	/* String: .offset, .size */
 	FETCH_OP_ST_USTRING,	/* User String: .offset, .size */
+	FETCH_OP_ST_SYMSTR,	/* Kernel Symbol String: .offset, .size */
 	// Stage 4 (modify) op
 	FETCH_OP_MOD_BF,	/* Bitfield: .basesize, .lshift, .rshift */
 	// Stage 5 (loop) op
 	FETCH_OP_LP_ARRAY,	/* Array: .param = loop count */
+	FETCH_OP_TP_ARG,	/* Trace Point argument */
 	FETCH_OP_END,
 	FETCH_NOP_SYMBOL,	/* Unresolved Symbol holder */
 };
@@ -133,9 +134,10 @@ struct fetch_insn {
 struct fetch_type {
 	const char		*name;		/* Name of type */
 	size_t			size;		/* Byte size of type */
-	int			is_signed;	/* Signed flag */
+	bool			is_signed;	/* Signed flag */
+	bool			is_string;	/* String flag */
 	print_type_func_t	print;		/* Print functions */
-	const char		*fmt;		/* Fromat string */
+	const char		*fmt;		/* Format string */
 	const char		*fmttype;	/* Name in format file */
 };
 
@@ -164,6 +166,7 @@ DECLARE_BASIC_PRINT_TYPE_FUNC(x16);
 DECLARE_BASIC_PRINT_TYPE_FUNC(x32);
 DECLARE_BASIC_PRINT_TYPE_FUNC(x64);
 
+DECLARE_BASIC_PRINT_TYPE_FUNC(char);
 DECLARE_BASIC_PRINT_TYPE_FUNC(string);
 DECLARE_BASIC_PRINT_TYPE_FUNC(symbol);
 
@@ -177,16 +180,19 @@ DECLARE_BASIC_PRINT_TYPE_FUNC(symbol);
 #define _ADDR_FETCH_TYPE(t) __ADDR_FETCH_TYPE(t)
 #define ADDR_FETCH_TYPE _ADDR_FETCH_TYPE(BITS_PER_LONG)
 
-#define __ASSIGN_FETCH_TYPE(_name, ptype, ftype, _size, sign, _fmttype)	\
-	{.name = _name,				\
+#define __ASSIGN_FETCH_TYPE(_name, ptype, ftype, _size, sign, str, _fmttype)	\
+	{.name = _name,					\
 	 .size = _size,					\
-	 .is_signed = sign,				\
+	 .is_signed = (bool)sign,			\
+	 .is_string = (bool)str,			\
 	 .print = PRINT_TYPE_FUNC_NAME(ptype),		\
 	 .fmt = PRINT_TYPE_FMT_NAME(ptype),		\
 	 .fmttype = _fmttype,				\
 	}
+
+/* Non string types can use these macros */
 #define _ASSIGN_FETCH_TYPE(_name, ptype, ftype, _size, sign, _fmttype)	\
-	__ASSIGN_FETCH_TYPE(_name, ptype, ftype, _size, sign, #_fmttype)
+	__ASSIGN_FETCH_TYPE(_name, ptype, ftype, _size, sign, 0, #_fmttype)
 #define ASSIGN_FETCH_TYPE(ptype, ftype, sign)			\
 	_ASSIGN_FETCH_TYPE(#ptype, ptype, ftype, sizeof(ftype), sign, ptype)
 
@@ -236,7 +242,7 @@ struct trace_probe_event {
 	struct trace_event_call		call;
 	struct list_head 		files;
 	struct list_head		probes;
-	struct trace_uprobe_filter	filter[0];
+	struct trace_uprobe_filter	filter[];
 };
 
 struct trace_probe {
@@ -342,31 +348,24 @@ struct event_file_link *trace_probe_get_file_link(struct trace_probe *tp,
 int trace_probe_compare_arg_type(struct trace_probe *a, struct trace_probe *b);
 bool trace_probe_match_command_args(struct trace_probe *tp,
 				    int argc, const char **argv);
+int trace_probe_create(const char *raw_command, int (*createfn)(int, const char **));
+int trace_probe_print_args(struct trace_seq *s, struct probe_arg *args, int nr_args,
+		 u8 *data, void *field);
 
 #define trace_probe_for_each_link(pos, tp)	\
 	list_for_each_entry(pos, &(tp)->event->files, list)
 #define trace_probe_for_each_link_rcu(pos, tp)	\
 	list_for_each_entry_rcu(pos, &(tp)->event->files, list)
 
-/* Check the name is good for event/group/fields */
-static inline bool is_good_name(const char *name)
-{
-	if (!isalpha(*name) && *name != '_')
-		return false;
-	while (*++name != '\0') {
-		if (!isalpha(*name) && !isdigit(*name) && *name != '_')
-			return false;
-	}
-	return true;
-}
-
 #define TPARG_FL_RETURN BIT(0)
 #define TPARG_FL_KERNEL BIT(1)
 #define TPARG_FL_FENTRY BIT(2)
-#define TPARG_FL_MASK	GENMASK(2, 0)
+#define TPARG_FL_TPOINT BIT(3)
+#define TPARG_FL_USER   BIT(4)
+#define TPARG_FL_MASK	GENMASK(4, 0)
 
 extern int traceprobe_parse_probe_arg(struct trace_probe *tp, int i,
-				char *arg, unsigned int flags);
+				const char *argv, unsigned int flags);
 
 extern int traceprobe_update_arg(struct probe_arg *arg);
 extern void traceprobe_free_probe_arg(struct probe_arg *arg);
@@ -375,7 +374,13 @@ extern int traceprobe_split_symbol_offset(char *symbol, long *offset);
 int traceprobe_parse_event_name(const char **pevent, const char **pgroup,
 				char *buf, int offset);
 
-extern int traceprobe_set_print_fmt(struct trace_probe *tp, bool is_return);
+enum probe_print_type {
+	PROBE_PRINT_NORMAL,
+	PROBE_PRINT_RETURN,
+	PROBE_PRINT_EVENT,
+};
+
+extern int traceprobe_set_print_fmt(struct trace_probe *tp, enum probe_print_type ptype);
 
 #ifdef CONFIG_PERF_EVENTS
 extern struct trace_event_call *
@@ -404,12 +409,14 @@ extern int traceprobe_define_arg_fields(struct trace_event_call *event_call,
 	C(MAXACT_TOO_BIG,	"Maxactive is too big"),		\
 	C(BAD_PROBE_ADDR,	"Invalid probed address or symbol"),	\
 	C(BAD_RETPROBE,		"Retprobe address must be an function entry"), \
+	C(BAD_ADDR_SUFFIX,	"Invalid probed address suffix"), \
 	C(NO_GROUP_NAME,	"Group name is not specified"),		\
 	C(GROUP_TOO_LONG,	"Group name is too long"),		\
 	C(BAD_GROUP_NAME,	"Group name must follow the same rules as C identifiers"), \
 	C(NO_EVENT_NAME,	"Event name is not specified"),		\
 	C(EVENT_TOO_LONG,	"Event name is too long"),		\
 	C(BAD_EVENT_NAME,	"Event name must follow the same rules as C identifiers"), \
+	C(EVENT_EXIST,		"Given group/event name is already used by another event"), \
 	C(RETVAL_ON_PROBE,	"$retval is not available on probe"),	\
 	C(BAD_STACK_NUM,	"Invalid stack number"),		\
 	C(BAD_ARG_NUM,		"Invalid argument number"),		\
@@ -433,6 +440,7 @@ extern int traceprobe_define_arg_fields(struct trace_event_call *event_call,
 	C(ARRAY_TOO_BIG,	"Array number is too big"),		\
 	C(BAD_TYPE,		"Unknown type is specified"),		\
 	C(BAD_STRING,		"String accepts only memory argument"),	\
+	C(BAD_SYMSTRING,	"Symbol String doesn't accept data/userdata"),	\
 	C(BAD_BITFIELD,		"Invalid bitfield"),			\
 	C(ARG_NAME_TOO_LONG,	"Argument name is too long"),		\
 	C(NO_ARG_NAME,		"Argument name is not specified"),	\
@@ -444,7 +452,11 @@ extern int traceprobe_define_arg_fields(struct trace_event_call *event_call,
 	C(FAIL_REG_PROBE,	"Failed to register probe event"),\
 	C(DIFF_PROBE_TYPE,	"Probe type is different from existing probe"),\
 	C(DIFF_ARG_TYPE,	"Argument type or name is different from existing probe"),\
-	C(SAME_PROBE,		"There is already the exact same probe event"),
+	C(SAME_PROBE,		"There is already the exact same probe event"),\
+	C(NO_EVENT_INFO,	"This requires both group and event name to attach"),\
+	C(BAD_ATTACH_EVENT,	"Attached event does not exist"),\
+	C(BAD_ATTACH_ARG,	"Attached event does not have this field"),\
+	C(NO_EP_FILTER,		"No filter rule after 'if'"),
 
 #undef C
 #define C(a, b)		TP_ERR_##a

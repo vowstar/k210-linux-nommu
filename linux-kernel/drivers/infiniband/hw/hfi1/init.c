@@ -1,48 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0 or BSD-3-Clause
 /*
- * Copyright(c) 2015 - 2018 Intel Corporation.
- *
- * This file is provided under a dual BSD/GPLv2 license.  When using or
- * redistributing this file, you may do so under either license.
- *
- * GPL LICENSE SUMMARY
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * BSD LICENSE
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- *  - Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *  - Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *  - Neither the name of Intel Corporation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
+ * Copyright(c) 2015 - 2020 Intel Corporation.
+ * Copyright(c) 2021 Cornelis Networks.
  */
 
 #include <linux/pci.h>
@@ -69,6 +28,7 @@
 #include "affinity.h"
 #include "vnic.h"
 #include "exp_rcv.h"
+#include "netdev.h"
 
 #undef pr_fmt
 #define pr_fmt(fmt) DRIVER_NAME ": " fmt
@@ -153,7 +113,6 @@ static int hfi1_create_kctxt(struct hfi1_devdata *dd,
 	rcd->fast_handler = get_dma_rtail_setting(rcd) ?
 				handle_receive_interrupt_dma_rtail :
 				handle_receive_interrupt_nodma_rtail;
-	rcd->slow_handler = handle_receive_interrupt;
 
 	hfi1_set_seq_cnt(rcd, 1);
 
@@ -311,7 +270,7 @@ struct hfi1_ctxtdata *hfi1_rcd_get_by_index_safe(struct hfi1_devdata *dd,
 }
 
 /**
- * hfi1_rcd_get_by_index
+ * hfi1_rcd_get_by_index - get by index
  * @dd: pointer to a valid devdata structure
  * @ctxt: the index of an possilbe rcd
  *
@@ -374,6 +333,9 @@ int hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, int numa,
 		rcd->numa_id = numa;
 		rcd->rcv_array_groups = dd->rcv_entries.ngroups;
 		rcd->rhf_rcv_function_map = normal_rhf_rcv_functions;
+		rcd->slow_handler = handle_receive_interrupt;
+		rcd->do_interrupt = rcd->slow_handler;
+		rcd->msix_intr = CCE_NUM_MSIX_VECTORS;
 
 		mutex_init(&rcd->exp_mutex);
 		spin_lock_init(&rcd->exp_lock);
@@ -497,12 +459,12 @@ bail:
 }
 
 /**
- * hfi1_free_ctxt
+ * hfi1_free_ctxt - free context
  * @rcd: pointer to an initialized rcd data structure
  *
  * This wrapper is the free function that matches hfi1_create_ctxtdata().
  * When a context is done being used (kernel or user), this function is called
- * for the "final" put to match the kref init from hf1i_create_ctxtdata().
+ * for the "final" put to match the kref init from hfi1_create_ctxtdata().
  * Other users of the context do a get/put sequence to make sure that the
  * structure isn't removed while in use.
  */
@@ -527,7 +489,7 @@ void set_link_ipg(struct hfi1_pportdata *ppd)
 	u16 shift, mult;
 	u64 src;
 	u32 current_egress_rate; /* Mbits /sec */
-	u32 max_pkt_time;
+	u64 max_pkt_time;
 	/*
 	 * max_pkt_time is the maximum packet egress time in units
 	 * of the fabric clock period 1/(805 MHz).
@@ -625,7 +587,7 @@ static enum hrtimer_restart cca_timer_fn(struct hrtimer *t)
  * Common code for initializing the physical port structure.
  */
 void hfi1_init_pportdata(struct pci_dev *pdev, struct hfi1_pportdata *ppd,
-			 struct hfi1_devdata *dd, u8 hw_pidx, u8 port)
+			 struct hfi1_devdata *dd, u8 hw_pidx, u32 port)
 {
 	int i;
 	uint default_pkey_idx;
@@ -648,12 +610,7 @@ void hfi1_init_pportdata(struct pci_dev *pdev, struct hfi1_pportdata *ppd,
 
 	ppd->pkeys[default_pkey_idx] = DEFAULT_P_KEY;
 	ppd->part_enforce |= HFI1_PART_ENFORCE_IN;
-
-	if (loopback) {
-		dd_dev_err(dd, "Faking data partition 0x8001 in idx %u\n",
-			   !default_pkey_idx);
-		ppd->pkeys[!default_pkey_idx] = 0x8001;
-	}
+	ppd->pkeys[0] = 0x8001;
 
 	INIT_WORK(&ppd->link_vc_work, handle_verify_cap);
 	INIT_WORK(&ppd->link_up_work, handle_link_up);
@@ -829,6 +786,29 @@ wq_error:
 }
 
 /**
+ * destroy_workqueues - destroy per port workqueues
+ * @dd: the hfi1_ib device
+ */
+static void destroy_workqueues(struct hfi1_devdata *dd)
+{
+	int pidx;
+	struct hfi1_pportdata *ppd;
+
+	for (pidx = 0; pidx < dd->num_pports; ++pidx) {
+		ppd = dd->pport + pidx;
+
+		if (ppd->hfi1_wq) {
+			destroy_workqueue(ppd->hfi1_wq);
+			ppd->hfi1_wq = NULL;
+		}
+		if (ppd->link_wq) {
+			destroy_workqueue(ppd->link_wq);
+			ppd->link_wq = NULL;
+		}
+	}
+}
+
+/**
  * enable_general_intr() - Enable the IRQs that will be handled by the
  * general interrupt handler.
  * @dd: valid devdata
@@ -895,18 +875,6 @@ int hfi1_init(struct hfi1_devdata *dd, int reinit)
 	if (ret)
 		goto done;
 
-	/* allocate dummy tail memory for all receive contexts */
-	dd->rcvhdrtail_dummy_kvaddr = dma_alloc_coherent(&dd->pcidev->dev,
-							 sizeof(u64),
-							 &dd->rcvhdrtail_dummy_dma,
-							 GFP_KERNEL);
-
-	if (!dd->rcvhdrtail_dummy_kvaddr) {
-		dd_dev_err(dd, "cannot allocate dummy tail memory\n");
-		ret = -ENOMEM;
-		goto done;
-	}
-
 	/* dd->rcd can be NULL if early initialization failed */
 	for (i = 0; dd->rcd && i < dd->first_dyn_alloc_ctxt; ++i) {
 		/*
@@ -918,8 +886,6 @@ int hfi1_init(struct hfi1_devdata *dd, int reinit)
 		rcd = hfi1_rcd_get_by_index(dd, i);
 		if (!rcd)
 			continue;
-
-		rcd->do_interrupt = &handle_receive_interrupt;
 
 		lastfail = hfi1_create_rcvhdrq(dd, rcd);
 		if (!lastfail)
@@ -1101,15 +1067,10 @@ static void shutdown_device(struct hfi1_devdata *dd)
 		 * We can't count on interrupts since we are stopping.
 		 */
 		hfi1_quiet_serdes(ppd);
-
-		if (ppd->hfi1_wq) {
-			destroy_workqueue(ppd->hfi1_wq);
-			ppd->hfi1_wq = NULL;
-		}
-		if (ppd->link_wq) {
-			destroy_workqueue(ppd->link_wq);
-			ppd->link_wq = NULL;
-		}
+		if (ppd->hfi1_wq)
+			flush_workqueue(ppd->hfi1_wq);
+		if (ppd->link_wq)
+			flush_workqueue(ppd->link_wq);
 	}
 	sdma_exit(dd);
 }
@@ -1146,7 +1107,7 @@ void hfi1_free_ctxtdata(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd)
 	rcd->egrbufs.rcvtids = NULL;
 
 	for (e = 0; e < rcd->egrbufs.alloced; e++) {
-		if (rcd->egrbufs.buffers[e].dma)
+		if (rcd->egrbufs.buffers[e].addr)
 			dma_free_coherent(&dd->pcidev->dev,
 					  rcd->egrbufs.buffers[e].len,
 					  rcd->egrbufs.buffers[e].addr,
@@ -1198,13 +1159,13 @@ static void finalize_asic_data(struct hfi1_devdata *dd,
 }
 
 /**
- * hfi1_clean_devdata - cleans up per-unit data structure
+ * hfi1_free_devdata - cleans up and frees per-unit data structure
  * @dd: pointer to a valid devdata structure
  *
- * It cleans up all data structures set up by
+ * It cleans up and frees all data structures set up by
  * by hfi1_alloc_devdata().
  */
-static void hfi1_clean_devdata(struct hfi1_devdata *dd)
+void hfi1_free_devdata(struct hfi1_devdata *dd)
 {
 	struct hfi1_asic_data *ad;
 	unsigned long flags;
@@ -1227,25 +1188,13 @@ static void hfi1_clean_devdata(struct hfi1_devdata *dd)
 	dd->tx_opstats    = NULL;
 	kfree(dd->comp_vect);
 	dd->comp_vect = NULL;
+	if (dd->rcvhdrtail_dummy_kvaddr)
+		dma_free_coherent(&dd->pcidev->dev, sizeof(u64),
+				  (void *)dd->rcvhdrtail_dummy_kvaddr,
+				  dd->rcvhdrtail_dummy_dma);
+	dd->rcvhdrtail_dummy_kvaddr = NULL;
 	sdma_clean(dd, dd->num_sdma);
 	rvt_dealloc_device(&dd->verbs_dev.rdi);
-}
-
-static void __hfi1_free_devdata(struct kobject *kobj)
-{
-	struct hfi1_devdata *dd =
-		container_of(kobj, struct hfi1_devdata, kobj);
-
-	hfi1_clean_devdata(dd);
-}
-
-static struct kobj_type hfi1_devdata_type = {
-	.release = __hfi1_free_devdata,
-};
-
-void hfi1_free_devdata(struct hfi1_devdata *dd)
-{
-	kobject_put(&dd->kobj);
 }
 
 /**
@@ -1274,7 +1223,6 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 	dd->pport = (struct hfi1_pportdata *)(dd + 1);
 	dd->pcidev = pdev;
 	pci_set_drvdata(pdev, dd);
-	dd->node = NUMA_NO_NODE;
 
 	ret = xa_alloc_irq(&hfi1_dev_table, &dd->unit, dd, xa_limit_32b,
 			GFP_KERNEL);
@@ -1284,6 +1232,15 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 		goto bail;
 	}
 	rvt_set_ibdev_name(&dd->verbs_dev.rdi, "%s_%d", class_name(), dd->unit);
+	/*
+	 * If the BIOS does not have the NUMA node information set, select
+	 * NUMA 0 so we get consistent performance.
+	 */
+	dd->node = pcibus_to_node(pdev->bus);
+	if (dd->node == NUMA_NO_NODE) {
+		dd_dev_err(dd, "Invalid PCI NUMA node. Performance may be affected\n");
+		dd->node = 0;
+	}
 
 	/*
 	 * Initialize all locks for the device. This needs to be as early as
@@ -1333,11 +1290,20 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 		goto bail;
 	}
 
-	kobject_init(&dd->kobj, &hfi1_devdata_type);
+	/* allocate dummy tail memory for all receive contexts */
+	dd->rcvhdrtail_dummy_kvaddr =
+		dma_alloc_coherent(&dd->pcidev->dev, sizeof(u64),
+				   &dd->rcvhdrtail_dummy_dma, GFP_KERNEL);
+	if (!dd->rcvhdrtail_dummy_kvaddr) {
+		ret = -ENOMEM;
+		goto bail;
+	}
+
+	atomic_set(&dd->ipoib_rsm_usr_num, 0);
 	return dd;
 
 bail:
-	hfi1_clean_devdata(dd);
+	hfi1_free_devdata(dd);
 	return ERR_PTR(ret);
 }
 
@@ -1378,7 +1344,7 @@ static void remove_one(struct pci_dev *);
 static int init_one(struct pci_dev *, const struct pci_device_id *);
 static void shutdown_one(struct pci_dev *);
 
-#define DRIVER_LOAD_MSG "Intel " DRIVER_NAME " loaded: "
+#define DRIVER_LOAD_MSG "Cornelis " DRIVER_NAME " loaded: "
 #define PFX DRIVER_NAME ": "
 
 const struct pci_device_id hfi1_pci_tbl[] = {
@@ -1540,13 +1506,6 @@ static void cleanup_device_data(struct hfi1_devdata *dd)
 
 	free_credit_return(dd);
 
-	if (dd->rcvhdrtail_dummy_kvaddr) {
-		dma_free_coherent(&dd->pcidev->dev, sizeof(u64),
-				  (void *)dd->rcvhdrtail_dummy_kvaddr,
-				  dd->rcvhdrtail_dummy_dma);
-		dd->rcvhdrtail_dummy_kvaddr = NULL;
-	}
-
 	/*
 	 * Free any resources still in use (usually just kernel contexts)
 	 * at unload; we do for ctxtcnt, because that's what we allocate.
@@ -1681,9 +1640,6 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	/* do the generic initialization */
 	initfail = hfi1_init(dd, 0);
 
-	/* setup vnic */
-	hfi1_vnic_setup(dd);
-
 	ret = hfi1_register_ib_device(dd);
 
 	/*
@@ -1722,7 +1678,6 @@ static int init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 			hfi1_device_remove(dd);
 		if (!ret)
 			hfi1_unregister_ib_device(dd);
-		hfi1_vnic_cleanup(dd);
 		postinit_cleanup(dd);
 		if (initfail)
 			ret = initfail;
@@ -1745,7 +1700,7 @@ static void wait_for_clients(struct hfi1_devdata *dd)
 	 * Remove the device init value and complete the device if there is
 	 * no clients or wait for active clients to finish.
 	 */
-	if (atomic_dec_and_test(&dd->user_refcount))
+	if (refcount_dec_and_test(&dd->user_refcount))
 		complete(&dd->user_comp);
 
 	wait_for_completion(&dd->user_comp);
@@ -1767,14 +1722,15 @@ static void remove_one(struct pci_dev *pdev)
 	/* unregister from IB core */
 	hfi1_unregister_ib_device(dd);
 
-	/* cleanup vnic */
-	hfi1_vnic_cleanup(dd);
+	/* free netdev data */
+	hfi1_free_rx(dd);
 
 	/*
 	 * Disable the IB link, disable interrupts on the device,
 	 * clear dma engines, etc.
 	 */
 	shutdown_device(dd);
+	destroy_workqueues(dd);
 
 	stop_timers(dd);
 
@@ -1805,17 +1761,11 @@ int hfi1_create_rcvhdrq(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd)
 	unsigned amt;
 
 	if (!rcd->rcvhdrq) {
-		gfp_t gfp_flags;
-
 		amt = rcvhdrq_size(rcd);
 
-		if (rcd->ctxt < dd->first_dyn_alloc_ctxt || rcd->is_vnic)
-			gfp_flags = GFP_KERNEL;
-		else
-			gfp_flags = GFP_USER;
 		rcd->rcvhdrq = dma_alloc_coherent(&dd->pcidev->dev, amt,
 						  &rcd->rcvhdrq_dma,
-						  gfp_flags | __GFP_COMP);
+						  GFP_KERNEL);
 
 		if (!rcd->rcvhdrq) {
 			dd_dev_err(dd,
@@ -1829,7 +1779,7 @@ int hfi1_create_rcvhdrq(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd)
 			rcd->rcvhdrtail_kvaddr = dma_alloc_coherent(&dd->pcidev->dev,
 								    PAGE_SIZE,
 								    &rcd->rcvhdrqtailaddr_dma,
-								    gfp_flags);
+								    GFP_KERNEL);
 			if (!rcd->rcvhdrtail_kvaddr)
 				goto bail_free;
 		}
@@ -1852,7 +1802,8 @@ bail:
 }
 
 /**
- * allocate eager buffers, both kernel and user contexts.
+ * hfi1_setup_eagerbufs - llocate eager buffers, both kernel and user
+ * contexts.
  * @rcd: the context we are setting up.
  *
  * Allocate the eager TID buffers and program them into hip.
@@ -1864,18 +1815,9 @@ int hfi1_setup_eagerbufs(struct hfi1_ctxtdata *rcd)
 {
 	struct hfi1_devdata *dd = rcd->dd;
 	u32 max_entries, egrtop, alloced_bytes = 0;
-	gfp_t gfp_flags;
 	u16 order, idx = 0;
 	int ret = 0;
 	u16 round_mtu = roundup_pow_of_two(hfi1_max_mtu);
-
-	/*
-	 * GFP_USER, but without GFP_FS, so buffer cache can be
-	 * coalesced (we hope); otherwise, even at order 4,
-	 * heavy filesystem activity makes these fail, and we can
-	 * use compound pages.
-	 */
-	gfp_flags = __GFP_RECLAIM | __GFP_IO | __GFP_COMP;
 
 	/*
 	 * The minimum size of the eager buffers is a groups of MTU-sized
@@ -1907,7 +1849,7 @@ int hfi1_setup_eagerbufs(struct hfi1_ctxtdata *rcd)
 			dma_alloc_coherent(&dd->pcidev->dev,
 					   rcd->egrbufs.rcvtid_size,
 					   &rcd->egrbufs.buffers[idx].dma,
-					   gfp_flags);
+					   GFP_KERNEL);
 		if (rcd->egrbufs.buffers[idx].addr) {
 			rcd->egrbufs.buffers[idx].len =
 				rcd->egrbufs.rcvtid_size;

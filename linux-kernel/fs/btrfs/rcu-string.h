@@ -8,7 +8,7 @@
 
 struct rcu_string {
 	struct rcu_head rcu;
-	char str[0];
+	char str[];
 };
 
 static inline struct rcu_string *rcu_string_strdup(const char *src, gfp_t mask)
@@ -18,7 +18,11 @@ static inline struct rcu_string *rcu_string_strdup(const char *src, gfp_t mask)
 					 (len * sizeof(char)), mask);
 	if (!ret)
 		return ret;
-	strncpy(ret->str, src, len);
+	/* Warn if the source got unexpectedly truncated. */
+	if (WARN_ON(strscpy(ret->str, src, len) < 0)) {
+		kfree(ret);
+		return NULL;
+	}
 	return ret;
 }
 

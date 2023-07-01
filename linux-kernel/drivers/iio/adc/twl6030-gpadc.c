@@ -57,6 +57,18 @@
 #define TWL6030_GPADCS				BIT(1)
 #define TWL6030_GPADCR				BIT(0)
 
+#define USB_VBUS_CTRL_SET			0x04
+#define USB_ID_CTRL_SET				0x06
+
+#define TWL6030_MISC1				0xE4
+#define VBUS_MEAS				0x01
+#define ID_MEAS					0x01
+
+#define VAC_MEAS                0x04
+#define VBAT_MEAS               0x02
+#define BB_MEAS                 0x01
+
+
 /**
  * struct twl6030_chnl_calib - channel calibration
  * @gain:		slope coefficient for ideal curve
@@ -94,9 +106,9 @@ struct twl6030_gpadc_data;
  * struct twl6030_gpadc_platform_data - platform specific data
  * @nchannels:		number of GPADC channels
  * @iio_channels:	iio channels
- * @twl6030_ideal:	pointer to calibration parameters
+ * @ideal:		pointer to calibration parameters
  * @start_conversion:	pointer to ADC start conversion function
- * @channel_to_reg	pointer to ADC function to convert channel to
+ * @channel_to_reg:	pointer to ADC function to convert channel to
  *			register address for reading conversion result
  * @calibrate:		pointer to calibration function
  */
@@ -900,7 +912,7 @@ static int twl6030_gpadc_probe(struct platform_device *pdev)
 
 	ret = pdata->calibrate(gpadc);
 	if (ret < 0) {
-		dev_err(&pdev->dev, "failed to read calibration registers\n");
+		dev_err(dev, "failed to read calibration registers\n");
 		return ret;
 	}
 
@@ -911,22 +923,43 @@ static int twl6030_gpadc_probe(struct platform_device *pdev)
 	ret = devm_request_threaded_irq(dev, irq, NULL,
 				twl6030_gpadc_irq_handler,
 				IRQF_ONESHOT, "twl6030_gpadc", indio_dev);
+	if (ret)
+		return ret;
 
 	ret = twl6030_gpadc_enable_irq(TWL6030_GPADC_RT_SW1_EOC_MASK);
 	if (ret < 0) {
-		dev_err(&pdev->dev, "failed to enable GPADC interrupt\n");
+		dev_err(dev, "failed to enable GPADC interrupt\n");
 		return ret;
 	}
 
 	ret = twl_i2c_write_u8(TWL6030_MODULE_ID1, TWL6030_GPADCS,
 					TWL6030_REG_TOGGLE1);
 	if (ret < 0) {
-		dev_err(&pdev->dev, "failed to enable GPADC module\n");
+		dev_err(dev, "failed to enable GPADC module\n");
+		return ret;
+	}
+
+	ret = twl_i2c_write_u8(TWL_MODULE_USB, VBUS_MEAS, USB_VBUS_CTRL_SET);
+	if (ret < 0) {
+		dev_err(dev, "failed to wire up inputs\n");
+		return ret;
+	}
+
+	ret = twl_i2c_write_u8(TWL_MODULE_USB, ID_MEAS, USB_ID_CTRL_SET);
+	if (ret < 0) {
+		dev_err(dev, "failed to wire up inputs\n");
+		return ret;
+	}
+
+	ret = twl_i2c_write_u8(TWL6030_MODULE_ID0,
+				VBAT_MEAS | BB_MEAS | VAC_MEAS,
+				TWL6030_MISC1);
+	if (ret < 0) {
+		dev_err(dev, "failed to wire up inputs\n");
 		return ret;
 	}
 
 	indio_dev->name = DRIVER_NAME;
-	indio_dev->dev.parent = dev;
 	indio_dev->info = &twl6030_gpadc_iio_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels = pdata->iio_channels;
@@ -945,7 +978,6 @@ static int twl6030_gpadc_remove(struct platform_device *pdev)
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int twl6030_gpadc_suspend(struct device *pdev)
 {
 	int ret;
@@ -969,17 +1001,16 @@ static int twl6030_gpadc_resume(struct device *pdev)
 
 	return 0;
 };
-#endif
 
-static SIMPLE_DEV_PM_OPS(twl6030_gpadc_pm_ops, twl6030_gpadc_suspend,
-					twl6030_gpadc_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(twl6030_gpadc_pm_ops, twl6030_gpadc_suspend,
+				twl6030_gpadc_resume);
 
 static struct platform_driver twl6030_gpadc_driver = {
 	.probe		= twl6030_gpadc_probe,
 	.remove		= twl6030_gpadc_remove,
 	.driver		= {
 		.name	= DRIVER_NAME,
-		.pm	= &twl6030_gpadc_pm_ops,
+		.pm	= pm_sleep_ptr(&twl6030_gpadc_pm_ops),
 		.of_match_table = of_twl6030_match_tbl,
 	},
 };

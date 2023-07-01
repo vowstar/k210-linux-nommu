@@ -27,11 +27,11 @@
 #include <linux/percpu.h>
 #include <linux/mmzone.h>
 #include <linux/gfp.h>
+#include <linux/bootmem_info.h>
 
 #include <asm/head.h>
 #include <asm/page.h>
 #include <asm/pgalloc.h>
-#include <asm/pgtable.h>
 #include <asm/oplib.h>
 #include <asm/iommu.h>
 #include <asm/io.h>
@@ -325,23 +325,12 @@ static void __update_mmu_tsb_insert(struct mm_struct *mm, unsigned long tsb_inde
 }
 
 #ifdef CONFIG_HUGETLB_PAGE
-static void __init add_huge_page_size(unsigned long size)
-{
-	unsigned int order;
-
-	if (size_to_hstate(size))
-		return;
-
-	order = ilog2(size) - PAGE_SHIFT;
-	hugetlb_add_hstate(order);
-}
-
 static int __init hugetlbpage_init(void)
 {
-	add_huge_page_size(1UL << HPAGE_64K_SHIFT);
-	add_huge_page_size(1UL << HPAGE_SHIFT);
-	add_huge_page_size(1UL << HPAGE_256MB_SHIFT);
-	add_huge_page_size(1UL << HPAGE_2GB_SHIFT);
+	hugetlb_add_hstate(HPAGE_64K_SHIFT - PAGE_SHIFT);
+	hugetlb_add_hstate(HPAGE_SHIFT - PAGE_SHIFT);
+	hugetlb_add_hstate(HPAGE_256MB_SHIFT - PAGE_SHIFT);
+	hugetlb_add_hstate(HPAGE_2GB_SHIFT - PAGE_SHIFT);
 
 	return 0;
 }
@@ -360,16 +349,11 @@ static void __init pud_huge_patch(void)
 	__asm__ __volatile__("flush %0" : : "r" (addr));
 }
 
-static int __init setup_hugepagesz(char *string)
+bool __init arch_hugetlb_valid_size(unsigned long size)
 {
-	unsigned long long hugepage_size;
-	unsigned int hugepage_shift;
+	unsigned int hugepage_shift = ilog2(size);
 	unsigned short hv_pgsz_idx;
 	unsigned int hv_pgsz_mask;
-	int rc = 0;
-
-	hugepage_size = memparse(string, &string);
-	hugepage_shift = ilog2(hugepage_size);
 
 	switch (hugepage_shift) {
 	case HPAGE_16GB_SHIFT:
@@ -397,20 +381,11 @@ static int __init setup_hugepagesz(char *string)
 		hv_pgsz_mask = 0;
 	}
 
-	if ((hv_pgsz_mask & cpu_pgsz_mask) == 0U) {
-		hugetlb_bad_size();
-		pr_err("hugepagesz=%llu not supported by MMU.\n",
-			hugepage_size);
-		goto out;
-	}
+	if ((hv_pgsz_mask & cpu_pgsz_mask) == 0U)
+		return false;
 
-	add_huge_page_size(hugepage_size);
-	rc = 1;
-
-out:
-	return rc;
+	return true;
 }
-__setup("hugepagesz=", setup_hugepagesz);
 #endif	/* CONFIG_HUGETLB_PAGE */
 
 void update_mmu_cache(struct vm_area_struct *vma, unsigned long address, pte_t *ptep)
@@ -529,11 +504,7 @@ void __kprobes flush_icache_range(unsigned long start, unsigned long end)
 			if (kaddr >= PAGE_OFFSET)
 				paddr = kaddr & mask;
 			else {
-				pgd_t *pgdp = pgd_offset_k(kaddr);
-				p4d_t *p4dp = p4d_offset(pgdp, kaddr);
-				pud_t *pudp = pud_offset(p4dp, kaddr);
-				pmd_t *pmdp = pmd_offset(pudp, kaddr);
-				pte_t *ptep = pte_offset_kernel(pmdp, kaddr);
+				pte_t *ptep = virt_to_kpte(kaddr);
 
 				paddr = pte_val(*ptep) & mask;
 			}
@@ -738,9 +709,10 @@ static void __init inherit_prom_mappings(void)
 
 void prom_world(int enter)
 {
-	if (!enter)
-		set_fs(get_fs());
-
+	/*
+	 * No need to change the address space any more, just flush
+	 * the register windows
+	 */
 	__asm__ __volatile__("flushw");
 }
 
@@ -933,7 +905,7 @@ struct node_mem_mask {
 static struct node_mem_mask node_masks[MAX_NUMNODES];
 static int num_node_masks;
 
-#ifdef CONFIG_NEED_MULTIPLE_NODES
+#ifdef CONFIG_NUMA
 
 struct mdesc_mlgroup {
 	u64	node;
@@ -1089,7 +1061,7 @@ static void __init allocate_node_data(int nid)
 {
 	struct pglist_data *p;
 	unsigned long start_pfn, end_pfn;
-#ifdef CONFIG_NEED_MULTIPLE_NODES
+#ifdef CONFIG_NUMA
 
 	NODE_DATA(nid) = memblock_alloc_node(sizeof(struct pglist_data),
 					     SMP_CACHE_BYTES, nid);
@@ -1110,7 +1082,7 @@ static void __init allocate_node_data(int nid)
 
 static void init_node_masks_nonnuma(void)
 {
-#ifdef CONFIG_NEED_MULTIPLE_NODES
+#ifdef CONFIG_NUMA
 	int i;
 #endif
 
@@ -1120,7 +1092,7 @@ static void init_node_masks_nonnuma(void)
 	node_masks[0].match = 0;
 	num_node_masks = 1;
 
-#ifdef CONFIG_NEED_MULTIPLE_NODES
+#ifdef CONFIG_NUMA
 	for (i = 0; i < NR_CPUS; i++)
 		numa_cpu_lookup_table[i] = 0;
 
@@ -1128,7 +1100,7 @@ static void init_node_masks_nonnuma(void)
 #endif
 }
 
-#ifdef CONFIG_NEED_MULTIPLE_NODES
+#ifdef CONFIG_NUMA
 struct pglist_data *node_data[MAX_NUMNODES];
 
 EXPORT_SYMBOL(numa_cpu_lookup_table);
@@ -1222,18 +1194,14 @@ int of_node_to_nid(struct device_node *dp)
 
 static void __init add_node_ranges(void)
 {
-	struct memblock_region *reg;
+	phys_addr_t start, end;
 	unsigned long prev_max;
+	u64 i;
 
 memblock_resized:
 	prev_max = memblock.memory.max;
 
-	for_each_memblock(memory, reg) {
-		unsigned long size = reg->size;
-		unsigned long start, end;
-
-		start = reg->base;
-		end = start + size;
+	for_each_mem_range(i, &start, &end) {
 		while (start < end) {
 			unsigned long this_end;
 			int nid;
@@ -1241,7 +1209,7 @@ memblock_resized:
 			this_end = memblock_nid_range(start, end, &nid);
 
 			numadbg("Setting memblock NUMA node nid[%d] "
-				"start[%lx] end[%lx]\n",
+				"start[%llx] end[%lx]\n",
 				nid, start, this_end);
 
 			memblock_set_node(start, this_end - start,
@@ -1640,7 +1608,6 @@ static unsigned long __init bootmem_init(unsigned long phys_base)
 
 	/* XXX cpu notifier XXX */
 
-	sparse_memory_present_with_active_regions(MAX_NUMNODES);
 	sparse_init();
 
 	return end_pfn;
@@ -1674,33 +1641,32 @@ bool kern_addr_valid(unsigned long addr)
 
 	pgd = pgd_offset_k(addr);
 	if (pgd_none(*pgd))
-		return 0;
+		return false;
 
 	p4d = p4d_offset(pgd, addr);
 	if (p4d_none(*p4d))
-		return 0;
+		return false;
 
 	pud = pud_offset(p4d, addr);
 	if (pud_none(*pud))
-		return 0;
+		return false;
 
 	if (pud_large(*pud))
 		return pfn_valid(pud_pfn(*pud));
 
 	pmd = pmd_offset(pud, addr);
 	if (pmd_none(*pmd))
-		return 0;
+		return false;
 
 	if (pmd_large(*pmd))
 		return pfn_valid(pmd_pfn(*pmd));
 
 	pte = pte_offset_kernel(pmd, addr);
 	if (pte_none(*pte))
-		return 0;
+		return false;
 
 	return pfn_valid(pte_pfn(*pte));
 }
-EXPORT_SYMBOL(kern_addr_valid);
 
 static unsigned long __ref kernel_map_hugepud(unsigned long vstart,
 					      unsigned long vend,
@@ -2488,7 +2454,7 @@ void __init paging_init(void)
 
 		max_zone_pfns[ZONE_NORMAL] = end_pfn;
 
-		free_area_init_nodes(max_zone_pfns);
+		free_area_init(max_zone_pfns);
 	}
 
 	printk("Booting Linux...\n");
@@ -2522,7 +2488,7 @@ int page_in_phys_avail(unsigned long paddr)
 
 static void __init register_page_bootmem_info(void)
 {
-#ifdef CONFIG_NEED_MULTIPLE_NODES
+#ifdef CONFIG_NUMA
 	int i;
 
 	for_each_online_node(i)
@@ -2555,7 +2521,6 @@ void __init mem_init(void)
 	}
 	mark_page_reserved(mem_map_zero);
 
-	mem_init_print_info(NULL);
 
 	if (tlb_type == cheetah || tlb_type == cheetah_plus)
 		cheetah_ecache_flush_init();
@@ -2667,6 +2632,9 @@ void vmemmap_free(unsigned long start, unsigned long end,
 {
 }
 #endif /* CONFIG_SPARSEMEM_VMEMMAP */
+
+/* These are actually filled in at boot time by sun4{u,v}_pgprot_init() */
+static pgprot_t protection_map[16] __ro_after_init;
 
 static void prot_init_common(unsigned long page_none,
 			     unsigned long page_shared,
@@ -2929,7 +2897,7 @@ pgtable_t pte_alloc_one(struct mm_struct *mm)
 	if (!page)
 		return NULL;
 	if (!pgtable_pte_page_ctor(page)) {
-		free_unref_page(page);
+		__free_page(page);
 		return NULL;
 	}
 	return (pte_t *) page_address(page);
@@ -3218,3 +3186,15 @@ void copy_highpage(struct page *to, struct page *from)
 	}
 }
 EXPORT_SYMBOL(copy_highpage);
+
+pgprot_t vm_get_page_prot(unsigned long vm_flags)
+{
+	unsigned long prot = pgprot_val(protection_map[vm_flags &
+					(VM_READ|VM_WRITE|VM_EXEC|VM_SHARED)]);
+
+	if (vm_flags & VM_SPARC_ADI)
+		prot |= _PAGE_MCD_4V;
+
+	return __pgprot(prot);
+}
+EXPORT_SYMBOL(vm_get_page_prot);

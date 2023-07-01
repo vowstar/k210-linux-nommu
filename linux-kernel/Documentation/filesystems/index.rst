@@ -1,3 +1,5 @@
+.. _filesystems_index:
+
 ===============================
 Filesystems in the Linux kernel
 ===============================
@@ -22,6 +24,20 @@ algorithms work.
    splice
    locking
    directory-locking
+   devpts
+   dnotify
+   fiemap
+   files
+   locks
+   mount_api
+   quota
+   seq_file
+   sharedsubtree
+   idmappings
+
+   automount-support
+
+   caching/index
 
    porting
 
@@ -37,6 +53,7 @@ filesystem implementations.
    journalling
    fscrypt
    fsverity
+   netfs_library
 
 Filesystems
 ===========
@@ -46,8 +63,64 @@ Documentation for filesystem implementations.
 .. toctree::
    :maxdepth: 2
 
+   9p
+   adfs
+   affs
+   afs
    autofs
+   autofs-mount-control
+   befs
+   bfs
+   btrfs
+   cifs/index
+   ceph
+   coda
+   configfs
+   cramfs
+   dax
+   debugfs
+   dlmfs
+   ecryptfs
+   efivarfs
+   erofs
+   ext2
+   ext3
+   ext4/index
+   f2fs
+   gfs2
+   gfs2-uevents
+   gfs2-glocks
+   hfs
+   hfsplus
+   hpfs
    fuse
+   fuse-io
+   inotify
+   isofs
+   nilfs2
+   nfs/index
+   ntfs
+   ntfs3
+   ocfs2
+   ocfs2-online-filecheck
+   omfs
+   orangefs
    overlayfs
+   proc
+   qnx6
+   ramfs-rootfs-initramfs
+   relay
+   romfs
+   spufs/index
+   squashfs
+   sysfs
+   sysv-fs
+   tmpfs
+   ubifs
+   ubifs-authentication
+   udf
    virtiofs
    vfat
+   xfs-delayed-logging-design
+   xfs-self-describing-metadata
+   zonefs

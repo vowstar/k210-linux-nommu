@@ -28,7 +28,7 @@
 	gpio-keys {
 		compatible = "gpio-keys";
 
-		power {
+		key-power {
 			gpios = <&gpio0 RK_PA5 GPIO_ACTIVE_LOW>;
 			label = "GPIO Power";
 			linux,code = <KEY_POWER>;
@@ -41,13 +41,13 @@
 	gpio-leds {
 		compatible = "gpio-leds";
 
-		heartbeat {
+		heartbeat_led: led-0 {
 			gpios = <&gpio7 RK_PB7 GPIO_ACTIVE_LOW>;
 			label = "rock2:green:state1";
 			linux,default-trigger = "heartbeat";
 		};
 
-		mmc {
+		mmc_led: led-1 {
 			gpios = <&gpio0 RK_PB3 GPIO_ACTIVE_LOW>;
 			label = "rock2:blue:state2";
 			linux,default-trigger = "mmc0";
@@ -156,7 +156,7 @@
 };
 
 &gmac {
-	status = "ok";
+	status = "okay";
 };
 
 &hdmi {
@@ -165,11 +165,10 @@
 };
 
 &i2c0 {
-	hym8563: hym8563@51 {
+	hym8563: rtc@51 {
 		compatible = "haoyu,hym8563";
 		reg = <0x51>;
 		#clock-cells = <0>;
-		clock-frequency = <32768>;
 		clock-output-names = "xin32k";
 		interrupt-parent = <&gpio0>;
 		interrupts = <RK_PA4 IRQ_TYPE_EDGE_FALLING>;

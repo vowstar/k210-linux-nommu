@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * rcar_du_plane.c  --  R-Car Display Unit Planes
+ * R-Car Display Unit Planes
  *
  * Copyright (C) 2013-2015 Renesas Electronics Corporation
  *
@@ -9,12 +9,13 @@
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
+#include <drm/drm_blend.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_device.h>
-#include <drm/drm_fb_cma_helper.h>
+#include <drm/drm_fb_dma_helper.h>
 #include <drm/drm_fourcc.h>
-#include <drm/drm_gem_cma_helper.h>
-#include <drm/drm_plane_helper.h>
+#include <drm/drm_framebuffer.h>
+#include <drm/drm_gem_dma_helper.h>
 
 #include "rcar_du_drv.h"
 #include "rcar_du_group.h"
@@ -128,7 +129,7 @@ static int rcar_du_plane_hwalloc(struct rcar_du_plane *plane,
 int rcar_du_atomic_check_planes(struct drm_device *dev,
 				struct drm_atomic_state *state)
 {
-	struct rcar_du_device *rcdu = dev->dev_private;
+	struct rcar_du_device *rcdu = to_rcar_du_device(dev);
 	unsigned int group_freed_planes[RCAR_DU_MAX_GROUPS] = { 0, };
 	unsigned int group_free_planes[RCAR_DU_MAX_GROUPS] = { 0, };
 	bool needs_realloc = false;
@@ -340,7 +341,7 @@ static void rcar_du_plane_setup_scanout(struct rcar_du_group *rgrp,
 
 	if (state->source == RCAR_DU_PLANE_MEMORY) {
 		struct drm_framebuffer *fb = state->state.fb;
-		struct drm_gem_cma_object *gem;
+		struct drm_gem_dma_object *gem;
 		unsigned int i;
 
 		if (state->format->planes == 2)
@@ -349,8 +350,8 @@ static void rcar_du_plane_setup_scanout(struct rcar_du_group *rgrp,
 			pitch = fb->pitches[0] * 8 / state->format->bpp;
 
 		for (i = 0; i < state->format->planes; ++i) {
-			gem = drm_fb_cma_get_gem_obj(fb, i);
-			dma[i] = gem->paddr + fb->offsets[i];
+			gem = drm_fb_dma_get_gem_obj(fb, i);
+			dma[i] = gem->dma_addr + fb->offsets[i];
 		}
 	} else {
 		pitch = drm_rect_width(&state->state.src) >> 16;
@@ -505,11 +506,29 @@ static void rcar_du_plane_setup_format_gen3(struct rcar_du_group *rgrp,
 					    unsigned int index,
 					    const struct rcar_du_plane_state *state)
 {
-	rcar_du_plane_write(rgrp, index, PnMR,
-			    PnMR_SPIM_TP_OFF | state->format->pnmr);
+	struct rcar_du_device *rcdu = rgrp->dev;
+	u32 pnmr = state->format->pnmr | PnMR_SPIM_TP_OFF;
+
+	if (rcdu->info->features & RCAR_DU_FEATURE_NO_BLENDING) {
+		/* No blending. ALP and EOR are not supported. */
+		pnmr &= ~(PnMR_SPIM_ALP | PnMR_SPIM_EOR);
+	}
+
+	rcar_du_plane_write(rgrp, index, PnMR, pnmr);
 
 	rcar_du_plane_write(rgrp, index, PnDDCR4,
 			    state->format->edf | PnDDCR4_CODE);
+
+	/*
+	 * On Gen3, some DU channels have two planes, each being wired to a
+	 * separate VSPD instance. The DU can then blend two planes. While
+	 * this feature isn't used by the driver, issues related to alpha
+	 * blending (such as incorrect colors or planes being invisible) may
+	 * still occur if the PnALPHAR register has a stale value. Set the
+	 * register to 0 to avoid this.
+	 */
+
+	rcar_du_plane_write(rgrp, index, PnALPHAR, 0);
 }
 
 static void rcar_du_plane_setup_format(struct rcar_du_group *rgrp,
@@ -549,8 +568,10 @@ void __rcar_du_plane_setup(struct rcar_du_group *rgrp,
 		rcar_du_plane_setup_format(rgrp, (state->hwindex + 1) % 8,
 					   state);
 
-	if (rcdu->info->gen < 3)
-		rcar_du_plane_setup_scanout(rgrp, state);
+	if (rcdu->info->gen >= 3)
+		return;
+
+	rcar_du_plane_setup_scanout(rgrp, state);
 
 	if (state->source == RCAR_DU_PLANE_VSPD1) {
 		unsigned int vspd1_sink = rgrp->index ? 2 : 0;
@@ -558,6 +579,12 @@ void __rcar_du_plane_setup(struct rcar_du_group *rgrp,
 		if (rcdu->vspd1_sink != vspd1_sink) {
 			rcdu->vspd1_sink = vspd1_sink;
 			rcar_du_set_dpad0_vsp1_routing(rcdu);
+
+			/*
+			 * Changes to the VSP1 sink take effect on DRES and thus
+			 * need a restart of the group.
+			 */
+			rgrp->need_restart = true;
 		}
 	}
 }
@@ -585,8 +612,8 @@ int __rcar_du_plane_atomic_check(struct drm_plane *plane,
 		return PTR_ERR(crtc_state);
 
 	ret = drm_atomic_helper_check_plane_state(state, crtc_state,
-						  DRM_PLANE_HELPER_NO_SCALING,
-						  DRM_PLANE_HELPER_NO_SCALING,
+						  DRM_PLANE_NO_SCALING,
+						  DRM_PLANE_NO_SCALING,
 						  true, true);
 	if (ret < 0)
 		return ret;
@@ -598,8 +625,8 @@ int __rcar_du_plane_atomic_check(struct drm_plane *plane,
 
 	*format = rcar_du_format_info(state->fb->format->format);
 	if (*format == NULL) {
-		dev_dbg(dev->dev, "%s: unsupported format %08x\n", __func__,
-			state->fb->format->format);
+		dev_dbg(dev->dev, "%s: unsupported format %p4cc\n", __func__,
+			&state->fb->format->format);
 		return -EINVAL;
 	}
 
@@ -607,21 +634,26 @@ int __rcar_du_plane_atomic_check(struct drm_plane *plane,
 }
 
 static int rcar_du_plane_atomic_check(struct drm_plane *plane,
-				      struct drm_plane_state *state)
+				      struct drm_atomic_state *state)
 {
-	struct rcar_du_plane_state *rstate = to_rcar_plane_state(state);
+	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
+										 plane);
+	struct rcar_du_plane_state *rstate = to_rcar_plane_state(new_plane_state);
 
-	return __rcar_du_plane_atomic_check(plane, state, &rstate->format);
+	return __rcar_du_plane_atomic_check(plane, new_plane_state,
+					    &rstate->format);
 }
 
 static void rcar_du_plane_atomic_update(struct drm_plane *plane,
-					struct drm_plane_state *old_state)
+					struct drm_atomic_state *state)
 {
+	struct drm_plane_state *old_state = drm_atomic_get_old_plane_state(state, plane);
+	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state, plane);
 	struct rcar_du_plane *rplane = to_rcar_plane(plane);
 	struct rcar_du_plane_state *old_rstate;
 	struct rcar_du_plane_state *new_rstate;
 
-	if (!plane->state->visible)
+	if (!new_state->visible)
 		return;
 
 	rcar_du_plane_setup(rplane);
@@ -635,7 +667,7 @@ static void rcar_du_plane_atomic_update(struct drm_plane *plane,
 	 * bit. We thus need to restart the group if the source changes.
 	 */
 	old_rstate = to_rcar_plane_state(old_state);
-	new_rstate = to_rcar_plane_state(plane->state);
+	new_rstate = to_rcar_plane_state(new_state);
 
 	if ((old_rstate->source == RCAR_DU_PLANE_MEMORY) !=
 	    (new_rstate->source == RCAR_DU_PLANE_MEMORY))
@@ -691,7 +723,6 @@ static void rcar_du_plane_reset(struct drm_plane *plane)
 	state->hwindex = -1;
 	state->source = RCAR_DU_PLANE_MEMORY;
 	state->colorkey = RCAR_DU_COLORKEY_NONE;
-	state->state.zpos = plane->type == DRM_PLANE_TYPE_PRIMARY ? 0 : 1;
 }
 
 static int rcar_du_plane_atomic_set_property(struct drm_plane *plane,
@@ -773,9 +804,9 @@ int rcar_du_planes_init(struct rcar_du_group *rgrp)
 
 		plane->group = rgrp;
 
-		ret = drm_universal_plane_init(rcdu->ddev, &plane->plane, crtcs,
-					       &rcar_du_plane_funcs, formats,
-					       ARRAY_SIZE(formats),
+		ret = drm_universal_plane_init(&rcdu->ddev, &plane->plane,
+					       crtcs, &rcar_du_plane_funcs,
+					       formats, ARRAY_SIZE(formats),
 					       NULL, type, NULL);
 		if (ret < 0)
 			return ret;
@@ -785,13 +816,15 @@ int rcar_du_planes_init(struct rcar_du_group *rgrp)
 
 		drm_plane_create_alpha_property(&plane->plane);
 
-		if (type == DRM_PLANE_TYPE_PRIMARY)
-			continue;
-
-		drm_object_attach_property(&plane->plane.base,
-					   rcdu->props.colorkey,
-					   RCAR_DU_COLORKEY_NONE);
-		drm_plane_create_zpos_property(&plane->plane, 1, 1, 7);
+		if (type == DRM_PLANE_TYPE_PRIMARY) {
+			drm_plane_create_zpos_immutable_property(&plane->plane,
+								 0);
+		} else {
+			drm_object_attach_property(&plane->plane.base,
+						   rcdu->props.colorkey,
+						   RCAR_DU_COLORKEY_NONE);
+			drm_plane_create_zpos_property(&plane->plane, 1, 1, 7);
+		}
 	}
 
 	return 0;

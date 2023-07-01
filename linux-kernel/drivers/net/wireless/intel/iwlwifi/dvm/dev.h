@@ -1,12 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /******************************************************************************
  *
- * Copyright(c) 2003 - 2014 Intel Corporation. All rights reserved.
- *
- * Contact Information:
- *  Intel Linux Wireless <linuxwifi@intel.com>
- * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
- *
+ * Copyright(c) 2003 - 2014, 2020 Intel Corporation. All rights reserved.
  *****************************************************************************/
 /*
  * Please use this file (dev.h) for driver implementation definitions.
@@ -701,6 +696,7 @@ struct iwl_priv {
 	/* Scan related variables */
 	unsigned long scan_start;
 	unsigned long scan_start_tsf;
+	size_t scan_cmd_size;
 	void *scan_cmd;
 	enum nl80211_band scan_band;
 	struct cfg80211_scan_request *scan_request;
@@ -810,7 +806,6 @@ struct iwl_priv {
 	u8 bt_traffic_load, last_bt_traffic_load;
 	bool bt_ch_announce;
 	bool bt_full_concurrent;
-	bool bt_ant_couple_ok;
 	__le32 kill_ack_mask;
 	__le32 kill_cts_mask;
 	__le16 bt_valid;

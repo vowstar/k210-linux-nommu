@@ -46,6 +46,7 @@
 #define BCLINK_WIN_MIN      32	/* bcast minimum link window size */
 
 const char tipc_bclink_name[] = "broadcast-link";
+unsigned long sysctl_tipc_bc_retruni __read_mostly;
 
 /**
  * struct tipc_bc_base - base structure for keeping broadcast send state
@@ -107,6 +108,8 @@ static void tipc_bcbase_select_primary(struct net *net)
 {
 	struct tipc_bc_base *bb = tipc_bc_base(net);
 	int all_dests =  tipc_link_bc_peers(bb->link);
+	int max_win = tipc_link_max_win(bb->link);
+	int min_win = tipc_link_min_win(bb->link);
 	int i, mtu, prim;
 
 	bb->primary_bearer = INVALID_BEARER_ID;
@@ -120,8 +123,12 @@ static void tipc_bcbase_select_primary(struct net *net)
 			continue;
 
 		mtu = tipc_bearer_mtu(net, i);
-		if (mtu < tipc_link_mtu(bb->link))
+		if (mtu < tipc_link_mtu(bb->link)) {
 			tipc_link_set_mtu(bb->link, mtu);
+			tipc_link_set_queue_limits(bb->link,
+						   min_win,
+						   max_win);
+		}
 		bb->bcast_support &= tipc_bearer_bcast_support(net, i);
 		if (bb->dests[i] < all_dests)
 			continue;
@@ -249,8 +256,8 @@ static void tipc_bcast_select_xmit_method(struct net *net, int dests,
  * Consumes the buffer chain.
  * Returns 0 if success, otherwise errno: -EHOSTUNREACH,-EMSGSIZE
  */
-static int tipc_bcast_xmit(struct net *net, struct sk_buff_head *pkts,
-			   u16 *cong_link_cnt)
+int tipc_bcast_xmit(struct net *net, struct sk_buff_head *pkts,
+		    u16 *cong_link_cnt)
 {
 	struct tipc_link *l = tipc_bc_sndlink(net);
 	struct sk_buff_head xmitq;
@@ -474,7 +481,7 @@ void tipc_bcast_ack_rcv(struct net *net, struct tipc_link *l,
 	__skb_queue_head_init(&xmitq);
 
 	tipc_bcast_lock(net);
-	tipc_link_bc_ack_rcv(l, acked, &xmitq);
+	tipc_link_bc_ack_rcv(l, acked, 0, NULL, &xmitq, NULL);
 	tipc_bcast_unlock(net);
 
 	tipc_bcbase_xmit(net, &xmitq);
@@ -489,9 +496,11 @@ void tipc_bcast_ack_rcv(struct net *net, struct tipc_link *l,
  * RCU is locked, no other locks set
  */
 int tipc_bcast_sync_rcv(struct net *net, struct tipc_link *l,
-			struct tipc_msg *hdr)
+			struct tipc_msg *hdr,
+			struct sk_buff_head *retrq)
 {
 	struct sk_buff_head *inputq = &tipc_bc_base(net)->inputq;
+	struct tipc_gap_ack_blks *ga;
 	struct sk_buff_head xmitq;
 	int rc = 0;
 
@@ -501,8 +510,13 @@ int tipc_bcast_sync_rcv(struct net *net, struct tipc_link *l,
 	if (msg_type(hdr) != STATE_MSG) {
 		tipc_link_bc_init_rcv(l, hdr);
 	} else if (!msg_bc_ack_invalid(hdr)) {
-		tipc_link_bc_ack_rcv(l, msg_bcast_ack(hdr), &xmitq);
-		rc = tipc_link_bc_sync_rcv(l, hdr, &xmitq);
+		tipc_get_gap_ack_blks(&ga, l, hdr, false);
+		if (!sysctl_tipc_bc_retruni)
+			retrq = &xmitq;
+		rc = tipc_link_bc_ack_rcv(l, msg_bcast_ack(hdr),
+					  msg_bc_gap(hdr), ga, &xmitq,
+					  retrq);
+		rc |= tipc_link_bc_sync_rcv(l, hdr, &xmitq);
 	}
 	tipc_bcast_unlock(net);
 
@@ -555,10 +569,8 @@ void tipc_bcast_remove_peer(struct net *net, struct tipc_link *rcv_l)
 		tipc_sk_rcv(net, inputq);
 }
 
-int tipc_bclink_reset_stats(struct net *net)
+int tipc_bclink_reset_stats(struct net *net, struct tipc_link *l)
 {
-	struct tipc_link *l = tipc_bc_sndlink(net);
-
 	if (!l)
 		return -ENOPROTOOPT;
 
@@ -579,7 +591,7 @@ static int tipc_bc_link_set_queue_limits(struct net *net, u32 max_win)
 	if (max_win > TIPC_MAX_LINK_WIN)
 		return -EINVAL;
 	tipc_bcast_lock(net);
-	tipc_link_set_queue_limits(l, BCLINK_WIN_MIN, max_win);
+	tipc_link_set_queue_limits(l, tipc_link_min_win(l), max_win);
 	tipc_bcast_unlock(net);
 	return 0;
 }
@@ -686,8 +698,8 @@ int tipc_bcast_init(struct net *net)
 	tn->bcbase = bb;
 	spin_lock_init(&tipc_net(net)->bclock);
 
-	if (!tipc_link_bc_create(net, 0, 0,
-				 FB_MTU,
+	if (!tipc_link_bc_create(net, 0, 0, NULL,
+				 one_page_mtu,
 				 BCLINK_WIN_DEFAULT,
 				 BCLINK_WIN_DEFAULT,
 				 0,
@@ -746,7 +758,7 @@ void tipc_nlist_purge(struct tipc_nlist *nl)
 	nl->local = false;
 }
 
-u32 tipc_bcast_get_broadcast_mode(struct net *net)
+u32 tipc_bcast_get_mode(struct net *net)
 {
 	struct tipc_bc_base *bb = tipc_bc_base(net);
 

@@ -25,7 +25,7 @@
 static void
 nvkm_falcon_msgq_open(struct nvkm_falcon_msgq *msgq)
 {
-	mutex_lock(&msgq->mutex);
+	spin_lock(&msgq->lock);
 	msgq->position = nvkm_falcon_rd32(msgq->qmgr->falcon, msgq->tail_reg);
 }
 
@@ -37,10 +37,10 @@ nvkm_falcon_msgq_close(struct nvkm_falcon_msgq *msgq, bool commit)
 	if (commit)
 		nvkm_falcon_wr32(falcon, msgq->tail_reg, msgq->position);
 
-	mutex_unlock(&msgq->mutex);
+	spin_unlock(&msgq->lock);
 }
 
-static bool
+bool
 nvkm_falcon_msgq_empty(struct nvkm_falcon_msgq *msgq)
 {
 	u32 head = nvkm_falcon_rd32(msgq->qmgr->falcon, msgq->head_reg);
@@ -68,13 +68,13 @@ nvkm_falcon_msgq_pop(struct nvkm_falcon_msgq *msgq, void *data, u32 size)
 		return -EINVAL;
 	}
 
-	nvkm_falcon_read_dmem(falcon, tail, size, 0, data);
+	nvkm_falcon_pio_rd(falcon, 0, DMEM, tail, data, 0, size);
 	msgq->position += ALIGN(size, QUEUE_ALIGNMENT);
 	return 0;
 }
 
 static int
-nvkm_falcon_msgq_read(struct nvkm_falcon_msgq *msgq, struct nv_falcon_msg *hdr)
+nvkm_falcon_msgq_read(struct nvkm_falcon_msgq *msgq, struct nvfw_falcon_msg *hdr)
 {
 	int ret = 0;
 
@@ -112,7 +112,7 @@ close:
 }
 
 static int
-nvkm_falcon_msgq_exec(struct nvkm_falcon_msgq *msgq, struct nv_falcon_msg *hdr)
+nvkm_falcon_msgq_exec(struct nvkm_falcon_msgq *msgq, struct nvfw_falcon_msg *hdr)
 {
 	struct nvkm_falcon_qmgr_seq *seq;
 
@@ -144,7 +144,7 @@ nvkm_falcon_msgq_recv(struct nvkm_falcon_msgq *msgq)
 	 * stack space to work with.
 	 */
 	u8 msg_buffer[MSG_BUF_SIZE];
-	struct nv_falcon_msg *hdr = (void *)msg_buffer;
+	struct nvfw_falcon_msg *hdr = (void *)msg_buffer;
 
 	while (nvkm_falcon_msgq_read(msgq, hdr) > 0)
 		nvkm_falcon_msgq_exec(msgq, hdr);
@@ -155,7 +155,7 @@ nvkm_falcon_msgq_recv_initmsg(struct nvkm_falcon_msgq *msgq,
 			      void *data, u32 size)
 {
 	struct nvkm_falcon *falcon = msgq->qmgr->falcon;
-	struct nv_falcon_msg *hdr = data;
+	struct nvfw_falcon_msg *hdr = data;
 	int ret;
 
 	msgq->head_reg = falcon->func->msgq.head;
@@ -208,6 +208,6 @@ nvkm_falcon_msgq_new(struct nvkm_falcon_qmgr *qmgr, const char *name,
 
 	msgq->qmgr = qmgr;
 	msgq->name = name;
-	mutex_init(&msgq->mutex);
+	spin_lock_init(&msgq->lock);
 	return 0;
 }

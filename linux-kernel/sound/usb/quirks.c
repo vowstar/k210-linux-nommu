@@ -55,8 +55,12 @@ static int create_composite_quirk(struct snd_usb_audio *chip,
 		if (!iface)
 			continue;
 		if (quirk->ifnum != probed_ifnum &&
-		    !usb_interface_claimed(iface))
-			usb_driver_claim_interface(driver, iface, (void *)-1L);
+		    !usb_interface_claimed(iface)) {
+			err = usb_driver_claim_interface(driver, iface,
+							 USB_AUDIO_IFACE_UNUSED);
+			if (err < 0)
+				return err;
+		}
 	}
 
 	return 0;
@@ -70,19 +74,6 @@ static int ignore_interface_quirk(struct snd_usb_audio *chip,
 	return 0;
 }
 
-
-/*
- * Allow alignment on audio sub-slot (channel samples) rather than
- * on audio slots (audio frames)
- */
-static int create_align_transfer_quirk(struct snd_usb_audio *chip,
-				       struct usb_interface *iface,
-				       struct usb_driver *driver,
-				       const struct snd_usb_audio_quirk *quirk)
-{
-	chip->txfr_quirk = 1;
-	return 1;	/* Continue with creating streams and mixer */
-}
 
 static int create_any_midi_quirk(struct snd_usb_audio *chip,
 				 struct usb_interface *intf,
@@ -104,9 +95,6 @@ static int create_standard_audio_quirk(struct snd_usb_audio *chip,
 	struct usb_interface_descriptor *altsd;
 	int err;
 
-	if (chip->usb_id == USB_ID(0x1686, 0x00dd)) /* Zoom R16/24 */
-		chip->tx_length_quirk = 1;
-
 	alts = &iface->altsetting[0];
 	altsd = get_iface_desc(alts);
 	err = snd_usb_parse_audio_interface(chip, altsd->bInterfaceNumber);
@@ -117,6 +105,40 @@ static int create_standard_audio_quirk(struct snd_usb_audio *chip,
 	}
 	/* reset the current interface */
 	usb_set_interface(chip->dev, altsd->bInterfaceNumber, 0);
+	return 0;
+}
+
+/* create the audio stream and the corresponding endpoints from the fixed
+ * audioformat object; this is used for quirks with the fixed EPs
+ */
+static int add_audio_stream_from_fixed_fmt(struct snd_usb_audio *chip,
+					   struct audioformat *fp)
+{
+	int stream, err;
+
+	stream = (fp->endpoint & USB_DIR_IN) ?
+		SNDRV_PCM_STREAM_CAPTURE : SNDRV_PCM_STREAM_PLAYBACK;
+
+	snd_usb_audioformat_set_sync_ep(chip, fp);
+
+	err = snd_usb_add_audio_stream(chip, stream, fp);
+	if (err < 0)
+		return err;
+
+	err = snd_usb_add_endpoint(chip, fp->endpoint,
+				   SND_USB_ENDPOINT_TYPE_DATA);
+	if (err < 0)
+		return err;
+
+	if (fp->sync_ep) {
+		err = snd_usb_add_endpoint(chip, fp->sync_ep,
+					   fp->implicit_fb ?
+					   SND_USB_ENDPOINT_TYPE_DATA :
+					   SND_USB_ENDPOINT_TYPE_SYNC);
+		if (err < 0)
+			return err;
+	}
+
 	return 0;
 }
 
@@ -131,8 +153,8 @@ static int create_fixed_stream_quirk(struct snd_usb_audio *chip,
 	struct audioformat *fp;
 	struct usb_host_interface *alts;
 	struct usb_interface_descriptor *altsd;
-	int stream, err;
 	unsigned *rate_table = NULL;
+	int err;
 
 	fp = kmemdup(quirk->data, sizeof(*fp), GFP_KERNEL);
 	if (!fp)
@@ -153,11 +175,6 @@ static int create_fixed_stream_quirk(struct snd_usb_audio *chip,
 		fp->rate_table = rate_table;
 	}
 
-	stream = (fp->endpoint & USB_DIR_IN)
-		? SNDRV_PCM_STREAM_CAPTURE : SNDRV_PCM_STREAM_PLAYBACK;
-	err = snd_usb_add_audio_stream(chip, stream, fp);
-	if (err < 0)
-		goto error;
 	if (fp->iface != get_iface_desc(&iface->altsetting[0])->bInterfaceNumber ||
 	    fp->altset_idx >= iface->num_altsetting) {
 		err = -EINVAL;
@@ -165,7 +182,7 @@ static int create_fixed_stream_quirk(struct snd_usb_audio *chip,
 	}
 	alts = &iface->altsetting[fp->altset_idx];
 	altsd = get_iface_desc(alts);
-	if (altsd->bNumEndpoints < 1) {
+	if (altsd->bNumEndpoints <= fp->ep_idx) {
 		err = -EINVAL;
 		goto error;
 	}
@@ -175,10 +192,17 @@ static int create_fixed_stream_quirk(struct snd_usb_audio *chip,
 	if (fp->datainterval == 0)
 		fp->datainterval = snd_usb_parse_datainterval(chip, alts);
 	if (fp->maxpacksize == 0)
-		fp->maxpacksize = le16_to_cpu(get_endpoint(alts, 0)->wMaxPacketSize);
+		fp->maxpacksize = le16_to_cpu(get_endpoint(alts, fp->ep_idx)->wMaxPacketSize);
+	if (!fp->fmt_type)
+		fp->fmt_type = UAC_FORMAT_TYPE_I;
+
+	err = add_audio_stream_from_fixed_fmt(chip, fp);
+	if (err < 0)
+		goto error;
+
 	usb_set_interface(chip->dev, fp->iface, 0);
-	snd_usb_init_pitch(chip, fp->iface, alts, fp);
-	snd_usb_init_sample_rate(chip, fp->iface, alts, fp, fp->rate_max);
+	snd_usb_init_pitch(chip, fp);
+	snd_usb_init_sample_rate(chip, fp, fp->rate_max);
 	return 0;
 
  error:
@@ -352,7 +376,8 @@ static int create_auto_midi_quirk(struct snd_usb_audio *chip,
 
 static int create_autodetect_quirk(struct snd_usb_audio *chip,
 				   struct usb_interface *iface,
-				   struct usb_driver *driver)
+				   struct usb_driver *driver,
+				   const struct snd_usb_audio_quirk *quirk)
 {
 	int err;
 
@@ -360,41 +385,6 @@ static int create_autodetect_quirk(struct snd_usb_audio *chip,
 	if (err == -ENODEV)
 		err = create_auto_midi_quirk(chip, iface, driver);
 	return err;
-}
-
-static int create_autodetect_quirks(struct snd_usb_audio *chip,
-				    struct usb_interface *iface,
-				    struct usb_driver *driver,
-				    const struct snd_usb_audio_quirk *quirk)
-{
-	int probed_ifnum = get_iface_desc(iface->altsetting)->bInterfaceNumber;
-	int ifcount, ifnum, err;
-
-	err = create_autodetect_quirk(chip, iface, driver);
-	if (err < 0)
-		return err;
-
-	/*
-	 * ALSA PCM playback/capture devices cannot be registered in two steps,
-	 * so we have to claim the other corresponding interface here.
-	 */
-	ifcount = chip->dev->actconfig->desc.bNumInterfaces;
-	for (ifnum = 0; ifnum < ifcount; ifnum++) {
-		if (ifnum == probed_ifnum || quirk->ifnum >= 0)
-			continue;
-		iface = usb_ifnum_to_if(chip->dev, ifnum);
-		if (!iface ||
-		    usb_interface_claimed(iface) ||
-		    get_iface_desc(iface->altsetting)->bInterfaceClass !=
-							USB_CLASS_VENDOR_SPEC)
-			continue;
-
-		err = create_autodetect_quirk(chip, iface, driver);
-		if (err >= 0)
-			usb_driver_claim_interface(driver, iface, (void *)-1L);
-	}
-
-	return 0;
 }
 
 /*
@@ -417,7 +407,7 @@ static int create_uaxx_quirk(struct snd_usb_audio *chip,
 	struct usb_host_interface *alts;
 	struct usb_interface_descriptor *altsd;
 	struct audioformat *fp;
-	int stream, err;
+	int err;
 
 	/* both PCM and MIDI interfaces have 2 or more altsettings */
 	if (iface->num_altsetting < 2)
@@ -482,9 +472,7 @@ static int create_uaxx_quirk(struct snd_usb_audio *chip,
 		return -ENXIO;
 	}
 
-	stream = (fp->endpoint & USB_DIR_IN)
-		? SNDRV_PCM_STREAM_CAPTURE : SNDRV_PCM_STREAM_PLAYBACK;
-	err = snd_usb_add_audio_stream(chip, stream, fp);
+	err = add_audio_stream_from_fixed_fmt(chip, fp);
 	if (err < 0) {
 		list_del(&fp->list); /* unlink for avoiding double-free */
 		kfree(fp);
@@ -505,17 +493,7 @@ static int create_standard_mixer_quirk(struct snd_usb_audio *chip,
 	if (quirk->ifnum < 0)
 		return 0;
 
-	return snd_usb_create_mixer(chip, quirk->ifnum, 0);
-}
-
-
-static int setup_fmt_after_resume_quirk(struct snd_usb_audio *chip,
-				       struct usb_interface *iface,
-				       struct usb_driver *driver,
-				       const struct snd_usb_audio_quirk *quirk)
-{
-	chip->setup_fmt_after_resume_quirk = 1;
-	return 1;	/* Continue with creating streams and mixer */
+	return snd_usb_create_mixer(chip, quirk->ifnum);
 }
 
 /*
@@ -538,7 +516,7 @@ int snd_usb_create_quirk(struct snd_usb_audio *chip,
 	static const quirk_func_t quirk_funcs[] = {
 		[QUIRK_IGNORE_INTERFACE] = ignore_interface_quirk,
 		[QUIRK_COMPOSITE] = create_composite_quirk,
-		[QUIRK_AUTODETECT] = create_autodetect_quirks,
+		[QUIRK_AUTODETECT] = create_autodetect_quirk,
 		[QUIRK_MIDI_STANDARD_INTERFACE] = create_any_midi_quirk,
 		[QUIRK_MIDI_FIXED_ENDPOINT] = create_any_midi_quirk,
 		[QUIRK_MIDI_YAMAHA] = create_any_midi_quirk,
@@ -554,9 +532,7 @@ int snd_usb_create_quirk(struct snd_usb_audio *chip,
 		[QUIRK_AUDIO_STANDARD_INTERFACE] = create_standard_audio_quirk,
 		[QUIRK_AUDIO_FIXED_ENDPOINT] = create_fixed_stream_quirk,
 		[QUIRK_AUDIO_EDIROL_UAXX] = create_uaxx_quirk,
-		[QUIRK_AUDIO_ALIGN_TRANSFER] = create_align_transfer_quirk,
 		[QUIRK_AUDIO_STANDARD_MIXER] = create_standard_mixer_quirk,
-		[QUIRK_SETUP_FMT_AFTER_RESUME] = setup_fmt_after_resume_quirk,
 	};
 
 	if (quirk->type < QUIRK_TYPE_COUNT) {
@@ -846,7 +822,7 @@ static int snd_usb_accessmusic_boot_quirk(struct usb_device *dev)
 	static const u8 seq[] = { 0x4e, 0x73, 0x52, 0x01 };
 	void *buf;
 
-	if (snd_usb_pipe_sanity_check(dev, usb_sndintpipe(dev, 0x05)))
+	if (usb_pipe_type_check(dev, usb_sndintpipe(dev, 0x05)))
 		return -EINVAL;
 	buf = kmemdup(seq, ARRAY_SIZE(seq), GFP_KERNEL);
 	if (!buf)
@@ -875,8 +851,6 @@ static int snd_usb_nativeinstruments_boot_quirk(struct usb_device *dev)
 {
 	int ret;
 
-	if (snd_usb_pipe_sanity_check(dev, usb_sndctrlpipe(dev, 0)))
-		return -EINVAL;
 	ret = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
 				  0xaf, USB_TYPE_VENDOR | USB_RECIP_DEVICE,
 				  1, 0, NULL, 0, 1000);
@@ -984,8 +958,6 @@ static int snd_usb_axefx3_boot_quirk(struct usb_device *dev)
 
 	dev_dbg(&dev->dev, "Waiting for Axe-Fx III to boot up...\n");
 
-	if (snd_usb_pipe_sanity_check(dev, usb_sndctrlpipe(dev, 0)))
-		return -EINVAL;
 	/* If the Axe-Fx III has not fully booted, it will timeout when trying
 	 * to enable the audio streaming interface. A more generous timeout is
 	 * used here to detect when the Axe-Fx III has finished booting as the
@@ -1010,6 +982,304 @@ static int snd_usb_axefx3_boot_quirk(struct usb_device *dev)
 	return 0;
 }
 
+static void mbox3_setup_48_24_magic(struct usb_device *dev)
+{
+	/* The Mbox 3 is "little endian" */
+	/* max volume is: 0x0000. */
+	/* min volume is: 0x0080 (shown in little endian form) */
+
+
+	/* Load 48000Hz rate into buffer */
+	u8 com_buff[4] = {0x80, 0xbb, 0x00, 0x00};
+
+	/* Set 48000Hz sample rate */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			0x01, 0x21, 0x0100, 0x0001, &com_buff, 4);  //Is this really needed?
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			0x01, 0x21, 0x0100, 0x8101, &com_buff, 4);
+
+	/* Deactivate Tuner */
+	/* on  = 0x01*/
+	/* off = 0x00*/
+	com_buff[0] = 0x00;
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+		0x01, 0x21, 0x0003, 0x2001, &com_buff, 1);
+
+	/* Set clock source to Internal (as opposed to S/PDIF) */
+	com_buff[0] = 0x01;
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0100, 0x8001, &com_buff, 1);
+
+	/* Mute the hardware loopbacks to start the device in a known state. */
+	com_buff[0] = 0x00;
+	com_buff[1] = 0x80;
+	/* Analogue input 1 left channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0110, 0x4001, &com_buff, 2);
+	/* Analogue input 1 right channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0111, 0x4001, &com_buff, 2);
+	/* Analogue input 2 left channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0114, 0x4001, &com_buff, 2);
+	/* Analogue input 2 right channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0115, 0x4001, &com_buff, 2);
+	/* Analogue input 3 left channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0118, 0x4001, &com_buff, 2);
+	/* Analogue input 3 right channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0119, 0x4001, &com_buff, 2);
+	/* Analogue input 4 left channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x011c, 0x4001, &com_buff, 2);
+	/* Analogue input 4 right channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x011d, 0x4001, &com_buff, 2);
+
+	/* Set software sends to output */
+	com_buff[0] = 0x00;
+	com_buff[1] = 0x00;
+	/* Analogue software return 1 left channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0100, 0x4001, &com_buff, 2);
+	com_buff[0] = 0x00;
+	com_buff[1] = 0x80;
+	/* Analogue software return 1 right channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0101, 0x4001, &com_buff, 2);
+	com_buff[0] = 0x00;
+	com_buff[1] = 0x80;
+	/* Analogue software return 2 left channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0104, 0x4001, &com_buff, 2);
+	com_buff[0] = 0x00;
+	com_buff[1] = 0x00;
+	/* Analogue software return 2 right channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0105, 0x4001, &com_buff, 2);
+
+	com_buff[0] = 0x00;
+	com_buff[1] = 0x80;
+	/* Analogue software return 3 left channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0108, 0x4001, &com_buff, 2);
+	/* Analogue software return 3 right channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0109, 0x4001, &com_buff, 2);
+	/* Analogue software return 4 left channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x010c, 0x4001, &com_buff, 2);
+	/* Analogue software return 4 right channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x010d, 0x4001, &com_buff, 2);
+
+	/* Return to muting sends */
+	com_buff[0] = 0x00;
+	com_buff[1] = 0x80;
+	/* Analogue fx return left channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0120, 0x4001, &com_buff, 2);
+	/* Analogue fx return right channel: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0121, 0x4001, &com_buff, 2);
+
+	/* Analogue software input 1 fx send: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0100, 0x4201, &com_buff, 2);
+	/* Analogue software input 2 fx send: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0101, 0x4201, &com_buff, 2);
+	/* Analogue software input 3 fx send: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0102, 0x4201, &com_buff, 2);
+	/* Analogue software input 4 fx send: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0103, 0x4201, &com_buff, 2);
+	/* Analogue input 1 fx send: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0104, 0x4201, &com_buff, 2);
+	/* Analogue input 2 fx send: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0105, 0x4201, &com_buff, 2);
+	/* Analogue input 3 fx send: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0106, 0x4201, &com_buff, 2);
+	/* Analogue input 4 fx send: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0107, 0x4201, &com_buff, 2);
+
+	/* Toggle allowing host control */
+	com_buff[0] = 0x02;
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			3, 0x21, 0x0000, 0x2001, &com_buff, 1);
+
+	/* Do not dim fx returns */
+	com_buff[0] = 0x00;
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			3, 0x21, 0x0002, 0x2001, &com_buff, 1);
+
+	/* Do not set fx returns to mono */
+	com_buff[0] = 0x00;
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			3, 0x21, 0x0001, 0x2001, &com_buff, 1);
+
+	/* Mute the S/PDIF hardware loopback
+	 * same odd volume logic here as above
+	 */
+	com_buff[0] = 0x00;
+	com_buff[1] = 0x80;
+	/* S/PDIF hardware input 1 left channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0112, 0x4001, &com_buff, 2);
+	/* S/PDIF hardware input 1 right channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0113, 0x4001, &com_buff, 2);
+	/* S/PDIF hardware input 2 left channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0116, 0x4001, &com_buff, 2);
+	/* S/PDIF hardware input 2 right channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0117, 0x4001, &com_buff, 2);
+	/* S/PDIF hardware input 3 left channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x011a, 0x4001, &com_buff, 2);
+	/* S/PDIF hardware input 3 right channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x011b, 0x4001, &com_buff, 2);
+	/* S/PDIF hardware input 4 left channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x011e, 0x4001, &com_buff, 2);
+	/* S/PDIF hardware input 4 right channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x011f, 0x4001, &com_buff, 2);
+	/* S/PDIF software return 1 left channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0102, 0x4001, &com_buff, 2);
+	/* S/PDIF software return 1 right channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0103, 0x4001, &com_buff, 2);
+	/* S/PDIF software return 2 left channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0106, 0x4001, &com_buff, 2);
+	/* S/PDIF software return 2 right channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0107, 0x4001, &com_buff, 2);
+
+	com_buff[0] = 0x00;
+	com_buff[1] = 0x00;
+	/* S/PDIF software return 3 left channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x010a, 0x4001, &com_buff, 2);
+
+	com_buff[0] = 0x00;
+	com_buff[1] = 0x80;
+	/* S/PDIF software return 3 right channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x010b, 0x4001, &com_buff, 2);
+	/* S/PDIF software return 4 left channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x010e, 0x4001, &com_buff, 2);
+
+	com_buff[0] = 0x00;
+	com_buff[1] = 0x00;
+	/* S/PDIF software return 4 right channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x010f, 0x4001, &com_buff, 2);
+
+	com_buff[0] = 0x00;
+	com_buff[1] = 0x80;
+	/* S/PDIF fx returns left channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0122, 0x4001, &com_buff, 2);
+	/* S/PDIF fx returns right channel */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0123, 0x4001, &com_buff, 2);
+
+	/* Set the dropdown "Effect" to the first option */
+	/* Room1  = 0x00 */
+	/* Room2  = 0x01 */
+	/* Room3  = 0x02 */
+	/* Hall 1 = 0x03 */
+	/* Hall 2 = 0x04 */
+	/* Plate  = 0x05 */
+	/* Delay  = 0x06 */
+	/* Echo   = 0x07 */
+	com_buff[0] = 0x00;
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0200, 0x4301, &com_buff, 1);	/* max is 0xff */
+	/* min is 0x00 */
+
+
+	/* Set the effect duration to 0 */
+	/* max is 0xffff */
+	/* min is 0x0000 */
+	com_buff[0] = 0x00;
+	com_buff[1] = 0x00;
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0400, 0x4301, &com_buff, 2);
+
+	/* Set the effect volume and feedback to 0 */
+	/* max is 0xff */
+	/* min is 0x00 */
+	com_buff[0] = 0x00;
+	/* feedback: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0500, 0x4301, &com_buff, 1);
+	/* volume: */
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			1, 0x21, 0x0300, 0x4301, &com_buff, 1);
+
+	/* Set soft button hold duration */
+	/* 0x03 = 250ms */
+	/* 0x05 = 500ms DEFAULT */
+	/* 0x08 = 750ms */
+	/* 0x0a = 1sec */
+	com_buff[0] = 0x05;
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			3, 0x21, 0x0005, 0x2001, &com_buff, 1);
+
+	/* Use dim LEDs for button of state */
+	com_buff[0] = 0x00;
+	snd_usb_ctl_msg(dev, usb_sndctrlpipe(dev, 0),
+			3, 0x21, 0x0004, 0x2001, &com_buff, 1);
+}
+
+#define MBOX3_DESCRIPTOR_SIZE	464
+
+static int snd_usb_mbox3_boot_quirk(struct usb_device *dev)
+{
+	struct usb_host_config *config = dev->actconfig;
+	int err;
+	int descriptor_size;
+
+	descriptor_size = le16_to_cpu(get_cfg_desc(config)->wTotalLength);
+
+	if (descriptor_size != MBOX3_DESCRIPTOR_SIZE) {
+		dev_err(&dev->dev, "Invalid descriptor size=%d.\n", descriptor_size);
+		return -ENODEV;
+	}
+
+	dev_dbg(&dev->dev, "device initialised!\n");
+
+	err = usb_get_descriptor(dev, USB_DT_DEVICE, 0,
+		&dev->descriptor, sizeof(dev->descriptor));
+	config = dev->actconfig;
+	if (err < 0)
+		dev_dbg(&dev->dev, "error usb_get_descriptor: %d\n", err);
+
+	err = usb_reset_configuration(dev);
+	if (err < 0)
+		dev_dbg(&dev->dev, "error usb_reset_configuration: %d\n", err);
+	dev_dbg(&dev->dev, "mbox3_boot: new boot length = %d\n",
+		le16_to_cpu(get_cfg_desc(config)->wTotalLength));
+
+	mbox3_setup_48_24_magic(dev);
+	dev_info(&dev->dev, "Digidesign Mbox 3: 24bit 48kHz");
+
+	return 0; /* Successful boot */
+}
 
 #define MICROBOOK_BUF_SIZE 128
 
@@ -1018,7 +1288,7 @@ static int snd_usb_motu_microbookii_communicate(struct usb_device *dev, u8 *buf,
 {
 	int err, actual_length;
 
-	if (snd_usb_pipe_sanity_check(dev, usb_sndintpipe(dev, 0x01)))
+	if (usb_pipe_type_check(dev, usb_sndintpipe(dev, 0x01)))
 		return -EINVAL;
 	err = usb_interrupt_msg(dev, usb_sndintpipe(dev, 0x01), buf, *length,
 				&actual_length, 1000);
@@ -1030,7 +1300,7 @@ static int snd_usb_motu_microbookii_communicate(struct usb_device *dev, u8 *buf,
 
 	memset(buf, 0, buf_size);
 
-	if (snd_usb_pipe_sanity_check(dev, usb_rcvintpipe(dev, 0x82)))
+	if (usb_pipe_type_check(dev, usb_rcvintpipe(dev, 0x82)))
 		return -EINVAL;
 	err = usb_interrupt_msg(dev, usb_rcvintpipe(dev, 0x82), buf, buf_size,
 				&actual_length, 1000);
@@ -1115,25 +1385,7 @@ free_buf:
 
 static int snd_usb_motu_m_series_boot_quirk(struct usb_device *dev)
 {
-	int ret;
-
-	if (snd_usb_pipe_sanity_check(dev, usb_sndctrlpipe(dev, 0)))
-		return -EINVAL;
-	ret = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
-			      1, USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			      0x0, 0, NULL, 0, 1000);
-
-	if (ret < 0)
-		return ret;
-
 	msleep(2000);
-
-	ret = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
-			      1, USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-			      0x20, 0, NULL, 0, 1000);
-
-	if (ret < 0)
-		return ret;
 
 	return 0;
 }
@@ -1144,14 +1396,14 @@ static int snd_usb_motu_m_series_boot_quirk(struct usb_device *dev)
 #define MAUDIO_SET		0x01 /* parse device_setup */
 #define MAUDIO_SET_COMPATIBLE	0x80 /* use only "win-compatible" interfaces */
 #define MAUDIO_SET_DTS		0x02 /* enable DTS Digital Output */
-#define MAUDIO_SET_96K		0x04 /* 48-96KHz rate if set, 8-48KHz otherwise */
+#define MAUDIO_SET_96K		0x04 /* 48-96kHz rate if set, 8-48kHz otherwise */
 #define MAUDIO_SET_24B		0x08 /* 24bits sample if set, 16bits otherwise */
 #define MAUDIO_SET_DI		0x10 /* enable Digital Input */
 #define MAUDIO_SET_MASK		0x1f /* bit mask for setup value */
-#define MAUDIO_SET_24B_48K_DI	 0x19 /* 24bits+48KHz+Digital Input */
-#define MAUDIO_SET_24B_48K_NOTDI 0x09 /* 24bits+48KHz+No Digital Input */
-#define MAUDIO_SET_16B_48K_DI	 0x11 /* 16bits+48KHz+Digital Input */
-#define MAUDIO_SET_16B_48K_NOTDI 0x01 /* 16bits+48KHz+No Digital Input */
+#define MAUDIO_SET_24B_48K_DI	 0x19 /* 24bits+48kHz+Digital Input */
+#define MAUDIO_SET_24B_48K_NOTDI 0x09 /* 24bits+48kHz+No Digital Input */
+#define MAUDIO_SET_16B_48K_DI	 0x11 /* 16bits+48kHz+Digital Input */
+#define MAUDIO_SET_16B_48K_NOTDI 0x01 /* 16bits+48kHz+No Digital Input */
 
 static int quattro_skip_setting_quirk(struct snd_usb_audio *chip,
 				      int iface, int altno)
@@ -1252,6 +1504,38 @@ static int fasttrackpro_skip_setting_quirk(struct snd_usb_audio *chip,
 	return 0; /* keep this altsetting */
 }
 
+static int s1810c_skip_setting_quirk(struct snd_usb_audio *chip,
+					   int iface, int altno)
+{
+	/*
+	 * Altno settings:
+	 *
+	 * Playback (Interface 1):
+	 * 1: 6 Analog + 2 S/PDIF
+	 * 2: 6 Analog + 2 S/PDIF
+	 * 3: 6 Analog
+	 *
+	 * Capture (Interface 2):
+	 * 1: 8 Analog + 2 S/PDIF + 8 ADAT
+	 * 2: 8 Analog + 2 S/PDIF + 4 ADAT
+	 * 3: 8 Analog
+	 */
+
+	/*
+	 * I'll leave 2 as the default one and
+	 * use device_setup to switch to the
+	 * other two.
+	 */
+	if ((chip->setup == 0 || chip->setup > 2) && altno != 2)
+		return 1;
+	else if (chip->setup == 1 && altno != 1)
+		return 1;
+	else if (chip->setup == 2 && altno != 3)
+		return 1;
+
+	return 0;
+}
+
 int snd_usb_apply_interface_quirk(struct snd_usb_audio *chip,
 				  int iface,
 				  int altno)
@@ -1265,6 +1549,10 @@ int snd_usb_apply_interface_quirk(struct snd_usb_audio *chip,
 	/* fasttrackpro usb: skip altsets incompatible with device_setup */
 	if (chip->usb_id == USB_ID(0x0763, 0x2012))
 		return fasttrackpro_skip_setting_quirk(chip, iface, altno);
+	/* presonus studio 1810c: skip altsets incompatible with device_setup */
+	if (chip->usb_id == USB_ID(0x194f, 0x010c))
+		return s1810c_skip_setting_quirk(chip, iface, altno);
+
 
 	return 0;
 }
@@ -1296,6 +1584,10 @@ int snd_usb_apply_boot_quirk(struct usb_device *dev,
 	case USB_ID(0x0dba, 0x3000):
 		/* Digidesign Mbox 2 */
 		return snd_usb_mbox2_boot_quirk(dev);
+	case USB_ID(0x0dba, 0x5000):
+		/* Digidesign Mbox 3 */
+		return snd_usb_mbox3_boot_quirk(dev);
+
 
 	case USB_ID(0x1235, 0x0010): /* Focusrite Novation Saffire 6 USB */
 	case USB_ID(0x1235, 0x0018): /* Focusrite Novation Twitch */
@@ -1316,7 +1608,15 @@ int snd_usb_apply_boot_quirk(struct usb_device *dev,
 	case USB_ID(0x2466, 0x8010): /* Fractal Audio Axe-Fx 3 */
 		return snd_usb_axefx3_boot_quirk(dev);
 	case USB_ID(0x07fd, 0x0004): /* MOTU MicroBook II */
-		return snd_usb_motu_microbookii_boot_quirk(dev);
+		/*
+		 * For some reason interface 3 with vendor-spec class is
+		 * detected on MicroBook IIc.
+		 */
+		if (get_iface_desc(intf->altsetting)->bInterfaceClass ==
+		    USB_CLASS_VENDOR_SPEC &&
+		    get_iface_desc(intf->altsetting)->bInterfaceNumber < 3)
+			return snd_usb_motu_microbookii_boot_quirk(dev);
+		break;
 	}
 
 	return 0;
@@ -1338,7 +1638,8 @@ int snd_usb_apply_boot_quirk_once(struct usb_device *dev,
 /*
  * check if the device uses big-endian samples
  */
-int snd_usb_is_big_endian_format(struct snd_usb_audio *chip, struct audioformat *fp)
+int snd_usb_is_big_endian_format(struct snd_usb_audio *chip,
+				 const struct audioformat *fp)
 {
 	/* it depends on altsetting whether the device is big-endian or not */
 	switch (chip->usb_id) {
@@ -1377,7 +1678,7 @@ enum {
 };
 
 static void set_format_emu_quirk(struct snd_usb_substream *subs,
-				 struct audioformat *fmt)
+				 const struct audioformat *fmt)
 {
 	unsigned char emu_samplerate_id = 0;
 
@@ -1386,7 +1687,7 @@ static void set_format_emu_quirk(struct snd_usb_substream *subs,
 	 * by playback substream
 	 */
 	if (subs->direction == SNDRV_PCM_STREAM_PLAYBACK) {
-		if (subs->stream->substream[SNDRV_PCM_STREAM_CAPTURE].interface != -1)
+		if (subs->stream->substream[SNDRV_PCM_STREAM_CAPTURE].cur_audiofmt)
 			return;
 	}
 
@@ -1414,8 +1715,25 @@ static void set_format_emu_quirk(struct snd_usb_substream *subs,
 	subs->pkt_offset_adj = (emu_samplerate_id >= EMU_QUIRK_SR_176400HZ) ? 4 : 0;
 }
 
+static int pioneer_djm_set_format_quirk(struct snd_usb_substream *subs,
+					u16 windex)
+{
+	unsigned int cur_rate = subs->data_endpoint->cur_rate;
+	u8 sr[3];
+	// Convert to little endian
+	sr[0] = cur_rate & 0xff;
+	sr[1] = (cur_rate >> 8) & 0xff;
+	sr[2] = (cur_rate >> 16) & 0xff;
+	usb_set_interface(subs->dev, 0, 1);
+	// we should derive windex from fmt-sync_ep but it's not set
+	snd_usb_ctl_msg(subs->stream->chip->dev,
+		usb_sndctrlpipe(subs->stream->chip->dev, 0),
+		0x01, 0x22, 0x0100, windex, &sr, 0x0003);
+	return 0;
+}
+
 void snd_usb_set_format_quirk(struct snd_usb_substream *subs,
-			      struct audioformat *fmt)
+			      const struct audioformat *fmt)
 {
 	switch (subs->stream->chip->usb_id) {
 	case USB_ID(0x041e, 0x3f02): /* E-Mu 0202 USB */
@@ -1424,61 +1742,27 @@ void snd_usb_set_format_quirk(struct snd_usb_substream *subs,
 	case USB_ID(0x041e, 0x3f19): /* E-Mu 0204 USB */
 		set_format_emu_quirk(subs, fmt);
 		break;
+	case USB_ID(0x534d, 0x0021): /* MacroSilicon MS2100/MS2106 */
+	case USB_ID(0x534d, 0x2109): /* MacroSilicon MS2109 */
+		subs->stream_offset_adj = 2;
+		break;
+	case USB_ID(0x2b73, 0x0013): /* Pioneer DJM-450 */
+		pioneer_djm_set_format_quirk(subs, 0x0082);
+		break;
+	case USB_ID(0x08e4, 0x017f): /* Pioneer DJM-750 */
+	case USB_ID(0x08e4, 0x0163): /* Pioneer DJM-850 */
+		pioneer_djm_set_format_quirk(subs, 0x0086);
+		break;
 	}
 }
 
-bool snd_usb_get_sample_rate_quirk(struct snd_usb_audio *chip)
+int snd_usb_select_mode_quirk(struct snd_usb_audio *chip,
+			      const struct audioformat *fmt)
 {
-	/* devices which do not support reading the sample rate. */
-	switch (chip->usb_id) {
-	case USB_ID(0x041e, 0x4080): /* Creative Live Cam VF0610 */
-	case USB_ID(0x04d8, 0xfeea): /* Benchmark DAC1 Pre */
-	case USB_ID(0x0556, 0x0014): /* Phoenix Audio TMX320VC */
-	case USB_ID(0x05a3, 0x9420): /* ELP HD USB Camera */
-	case USB_ID(0x05a7, 0x1020): /* Bose Companion 5 */
-	case USB_ID(0x074d, 0x3553): /* Outlaw RR2150 (Micronas UAC3553B) */
-	case USB_ID(0x1395, 0x740a): /* Sennheiser DECT */
-	case USB_ID(0x1901, 0x0191): /* GE B850V3 CP2114 audio interface */
-	case USB_ID(0x21b4, 0x0081): /* AudioQuest DragonFly */
-		return true;
-	}
-
-	/* devices of these vendors don't support reading rate, either */
-	switch (USB_ID_VENDOR(chip->usb_id)) {
-	case 0x045e: /* MS Lifecam */
-	case 0x047f: /* Plantronics */
-	case 0x1de7: /* Phoenix Audio */
-		return true;
-	}
-
-	return false;
-}
-
-/* ITF-USB DSD based DACs need a vendor cmd to switch
- * between PCM and native DSD mode
- */
-static bool is_itf_usb_dsd_dac(unsigned int id)
-{
-	switch (id) {
-	case USB_ID(0x154e, 0x1003): /* Denon DA-300USB */
-	case USB_ID(0x154e, 0x3005): /* Marantz HD-DAC1 */
-	case USB_ID(0x154e, 0x3006): /* Marantz SA-14S1 */
-	case USB_ID(0x1852, 0x5065): /* Luxman DA-06 */
-	case USB_ID(0x0644, 0x8043): /* TEAC UD-501/UD-501V2/UD-503/NT-503 */
-	case USB_ID(0x0644, 0x8044): /* Esoteric D-05X */
-	case USB_ID(0x0644, 0x804a): /* TEAC UD-301 */
-		return true;
-	}
-	return false;
-}
-
-int snd_usb_select_mode_quirk(struct snd_usb_substream *subs,
-			      struct audioformat *fmt)
-{
-	struct usb_device *dev = subs->dev;
+	struct usb_device *dev = chip->dev;
 	int err;
 
-	if (is_itf_usb_dsd_dac(subs->stream->chip->usb_id)) {
+	if (chip->quirk_flags & QUIRK_FLAG_ITF_USB_DSD_DAC) {
 		/* First switch to alt set 0, otherwise the mode switch cmd
 		 * will not be accepted by the DAC
 		 */
@@ -1524,7 +1808,7 @@ void snd_usb_endpoint_start_quirk(struct snd_usb_endpoint *ep)
 
 	/*
 	 * M-Audio Fast Track C400/C600 - when packets are not skipped, real
-	 * world latency varies by approx. +/- 50 frames (at 96KHz) each time
+	 * world latency varies by approx. +/- 50 frames (at 96kHz) each time
 	 * the stream is (re)started. When skipping packets 16 at endpoint
 	 * start up, the real world latency is stable within +/- 1 frame (also
 	 * across power cycles).
@@ -1541,24 +1825,6 @@ void snd_usb_endpoint_start_quirk(struct snd_usb_endpoint *ep)
 		ep->tenor_fb_quirk = 1;
 }
 
-void snd_usb_set_interface_quirk(struct usb_device *dev)
-{
-	struct snd_usb_audio *chip = dev_get_drvdata(&dev->dev);
-
-	if (!chip)
-		return;
-	/*
-	 * "Playback Design" products need a 50ms delay after setting the
-	 * USB interface.
-	 */
-	switch (USB_ID_VENDOR(chip->usb_id)) {
-	case 0x23ba: /* Playback Design */
-	case 0x0644: /* TEAC Corp. */
-		msleep(50);
-		break;
-	}
-}
-
 /* quirk applied after snd_usb_ctl_msg(); not applied during boot quirks */
 void snd_usb_ctl_msg_quirk(struct usb_device *dev, unsigned int pipe,
 			   __u8 request, __u8 requesttype, __u16 value,
@@ -1566,40 +1832,15 @@ void snd_usb_ctl_msg_quirk(struct usb_device *dev, unsigned int pipe,
 {
 	struct snd_usb_audio *chip = dev_get_drvdata(&dev->dev);
 
-	if (!chip)
+	if (!chip || (requesttype & USB_TYPE_MASK) != USB_TYPE_CLASS)
 		return;
-	/*
-	 * "Playback Design" products need a 20ms delay after each
-	 * class compliant request
-	 */
-	if (USB_ID_VENDOR(chip->usb_id) == 0x23ba &&
-	    (requesttype & USB_TYPE_MASK) == USB_TYPE_CLASS)
-		msleep(20);
 
-	/*
-	 * "TEAC Corp." products need a 20ms delay after each
-	 * class compliant request
-	 */
-	if (USB_ID_VENDOR(chip->usb_id) == 0x0644 &&
-	    (requesttype & USB_TYPE_MASK) == USB_TYPE_CLASS)
+	if (chip->quirk_flags & QUIRK_FLAG_CTL_MSG_DELAY)
 		msleep(20);
-
-	/* ITF-USB DSD based DACs functionality need a delay
-	 * after each class compliant request
-	 */
-	if (is_itf_usb_dsd_dac(chip->usb_id)
-	    && (requesttype & USB_TYPE_MASK) == USB_TYPE_CLASS)
-		msleep(20);
-
-	/* Zoom R16/24, Logitech H650e, Jabra 550a needs a tiny delay here,
-	 * otherwise requests like get/set frequency return as failed despite
-	 * actually succeeding.
-	 */
-	if ((chip->usb_id == USB_ID(0x1686, 0x00dd) ||
-	     chip->usb_id == USB_ID(0x046d, 0x0a46) ||
-	     chip->usb_id == USB_ID(0x0b0e, 0x0349)) &&
-	    (requesttype & USB_TYPE_MASK) == USB_TYPE_CLASS)
+	else if (chip->quirk_flags & QUIRK_FLAG_CTL_MSG_DELAY_1M)
 		usleep_range(1000, 2000);
+	else if (chip->quirk_flags & QUIRK_FLAG_CTL_MSG_DELAY_5M)
+		usleep_range(5000, 6000);
 }
 
 /*
@@ -1634,6 +1875,7 @@ u64 snd_usb_interface_dsd_format_quirks(struct snd_usb_audio *chip,
 	/* XMOS based USB DACs */
 	switch (chip->usb_id) {
 	case USB_ID(0x1511, 0x0037): /* AURALiC VEGA */
+	case USB_ID(0x21ed, 0xd75a): /* Accuphase DAC-60 option card */
 	case USB_ID(0x2522, 0x0012): /* LH Labs VI DAC Infinity */
 	case USB_ID(0x2772, 0x0230): /* Pro-Ject Pre Box S2 Digital */
 		if (fp->altsetting == 2)
@@ -1642,7 +1884,7 @@ u64 snd_usb_interface_dsd_format_quirks(struct snd_usb_audio *chip,
 
 	case USB_ID(0x0d8c, 0x0316): /* Hegel HD12 DSD */
 	case USB_ID(0x10cb, 0x0103): /* The Bit Opus #3; with fp->dsd_raw */
-	case USB_ID(0x16b0, 0x06b2): /* NuPrime DAC-10 */
+	case USB_ID(0x16d0, 0x06b2): /* NuPrime DAC-10 */
 	case USB_ID(0x16d0, 0x09dd): /* Encore mDSD */
 	case USB_ID(0x16d0, 0x0733): /* Furutech ADL Stratos */
 	case USB_ID(0x16d0, 0x09db): /* NuPrime Audio DAC-9 */
@@ -1685,7 +1927,7 @@ u64 snd_usb_interface_dsd_format_quirks(struct snd_usb_audio *chip,
 	}
 
 	/* ITF-USB DSD based DACs */
-	if (is_itf_usb_dsd_dac(chip->usb_id)) {
+	if (chip->quirk_flags & QUIRK_FLAG_ITF_USB_DSD_DAC) {
 		iface = usb_ifnum_to_if(chip->dev, fp->iface);
 
 		/* Altsetting 2 support native DSD if the num of altsets is
@@ -1697,27 +1939,9 @@ u64 snd_usb_interface_dsd_format_quirks(struct snd_usb_audio *chip,
 			return SNDRV_PCM_FMTBIT_DSD_U32_BE;
 	}
 
-	/* Mostly generic method to detect many DSD-capable implementations -
-	 * from XMOS/Thesycon
-	 */
-	switch (USB_ID_VENDOR(chip->usb_id)) {
-	case 0x152a:  /* Thesycon devices */
-	case 0x20b1:  /* XMOS based devices */
-	case 0x22d9:  /* Oppo */
-	case 0x23ba:  /* Playback Designs */
-	case 0x25ce:  /* Mytek devices */
-	case 0x278b:  /* Rotel? */
-	case 0x292b:  /* Gustard/Ess based devices */
-	case 0x2ab6:  /* T+A devices */
-	case 0x3842:  /* EVGA */
-	case 0xc502:  /* HiBy devices */
-		if (fp->dsd_raw)
-			return SNDRV_PCM_FMTBIT_DSD_U32_BE;
-		break;
-	default:
-		break;
-
-	}
+	/* Mostly generic method to detect many DSD-capable implementations */
+	if ((chip->quirk_flags & QUIRK_FLAG_DSD_RAW) && fp->dsd_raw)
+		return SNDRV_PCM_FMTBIT_DSD_U32_BE;
 
 	return 0;
 }
@@ -1753,5 +1977,244 @@ void snd_usb_audioformat_attributes_quirk(struct snd_usb_audio *chip,
 		else
 			fp->ep_attr |= USB_ENDPOINT_SYNC_SYNC;
 		break;
+	case USB_ID(0x07fd, 0x0004):  /* MOTU MicroBook IIc */
+		/*
+		 * MaxPacketsOnly attribute is erroneously set in endpoint
+		 * descriptors. As a result this card produces noise with
+		 * all sample rates other than 96 kHz.
+		 */
+		fp->attributes &= ~UAC_EP_CS_ATTR_FILL_MAX;
+		break;
+	case USB_ID(0x1224, 0x2a25):  /* Jieli Technology USB PHY 2.0 */
+		/* mic works only when ep packet size is set to wMaxPacketSize */
+		fp->attributes |= UAC_EP_CS_ATTR_FILL_MAX;
+		break;
+
+	}
+}
+
+/*
+ * driver behavior quirk flags
+ */
+struct usb_audio_quirk_flags_table {
+	u32 id;
+	u32 flags;
+};
+
+#define DEVICE_FLG(vid, pid, _flags) \
+	{ .id = USB_ID(vid, pid), .flags = (_flags) }
+#define VENDOR_FLG(vid, _flags) DEVICE_FLG(vid, 0, _flags)
+
+static const struct usb_audio_quirk_flags_table quirk_flags_table[] = {
+	/* Device matches */
+	DEVICE_FLG(0x041e, 0x3000, /* Creative SB Extigy */
+		   QUIRK_FLAG_IGNORE_CTL_ERROR),
+	DEVICE_FLG(0x041e, 0x4080, /* Creative Live Cam VF0610 */
+		   QUIRK_FLAG_GET_SAMPLE_RATE),
+	DEVICE_FLG(0x046d, 0x084c, /* Logitech ConferenceCam Connect */
+		   QUIRK_FLAG_GET_SAMPLE_RATE | QUIRK_FLAG_CTL_MSG_DELAY_1M),
+	DEVICE_FLG(0x046d, 0x0991, /* Logitech QuickCam Pro */
+		   QUIRK_FLAG_CTL_MSG_DELAY_1M | QUIRK_FLAG_IGNORE_CTL_ERROR),
+	DEVICE_FLG(0x046d, 0x09a4, /* Logitech QuickCam E 3500 */
+		   QUIRK_FLAG_CTL_MSG_DELAY_1M | QUIRK_FLAG_IGNORE_CTL_ERROR),
+	DEVICE_FLG(0x0499, 0x1509, /* Steinberg UR22 */
+		   QUIRK_FLAG_GENERIC_IMPLICIT_FB),
+	DEVICE_FLG(0x04d8, 0xfeea, /* Benchmark DAC1 Pre */
+		   QUIRK_FLAG_GET_SAMPLE_RATE),
+	DEVICE_FLG(0x04e8, 0xa051, /* Samsung USBC Headset (AKG) */
+		   QUIRK_FLAG_SKIP_CLOCK_SELECTOR | QUIRK_FLAG_CTL_MSG_DELAY_5M),
+	DEVICE_FLG(0x054c, 0x0b8c, /* Sony WALKMAN NW-A45 DAC */
+		   QUIRK_FLAG_SET_IFACE_FIRST),
+	DEVICE_FLG(0x0556, 0x0014, /* Phoenix Audio TMX320VC */
+		   QUIRK_FLAG_GET_SAMPLE_RATE),
+	DEVICE_FLG(0x05a3, 0x9420, /* ELP HD USB Camera */
+		   QUIRK_FLAG_GET_SAMPLE_RATE),
+	DEVICE_FLG(0x05a7, 0x1020, /* Bose Companion 5 */
+		   QUIRK_FLAG_GET_SAMPLE_RATE),
+	DEVICE_FLG(0x05e1, 0x0408, /* Syntek STK1160 */
+		   QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x05e1, 0x0480, /* Hauppauge Woodbury */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x0644, 0x8043, /* TEAC UD-501/UD-501V2/UD-503/NT-503 */
+		   QUIRK_FLAG_ITF_USB_DSD_DAC | QUIRK_FLAG_CTL_MSG_DELAY |
+		   QUIRK_FLAG_IFACE_DELAY),
+	DEVICE_FLG(0x0644, 0x8044, /* Esoteric D-05X */
+		   QUIRK_FLAG_ITF_USB_DSD_DAC | QUIRK_FLAG_CTL_MSG_DELAY |
+		   QUIRK_FLAG_IFACE_DELAY),
+	DEVICE_FLG(0x0644, 0x804a, /* TEAC UD-301 */
+		   QUIRK_FLAG_ITF_USB_DSD_DAC | QUIRK_FLAG_CTL_MSG_DELAY |
+		   QUIRK_FLAG_IFACE_DELAY),
+	DEVICE_FLG(0x0644, 0x805f, /* TEAC Model 12 */
+		   QUIRK_FLAG_FORCE_IFACE_RESET),
+	DEVICE_FLG(0x06f8, 0xb000, /* Hercules DJ Console (Windows Edition) */
+		   QUIRK_FLAG_IGNORE_CTL_ERROR),
+	DEVICE_FLG(0x06f8, 0xd002, /* Hercules DJ Console (Macintosh Edition) */
+		   QUIRK_FLAG_IGNORE_CTL_ERROR),
+	DEVICE_FLG(0x0711, 0x5800, /* MCT Trigger 5 USB-to-HDMI */
+		   QUIRK_FLAG_GET_SAMPLE_RATE),
+	DEVICE_FLG(0x074d, 0x3553, /* Outlaw RR2150 (Micronas UAC3553B) */
+		   QUIRK_FLAG_GET_SAMPLE_RATE),
+	DEVICE_FLG(0x0763, 0x2030, /* M-Audio Fast Track C400 */
+		   QUIRK_FLAG_GENERIC_IMPLICIT_FB),
+	DEVICE_FLG(0x0763, 0x2031, /* M-Audio Fast Track C600 */
+		   QUIRK_FLAG_GENERIC_IMPLICIT_FB),
+	DEVICE_FLG(0x08bb, 0x2702, /* LineX FM Transmitter */
+		   QUIRK_FLAG_IGNORE_CTL_ERROR),
+	DEVICE_FLG(0x0951, 0x16ad, /* Kingston HyperX */
+		   QUIRK_FLAG_CTL_MSG_DELAY_1M),
+	DEVICE_FLG(0x0b0e, 0x0349, /* Jabra 550a */
+		   QUIRK_FLAG_CTL_MSG_DELAY_1M),
+	DEVICE_FLG(0x0fd9, 0x0008, /* Hauppauge HVR-950Q */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x1395, 0x740a, /* Sennheiser DECT */
+		   QUIRK_FLAG_GET_SAMPLE_RATE),
+	DEVICE_FLG(0x1397, 0x0507, /* Behringer UMC202HD */
+		   QUIRK_FLAG_PLAYBACK_FIRST | QUIRK_FLAG_GENERIC_IMPLICIT_FB),
+	DEVICE_FLG(0x1397, 0x0508, /* Behringer UMC204HD */
+		   QUIRK_FLAG_PLAYBACK_FIRST | QUIRK_FLAG_GENERIC_IMPLICIT_FB),
+	DEVICE_FLG(0x1397, 0x0509, /* Behringer UMC404HD */
+		   QUIRK_FLAG_PLAYBACK_FIRST | QUIRK_FLAG_GENERIC_IMPLICIT_FB),
+	DEVICE_FLG(0x13e5, 0x0001, /* Serato Phono */
+		   QUIRK_FLAG_IGNORE_CTL_ERROR),
+	DEVICE_FLG(0x154e, 0x1002, /* Denon DCD-1500RE */
+		   QUIRK_FLAG_ITF_USB_DSD_DAC | QUIRK_FLAG_CTL_MSG_DELAY),
+	DEVICE_FLG(0x154e, 0x1003, /* Denon DA-300USB */
+		   QUIRK_FLAG_ITF_USB_DSD_DAC | QUIRK_FLAG_CTL_MSG_DELAY),
+	DEVICE_FLG(0x154e, 0x3005, /* Marantz HD-DAC1 */
+		   QUIRK_FLAG_ITF_USB_DSD_DAC | QUIRK_FLAG_CTL_MSG_DELAY),
+	DEVICE_FLG(0x154e, 0x3006, /* Marantz SA-14S1 */
+		   QUIRK_FLAG_ITF_USB_DSD_DAC | QUIRK_FLAG_CTL_MSG_DELAY),
+	DEVICE_FLG(0x154e, 0x500e, /* Denon DN-X1600 */
+		   QUIRK_FLAG_IGNORE_CLOCK_SOURCE),
+	DEVICE_FLG(0x1686, 0x00dd, /* Zoom R16/24 */
+		   QUIRK_FLAG_TX_LENGTH | QUIRK_FLAG_CTL_MSG_DELAY_1M),
+	DEVICE_FLG(0x17aa, 0x1046, /* Lenovo ThinkStation P620 Rear Line-in, Line-out and Microphone */
+		   QUIRK_FLAG_DISABLE_AUTOSUSPEND),
+	DEVICE_FLG(0x17aa, 0x104d, /* Lenovo ThinkStation P620 Internal Speaker + Front Headset */
+		   QUIRK_FLAG_DISABLE_AUTOSUSPEND),
+	DEVICE_FLG(0x1852, 0x5065, /* Luxman DA-06 */
+		   QUIRK_FLAG_ITF_USB_DSD_DAC | QUIRK_FLAG_CTL_MSG_DELAY),
+	DEVICE_FLG(0x1901, 0x0191, /* GE B850V3 CP2114 audio interface */
+		   QUIRK_FLAG_GET_SAMPLE_RATE),
+	DEVICE_FLG(0x2040, 0x7200, /* Hauppauge HVR-950Q */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x2040, 0x7201, /* Hauppauge HVR-950Q-MXL */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x2040, 0x7210, /* Hauppauge HVR-950Q */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x2040, 0x7211, /* Hauppauge HVR-950Q-MXL */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x2040, 0x7213, /* Hauppauge HVR-950Q */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x2040, 0x7217, /* Hauppauge HVR-950Q */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x2040, 0x721b, /* Hauppauge HVR-950Q */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x2040, 0x721e, /* Hauppauge HVR-950Q */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x2040, 0x721f, /* Hauppauge HVR-950Q */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x2040, 0x7240, /* Hauppauge HVR-850 */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x2040, 0x7260, /* Hauppauge HVR-950Q */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x2040, 0x7270, /* Hauppauge HVR-950Q */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x2040, 0x7280, /* Hauppauge HVR-950Q */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x2040, 0x7281, /* Hauppauge HVR-950Q-MXL */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x2040, 0x8200, /* Hauppauge Woodbury */
+		   QUIRK_FLAG_SHARE_MEDIA_DEVICE | QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x21b4, 0x0081, /* AudioQuest DragonFly */
+		   QUIRK_FLAG_GET_SAMPLE_RATE),
+	DEVICE_FLG(0x2522, 0x0007, /* LH Labs Geek Out HD Audio 1V5 */
+		   QUIRK_FLAG_SET_IFACE_FIRST),
+	DEVICE_FLG(0x2708, 0x0002, /* Audient iD14 */
+		   QUIRK_FLAG_IGNORE_CTL_ERROR),
+	DEVICE_FLG(0x2912, 0x30c8, /* Audioengine D1 */
+		   QUIRK_FLAG_GET_SAMPLE_RATE),
+	DEVICE_FLG(0x30be, 0x0101, /* Schiit Hel */
+		   QUIRK_FLAG_IGNORE_CTL_ERROR),
+	DEVICE_FLG(0x413c, 0xa506, /* Dell AE515 sound bar */
+		   QUIRK_FLAG_GET_SAMPLE_RATE),
+	DEVICE_FLG(0x534d, 0x0021, /* MacroSilicon MS2100/MS2106 */
+		   QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x534d, 0x2109, /* MacroSilicon MS2109 */
+		   QUIRK_FLAG_ALIGN_TRANSFER),
+	DEVICE_FLG(0x1224, 0x2a25, /* Jieli Technology USB PHY 2.0 */
+		   QUIRK_FLAG_GET_SAMPLE_RATE),
+	DEVICE_FLG(0x2b53, 0x0023, /* Fiero SC-01 (firmware v1.0.0 @ 48 kHz) */
+		   QUIRK_FLAG_GENERIC_IMPLICIT_FB),
+	DEVICE_FLG(0x2b53, 0x0024, /* Fiero SC-01 (firmware v1.0.0 @ 96 kHz) */
+		   QUIRK_FLAG_GENERIC_IMPLICIT_FB),
+	DEVICE_FLG(0x2b53, 0x0031, /* Fiero SC-01 (firmware v1.1.0) */
+		   QUIRK_FLAG_GENERIC_IMPLICIT_FB),
+	DEVICE_FLG(0x0525, 0xa4ad, /* Hamedal C20 usb camero */
+		   QUIRK_FLAG_IFACE_SKIP_CLOSE),
+	DEVICE_FLG(0x0ecb, 0x205c, /* JBL Quantum610 Wireless */
+		   QUIRK_FLAG_FIXED_RATE),
+	DEVICE_FLG(0x0ecb, 0x2069, /* JBL Quantum810 Wireless */
+		   QUIRK_FLAG_FIXED_RATE),
+
+	/* Vendor matches */
+	VENDOR_FLG(0x045e, /* MS Lifecam */
+		   QUIRK_FLAG_GET_SAMPLE_RATE),
+	VENDOR_FLG(0x046d, /* Logitech */
+		   QUIRK_FLAG_CTL_MSG_DELAY_1M),
+	VENDOR_FLG(0x047f, /* Plantronics */
+		   QUIRK_FLAG_GET_SAMPLE_RATE | QUIRK_FLAG_CTL_MSG_DELAY),
+	VENDOR_FLG(0x0644, /* TEAC Corp. */
+		   QUIRK_FLAG_CTL_MSG_DELAY | QUIRK_FLAG_IFACE_DELAY),
+	VENDOR_FLG(0x07fd, /* MOTU */
+		   QUIRK_FLAG_VALIDATE_RATES),
+	VENDOR_FLG(0x1235, /* Focusrite Novation */
+		   QUIRK_FLAG_VALIDATE_RATES),
+	VENDOR_FLG(0x152a, /* Thesycon devices */
+		   QUIRK_FLAG_DSD_RAW),
+	VENDOR_FLG(0x1de7, /* Phoenix Audio */
+		   QUIRK_FLAG_GET_SAMPLE_RATE),
+	VENDOR_FLG(0x20b1, /* XMOS based devices */
+		   QUIRK_FLAG_DSD_RAW),
+	VENDOR_FLG(0x22d9, /* Oppo */
+		   QUIRK_FLAG_DSD_RAW),
+	VENDOR_FLG(0x23ba, /* Playback Design */
+		   QUIRK_FLAG_CTL_MSG_DELAY | QUIRK_FLAG_IFACE_DELAY |
+		   QUIRK_FLAG_DSD_RAW),
+	VENDOR_FLG(0x25ce, /* Mytek devices */
+		   QUIRK_FLAG_DSD_RAW),
+	VENDOR_FLG(0x278b, /* Rotel? */
+		   QUIRK_FLAG_DSD_RAW),
+	VENDOR_FLG(0x292b, /* Gustard/Ess based devices */
+		   QUIRK_FLAG_DSD_RAW),
+	VENDOR_FLG(0x2972, /* FiiO devices */
+		   QUIRK_FLAG_DSD_RAW),
+	VENDOR_FLG(0x2ab6, /* T+A devices */
+		   QUIRK_FLAG_DSD_RAW),
+	VENDOR_FLG(0x3353, /* Khadas devices */
+		   QUIRK_FLAG_DSD_RAW),
+	VENDOR_FLG(0x3842, /* EVGA */
+		   QUIRK_FLAG_DSD_RAW),
+	VENDOR_FLG(0xc502, /* HiBy devices */
+		   QUIRK_FLAG_DSD_RAW),
+
+	{} /* terminator */
+};
+
+void snd_usb_init_quirk_flags(struct snd_usb_audio *chip)
+{
+	const struct usb_audio_quirk_flags_table *p;
+
+	for (p = quirk_flags_table; p->id; p++) {
+		if (chip->usb_id == p->id ||
+		    (!USB_ID_PRODUCT(p->id) &&
+		     USB_ID_VENDOR(chip->usb_id) == USB_ID_VENDOR(p->id))) {
+			usb_audio_dbg(chip,
+				      "Set quirk_flags 0x%x for device %04x:%04x\n",
+				      p->flags, USB_ID_VENDOR(chip->usb_id),
+				      USB_ID_PRODUCT(chip->usb_id));
+			chip->quirk_flags |= p->flags;
+			return;
+		}
 	}
 }

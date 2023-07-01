@@ -1161,7 +1161,7 @@ static int imx355_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 {
 	struct imx355 *imx355 = to_imx355(sd);
 	struct v4l2_mbus_framefmt *try_fmt =
-		v4l2_subdev_get_try_format(sd, fh->pad, 0);
+		v4l2_subdev_get_try_format(sd, fh->state, 0);
 
 	mutex_lock(&imx355->mutex);
 
@@ -1248,7 +1248,7 @@ static const struct v4l2_ctrl_ops imx355_ctrl_ops = {
 };
 
 static int imx355_enum_mbus_code(struct v4l2_subdev *sd,
-				 struct v4l2_subdev_pad_config *cfg,
+				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_mbus_code_enum *code)
 {
 	struct imx355 *imx355 = to_imx355(sd);
@@ -1264,7 +1264,7 @@ static int imx355_enum_mbus_code(struct v4l2_subdev *sd,
 }
 
 static int imx355_enum_frame_size(struct v4l2_subdev *sd,
-				  struct v4l2_subdev_pad_config *cfg,
+				  struct v4l2_subdev_state *sd_state,
 				  struct v4l2_subdev_frame_size_enum *fse)
 {
 	struct imx355 *imx355 = to_imx355(sd);
@@ -1298,14 +1298,14 @@ static void imx355_update_pad_format(struct imx355 *imx355,
 }
 
 static int imx355_do_get_pad_format(struct imx355 *imx355,
-				    struct v4l2_subdev_pad_config *cfg,
+				    struct v4l2_subdev_state *sd_state,
 				    struct v4l2_subdev_format *fmt)
 {
 	struct v4l2_mbus_framefmt *framefmt;
 	struct v4l2_subdev *sd = &imx355->sd;
 
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
-		framefmt = v4l2_subdev_get_try_format(sd, cfg, fmt->pad);
+		framefmt = v4l2_subdev_get_try_format(sd, sd_state, fmt->pad);
 		fmt->format = *framefmt;
 	} else {
 		imx355_update_pad_format(imx355, imx355->cur_mode, fmt);
@@ -1315,14 +1315,14 @@ static int imx355_do_get_pad_format(struct imx355 *imx355,
 }
 
 static int imx355_get_pad_format(struct v4l2_subdev *sd,
-				 struct v4l2_subdev_pad_config *cfg,
+				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_format *fmt)
 {
 	struct imx355 *imx355 = to_imx355(sd);
 	int ret;
 
 	mutex_lock(&imx355->mutex);
-	ret = imx355_do_get_pad_format(imx355, cfg, fmt);
+	ret = imx355_do_get_pad_format(imx355, sd_state, fmt);
 	mutex_unlock(&imx355->mutex);
 
 	return ret;
@@ -1330,7 +1330,7 @@ static int imx355_get_pad_format(struct v4l2_subdev *sd,
 
 static int
 imx355_set_pad_format(struct v4l2_subdev *sd,
-		      struct v4l2_subdev_pad_config *cfg,
+		      struct v4l2_subdev_state *sd_state,
 		      struct v4l2_subdev_format *fmt)
 {
 	struct imx355 *imx355 = to_imx355(sd);
@@ -1356,7 +1356,7 @@ imx355_set_pad_format(struct v4l2_subdev *sd,
 				      fmt->format.width, fmt->format.height);
 	imx355_update_pad_format(imx355, mode, fmt);
 	if (fmt->which == V4L2_SUBDEV_FORMAT_TRY) {
-		framefmt = v4l2_subdev_get_try_format(sd, cfg, fmt->pad);
+		framefmt = v4l2_subdev_get_try_format(sd, sd_state, fmt->pad);
 		*framefmt = fmt->format;
 	} else {
 		imx355->cur_mode = mode;
@@ -1442,11 +1442,9 @@ static int imx355_set_stream(struct v4l2_subdev *sd, int enable)
 	}
 
 	if (enable) {
-		ret = pm_runtime_get_sync(&client->dev);
-		if (ret < 0) {
-			pm_runtime_put_noidle(&client->dev);
+		ret = pm_runtime_resume_and_get(&client->dev);
+		if (ret < 0)
 			goto err_unlock;
-		}
 
 		/*
 		 * Apply default & customized values
@@ -1480,8 +1478,7 @@ err_unlock:
 
 static int __maybe_unused imx355_suspend(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct v4l2_subdev *sd = i2c_get_clientdata(client);
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct imx355 *imx355 = to_imx355(sd);
 
 	if (imx355->streaming)
@@ -1492,8 +1489,7 @@ static int __maybe_unused imx355_suspend(struct device *dev)
 
 static int __maybe_unused imx355_resume(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct v4l2_subdev *sd = i2c_get_clientdata(client);
+	struct v4l2_subdev *sd = dev_get_drvdata(dev);
 	struct imx355 *imx355 = to_imx355(sd);
 	int ret;
 
@@ -1621,8 +1617,12 @@ static int imx355_init_controls(struct imx355 *imx355)
 
 	imx355->hflip = v4l2_ctrl_new_std(ctrl_hdlr, &imx355_ctrl_ops,
 					  V4L2_CID_HFLIP, 0, 1, 1, 0);
+	if (imx355->hflip)
+		imx355->hflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
 	imx355->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &imx355_ctrl_ops,
 					  V4L2_CID_VFLIP, 0, 1, 1, 0);
+	if (imx355->vflip)
+		imx355->vflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
 
 	v4l2_ctrl_new_std(ctrl_hdlr, &imx355_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
 			  IMX355_ANA_GAIN_MIN, IMX355_ANA_GAIN_MAX,
@@ -1788,7 +1788,7 @@ static int imx355_probe(struct i2c_client *client)
 		goto error_handler_free;
 	}
 
-	ret = v4l2_async_register_subdev_sensor_common(&imx355->sd);
+	ret = v4l2_async_register_subdev_sensor(&imx355->sd);
 	if (ret < 0)
 		goto error_media_entity;
 
@@ -1814,7 +1814,7 @@ error_probe:
 	return ret;
 }
 
-static int imx355_remove(struct i2c_client *client)
+static void imx355_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct imx355 *imx355 = to_imx355(sd);
@@ -1827,15 +1827,13 @@ static int imx355_remove(struct i2c_client *client)
 	pm_runtime_set_suspended(&client->dev);
 
 	mutex_destroy(&imx355->mutex);
-
-	return 0;
 }
 
 static const struct dev_pm_ops imx355_pm_ops = {
 	SET_SYSTEM_SLEEP_PM_OPS(imx355_suspend, imx355_resume)
 };
 
-static const struct acpi_device_id imx355_acpi_ids[] = {
+static const struct acpi_device_id imx355_acpi_ids[] __maybe_unused = {
 	{ "SONY355A" },
 	{ /* sentinel */ }
 };
@@ -1855,6 +1853,6 @@ module_i2c_driver(imx355_i2c_driver);
 MODULE_AUTHOR("Qiu, Tianshu <tian.shu.qiu@intel.com>");
 MODULE_AUTHOR("Rapolu, Chiranjeevi <chiranjeevi.rapolu@intel.com>");
 MODULE_AUTHOR("Bingbu Cao <bingbu.cao@intel.com>");
-MODULE_AUTHOR("Yang, Hyungwoo <hyungwoo.yang@intel.com>");
+MODULE_AUTHOR("Yang, Hyungwoo");
 MODULE_DESCRIPTION("Sony imx355 sensor driver");
 MODULE_LICENSE("GPL v2");

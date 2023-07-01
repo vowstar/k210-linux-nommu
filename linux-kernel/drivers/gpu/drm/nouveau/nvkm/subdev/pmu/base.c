@@ -81,62 +81,24 @@ nvkm_pmu_fini(struct nvkm_subdev *subdev, bool suspend)
 {
 	struct nvkm_pmu *pmu = nvkm_pmu(subdev);
 
+	if (!subdev->use.enabled)
+		return 0;
+
 	if (pmu->func->fini)
 		pmu->func->fini(pmu);
 
-	flush_work(&pmu->recv.work);
-
-	reinit_completion(&pmu->wpr_ready);
-
-	nvkm_falcon_cmdq_fini(pmu->lpq);
-	nvkm_falcon_cmdq_fini(pmu->hpq);
-	pmu->initmsg_received = false;
 	return 0;
-}
-
-static int
-nvkm_pmu_reset(struct nvkm_pmu *pmu)
-{
-	struct nvkm_device *device = pmu->subdev.device;
-
-	if (!pmu->func->enabled(pmu))
-		return 0;
-
-	/* Inhibit interrupts, and wait for idle. */
-	nvkm_wr32(device, 0x10a014, 0x0000ffff);
-	nvkm_msec(device, 2000,
-		if (!nvkm_rd32(device, 0x10a04c))
-			break;
-	);
-
-	/* Reset. */
-	if (pmu->func->reset)
-		pmu->func->reset(pmu);
-
-	/* Wait for IMEM/DMEM scrubbing to be complete. */
-	nvkm_msec(device, 2000,
-		if (!(nvkm_rd32(device, 0x10a10c) & 0x00000006))
-			break;
-	);
-
-	return 0;
-}
-
-static int
-nvkm_pmu_preinit(struct nvkm_subdev *subdev)
-{
-	struct nvkm_pmu *pmu = nvkm_pmu(subdev);
-	return nvkm_pmu_reset(pmu);
 }
 
 static int
 nvkm_pmu_init(struct nvkm_subdev *subdev)
 {
 	struct nvkm_pmu *pmu = nvkm_pmu(subdev);
-	int ret = nvkm_pmu_reset(pmu);
-	if (ret == 0 && pmu->func->init)
-		ret = pmu->func->init(pmu);
-	return ret;
+
+	if (!pmu->func->init)
+		return 0;
+
+	return pmu->func->init(pmu);
 }
 
 static void *
@@ -148,13 +110,13 @@ nvkm_pmu_dtor(struct nvkm_subdev *subdev)
 	nvkm_falcon_cmdq_del(&pmu->hpq);
 	nvkm_falcon_qmgr_del(&pmu->qmgr);
 	nvkm_falcon_dtor(&pmu->falcon);
+	mutex_destroy(&pmu->send.mutex);
 	return nvkm_pmu(subdev);
 }
 
 static const struct nvkm_subdev_func
 nvkm_pmu = {
 	.dtor = nvkm_pmu_dtor,
-	.preinit = nvkm_pmu_preinit,
 	.init = nvkm_pmu_init,
 	.fini = nvkm_pmu_fini,
 	.intr = nvkm_pmu_intr,
@@ -162,11 +124,13 @@ nvkm_pmu = {
 
 int
 nvkm_pmu_ctor(const struct nvkm_pmu_fwif *fwif, struct nvkm_device *device,
-	      int index, struct nvkm_pmu *pmu)
+	      enum nvkm_subdev_type type, int inst, struct nvkm_pmu *pmu)
 {
 	int ret;
 
-	nvkm_subdev_ctor(&nvkm_pmu, device, index, &pmu->subdev);
+	nvkm_subdev_ctor(&nvkm_pmu, device, type, inst, &pmu->subdev);
+
+	mutex_init(&pmu->send.mutex);
 
 	INIT_WORK(&pmu->recv.work, nvkm_pmu_recv);
 	init_waitqueue_head(&pmu->recv.wait);
@@ -177,9 +141,8 @@ nvkm_pmu_ctor(const struct nvkm_pmu_fwif *fwif, struct nvkm_device *device,
 
 	pmu->func = fwif->func;
 
-	ret = nvkm_falcon_ctor(pmu->func->flcn, &pmu->subdev,
-			       nvkm_subdev_name[pmu->subdev.index], 0x10a000,
-			       &pmu->falcon);
+	ret = nvkm_falcon_ctor(pmu->func->flcn, &pmu->subdev, pmu->subdev.name,
+			       0x10a000, &pmu->falcon);
 	if (ret)
 		return ret;
 
@@ -195,10 +158,10 @@ nvkm_pmu_ctor(const struct nvkm_pmu_fwif *fwif, struct nvkm_device *device,
 
 int
 nvkm_pmu_new_(const struct nvkm_pmu_fwif *fwif, struct nvkm_device *device,
-	      int index, struct nvkm_pmu **ppmu)
+	      enum nvkm_subdev_type type, int inst, struct nvkm_pmu **ppmu)
 {
 	struct nvkm_pmu *pmu;
 	if (!(pmu = *ppmu = kzalloc(sizeof(*pmu), GFP_KERNEL)))
 		return -ENOMEM;
-	return nvkm_pmu_ctor(fwif, device, index, *ppmu);
+	return nvkm_pmu_ctor(fwif, device, type, inst, *ppmu);
 }

@@ -2,7 +2,7 @@
 VFIO - "Virtual Function I/O" [1]_
 ==================================
 
-Many modern system now provide DMA and interrupt remapping facilities
+Many modern systems now provide DMA and interrupt remapping facilities
 to help ensure I/O devices behave within the boundaries they've been
 allotted.  This includes x86 hardware with AMD-Vi and Intel VT-d,
 POWER systems with Partitionable Endpoints (PEs) and embedded PowerPC
@@ -242,48 +242,94 @@ group and can access them as follows::
 VFIO User API
 -------------------------------------------------------------------------------
 
-Please see include/linux/vfio.h for complete API documentation.
+Please see include/uapi/linux/vfio.h for complete API documentation.
 
 VFIO bus driver API
 -------------------------------------------------------------------------------
 
 VFIO bus drivers, such as vfio-pci make use of only a few interfaces
 into VFIO core.  When devices are bound and unbound to the driver,
-the driver should call vfio_add_group_dev() and vfio_del_group_dev()
-respectively::
+Following interfaces are called when devices are bound to and
+unbound from the driver::
 
-	extern int vfio_add_group_dev(struct device *dev,
-				      const struct vfio_device_ops *ops,
-				      void *device_data);
+	int vfio_register_group_dev(struct vfio_device *device);
+	int vfio_register_emulated_iommu_dev(struct vfio_device *device);
+	void vfio_unregister_group_dev(struct vfio_device *device);
 
-	extern void *vfio_del_group_dev(struct device *dev);
+The driver should embed the vfio_device in its own structure and use
+vfio_alloc_device() to allocate the structure, and can register
+@init/@release callbacks to manage any private state wrapping the
+vfio_device::
 
-vfio_add_group_dev() indicates to the core to begin tracking the
-iommu_group of the specified dev and register the dev as owned by
-a VFIO bus driver.  The driver provides an ops structure for callbacks
+	vfio_alloc_device(dev_struct, member, dev, ops);
+	void vfio_put_device(struct vfio_device *device);
+
+vfio_register_group_dev() indicates to the core to begin tracking the
+iommu_group of the specified dev and register the dev as owned by a VFIO bus
+driver. Once vfio_register_group_dev() returns it is possible for userspace to
+start accessing the driver, thus the driver should ensure it is completely
+ready before calling it. The driver provides an ops structure for callbacks
 similar to a file operations structure::
 
 	struct vfio_device_ops {
-		int	(*open)(void *device_data);
-		void	(*release)(void *device_data);
-		ssize_t	(*read)(void *device_data, char __user *buf,
+		char	*name;
+		int	(*init)(struct vfio_device *vdev);
+		void	(*release)(struct vfio_device *vdev);
+		int	(*bind_iommufd)(struct vfio_device *vdev,
+					struct iommufd_ctx *ictx, u32 *out_device_id);
+		void	(*unbind_iommufd)(struct vfio_device *vdev);
+		int	(*attach_ioas)(struct vfio_device *vdev, u32 *pt_id);
+		int	(*open_device)(struct vfio_device *vdev);
+		void	(*close_device)(struct vfio_device *vdev);
+		ssize_t	(*read)(struct vfio_device *vdev, char __user *buf,
 				size_t count, loff_t *ppos);
-		ssize_t	(*write)(void *device_data, const char __user *buf,
-				 size_t size, loff_t *ppos);
-		long	(*ioctl)(void *device_data, unsigned int cmd,
+		ssize_t	(*write)(struct vfio_device *vdev, const char __user *buf,
+			 size_t count, loff_t *size);
+		long	(*ioctl)(struct vfio_device *vdev, unsigned int cmd,
 				 unsigned long arg);
-		int	(*mmap)(void *device_data, struct vm_area_struct *vma);
+		int	(*mmap)(struct vfio_device *vdev, struct vm_area_struct *vma);
+		void	(*request)(struct vfio_device *vdev, unsigned int count);
+		int	(*match)(struct vfio_device *vdev, char *buf);
+		void	(*dma_unmap)(struct vfio_device *vdev, u64 iova, u64 length);
+		int	(*device_feature)(struct vfio_device *device, u32 flags,
+					  void __user *arg, size_t argsz);
 	};
 
-Each function is passed the device_data that was originally registered
-in the vfio_add_group_dev() call above.  This allows the bus driver
-an easy place to store its opaque, private data.  The open/release
-callbacks are issued when a new file descriptor is created for a
-device (via VFIO_GROUP_GET_DEVICE_FD).  The ioctl interface provides
-a direct pass through for VFIO_DEVICE_* ioctls.  The read/write/mmap
-interfaces implement the device region access defined by the device's
-own VFIO_DEVICE_GET_REGION_INFO ioctl.
+Each function is passed the vdev that was originally registered
+in the vfio_register_group_dev() or vfio_register_emulated_iommu_dev()
+call above. This allows the bus driver to obtain its private data using
+container_of().
 
+::
+
+	- The init/release callbacks are issued when vfio_device is initialized
+	  and released.
+
+	- The open/close device callbacks are issued when the first
+	  instance of a file descriptor for the device is created (eg.
+	  via VFIO_GROUP_GET_DEVICE_FD) for a user session.
+
+	- The ioctl callback provides a direct pass through for some VFIO_DEVICE_*
+	  ioctls.
+
+	- The [un]bind_iommufd callbacks are issued when the device is bound to
+	  and unbound from iommufd.
+
+	- The attach_ioas callback is issued when the device is attached to an
+	  IOAS managed by the bound iommufd. The attached IOAS is automatically
+	  detached when the device is unbound from iommufd.
+
+	- The read/write/mmap callbacks implement the device region access defined
+	  by the device's own VFIO_DEVICE_GET_REGION_INFO ioctl.
+
+	- The request callback is issued when device is going to be unregistered,
+	  such as when trying to unbind the device from the vfio bus driver.
+
+	- The dma_unmap callback is issued when a range of iovas are unmapped
+	  in the container or IOAS attached by the device. Drivers which make
+	  use of the vfio page pinning interface must implement this callback in
+	  order to unpin pages within the dma_unmap range. Drivers must tolerate
+	  this callback even before calls to open_device().
 
 PPC64 sPAPR implementation note
 -------------------------------

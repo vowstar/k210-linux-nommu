@@ -688,9 +688,11 @@ static int tvp7002_g_register(struct v4l2_subdev *sd,
 	int ret;
 
 	ret = tvp7002_read(sd, reg->reg & 0xff, &val);
+	if (ret < 0)
+		return ret;
 	reg->val = val;
 	reg->size = 1;
-	return ret;
+	return 0;
 }
 
 /*
@@ -795,7 +797,8 @@ static const struct v4l2_ctrl_ops tvp7002_ctrl_ops = {
  * Enumerate supported digital video formats for pad.
  */
 static int
-tvp7002_enum_mbus_code(struct v4l2_subdev *sd, struct v4l2_subdev_pad_config *cfg,
+tvp7002_enum_mbus_code(struct v4l2_subdev *sd,
+		       struct v4l2_subdev_state *sd_state,
 		       struct v4l2_subdev_mbus_code_enum *code)
 {
 	/* Check requested format index is within range */
@@ -816,7 +819,8 @@ tvp7002_enum_mbus_code(struct v4l2_subdev *sd, struct v4l2_subdev_pad_config *cf
  * get video format for pad.
  */
 static int
-tvp7002_get_pad_format(struct v4l2_subdev *sd, struct v4l2_subdev_pad_config *cfg,
+tvp7002_get_pad_format(struct v4l2_subdev *sd,
+		       struct v4l2_subdev_state *sd_state,
 		       struct v4l2_subdev_format *fmt)
 {
 	struct tvp7002 *tvp7002 = to_tvp7002(sd);
@@ -839,10 +843,11 @@ tvp7002_get_pad_format(struct v4l2_subdev *sd, struct v4l2_subdev_pad_config *cf
  * set video format for pad.
  */
 static int
-tvp7002_set_pad_format(struct v4l2_subdev *sd, struct v4l2_subdev_pad_config *cfg,
+tvp7002_set_pad_format(struct v4l2_subdev *sd,
+		       struct v4l2_subdev_state *sd_state,
 		       struct v4l2_subdev_format *fmt)
 {
-	return tvp7002_get_pad_format(sd, cfg, fmt);
+	return tvp7002_get_pad_format(sd, sd_state, fmt);
 }
 
 /* V4L2 core operation handlers */
@@ -1039,7 +1044,7 @@ error:
  * Reset the TVP7002 device
  * Returns zero.
  */
-static int tvp7002_remove(struct i2c_client *c)
+static void tvp7002_remove(struct i2c_client *c)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(c);
 	struct tvp7002 *device = to_tvp7002(sd);
@@ -1051,7 +1056,6 @@ static int tvp7002_remove(struct i2c_client *c)
 	media_entity_cleanup(&device->sd.entity);
 #endif
 	v4l2_ctrl_handler_free(&device->hdl);
-	return 0;
 }
 
 /* I2C Device ID table */

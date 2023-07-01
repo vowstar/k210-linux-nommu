@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Copyright(c) 1999 - 2018 Intel Corporation. */
 
-#ifndef _E1000_HW_H_
-#define _E1000_HW_H_
+#ifndef _E1000E_HW_H_
+#define _E1000E_HW_H_
 
 #include "regs.h"
 #include "defines.h"
@@ -97,6 +97,31 @@ struct e1000_hw;
 #define E1000_DEV_ID_PCH_TGP_I219_LM14		0x15F9
 #define E1000_DEV_ID_PCH_TGP_I219_V14		0x15FA
 #define E1000_DEV_ID_PCH_TGP_I219_LM15		0x15F4
+#define E1000_DEV_ID_PCH_TGP_I219_V15		0x15F5
+#define E1000_DEV_ID_PCH_RPL_I219_LM23		0x0DC5
+#define E1000_DEV_ID_PCH_RPL_I219_V23		0x0DC6
+#define E1000_DEV_ID_PCH_ADP_I219_LM16		0x1A1E
+#define E1000_DEV_ID_PCH_ADP_I219_V16		0x1A1F
+#define E1000_DEV_ID_PCH_ADP_I219_LM17		0x1A1C
+#define E1000_DEV_ID_PCH_ADP_I219_V17		0x1A1D
+#define E1000_DEV_ID_PCH_RPL_I219_LM22		0x0DC7
+#define E1000_DEV_ID_PCH_RPL_I219_V22		0x0DC8
+#define E1000_DEV_ID_PCH_MTP_I219_LM18		0x550A
+#define E1000_DEV_ID_PCH_MTP_I219_V18		0x550B
+#define E1000_DEV_ID_PCH_MTP_I219_LM19		0x550C
+#define E1000_DEV_ID_PCH_MTP_I219_V19		0x550D
+#define E1000_DEV_ID_PCH_LNP_I219_LM20		0x550E
+#define E1000_DEV_ID_PCH_LNP_I219_V20		0x550F
+#define E1000_DEV_ID_PCH_LNP_I219_LM21		0x5510
+#define E1000_DEV_ID_PCH_LNP_I219_V21		0x5511
+#define E1000_DEV_ID_PCH_ARL_I219_LM24		0x57A0
+#define E1000_DEV_ID_PCH_ARL_I219_V24		0x57A1
+#define E1000_DEV_ID_PCH_PTP_I219_LM25		0x57B3
+#define E1000_DEV_ID_PCH_PTP_I219_V25		0x57B4
+#define E1000_DEV_ID_PCH_PTP_I219_LM26		0x57B5
+#define E1000_DEV_ID_PCH_PTP_I219_V26		0x57B6
+#define E1000_DEV_ID_PCH_PTP_I219_LM27		0x57B7
+#define E1000_DEV_ID_PCH_PTP_I219_V27		0x57B8
 
 #define E1000_REVISION_4	4
 
@@ -121,6 +146,10 @@ enum e1000_mac_type {
 	e1000_pch_spt,
 	e1000_pch_cnp,
 	e1000_pch_tgp,
+	e1000_pch_adp,
+	e1000_pch_mtp,
+	e1000_pch_lnp,
+	e1000_pch_ptp,
 };
 
 enum e1000_media_type {
@@ -703,4 +732,4 @@ struct e1000_hw {
 #include "80003es2lan.h"
 #include "ich8lan.h"
 
-#endif
+#endif /* _E1000E_HW_H_ */

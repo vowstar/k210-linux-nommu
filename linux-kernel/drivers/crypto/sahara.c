@@ -15,20 +15,21 @@
 #include <crypto/internal/hash.h>
 #include <crypto/internal/skcipher.h>
 #include <crypto/scatterwalk.h>
-#include <crypto/sha.h>
+#include <crypto/sha1.h>
+#include <crypto/sha2.h>
 
 #include <linux/clk.h>
-#include <linux/crypto.h>
+#include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/irq.h>
 #include <linux/kernel.h>
 #include <linux/kthread.h>
 #include <linux/module.h>
-#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
 #include <linux/platform_device.h>
+#include <linux/spinlock.h>
 
 #define SHA_BUFFER_LEN		PAGE_SIZE
 #define SAHARA_MAX_SHA_BLOCK_SIZE	SHA256_BLOCK_SIZE
@@ -146,11 +147,12 @@ struct sahara_ctx {
 	/* AES-specific context */
 	int keylen;
 	u8 key[AES_KEYSIZE_128];
-	struct crypto_sync_skcipher *fallback;
+	struct crypto_skcipher *fallback;
 };
 
 struct sahara_aes_reqctx {
 	unsigned long mode;
+	struct skcipher_request fallback_req;	// keep at the end
 };
 
 /*
@@ -194,7 +196,7 @@ struct sahara_dev {
 	void __iomem		*regs_base;
 	struct clk		*clk_ipg;
 	struct clk		*clk_ahb;
-	struct mutex		queue_mutex;
+	spinlock_t		queue_spinlock;
 	struct task_struct	*kthread;
 	struct completion	dma_completion;
 
@@ -485,13 +487,13 @@ static int sahara_hw_descriptor_create(struct sahara_dev *dev)
 
 	ret = dma_map_sg(dev->device, dev->in_sg, dev->nb_in_sg,
 			 DMA_TO_DEVICE);
-	if (ret != dev->nb_in_sg) {
+	if (!ret) {
 		dev_err(dev->device, "couldn't map in sg\n");
 		goto unmap_in;
 	}
 	ret = dma_map_sg(dev->device, dev->out_sg, dev->nb_out_sg,
 			 DMA_FROM_DEVICE);
-	if (ret != dev->nb_out_sg) {
+	if (!ret) {
 		dev_err(dev->device, "couldn't map out sg\n");
 		goto unmap_out;
 	}
@@ -617,10 +619,10 @@ static int sahara_aes_setkey(struct crypto_skcipher *tfm, const u8 *key,
 	/*
 	 * The requested key size is not supported by HW, do a fallback.
 	 */
-	crypto_sync_skcipher_clear_flags(ctx->fallback, CRYPTO_TFM_REQ_MASK);
-	crypto_sync_skcipher_set_flags(ctx->fallback, tfm->base.crt_flags &
+	crypto_skcipher_clear_flags(ctx->fallback, CRYPTO_TFM_REQ_MASK);
+	crypto_skcipher_set_flags(ctx->fallback, tfm->base.crt_flags &
 						 CRYPTO_TFM_REQ_MASK);
-	return crypto_sync_skcipher_setkey(ctx->fallback, key, keylen);
+	return crypto_skcipher_setkey(ctx->fallback, key, keylen);
 }
 
 static int sahara_aes_crypt(struct skcipher_request *req, unsigned long mode)
@@ -640,9 +642,9 @@ static int sahara_aes_crypt(struct skcipher_request *req, unsigned long mode)
 
 	rctx->mode = mode;
 
-	mutex_lock(&dev->queue_mutex);
+	spin_lock_bh(&dev->queue_spinlock);
 	err = crypto_enqueue_request(&dev->queue, &req->base);
-	mutex_unlock(&dev->queue_mutex);
+	spin_unlock_bh(&dev->queue_spinlock);
 
 	wake_up_process(dev->kthread);
 
@@ -651,21 +653,19 @@ static int sahara_aes_crypt(struct skcipher_request *req, unsigned long mode)
 
 static int sahara_aes_ecb_encrypt(struct skcipher_request *req)
 {
+	struct sahara_aes_reqctx *rctx = skcipher_request_ctx(req);
 	struct sahara_ctx *ctx = crypto_skcipher_ctx(
 		crypto_skcipher_reqtfm(req));
-	int err;
 
 	if (unlikely(ctx->keylen != AES_KEYSIZE_128)) {
-		SYNC_SKCIPHER_REQUEST_ON_STACK(subreq, ctx->fallback);
-
-		skcipher_request_set_sync_tfm(subreq, ctx->fallback);
-		skcipher_request_set_callback(subreq, req->base.flags,
-					      NULL, NULL);
-		skcipher_request_set_crypt(subreq, req->src, req->dst,
-					   req->cryptlen, req->iv);
-		err = crypto_skcipher_encrypt(subreq);
-		skcipher_request_zero(subreq);
-		return err;
+		skcipher_request_set_tfm(&rctx->fallback_req, ctx->fallback);
+		skcipher_request_set_callback(&rctx->fallback_req,
+					      req->base.flags,
+					      req->base.complete,
+					      req->base.data);
+		skcipher_request_set_crypt(&rctx->fallback_req, req->src,
+					   req->dst, req->cryptlen, req->iv);
+		return crypto_skcipher_encrypt(&rctx->fallback_req);
 	}
 
 	return sahara_aes_crypt(req, FLAGS_ENCRYPT);
@@ -673,21 +673,19 @@ static int sahara_aes_ecb_encrypt(struct skcipher_request *req)
 
 static int sahara_aes_ecb_decrypt(struct skcipher_request *req)
 {
+	struct sahara_aes_reqctx *rctx = skcipher_request_ctx(req);
 	struct sahara_ctx *ctx = crypto_skcipher_ctx(
 		crypto_skcipher_reqtfm(req));
-	int err;
 
 	if (unlikely(ctx->keylen != AES_KEYSIZE_128)) {
-		SYNC_SKCIPHER_REQUEST_ON_STACK(subreq, ctx->fallback);
-
-		skcipher_request_set_sync_tfm(subreq, ctx->fallback);
-		skcipher_request_set_callback(subreq, req->base.flags,
-					      NULL, NULL);
-		skcipher_request_set_crypt(subreq, req->src, req->dst,
-					   req->cryptlen, req->iv);
-		err = crypto_skcipher_decrypt(subreq);
-		skcipher_request_zero(subreq);
-		return err;
+		skcipher_request_set_tfm(&rctx->fallback_req, ctx->fallback);
+		skcipher_request_set_callback(&rctx->fallback_req,
+					      req->base.flags,
+					      req->base.complete,
+					      req->base.data);
+		skcipher_request_set_crypt(&rctx->fallback_req, req->src,
+					   req->dst, req->cryptlen, req->iv);
+		return crypto_skcipher_decrypt(&rctx->fallback_req);
 	}
 
 	return sahara_aes_crypt(req, 0);
@@ -695,21 +693,19 @@ static int sahara_aes_ecb_decrypt(struct skcipher_request *req)
 
 static int sahara_aes_cbc_encrypt(struct skcipher_request *req)
 {
+	struct sahara_aes_reqctx *rctx = skcipher_request_ctx(req);
 	struct sahara_ctx *ctx = crypto_skcipher_ctx(
 		crypto_skcipher_reqtfm(req));
-	int err;
 
 	if (unlikely(ctx->keylen != AES_KEYSIZE_128)) {
-		SYNC_SKCIPHER_REQUEST_ON_STACK(subreq, ctx->fallback);
-
-		skcipher_request_set_sync_tfm(subreq, ctx->fallback);
-		skcipher_request_set_callback(subreq, req->base.flags,
-					      NULL, NULL);
-		skcipher_request_set_crypt(subreq, req->src, req->dst,
-					   req->cryptlen, req->iv);
-		err = crypto_skcipher_encrypt(subreq);
-		skcipher_request_zero(subreq);
-		return err;
+		skcipher_request_set_tfm(&rctx->fallback_req, ctx->fallback);
+		skcipher_request_set_callback(&rctx->fallback_req,
+					      req->base.flags,
+					      req->base.complete,
+					      req->base.data);
+		skcipher_request_set_crypt(&rctx->fallback_req, req->src,
+					   req->dst, req->cryptlen, req->iv);
+		return crypto_skcipher_encrypt(&rctx->fallback_req);
 	}
 
 	return sahara_aes_crypt(req, FLAGS_ENCRYPT | FLAGS_CBC);
@@ -717,21 +713,19 @@ static int sahara_aes_cbc_encrypt(struct skcipher_request *req)
 
 static int sahara_aes_cbc_decrypt(struct skcipher_request *req)
 {
+	struct sahara_aes_reqctx *rctx = skcipher_request_ctx(req);
 	struct sahara_ctx *ctx = crypto_skcipher_ctx(
 		crypto_skcipher_reqtfm(req));
-	int err;
 
 	if (unlikely(ctx->keylen != AES_KEYSIZE_128)) {
-		SYNC_SKCIPHER_REQUEST_ON_STACK(subreq, ctx->fallback);
-
-		skcipher_request_set_sync_tfm(subreq, ctx->fallback);
-		skcipher_request_set_callback(subreq, req->base.flags,
-					      NULL, NULL);
-		skcipher_request_set_crypt(subreq, req->src, req->dst,
-					   req->cryptlen, req->iv);
-		err = crypto_skcipher_decrypt(subreq);
-		skcipher_request_zero(subreq);
-		return err;
+		skcipher_request_set_tfm(&rctx->fallback_req, ctx->fallback);
+		skcipher_request_set_callback(&rctx->fallback_req,
+					      req->base.flags,
+					      req->base.complete,
+					      req->base.data);
+		skcipher_request_set_crypt(&rctx->fallback_req, req->src,
+					   req->dst, req->cryptlen, req->iv);
+		return crypto_skcipher_decrypt(&rctx->fallback_req);
 	}
 
 	return sahara_aes_crypt(req, FLAGS_CBC);
@@ -742,14 +736,15 @@ static int sahara_aes_init_tfm(struct crypto_skcipher *tfm)
 	const char *name = crypto_tfm_alg_name(&tfm->base);
 	struct sahara_ctx *ctx = crypto_skcipher_ctx(tfm);
 
-	ctx->fallback = crypto_alloc_sync_skcipher(name, 0,
+	ctx->fallback = crypto_alloc_skcipher(name, 0,
 					      CRYPTO_ALG_NEED_FALLBACK);
 	if (IS_ERR(ctx->fallback)) {
 		pr_err("Error allocating fallback algo %s\n", name);
 		return PTR_ERR(ctx->fallback);
 	}
 
-	crypto_skcipher_set_reqsize(tfm, sizeof(struct sahara_aes_reqctx));
+	crypto_skcipher_set_reqsize(tfm, sizeof(struct sahara_aes_reqctx) +
+					 crypto_skcipher_reqsize(ctx->fallback));
 
 	return 0;
 }
@@ -758,7 +753,7 @@ static void sahara_aes_exit_tfm(struct crypto_skcipher *tfm)
 {
 	struct sahara_ctx *ctx = crypto_skcipher_ctx(tfm);
 
-	crypto_free_sync_skcipher(ctx->fallback);
+	crypto_free_skcipher(ctx->fallback);
 }
 
 static u32 sahara_sha_init_hdr(struct sahara_dev *dev,
@@ -1048,13 +1043,13 @@ static int sahara_queue_manage(void *data)
 	do {
 		__set_current_state(TASK_INTERRUPTIBLE);
 
-		mutex_lock(&dev->queue_mutex);
+		spin_lock_bh(&dev->queue_spinlock);
 		backlog = crypto_get_backlog(&dev->queue);
 		async_req = crypto_dequeue_request(&dev->queue);
-		mutex_unlock(&dev->queue_mutex);
+		spin_unlock_bh(&dev->queue_spinlock);
 
 		if (backlog)
-			backlog->complete(backlog, -EINPROGRESS);
+			crypto_request_complete(backlog, -EINPROGRESS);
 
 		if (async_req) {
 			if (crypto_tfm_alg_type(async_req->tfm) ==
@@ -1070,7 +1065,7 @@ static int sahara_queue_manage(void *data)
 				ret = sahara_aes_process(req);
 			}
 
-			async_req->complete(async_req, ret);
+			crypto_request_complete(async_req, ret);
 
 			continue;
 		}
@@ -1097,9 +1092,9 @@ static int sahara_sha_enqueue(struct ahash_request *req, int last)
 		rctx->first = 1;
 	}
 
-	mutex_lock(&dev->queue_mutex);
+	spin_lock_bh(&dev->queue_spinlock);
 	ret = crypto_enqueue_request(&dev->queue, &req->base);
-	mutex_unlock(&dev->queue_mutex);
+	spin_unlock_bh(&dev->queue_spinlock);
 
 	wake_up_process(dev->kthread);
 
@@ -1355,12 +1350,6 @@ static void sahara_unregister_algs(struct sahara_dev *dev)
 			crypto_unregister_ahash(&sha_v4_algs[i]);
 }
 
-static const struct platform_device_id sahara_platform_ids[] = {
-	{ .name = "sahara-imx27" },
-	{ /* sentinel */ }
-};
-MODULE_DEVICE_TABLE(platform, sahara_platform_ids);
-
 static const struct of_device_id sahara_dt_ids[] = {
 	{ .compatible = "fsl,imx53-sahara" },
 	{ .compatible = "fsl,imx27-sahara" },
@@ -1460,7 +1449,7 @@ static int sahara_probe(struct platform_device *pdev)
 
 	crypto_init_queue(&dev->queue, SAHARA_QUEUE_LENGTH);
 
-	mutex_init(&dev->queue_mutex);
+	spin_lock_init(&dev->queue_spinlock);
 
 	dev_ptr = dev;
 
@@ -1545,7 +1534,6 @@ static struct platform_driver sahara_driver = {
 		.name	= SAHARA_NAME,
 		.of_match_table = sahara_dt_ids,
 	},
-	.id_table = sahara_platform_ids,
 };
 
 module_platform_driver(sahara_driver);

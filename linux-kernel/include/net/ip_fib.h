@@ -17,6 +17,7 @@
 #include <linux/rcupdate.h>
 #include <net/fib_notifier.h>
 #include <net/fib_rules.h>
+#include <net/inet_dscp.h>
 #include <net/inetpeer.h>
 #include <linux/percpu.h>
 #include <linux/notifier.h>
@@ -24,7 +25,7 @@
 
 struct fib_config {
 	u8			fc_dst_len;
-	u8			fc_tos;
+	dscp_t			fc_dscp;
 	u8			fc_protocol;
 	u8			fc_scope;
 	u8			fc_type;
@@ -79,6 +80,7 @@ struct fnhe_hash_bucket {
 
 struct fib_nh_common {
 	struct net_device	*nhc_dev;
+	netdevice_tracker	nhc_dev_tracker;
 	int			nhc_oif;
 	unsigned char		nhc_scope;
 	u8			nhc_family;
@@ -111,6 +113,7 @@ struct fib_nh {
 	int			nh_saddr_genid;
 #define fib_nh_family		nh_common.nhc_family
 #define fib_nh_dev		nh_common.nhc_dev
+#define fib_nh_dev_tracker	nh_common.nhc_dev_tracker
 #define fib_nh_oif		nh_common.nhc_oif
 #define fib_nh_flags		nh_common.nhc_flags
 #define fib_nh_lws		nh_common.nhc_lwtstate
@@ -133,7 +136,7 @@ struct fib_info {
 	struct hlist_node	fib_lhash;
 	struct list_head	nh_list;
 	struct net		*fib_net;
-	int			fib_treeref;
+	refcount_t		fib_treeref;
 	refcount_t		fib_clntref;
 	unsigned int		fib_flags;
 	unsigned char		fib_dead;
@@ -153,7 +156,7 @@ struct fib_info {
 	bool			nh_updated;
 	struct nexthop		*nh;
 	struct rcu_head		rcu;
-	struct fib_nh		fib_nh[0];
+	struct fib_nh		fib_nh[];
 };
 
 
@@ -209,11 +212,12 @@ struct fib_rt_info {
 	u32			tb_id;
 	__be32			dst;
 	int			dst_len;
-	u8			tos;
+	dscp_t			dscp;
 	u8			type;
 	u8			offload:1,
 				trap:1,
-				unused:6;
+				offload_failed:1,
+				unused:5;
 };
 
 struct fib_entry_notifier_info {
@@ -221,7 +225,7 @@ struct fib_entry_notifier_info {
 	u32 dst;
 	int dst_len;
 	struct fib_info *fi;
-	u8 tos;
+	dscp_t dscp;
 	u8 type;
 	u32 tb_id;
 };
@@ -250,14 +254,13 @@ struct fib_table {
 	int			tb_num_default;
 	struct rcu_head		rcu;
 	unsigned long 		*tb_data;
-	unsigned long		__data[0];
+	unsigned long		__data[];
 };
 
 struct fib_dump_filter {
 	u32			table_id;
 	/* filter_set is an optimization that an entry is set */
 	bool			filter_set;
-	bool			dump_all_families;
 	bool			dump_routes;
 	bool			dump_exceptions;
 	unsigned char		protocol;
@@ -438,7 +441,7 @@ int fib_validate_source(struct sk_buff *skb, __be32 src, __be32 dst,
 #ifdef CONFIG_IP_ROUTE_CLASSID
 static inline int fib_num_tclassid_users(struct net *net)
 {
-	return net->ipv4.fib_num_tclassid_users;
+	return atomic_read(&net->ipv4.fib_num_tclassid_users);
 }
 #else
 static inline int fib_num_tclassid_users(struct net *net)
@@ -448,6 +451,16 @@ static inline int fib_num_tclassid_users(struct net *net)
 #endif
 int fib_unmerge(struct net *net);
 
+static inline bool nhc_l3mdev_matches_dev(const struct fib_nh_common *nhc,
+const struct net_device *dev)
+{
+	if (nhc->nhc_dev == dev ||
+	    l3mdev_master_ifindex_rcu(nhc->nhc_dev) == dev->ifindex)
+		return true;
+
+	return false;
+}
+
 /* Exported by fib_semantics.c */
 int ip_fib_check_default(__be32 gw, struct net_device *dev);
 int fib_sync_down_dev(struct net_device *dev, unsigned long event, bool force);
@@ -455,6 +468,49 @@ int fib_sync_down_addr(struct net_device *dev, __be32 local);
 int fib_sync_up(struct net_device *dev, unsigned char nh_flags);
 void fib_sync_mtu(struct net_device *dev, u32 orig_mtu);
 void fib_nhc_update_mtu(struct fib_nh_common *nhc, u32 new, u32 orig);
+
+/* Fields used for sysctl_fib_multipath_hash_fields.
+ * Common to IPv4 and IPv6.
+ *
+ * Add new fields at the end. This is user API.
+ */
+#define FIB_MULTIPATH_HASH_FIELD_SRC_IP			BIT(0)
+#define FIB_MULTIPATH_HASH_FIELD_DST_IP			BIT(1)
+#define FIB_MULTIPATH_HASH_FIELD_IP_PROTO		BIT(2)
+#define FIB_MULTIPATH_HASH_FIELD_FLOWLABEL		BIT(3)
+#define FIB_MULTIPATH_HASH_FIELD_SRC_PORT		BIT(4)
+#define FIB_MULTIPATH_HASH_FIELD_DST_PORT		BIT(5)
+#define FIB_MULTIPATH_HASH_FIELD_INNER_SRC_IP		BIT(6)
+#define FIB_MULTIPATH_HASH_FIELD_INNER_DST_IP		BIT(7)
+#define FIB_MULTIPATH_HASH_FIELD_INNER_IP_PROTO		BIT(8)
+#define FIB_MULTIPATH_HASH_FIELD_INNER_FLOWLABEL	BIT(9)
+#define FIB_MULTIPATH_HASH_FIELD_INNER_SRC_PORT		BIT(10)
+#define FIB_MULTIPATH_HASH_FIELD_INNER_DST_PORT		BIT(11)
+
+#define FIB_MULTIPATH_HASH_FIELD_OUTER_MASK		\
+	(FIB_MULTIPATH_HASH_FIELD_SRC_IP |		\
+	 FIB_MULTIPATH_HASH_FIELD_DST_IP |		\
+	 FIB_MULTIPATH_HASH_FIELD_IP_PROTO |		\
+	 FIB_MULTIPATH_HASH_FIELD_FLOWLABEL |		\
+	 FIB_MULTIPATH_HASH_FIELD_SRC_PORT |		\
+	 FIB_MULTIPATH_HASH_FIELD_DST_PORT)
+
+#define FIB_MULTIPATH_HASH_FIELD_INNER_MASK		\
+	(FIB_MULTIPATH_HASH_FIELD_INNER_SRC_IP |	\
+	 FIB_MULTIPATH_HASH_FIELD_INNER_DST_IP |	\
+	 FIB_MULTIPATH_HASH_FIELD_INNER_IP_PROTO |	\
+	 FIB_MULTIPATH_HASH_FIELD_INNER_FLOWLABEL |	\
+	 FIB_MULTIPATH_HASH_FIELD_INNER_SRC_PORT |	\
+	 FIB_MULTIPATH_HASH_FIELD_INNER_DST_PORT)
+
+#define FIB_MULTIPATH_HASH_FIELD_ALL_MASK		\
+	(FIB_MULTIPATH_HASH_FIELD_OUTER_MASK |		\
+	 FIB_MULTIPATH_HASH_FIELD_INNER_MASK)
+
+#define FIB_MULTIPATH_HASH_FIELD_DEFAULT_MASK		\
+	(FIB_MULTIPATH_HASH_FIELD_SRC_IP |		\
+	 FIB_MULTIPATH_HASH_FIELD_DST_IP |		\
+	 FIB_MULTIPATH_HASH_FIELD_IP_PROTO)
 
 #ifdef CONFIG_IP_ROUTE_MULTIPATH
 int fib_multipath_hash(const struct net *net, const struct flowi4 *fl4,
@@ -470,8 +526,9 @@ int fib_nh_init(struct net *net, struct fib_nh *fib_nh,
 		struct fib_config *cfg, int nh_weight,
 		struct netlink_ext_ack *extack);
 void fib_nh_release(struct net *net, struct fib_nh *fib_nh);
-int fib_nh_common_init(struct fib_nh_common *nhc, struct nlattr *fc_encap,
-		       u16 fc_encap_type, void *cfg, gfp_t gfp_flags,
+int fib_nh_common_init(struct net *net, struct fib_nh_common *nhc,
+		       struct nlattr *fc_encap, u16 fc_encap_type,
+		       void *cfg, gfp_t gfp_flags,
 		       struct netlink_ext_ack *extack);
 void fib_nh_common_release(struct fib_nh_common *nhc);
 
@@ -479,6 +536,8 @@ void fib_nh_common_release(struct fib_nh_common *nhc);
 void fib_alias_hw_flags_set(struct net *net, const struct fib_rt_info *fri);
 void fib_trie_init(void);
 struct fib_table *fib_trie_table(u32 id, struct fib_table *alias);
+bool fib_lookup_good_nhc(const struct fib_nh_common *nhc, int fib_flags,
+			 const struct flowi4 *flp);
 
 static inline void fib_combine_itag(u32 *itag, const struct fib_result *res)
 {
@@ -541,5 +600,5 @@ int ip_valid_fib_dump_req(struct net *net, const struct nlmsghdr *nlh,
 int fib_nexthop_info(struct sk_buff *skb, const struct fib_nh_common *nh,
 		     u8 rt_family, unsigned char *flags, bool skip_oif);
 int fib_add_nexthop(struct sk_buff *skb, const struct fib_nh_common *nh,
-		    int nh_weight, u8 rt_family);
+		    int nh_weight, u8 rt_family, u32 nh_tclassid);
 #endif  /* _NET_FIB_H */

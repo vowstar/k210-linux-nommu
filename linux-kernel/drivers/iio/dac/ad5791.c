@@ -76,9 +76,11 @@ struct ad5791_chip_info {
  * @chip_info:		chip model specific constants
  * @vref_mv:		actual reference voltage used
  * @vref_neg_mv:	voltage of the negative supply
- * @pwr_down_mode	current power down mode
+ * @ctrl:		control register cache
+ * @pwr_down_mode:	current power down mode
+ * @pwr_down:		true if device is powered down
+ * @data:		spi transfer buffers
  */
-
 struct ad5791_state {
 	struct spi_device		*spi;
 	struct regulator		*reg_vdd;
@@ -93,12 +95,8 @@ struct ad5791_state {
 	union {
 		__be32 d32;
 		u8 d8[4];
-	} data[3] ____cacheline_aligned;
+	} data[3] __aligned(IIO_DMA_MINALIGN);
 };
-
-/**
- * ad5791_supported_device_ids:
- */
 
 enum ad5791_supported_device_ids {
 	ID_AD5760,
@@ -179,7 +177,7 @@ static ssize_t ad5791_read_dac_powerdown(struct iio_dev *indio_dev,
 {
 	struct ad5791_state *st = iio_priv(indio_dev);
 
-	return sprintf(buf, "%d\n", st->pwr_down);
+	return sysfs_emit(buf, "%d\n", st->pwr_down);
 }
 
 static ssize_t ad5791_write_dac_powerdown(struct iio_dev *indio_dev,
@@ -190,7 +188,7 @@ static ssize_t ad5791_write_dac_powerdown(struct iio_dev *indio_dev,
 	int ret;
 	struct ad5791_state *st = iio_priv(indio_dev);
 
-	ret = strtobool(buf, &pwr_down);
+	ret = kstrtobool(buf, &pwr_down);
 	if (ret)
 		return ret;
 
@@ -287,7 +285,7 @@ static const struct iio_chan_spec_ext_info ad5791_ext_info[] = {
 	},
 	IIO_ENUM("powerdown_mode", IIO_SHARED_BY_TYPE,
 		 &ad5791_powerdown_mode_enum),
-	IIO_ENUM_AVAILABLE("powerdown_mode", &ad5791_powerdown_mode_enum),
+	IIO_ENUM_AVAILABLE("powerdown_mode", IIO_SHARED_BY_TYPE, &ad5791_powerdown_mode_enum),
 	{ },
 };
 
@@ -409,7 +407,6 @@ static int ad5791_probe(struct spi_device *spi)
 		goto error_disable_reg_neg;
 
 	spi_set_drvdata(spi, indio_dev);
-	indio_dev->dev.parent = &spi->dev;
 	indio_dev->info = &ad5791_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	indio_dev->channels
@@ -431,7 +428,7 @@ error_disable_reg_pos:
 	return ret;
 }
 
-static int ad5791_remove(struct spi_device *spi)
+static void ad5791_remove(struct spi_device *spi)
 {
 	struct iio_dev *indio_dev = spi_get_drvdata(spi);
 	struct ad5791_state *st = iio_priv(indio_dev);
@@ -442,8 +439,6 @@ static int ad5791_remove(struct spi_device *spi)
 
 	if (!IS_ERR(st->reg_vss))
 		regulator_disable(st->reg_vss);
-
-	return 0;
 }
 
 static const struct spi_device_id ad5791_id[] = {

@@ -18,6 +18,7 @@
 #include <linux/of_platform.h>
 #include <linux/init.h>
 #include <linux/kexec.h>
+#include <linux/libfdt.h>
 #include <linux/of_fdt.h>
 #include <linux/cpu.h>
 #include <linux/interrupt.h>
@@ -58,6 +59,7 @@
 #include <asm/unwind.h>
 #include <asm/memblock.h>
 #include <asm/virt.h>
+#include <asm/kasan.h>
 
 #include "atags.h"
 
@@ -139,10 +141,10 @@ EXPORT_SYMBOL(outer_cache);
 int __cpu_architecture __read_mostly = CPU_ARCH_UNKNOWN;
 
 struct stack {
-	u32 irq[3];
-	u32 abt[3];
-	u32 und[3];
-	u32 fiq[3];
+	u32 irq[4];
+	u32 abt[4];
+	u32 und[4];
+	u32 fiq[4];
 } ____cacheline_aligned;
 
 #ifndef CONFIG_CPU_V7M
@@ -448,6 +450,8 @@ static void __init cpuid_init_hwcaps(void)
 {
 	int block;
 	u32 isar5;
+	u32 isar6;
+	u32 pfr2;
 
 	if (cpu_architecture() < CPU_ARCH_ARMv7)
 		return;
@@ -483,6 +487,18 @@ static void __init cpuid_init_hwcaps(void)
 	block = cpuid_feature_extract_field(isar5, 16);
 	if (block >= 1)
 		elf_hwcap2 |= HWCAP2_CRC32;
+
+	/* Check for Speculation barrier instruction */
+	isar6 = read_cpuid_ext(CPUID_EXT_ISAR6);
+	block = cpuid_feature_extract_field(isar6, 12);
+	if (block >= 1)
+		elf_hwcap2 |= HWCAP2_SB;
+
+	/* Check for Speculative Store Bypassing control */
+	pfr2 = read_cpuid_ext(CPUID_EXT_PFR2);
+	block = cpuid_feature_extract_field(pfr2, 4);
+	if (block >= 1)
+		elf_hwcap2 |= HWCAP2_SSBS;
 }
 
 static void __init elf_hwcap_fixup(void)
@@ -543,9 +559,11 @@ void notrace cpu_init(void)
 	 * In Thumb-2, msr with an immediate value is not allowed.
 	 */
 #ifdef CONFIG_THUMB2_KERNEL
-#define PLC	"r"
+#define PLC_l	"l"
+#define PLC_r	"r"
 #else
-#define PLC	"I"
+#define PLC_l	"I"
+#define PLC_r	"I"
 #endif
 
 	/*
@@ -567,15 +585,15 @@ void notrace cpu_init(void)
 	"msr	cpsr_c, %9"
 	    :
 	    : "r" (stk),
-	      PLC (PSR_F_BIT | PSR_I_BIT | IRQ_MODE),
+	      PLC_r (PSR_F_BIT | PSR_I_BIT | IRQ_MODE),
 	      "I" (offsetof(struct stack, irq[0])),
-	      PLC (PSR_F_BIT | PSR_I_BIT | ABT_MODE),
+	      PLC_r (PSR_F_BIT | PSR_I_BIT | ABT_MODE),
 	      "I" (offsetof(struct stack, abt[0])),
-	      PLC (PSR_F_BIT | PSR_I_BIT | UND_MODE),
+	      PLC_r (PSR_F_BIT | PSR_I_BIT | UND_MODE),
 	      "I" (offsetof(struct stack, und[0])),
-	      PLC (PSR_F_BIT | PSR_I_BIT | FIQ_MODE),
+	      PLC_r (PSR_F_BIT | PSR_I_BIT | FIQ_MODE),
 	      "I" (offsetof(struct stack, fiq[0])),
-	      PLC (PSR_F_BIT | PSR_I_BIT | SVC_MODE)
+	      PLC_l (PSR_F_BIT | PSR_I_BIT | SVC_MODE)
 	    : "r14");
 #endif
 }
@@ -763,7 +781,7 @@ int __init arm_add_memory(u64 start, u64 size)
 #ifndef CONFIG_PHYS_ADDR_T_64BIT
 	if (aligned_start > ULONG_MAX) {
 		pr_crit("Ignoring memory at 0x%08llx outside 32-bit physical address space\n",
-			(long long)start);
+			start);
 		return -EINVAL;
 	}
 
@@ -843,18 +861,24 @@ early_param("mem", early_mem);
 
 static void __init request_standard_resources(const struct machine_desc *mdesc)
 {
-	struct memblock_region *region;
+	phys_addr_t start, end, res_end;
 	struct resource *res;
+	u64 i;
 
 	kernel_code.start   = virt_to_phys(_text);
 	kernel_code.end     = virt_to_phys(__init_begin - 1);
 	kernel_data.start   = virt_to_phys(_sdata);
 	kernel_data.end     = virt_to_phys(_end - 1);
 
-	for_each_memblock(memory, region) {
-		phys_addr_t start = __pfn_to_phys(memblock_region_memory_base_pfn(region));
-		phys_addr_t end = __pfn_to_phys(memblock_region_memory_end_pfn(region)) - 1;
+	for_each_mem_range(i, &start, &end) {
 		unsigned long boot_alias_start;
+
+		/*
+		 * In memblock, end points to the first byte after the
+		 * range while in resourses, end points to the last byte in
+		 * the range.
+		 */
+		res_end = end - 1;
 
 		/*
 		 * Some systems have a special memory alias which is only
@@ -869,7 +893,7 @@ static void __init request_standard_resources(const struct machine_desc *mdesc)
 				      __func__, sizeof(*res));
 			res->name = "System RAM (boot alias)";
 			res->start = boot_alias_start;
-			res->end = phys_to_idmap(end);
+			res->end = phys_to_idmap(res_end);
 			res->flags = IORESOURCE_MEM | IORESOURCE_BUSY;
 			request_resource(&iomem_resource, res);
 		}
@@ -880,7 +904,7 @@ static void __init request_standard_resources(const struct machine_desc *mdesc)
 			      sizeof(*res));
 		res->name  = "System RAM";
 		res->start = start;
-		res->end = end;
+		res->end = res_end;
 		res->flags = IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY;
 
 		request_resource(&iomem_resource, res);
@@ -994,7 +1018,8 @@ static void __init reserve_crashkernel(void)
 	total_mem = get_total_mem();
 	ret = parse_crashkernel(boot_command_line, total_mem,
 				&crash_size, &crash_base);
-	if (ret)
+	/* invalid value specified or crashkernel=0 */
+	if (ret || !crash_size)
 		return;
 
 	if (crash_base <= 0) {
@@ -1002,29 +1027,23 @@ static void __init reserve_crashkernel(void)
 		unsigned long long lowmem_max = __pa(high_memory - 1) + 1;
 		if (crash_max > lowmem_max)
 			crash_max = lowmem_max;
-		crash_base = memblock_find_in_range(CRASH_ALIGN, crash_max,
-						    crash_size, CRASH_ALIGN);
+
+		crash_base = memblock_phys_alloc_range(crash_size, CRASH_ALIGN,
+						       CRASH_ALIGN, crash_max);
 		if (!crash_base) {
 			pr_err("crashkernel reservation failed - No suitable area found.\n");
 			return;
 		}
 	} else {
+		unsigned long long crash_max = crash_base + crash_size;
 		unsigned long long start;
 
-		start = memblock_find_in_range(crash_base,
-					       crash_base + crash_size,
-					       crash_size, SECTION_SIZE);
-		if (start != crash_base) {
+		start = memblock_phys_alloc_range(crash_size, SECTION_SIZE,
+						  crash_base, crash_max);
+		if (!start) {
 			pr_err("crashkernel reservation failed - memory is in use.\n");
 			return;
 		}
-	}
-
-	ret = memblock_reserve(crash_base, crash_size);
-	if (ret < 0) {
-		pr_warn("crashkernel reservation failed - memory is in use (0x%lx)\n",
-			(unsigned long)crash_base);
-		return;
 	}
 
 	pr_info("Reserving %ldMB of memory at %ldMB for crashkernel (System RAM: %ldMB)\n",
@@ -1073,21 +1092,43 @@ void __init hyp_mode_check(void)
 #endif
 }
 
+static void (*__arm_pm_restart)(enum reboot_mode reboot_mode, const char *cmd);
+
+static int arm_restart(struct notifier_block *nb, unsigned long action,
+		       void *data)
+{
+	__arm_pm_restart(action, data);
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block arm_restart_nb = {
+	.notifier_call = arm_restart,
+	.priority = 128,
+};
+
 void __init setup_arch(char **cmdline_p)
 {
-	const struct machine_desc *mdesc;
+	const struct machine_desc *mdesc = NULL;
+	void *atags_vaddr = NULL;
+
+	if (__atags_pointer)
+		atags_vaddr = FDT_VIRT_BASE(__atags_pointer);
 
 	setup_processor();
-	mdesc = setup_machine_fdt(__atags_pointer);
+	if (atags_vaddr) {
+		mdesc = setup_machine_fdt(atags_vaddr);
+		if (mdesc)
+			memblock_reserve(__atags_pointer,
+					 fdt_totalsize(atags_vaddr));
+	}
 	if (!mdesc)
-		mdesc = setup_machine_tags(__atags_pointer, __machine_arch_type);
+		mdesc = setup_machine_tags(atags_vaddr, __machine_arch_type);
 	if (!mdesc) {
 		early_print("\nError: invalid dtb and unrecognized/unsupported machine ID\n");
 		early_print("  r1=0x%08x, r2=0x%08x\n", __machine_arch_type,
 			    __atags_pointer);
 		if (__atags_pointer)
-			early_print("  r2[]=%*ph\n", 16,
-				    phys_to_virt(__atags_pointer));
+			early_print("  r2[]=%*ph\n", 16, atags_vaddr);
 		dump_machine_table();
 	}
 
@@ -1098,10 +1139,7 @@ void __init setup_arch(char **cmdline_p)
 	if (mdesc->reboot_mode != REBOOT_HARD)
 		reboot_mode = mdesc->reboot_mode;
 
-	init_mm.start_code = (unsigned long) _text;
-	init_mm.end_code   = (unsigned long) _etext;
-	init_mm.end_data   = (unsigned long) _edata;
-	init_mm.brk	   = (unsigned long) _end;
+	setup_initial_init_mm(_text, _etext, _edata, _end);
 
 	/* populate cmd_line too for later use, preserving boot_command_line */
 	strlcpy(cmd_line, boot_command_line, COMMAND_LINE_SIZE);
@@ -1117,10 +1155,10 @@ void __init setup_arch(char **cmdline_p)
 #endif
 	setup_dma_zone(mdesc);
 	xen_early_init();
-	efi_init();
+	arm_efi_init();
 	/*
 	 * Make sure the calculation for lowmem/highmem is set appropriately
-	 * before reserving/allocating any mmeory
+	 * before reserving/allocating any memory
 	 */
 	adjust_lowmem_bounds();
 	arm_memblock_init(mdesc);
@@ -1130,10 +1168,13 @@ void __init setup_arch(char **cmdline_p)
 	early_ioremap_reset();
 
 	paging_init(mdesc);
+	kasan_init();
 	request_standard_resources(mdesc);
 
-	if (mdesc->restart)
-		arm_pm_restart = mdesc->restart;
+	if (mdesc->restart) {
+		__arm_pm_restart = mdesc->restart;
+		register_restart_handler(&arm_restart_nb);
+	}
 
 	unflatten_device_tree();
 
@@ -1222,6 +1263,12 @@ static const char *hwcap_str[] = {
 	"vfpd32",
 	"lpae",
 	"evtstrm",
+	"fphp",
+	"asimdhp",
+	"asimddp",
+	"asimdfhm",
+	"asimdbf16",
+	"i8mm",
 	NULL
 };
 
@@ -1231,6 +1278,8 @@ static const char *hwcap2_str[] = {
 	"sha1",
 	"sha2",
 	"crc32",
+	"sb",
+	"ssbs",
 	NULL
 };
 

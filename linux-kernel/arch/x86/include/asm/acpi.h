@@ -14,6 +14,7 @@
 #include <asm/mmu.h>
 #include <asm/mpspec.h>
 #include <asm/x86_init.h>
+#include <asm/cpufeature.h>
 
 #ifdef CONFIG_ACPI_APEI
 # include <asm/pgtable_types.h>
@@ -62,6 +63,13 @@ extern int (*acpi_suspend_lowlevel)(void);
 
 /* Physical address to resume after wakeup */
 unsigned long acpi_get_wakeup_address(void);
+
+static inline bool acpi_skip_set_wakeup_address(void)
+{
+	return cpu_feature_enabled(X86_FEATURE_XENPV);
+}
+
+#define acpi_skip_set_wakeup_address acpi_skip_set_wakeup_address
 
 /*
  * Check if the CPU can handle C2 and deeper
@@ -159,7 +167,7 @@ static inline u64 x86_default_get_root_pointer(void)
 extern int x86_acpi_numa_init(void);
 #endif /* CONFIG_ACPI_NUMA */
 
-#define acpi_unlazy_tlb(x)	leave_mm(x)
+struct cper_ia_proc_ctx;
 
 #ifdef CONFIG_ACPI_APEI
 static inline pgprot_t arch_apei_get_mem_attribute(phys_addr_t addr)
@@ -178,6 +186,15 @@ static inline pgprot_t arch_apei_get_mem_attribute(phys_addr_t addr)
 	 * so return PAGE_KERNEL_NOENC until we know differently.
 	 */
 	return PAGE_KERNEL_NOENC;
+}
+
+int arch_apei_report_x86_error(struct cper_ia_proc_ctx *ctx_info,
+			       u64 lapic_id);
+#else
+static inline int arch_apei_report_x86_error(struct cper_ia_proc_ctx *ctx_info,
+					     u64 lapic_id)
+{
+	return -EINVAL;
 }
 #endif
 

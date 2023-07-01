@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Samsung EXYNOS SoC series Display Port PHY driver
+ * Samsung Exynos SoC series Display Port PHY driver
  *
  * Copyright (C) 2013 Samsung Electronics Co., Ltd.
  * Author: Jingoo Han <jg1.han@samsung.com>
@@ -83,8 +83,11 @@ static int exynos_dp_video_phy_probe(struct platform_device *pdev)
 	if (!state)
 		return -ENOMEM;
 
-	state->regs = syscon_regmap_lookup_by_phandle(dev->of_node,
-						      "samsung,pmu-syscon");
+	state->regs = syscon_node_to_regmap(dev->parent->of_node);
+	if (IS_ERR(state->regs))
+		/* Backwards compatible way */
+		state->regs = syscon_regmap_lookup_by_phandle(dev->of_node,
+							      "samsung,pmu-syscon");
 	if (IS_ERR(state->regs)) {
 		dev_err(dev, "Failed to lookup PMU regmap\n");
 		return PTR_ERR(state->regs);
@@ -115,5 +118,5 @@ static struct platform_driver exynos_dp_video_phy_driver = {
 module_platform_driver(exynos_dp_video_phy_driver);
 
 MODULE_AUTHOR("Jingoo Han <jg1.han@samsung.com>");
-MODULE_DESCRIPTION("Samsung EXYNOS SoC DP PHY driver");
+MODULE_DESCRIPTION("Samsung Exynos SoC DP PHY driver");
 MODULE_LICENSE("GPL v2");

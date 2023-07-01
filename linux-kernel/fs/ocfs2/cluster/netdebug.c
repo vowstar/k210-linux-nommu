@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-/* -*- mode: c; c-basic-offset: 8; -*-
- * vim: noexpandtab sw=8 ts=8 sts=0:
- *
+/*
  * netdebug.c
  *
  * debug functionality for o2net
@@ -440,11 +438,11 @@ static int o2net_fill_bitmap(char *buf, int len)
 	unsigned long map[BITS_TO_LONGS(O2NM_MAX_NODES)];
 	int i = -1, out = 0;
 
-	o2net_fill_node_map(map, sizeof(map));
+	o2net_fill_node_map(map, O2NM_MAX_NODES);
 
 	while ((i = find_next_bit(map, O2NM_MAX_NODES, i + 1)) < O2NM_MAX_NODES)
-		out += snprintf(buf + out, PAGE_SIZE - out, "%d ", i);
-	out += snprintf(buf + out, PAGE_SIZE - out, "\n");
+		out += scnprintf(buf + out, PAGE_SIZE - out, "%d ", i);
+	out += scnprintf(buf + out, PAGE_SIZE - out, "\n");
 
 	return out;
 }

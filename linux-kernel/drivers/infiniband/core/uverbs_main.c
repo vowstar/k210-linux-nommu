@@ -75,7 +75,7 @@ static dev_t dynamic_uverbs_dev;
 static struct class *uverbs_class;
 
 static DEFINE_IDA(uverbs_ida);
-static void ib_uverbs_add_one(struct ib_device *device);
+static int ib_uverbs_add_one(struct ib_device *device);
 static void ib_uverbs_remove_one(struct ib_device *device, void *client_data);
 
 /*
@@ -108,8 +108,11 @@ int uverbs_dealloc_mw(struct ib_mw *mw)
 	int ret;
 
 	ret = mw->device->ops.dealloc_mw(mw);
-	if (!ret)
-		atomic_dec(&pd->usecnt);
+	if (ret)
+		return ret;
+
+	atomic_dec(&pd->usecnt);
+	kfree(mw);
 	return ret;
 }
 
@@ -146,8 +149,7 @@ void ib_uverbs_release_ucq(struct ib_uverbs_completion_event_file *ev_file,
 
 void ib_uverbs_release_uevent(struct ib_uevent_object *uobj)
 {
-	struct ib_uverbs_async_event_file *async_file =
-		READ_ONCE(uobj->uobject.ufile->async_file);
+	struct ib_uverbs_async_event_file *async_file = uobj->event_file;
 	struct ib_uverbs_event *evt, *tmp;
 
 	if (!async_file)
@@ -159,6 +161,7 @@ void ib_uverbs_release_uevent(struct ib_uevent_object *uobj)
 		kfree(evt);
 	}
 	spin_unlock_irq(&async_file->ev_queue.lock);
+	uverbs_uobject_put(&async_file->uobj);
 }
 
 void ib_uverbs_detach_umcast(struct ib_qp *qp,
@@ -194,11 +197,11 @@ void ib_uverbs_release_file(struct kref *ref)
 		module_put(ib_dev->ops.owner);
 	srcu_read_unlock(&file->device->disassociate_srcu, srcu_key);
 
-	if (atomic_dec_and_test(&file->device->refcount))
+	if (refcount_dec_and_test(&file->device->refcount))
 		ib_uverbs_comp_dev(file->device);
 
-	if (file->async_file)
-		uverbs_uobject_put(&file->async_file->uobj);
+	if (file->default_async_file)
+		uverbs_uobject_put(&file->default_async_file->uobj);
 	put_device(&file->device->dev);
 
 	if (file->disassociate_page)
@@ -296,6 +299,8 @@ static __poll_t ib_uverbs_event_poll(struct ib_uverbs_event_queue *ev_queue,
 	spin_lock_irq(&ev_queue->lock);
 	if (!list_empty(&ev_queue->event_list))
 		pollflags = EPOLLIN | EPOLLRDNORM;
+	else if (ev_queue->is_closed)
+		pollflags = EPOLLERR;
 	spin_unlock_irq(&ev_queue->lock);
 
 	return pollflags;
@@ -346,7 +351,7 @@ const struct file_operations uverbs_async_event_fops = {
 	.owner	 = THIS_MODULE,
 	.read	 = ib_uverbs_async_event_read,
 	.poll    = ib_uverbs_async_event_poll,
-	.release = uverbs_uobject_fd_release,
+	.release = uverbs_async_event_release,
 	.fasync  = ib_uverbs_async_event_fasync,
 	.llseek	 = no_llseek,
 };
@@ -386,10 +391,9 @@ void ib_uverbs_comp_handler(struct ib_cq *cq, void *cq_context)
 	kill_fasync(&ev_queue->async_queue, SIGIO, POLL_IN);
 }
 
-static void
-ib_uverbs_async_handler(struct ib_uverbs_async_event_file *async_file,
-			__u64 element, __u64 event, struct list_head *obj_list,
-			u32 *counter)
+void ib_uverbs_async_handler(struct ib_uverbs_async_event_file *async_file,
+			     __u64 element, __u64 event,
+			     struct list_head *obj_list, u32 *counter)
 {
 	struct ib_uverbs_event *entry;
 	unsigned long flags;
@@ -426,7 +430,7 @@ ib_uverbs_async_handler(struct ib_uverbs_async_event_file *async_file,
 static void uverbs_uobj_event(struct ib_uevent_object *eobj,
 			      struct ib_event *event)
 {
-	ib_uverbs_async_handler(READ_ONCE(eobj->uobject.ufile->async_file),
+	ib_uverbs_async_handler(eobj->event_file,
 				eobj->uobject.user_handle, event->event,
 				&eobj->event_list, &eobj->events_reported);
 }
@@ -483,10 +487,10 @@ void ib_uverbs_init_async_event_file(
 
 	/* The first async_event_file becomes the default one for the file. */
 	mutex_lock(&uverbs_file->ucontext_lock);
-	if (!uverbs_file->async_file) {
+	if (!uverbs_file->default_async_file) {
 		/* Pairs with the put in ib_uverbs_release_file */
 		uverbs_uobject_get(&async_file->uobj);
-		smp_store_release(&uverbs_file->async_file, async_file);
+		smp_store_release(&uverbs_file->default_async_file, async_file);
 	}
 	mutex_unlock(&uverbs_file->ucontext_lock);
 
@@ -600,6 +604,7 @@ static ssize_t ib_uverbs_write(struct file *filp, const char __user *buf,
 	memset(bundle.attr_present, 0, sizeof(bundle.attr_present));
 	bundle.ufile = file;
 	bundle.context = NULL; /* only valid if bundle has uobject */
+	bundle.uobject = NULL;
 	if (!method_elm->is_ex) {
 		size_t in_len = hdr.in_words * 4 - sizeof(hdr);
 		size_t out_len = hdr.out_words * 4;
@@ -663,6 +668,9 @@ static ssize_t ib_uverbs_write(struct file *filp, const char __user *buf,
 	}
 
 	ret = method_elm->handler(&bundle);
+	if (bundle.uobject)
+		uverbs_finalize_object(bundle.uobject, UVERBS_ACCESS_NEW, true,
+				       !ret, &bundle);
 out_unlock:
 	srcu_read_unlock(&file->device->disassociate_srcu, srcu_key);
 	return (ret) ? : count;
@@ -820,6 +828,10 @@ void uverbs_user_mmap_disassociate(struct ib_uverbs_file *ufile)
 			ret = mmget_not_zero(mm);
 			if (!ret) {
 				list_del_init(&priv->list);
+				if (priv->entry) {
+					rdma_user_mmap_entry_put(priv->entry);
+					priv->entry = NULL;
+				}
 				mm = NULL;
 				continue;
 			}
@@ -830,14 +842,12 @@ void uverbs_user_mmap_disassociate(struct ib_uverbs_file *ufile)
 			return;
 
 		/*
-		 * The umap_lock is nested under mmap_sem since it used within
+		 * The umap_lock is nested under mmap_lock since it used within
 		 * the vma_ops callbacks, so we have to clean the list one mm
 		 * at a time to get the lock ordering right. Typically there
 		 * will only be one mm, so no big deal.
 		 */
-		down_read(&mm->mmap_sem);
-		if (!mmget_still_valid(mm))
-			goto skip_mm;
+		mmap_read_lock(mm);
 		mutex_lock(&ufile->umap_lock);
 		list_for_each_entry_safe (priv, next_priv, &ufile->umaps,
 					  list) {
@@ -856,8 +866,7 @@ void uverbs_user_mmap_disassociate(struct ib_uverbs_file *ufile)
 			}
 		}
 		mutex_unlock(&ufile->umap_lock);
-	skip_mm:
-		up_read(&mm->mmap_sem);
+		mmap_read_unlock(mm);
 		mmput(mm);
 	}
 }
@@ -882,7 +891,7 @@ static int ib_uverbs_open(struct inode *inode, struct file *filp)
 	int srcu_key;
 
 	dev = container_of(inode->i_cdev, struct ib_uverbs_device, cdev);
-	if (!atomic_inc_not_zero(&dev->refcount))
+	if (!refcount_inc_not_zero(&dev->refcount))
 		return -ENXIO;
 
 	get_device(&dev->dev);
@@ -946,7 +955,7 @@ err_module:
 err:
 	mutex_unlock(&dev->lists_mutex);
 	srcu_read_unlock(&dev->disassociate_srcu, srcu_key);
-	if (atomic_dec_and_test(&dev->refcount))
+	if (refcount_dec_and_test(&dev->refcount))
 		ib_uverbs_comp_dev(dev);
 
 	put_device(&dev->dev);
@@ -1037,7 +1046,7 @@ static ssize_t ibdev_show(struct device *device, struct device_attribute *attr,
 	srcu_key = srcu_read_lock(&dev->disassociate_srcu);
 	ib_dev = srcu_dereference(dev->ib_dev, &dev->disassociate_srcu);
 	if (ib_dev)
-		ret = sprintf(buf, "%s\n", dev_name(&ib_dev->dev));
+		ret = sysfs_emit(buf, "%s\n", dev_name(&ib_dev->dev));
 	srcu_read_unlock(&dev->disassociate_srcu, srcu_key);
 
 	return ret;
@@ -1056,7 +1065,7 @@ static ssize_t abi_version_show(struct device *device,
 	srcu_key = srcu_read_lock(&dev->disassociate_srcu);
 	ib_dev = srcu_dereference(dev->ib_dev, &dev->disassociate_srcu);
 	if (ib_dev)
-		ret = sprintf(buf, "%u\n", ib_dev->ops.uverbs_abi_ver);
+		ret = sysfs_emit(buf, "%u\n", ib_dev->ops.uverbs_abi_ver);
 	srcu_read_unlock(&dev->disassociate_srcu, srcu_key);
 
 	return ret;
@@ -1089,7 +1098,7 @@ static int ib_uverbs_create_uapi(struct ib_device *device,
 	return 0;
 }
 
-static void ib_uverbs_add_one(struct ib_device *device)
+static int ib_uverbs_add_one(struct ib_device *device)
 {
 	int devnum;
 	dev_t base;
@@ -1097,16 +1106,16 @@ static void ib_uverbs_add_one(struct ib_device *device)
 	int ret;
 
 	if (!device->ops.alloc_ucontext)
-		return;
+		return -EOPNOTSUPP;
 
 	uverbs_dev = kzalloc(sizeof(*uverbs_dev), GFP_KERNEL);
 	if (!uverbs_dev)
-		return;
+		return -ENOMEM;
 
 	ret = init_srcu_struct(&uverbs_dev->disassociate_srcu);
 	if (ret) {
 		kfree(uverbs_dev);
-		return;
+		return -ENOMEM;
 	}
 
 	device_initialize(&uverbs_dev->dev);
@@ -1115,7 +1124,7 @@ static void ib_uverbs_add_one(struct ib_device *device)
 	uverbs_dev->dev.release = ib_uverbs_release_dev;
 	uverbs_dev->groups[0] = &dev_attr_group;
 	uverbs_dev->dev.groups = uverbs_dev->groups;
-	atomic_set(&uverbs_dev->refcount, 1);
+	refcount_set(&uverbs_dev->refcount, 1);
 	init_completion(&uverbs_dev->comp);
 	uverbs_dev->xrcd_tree = RB_ROOT;
 	mutex_init(&uverbs_dev->xrcd_tree_mutex);
@@ -1126,15 +1135,18 @@ static void ib_uverbs_add_one(struct ib_device *device)
 
 	devnum = ida_alloc_max(&uverbs_ida, IB_UVERBS_MAX_DEVICES - 1,
 			       GFP_KERNEL);
-	if (devnum < 0)
+	if (devnum < 0) {
+		ret = -ENOMEM;
 		goto err;
+	}
 	uverbs_dev->devnum = devnum;
 	if (devnum >= IB_UVERBS_NUM_FIXED_MINOR)
 		base = dynamic_uverbs_dev + devnum - IB_UVERBS_NUM_FIXED_MINOR;
 	else
 		base = IB_UVERBS_BASE_DEV + devnum;
 
-	if (ib_uverbs_create_uapi(device, uverbs_dev))
+	ret = ib_uverbs_create_uapi(device, uverbs_dev);
+	if (ret)
 		goto err_uapi;
 
 	uverbs_dev->dev.devt = base;
@@ -1149,16 +1161,16 @@ static void ib_uverbs_add_one(struct ib_device *device)
 		goto err_uapi;
 
 	ib_set_client_data(device, &uverbs_client, uverbs_dev);
-	return;
+	return 0;
 
 err_uapi:
 	ida_free(&uverbs_ida, devnum);
 err:
-	if (atomic_dec_and_test(&uverbs_dev->refcount))
+	if (refcount_dec_and_test(&uverbs_dev->refcount))
 		ib_uverbs_comp_dev(uverbs_dev);
 	wait_for_completion(&uverbs_dev->comp);
 	put_device(&uverbs_dev->dev);
-	return;
+	return ret;
 }
 
 static void ib_uverbs_free_hw_resources(struct ib_uverbs_device *uverbs_dev,
@@ -1183,9 +1195,6 @@ static void ib_uverbs_free_hw_resources(struct ib_uverbs_device *uverbs_dev,
 		 */
 		mutex_unlock(&uverbs_dev->lists_mutex);
 
-		ib_uverbs_async_handler(READ_ONCE(file->async_file), 0,
-					IB_EVENT_DEVICE_FATAL, NULL, NULL);
-
 		uverbs_destroy_ufile_hw(file, RDMA_REMOVE_DRIVER_REMOVE);
 		kref_put(&file->ref, ib_uverbs_release_file);
 
@@ -1200,9 +1209,6 @@ static void ib_uverbs_remove_one(struct ib_device *device, void *client_data)
 {
 	struct ib_uverbs_device *uverbs_dev = client_data;
 	int wait_clients = 1;
-
-	if (!uverbs_dev)
-		return;
 
 	cdev_device_del(&uverbs_dev->cdev, &uverbs_dev->dev);
 	ida_free(&uverbs_ida, uverbs_dev->devnum);
@@ -1223,7 +1229,7 @@ static void ib_uverbs_remove_one(struct ib_device *device, void *client_data)
 		wait_clients = 0;
 	}
 
-	if (atomic_dec_and_test(&uverbs_dev->refcount))
+	if (refcount_dec_and_test(&uverbs_dev->refcount))
 		ib_uverbs_comp_dev(uverbs_dev);
 	if (wait_clients)
 		wait_for_completion(&uverbs_dev->comp);
@@ -1231,7 +1237,7 @@ static void ib_uverbs_remove_one(struct ib_device *device, void *client_data)
 	put_device(&uverbs_dev->dev);
 }
 
-static char *uverbs_devnode(struct device *dev, umode_t *mode)
+static char *uverbs_devnode(const struct device *dev, umode_t *mode)
 {
 	if (mode)
 		*mode = 0666;

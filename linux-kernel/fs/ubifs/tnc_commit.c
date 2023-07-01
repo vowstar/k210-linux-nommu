@@ -700,7 +700,7 @@ static int alloc_idx_lebs(struct ubifs_info *c, int cnt)
 		c->ilebs[c->ileb_cnt++] = lnum;
 		dbg_cmt("LEB %d", lnum);
 	}
-	if (dbg_is_chk_index(c) && !(prandom_u32() & 7))
+	if (dbg_is_chk_index(c) && !get_random_u32_below(8))
 		return -ENOSPC;
 	return 0;
 }
@@ -930,7 +930,7 @@ static int write_index(struct ubifs_info *c)
 		 * flag cleared before %COW_ZNODE. Specifically, it matters in
 		 * the 'dirty_cow_znode()' function. This is the reason for the
 		 * first barrier. Also, we want the bit changes to be seen to
-		 * other threads ASAP, to avoid unnecesarry copying, which is
+		 * other threads ASAP, to avoid unnecessary copying, which is
 		 * the reason for the second barrier.
 		 */
 		clear_bit(DIRTY_ZNODE, &znode->flags);

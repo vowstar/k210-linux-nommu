@@ -70,9 +70,6 @@ copy_ucs2_from_user_len(efi_char16_t **dst, efi_char16_t __user *src,
 		return 0;
 	}
 
-	if (!access_ok(src, 1))
-		return -EFAULT;
-
 	buf = memdup_user(src, len);
 	if (IS_ERR(buf)) {
 		*dst = NULL;
@@ -91,9 +88,6 @@ copy_ucs2_from_user_len(efi_char16_t **dst, efi_char16_t __user *src,
 static inline int
 get_ucs2_strsize_from_user(efi_char16_t __user *src, size_t *len)
 {
-	if (!access_ok(src, 1))
-		return -EFAULT;
-
 	*len = user_ucs2_strsize(src);
 	if (*len == 0)
 		return -EFAULT;
@@ -118,9 +112,6 @@ copy_ucs2_from_user(efi_char16_t **dst, efi_char16_t __user *src)
 {
 	size_t len;
 
-	if (!access_ok(src, 1))
-		return -EFAULT;
-
 	len = user_ucs2_strsize(src);
 	if (len == 0)
 		return -EFAULT;
@@ -141,9 +132,6 @@ copy_ucs2_to_user_len(efi_char16_t __user *dst, efi_char16_t *src, size_t len)
 {
 	if (!src)
 		return 0;
-
-	if (!access_ok(dst, 1))
-		return -EFAULT;
 
 	return copy_to_user(dst, src, len);
 }
@@ -675,6 +663,19 @@ out:
 	return rv;
 }
 
+static long efi_runtime_get_supported_mask(unsigned long arg)
+{
+	unsigned int __user *supported_mask;
+	int rv = 0;
+
+	supported_mask = (unsigned int *)arg;
+
+	if (put_user(efi.runtime_supported_mask, supported_mask))
+		rv = -EFAULT;
+
+	return rv;
+}
+
 static long efi_test_ioctl(struct file *file, unsigned int cmd,
 							unsigned long arg)
 {
@@ -711,6 +712,9 @@ static long efi_test_ioctl(struct file *file, unsigned int cmd,
 
 	case EFI_RUNTIME_RESET_SYSTEM:
 		return efi_runtime_reset_system(arg);
+
+	case EFI_RUNTIME_GET_SUPPORTED_MASK:
+		return efi_runtime_get_supported_mask(arg);
 	}
 
 	return -ENOTTY;

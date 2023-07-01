@@ -47,7 +47,6 @@
 #include "util/time-utils.h"
 #include "util/auxtrace.h"
 #include "util/units.h"
-#include "util/branch.h"
 #include "util/util.h" // perf_tip()
 #include "ui/ui.h"
 #include "ui/progress.h"
@@ -68,11 +67,21 @@
 #include <unistd.h>
 #include <linux/mman.h>
 
+#ifdef HAVE_LIBTRACEEVENT
+#include <traceevent/event-parse.h>
+#endif
+
 struct report {
 	struct perf_tool	tool;
 	struct perf_session	*session;
 	struct evswitch		evswitch;
-	bool			use_tui, use_gtk, use_stdio;
+#ifdef HAVE_SLANG_SUPPORT
+	bool			use_tui;
+#endif
+#ifdef HAVE_GTK2_SUPPORT
+	bool			use_gtk;
+#endif
+	bool			use_stdio;
 	bool			show_full_info;
 	bool			show_threads;
 	bool			inverted_callchain;
@@ -84,6 +93,9 @@ struct report {
 	bool			header_only;
 	bool			nonany_branch_mode;
 	bool			group_set;
+	bool			stitch_lbr;
+	bool			disable_order;
+	bool			skip_empty;
 	int			max_stack;
 	struct perf_read_values	show_threads_values;
 	struct annotation_options annotation_opts;
@@ -104,6 +116,7 @@ struct report {
 	bool			symbol_ipc;
 	bool			total_cycles_mode;
 	struct block_report	*block_reports;
+	int			nr_block_reports;
 };
 
 static int report__config(const char *var, const char *value, void *cb)
@@ -130,6 +143,11 @@ static int report__config(const char *var, const char *value, void *cb)
 
 	if (!strcmp(var, "report.sort_order")) {
 		default_sort_order = strdup(value);
+		return 0;
+	}
+
+	if (!strcmp(var, "report.skip-empty")) {
+		rep->skip_empty = perf_config_bool(var, value);
 		return 0;
 	}
 
@@ -185,23 +203,22 @@ static int hist_iter__branch_callback(struct hist_entry_iter *iter,
 {
 	struct hist_entry *he = iter->he;
 	struct report *rep = arg;
-	struct branch_info *bi;
+	struct branch_info *bi = he->branch_info;
 	struct perf_sample *sample = iter->sample;
 	struct evsel *evsel = iter->evsel;
 	int err;
 
+	branch_type_count(&rep->brtype_stat, &bi->flags,
+			  bi->from.addr, bi->to.addr);
+
 	if (!ui__has_annotation() && !rep->symbol_ipc)
 		return 0;
 
-	bi = he->branch_info;
 	err = addr_map_symbol__inc_samples(&bi->from, sample, evsel);
 	if (err)
 		goto out;
 
 	err = addr_map_symbol__inc_samples(&bi->to, sample, evsel);
-
-	branch_type_count(&rep->brtype_stat, &bi->flags,
-			  bi->from.addr, bi->to.addr);
 
 out:
 	return err;
@@ -211,7 +228,7 @@ static void setup_forced_leader(struct report *report,
 				struct evlist *evlist)
 {
 	if (report->group_set)
-		perf_evlist__force_leader(evlist);
+		evlist__force_leader(evlist);
 }
 
 static int process_feature_event(struct perf_session *session,
@@ -226,6 +243,8 @@ static int process_feature_event(struct perf_session *session,
 		pr_err("failed: wrong feature ID: %" PRI_lu64 "\n",
 		       event->feat.feat_id);
 		return -1;
+	} else if (rep->header_only) {
+		session_done = 1;
 	}
 
 	/*
@@ -266,6 +285,9 @@ static int process_sample_event(struct perf_tool *tool,
 			 event->header.type);
 		return -1;
 	}
+
+	if (rep->stitch_lbr)
+		al.thread->lbr_stitch_enable = true;
 
 	if (symbol_conf.hide_unresolved && al.sym == NULL)
 		goto out_put;
@@ -317,10 +339,10 @@ static int process_read_event(struct perf_tool *tool,
 	struct report *rep = container_of(tool, struct report, tool);
 
 	if (rep->show_threads) {
-		const char *name = perf_evsel__name(evsel);
+		const char *name = evsel__name(evsel);
 		int err = perf_read_values_add_value(&rep->show_threads_values,
 					   event->read.pid, event->read.tid,
-					   evsel->idx,
+					   evsel->core.idx,
 					   name,
 					   event->read.value);
 
@@ -335,16 +357,19 @@ static int process_read_event(struct perf_tool *tool,
 static int report__setup_sample_type(struct report *rep)
 {
 	struct perf_session *session = rep->session;
-	u64 sample_type = perf_evlist__combined_sample_type(session->evlist);
+	u64 sample_type = evlist__combined_sample_type(session->evlist);
 	bool is_pipe = perf_data__is_pipe(session->data);
+	struct evsel *evsel;
 
 	if (session->itrace_synth_opts->callchain ||
+	    session->itrace_synth_opts->add_callchain ||
 	    (!is_pipe &&
 	     perf_header__has_feat(&session->header, HEADER_AUXTRACE) &&
 	     !session->itrace_synth_opts->set))
 		sample_type |= PERF_SAMPLE_CALLCHAIN;
 
-	if (session->itrace_synth_opts->last_branch)
+	if (session->itrace_synth_opts->last_branch ||
+	    session->itrace_synth_opts->add_last_branch)
 		sample_type |= PERF_SAMPLE_BRANCH_STACK;
 
 	if (!is_pipe && !(sample_type & PERF_SAMPLE_CALLCHAIN)) {
@@ -389,6 +414,19 @@ static int report__setup_sample_type(struct report *rep)
 	}
 
 	if (sort__mode == SORT_MODE__MEMORY) {
+		/*
+		 * FIXUP: prior to kernel 5.18, Arm SPE missed to set
+		 * PERF_SAMPLE_DATA_SRC bit in sample type.  For backward
+		 * compatibility, set the bit if it's an old perf data file.
+		 */
+		evlist__for_each_entry(session->evlist, evsel) {
+			if (strstr(evsel->name, "arm_spe") &&
+				!(sample_type & PERF_SAMPLE_DATA_SRC)) {
+				evsel->core.attr.sample_type |= PERF_SAMPLE_DATA_SRC;
+				sample_type |= PERF_SAMPLE_DATA_SRC;
+			}
+		}
+
 		if (!is_pipe && !(sample_type & PERF_SAMPLE_DATA_SRC)) {
 			ui__error("Selected --mem-mode but no mem data. "
 				  "Did you call perf record without -d?\n");
@@ -396,20 +434,16 @@ static int report__setup_sample_type(struct report *rep)
 		}
 	}
 
-	if (symbol_conf.use_callchain || symbol_conf.cumulate_callchain) {
-		if ((sample_type & PERF_SAMPLE_REGS_USER) &&
-		    (sample_type & PERF_SAMPLE_STACK_USER)) {
-			callchain_param.record_mode = CALLCHAIN_DWARF;
-			dwarf_callchain_users = true;
-		} else if (sample_type & PERF_SAMPLE_BRANCH_STACK)
-			callchain_param.record_mode = CALLCHAIN_LBR;
-		else
-			callchain_param.record_mode = CALLCHAIN_FP;
+	callchain_param_setup(sample_type, perf_env__arch(&rep->session->header.env));
+
+	if (rep->stitch_lbr && (callchain_param.record_mode != CALLCHAIN_LBR)) {
+		ui__warning("Can't find LBR callchain. Switch off --stitch-lbr.\n"
+			    "Please apply --call-graph lbr when recording.\n");
+		rep->stitch_lbr = false;
 	}
 
 	/* ??? handle more cases than just ANY? */
-	if (!(perf_evlist__combined_branch_type(session->evlist) &
-				PERF_SAMPLE_BRANCH_ANY))
+	if (!(evlist__combined_branch_type(session->evlist) & PERF_SAMPLE_BRANCH_ANY))
 		rep->nonany_branch_mode = true;
 
 #if !defined(HAVE_LIBUNWIND_SUPPORT) && !defined(HAVE_DWARF_SUPPORT)
@@ -432,7 +466,7 @@ static size_t hists__fprintf_nr_sample_events(struct hists *hists, struct report
 {
 	size_t ret;
 	char unit;
-	unsigned long nr_samples = hists->stats.nr_events[PERF_RECORD_SAMPLE];
+	unsigned long nr_samples = hists->stats.nr_samples;
 	u64 nr_events = hists->stats.total_period;
 	struct evsel *evsel = hists_to_evsel(hists);
 	char buf[512];
@@ -447,10 +481,10 @@ static size_t hists__fprintf_nr_sample_events(struct hists *hists, struct report
 		nr_events = hists->stats.total_non_filtered_period;
 	}
 
-	if (perf_evsel__is_group_event(evsel)) {
+	if (evsel__is_group_event(evsel)) {
 		struct evsel *pos;
 
-		perf_evsel__group_desc(evsel, buf, size);
+		evsel__group_desc(evsel, buf, size);
 		evname = buf;
 
 		for_each_group_member(pos, evsel) {
@@ -460,7 +494,7 @@ static size_t hists__fprintf_nr_sample_events(struct hists *hists, struct report
 				nr_samples += pos_hists->stats.nr_non_filtered_samples;
 				nr_events += pos_hists->stats.total_non_filtered_period;
 			} else {
-				nr_samples += pos_hists->stats.nr_events[PERF_RECORD_SAMPLE];
+				nr_samples += pos_hists->stats.nr_samples;
 				nr_events += pos_hists->stats.total_period;
 			}
 		}
@@ -476,8 +510,7 @@ static size_t hists__fprintf_nr_sample_events(struct hists *hists, struct report
 	if (rep->time_str)
 		ret += fprintf(fp, " (time slices: %s)", rep->time_str);
 
-	if (symbol_conf.show_ref_callgraph &&
-	    strstr(evname, "call-graph=no")) {
+	if (symbol_conf.show_ref_callgraph && evname && strstr(evname, "call-graph=no")) {
 		ret += fprintf(fp, ", show reference callgraph");
 	}
 
@@ -493,8 +526,7 @@ static size_t hists__fprintf_nr_sample_events(struct hists *hists, struct report
 	return ret + fprintf(fp, "\n#\n");
 }
 
-static int perf_evlist__tui_block_hists_browse(struct evlist *evlist,
-					       struct report *rep)
+static int evlist__tui_block_hists_browse(struct evlist *evlist, struct report *rep)
 {
 	struct evsel *pos;
 	int i = 0, ret;
@@ -511,9 +543,7 @@ static int perf_evlist__tui_block_hists_browse(struct evlist *evlist,
 	return 0;
 }
 
-static int perf_evlist__tty_browse_hists(struct evlist *evlist,
-					 struct report *rep,
-					 const char *help)
+static int evlist__tty_browse_hists(struct evlist *evlist, struct report *rep, const char *help)
 {
 	struct evsel *pos;
 	int i = 0;
@@ -525,10 +555,12 @@ static int perf_evlist__tty_browse_hists(struct evlist *evlist,
 
 	evlist__for_each_entry(evlist, pos) {
 		struct hists *hists = evsel__hists(pos);
-		const char *evname = perf_evsel__name(pos);
+		const char *evname = evsel__name(pos);
 
-		if (symbol_conf.event_group &&
-		    !perf_evsel__is_group_leader(pos))
+		if (symbol_conf.event_group && !evsel__is_group_leader(pos))
+			continue;
+
+		if (rep->skip_empty && !hists->stats.nr_samples)
 			continue;
 
 		hists__fprintf_nr_sample_events(hists, rep, evname, stdout);
@@ -567,7 +599,7 @@ static void report__warn_kptr_restrict(const struct report *rep)
 	struct map *kernel_map = machine__kernel_map(&rep->session->machines.host);
 	struct kmap *kernel_kmap = kernel_map ? map__kmap(kernel_map) : NULL;
 
-	if (perf_evlist__exclude_kernel(rep->session->evlist))
+	if (evlist__exclude_kernel(rep->session->evlist))
 		return;
 
 	if (kernel_map == NULL ||
@@ -596,7 +628,7 @@ static int report__gtk_browse_hists(struct report *rep, const char *help)
 	int (*hist_browser)(struct evlist *evlist, const char *help,
 			    struct hist_browser_timer *timer, float min_pcnt);
 
-	hist_browser = dlsym(perf_gtk_handle, "perf_evlist__gtk_browse_hists");
+	hist_browser = dlsym(perf_gtk_handle, "evlist__gtk_browse_hists");
 
 	if (hist_browser == NULL) {
 		ui__error("GTK browser not found!\n");
@@ -611,41 +643,42 @@ static int report__browse_hists(struct report *rep)
 	int ret;
 	struct perf_session *session = rep->session;
 	struct evlist *evlist = session->evlist;
-	const char *help = perf_tip(system_path(TIPDIR));
+	char *help = NULL, *path = NULL;
 
-	if (help == NULL) {
+	path = system_path(TIPDIR);
+	if (perf_tip(&help, path) || help == NULL) {
 		/* fallback for people who don't install perf ;-) */
-		help = perf_tip(DOCDIR);
-		if (help == NULL)
-			help = "Cannot load tips.txt file, please install perf!";
+		free(path);
+		path = system_path(DOCDIR);
+		if (perf_tip(&help, path) || help == NULL)
+			help = strdup("Cannot load tips.txt file, please install perf!");
 	}
+	free(path);
 
 	switch (use_browser) {
 	case 1:
 		if (rep->total_cycles_mode) {
-			ret = perf_evlist__tui_block_hists_browse(evlist, rep);
+			ret = evlist__tui_block_hists_browse(evlist, rep);
 			break;
 		}
 
-		ret = perf_evlist__tui_browse_hists(evlist, help, NULL,
-						    rep->min_percent,
-						    &session->header.env,
-						    true, &rep->annotation_opts);
+		ret = evlist__tui_browse_hists(evlist, help, NULL, rep->min_percent,
+					       &session->header.env, true, &rep->annotation_opts);
 		/*
 		 * Usually "ret" is the last pressed key, and we only
 		 * care if the key notifies us to switch data file.
 		 */
-		if (ret != K_SWITCH_INPUT_DATA)
+		if (ret != K_SWITCH_INPUT_DATA && ret != K_RELOAD)
 			ret = 0;
 		break;
 	case 2:
 		ret = report__gtk_browse_hists(rep, help);
 		break;
 	default:
-		ret = perf_evlist__tty_browse_hists(evlist, rep, help);
+		ret = evlist__tty_browse_hists(evlist, rep, help);
 		break;
 	}
-
+	free(help);
 	return ret;
 }
 
@@ -660,7 +693,7 @@ static int report__collapse_hists(struct report *rep)
 	evlist__for_each_entry(rep->session->evlist, pos) {
 		struct hists *hists = evsel__hists(pos);
 
-		if (pos->idx == 0)
+		if (pos->core.idx == 0)
 			hists->symbol_filter_str = rep->symbol_filter_str;
 
 		hists->socket_filter = rep->socket_filter;
@@ -670,9 +703,8 @@ static int report__collapse_hists(struct report *rep)
 			break;
 
 		/* Non-group events are considered as leader */
-		if (symbol_conf.event_group &&
-		    !perf_evsel__is_group_leader(pos)) {
-			struct hists *leader_hists = evsel__hists(pos->leader);
+		if (symbol_conf.event_group && !evsel__is_group_leader(pos)) {
+			struct hists *leader_hists = evsel__hists(evsel__leader(pos));
 
 			hists__match(leader_hists, hists);
 			hists__link(leader_hists, hists);
@@ -706,16 +738,50 @@ static void report__output_resort(struct report *rep)
 	ui_progress__init(&prog, rep->nr_entries, "Sorting events for output...");
 
 	evlist__for_each_entry(rep->session->evlist, pos) {
-		perf_evsel__output_resort_cb(pos, &prog,
-					     hists__resort_cb, rep);
+		evsel__output_resort_cb(pos, &prog, hists__resort_cb, rep);
 	}
 
 	ui_progress__finish();
 }
 
+static int count_sample_event(struct perf_tool *tool __maybe_unused,
+			      union perf_event *event __maybe_unused,
+			      struct perf_sample *sample __maybe_unused,
+			      struct evsel *evsel,
+			      struct machine *machine __maybe_unused)
+{
+	struct hists *hists = evsel__hists(evsel);
+
+	hists__inc_nr_events(hists);
+	return 0;
+}
+
+static int count_lost_samples_event(struct perf_tool *tool,
+				    union perf_event *event,
+				    struct perf_sample *sample,
+				    struct machine *machine __maybe_unused)
+{
+	struct report *rep = container_of(tool, struct report, tool);
+	struct evsel *evsel;
+
+	evsel = evlist__id2evsel(rep->session->evlist, sample->id);
+	if (evsel) {
+		hists__inc_nr_lost_samples(evsel__hists(evsel),
+					   event->lost_samples.lost);
+	}
+	return 0;
+}
+
+static int process_attr(struct perf_tool *tool __maybe_unused,
+			union perf_event *event,
+			struct evlist **pevlist);
+
 static void stats_setup(struct report *rep)
 {
 	memset(&rep->tool, 0, sizeof(rep->tool));
+	rep->tool.attr = process_attr;
+	rep->tool.sample = count_sample_event;
+	rep->tool.lost_samples = count_lost_samples_event;
 	rep->tool.no_warn = true;
 }
 
@@ -723,7 +789,8 @@ static int stats_print(struct report *rep)
 {
 	struct perf_session *session = rep->session;
 
-	perf_session__fprintf_nr_events(session, stdout);
+	perf_session__fprintf_nr_events(session, stdout, rep->skip_empty);
+	evlist__fprintf_nr_events(session->evlist, stdout, rep->skip_empty);
 	return 0;
 }
 
@@ -735,6 +802,7 @@ static void tasks_setup(struct report *rep)
 		rep->tool.mmap = perf_event__process_mmap;
 		rep->tool.mmap2 = perf_event__process_mmap2;
 	}
+	rep->tool.attr = process_attr;
 	rep->tool.comm = perf_event__process_comm;
 	rep->tool.exit = perf_event__process_exit;
 	rep->tool.fork = perf_event__process_fork;
@@ -916,6 +984,8 @@ static int __cmd_report(struct report *rep)
 		return ret;
 	}
 
+	evlist__check_mem_load_aux(session->evlist);
+
 	if (rep->stats_mode)
 		return stats_print(rep);
 
@@ -935,8 +1005,10 @@ static int __cmd_report(struct report *rep)
 			perf_session__fprintf_dsos(session, stdout);
 
 		if (dump_trace) {
-			perf_session__fprintf_nr_events(session, stdout);
-			perf_evlist__fprintf_nr_events(session->evlist, stdout);
+			perf_session__fprintf_nr_events(session, stdout,
+							rep->skip_empty);
+			evlist__fprintf_nr_events(session->evlist, stdout,
+						  rep->skip_empty);
 			return 0;
 		}
 	}
@@ -966,8 +1038,19 @@ static int __cmd_report(struct report *rep)
 	report__output_resort(rep);
 
 	if (rep->total_cycles_mode) {
+		int block_hpps[6] = {
+			PERF_HPP_REPORT__BLOCK_TOTAL_CYCLES_PCT,
+			PERF_HPP_REPORT__BLOCK_LBR_CYCLES,
+			PERF_HPP_REPORT__BLOCK_CYCLES_PCT,
+			PERF_HPP_REPORT__BLOCK_AVG_CYCLES,
+			PERF_HPP_REPORT__BLOCK_RANGE,
+			PERF_HPP_REPORT__BLOCK_DSO,
+		};
+
 		rep->block_reports = block_info__create_report(session->evlist,
-							       rep->total_cycles);
+							       rep->total_cycles,
+							       block_hpps, 6,
+							       &rep->nr_block_reports);
 		if (!rep->block_reports)
 			return -1;
 	}
@@ -1069,6 +1152,26 @@ parse_percent_limit(const struct option *opt, const char *str,
 	return 0;
 }
 
+static int process_attr(struct perf_tool *tool __maybe_unused,
+			union perf_event *event,
+			struct evlist **pevlist)
+{
+	u64 sample_type;
+	int err;
+
+	err = perf_event__process_attr(tool, event, pevlist);
+	if (err)
+		return err;
+
+	/*
+	 * Check if we need to enable callchains based
+	 * on events sample_type.
+	 */
+	sample_type = evlist__combined_sample_type(*pevlist);
+	callchain_param_setup(sample_type, perf_env__arch((*pevlist)->env));
+	return 0;
+}
+
 int cmd_report(int argc, const char **argv)
 {
 	struct perf_session *session;
@@ -1094,12 +1197,15 @@ int cmd_report(int argc, const char **argv)
 			.mmap2		 = perf_event__process_mmap2,
 			.comm		 = perf_event__process_comm,
 			.namespaces	 = perf_event__process_namespaces,
+			.cgroup		 = perf_event__process_cgroup,
 			.exit		 = perf_event__process_exit,
 			.fork		 = perf_event__process_fork,
 			.lost		 = perf_event__process_lost,
 			.read		 = process_read_event,
-			.attr		 = perf_event__process_attr,
+			.attr		 = process_attr,
+#ifdef HAVE_LIBTRACEEVENT
 			.tracing_data	 = perf_event__process_tracing_data,
+#endif
 			.build_id	 = perf_event__process_build_id,
 			.id_index	 = perf_event__process_id_index,
 			.auxtrace_info	 = perf_event__process_auxtrace_info,
@@ -1113,13 +1219,16 @@ int cmd_report(int argc, const char **argv)
 		.pretty_printing_style	 = "normal",
 		.socket_filter		 = -1,
 		.annotation_opts	 = annotation__default_options,
+		.skip_empty		 = true,
 	};
+	char *sort_order_help = sort_help("sort by key(s):");
+	char *field_order_help = sort_help("output field(s): overhead period sample ");
 	const struct option options[] = {
 	OPT_STRING('i', "input", &input_name, "file",
 		    "input file name"),
 	OPT_INCR('v', "verbose", &verbose,
 		    "be more verbose (show symbol address, etc)"),
-	OPT_BOOLEAN('q', "quiet", &quiet, "Do not show any message"),
+	OPT_BOOLEAN('q', "quiet", &quiet, "Do not show any warnings or messages"),
 	OPT_BOOLEAN('D', "dump-raw-trace", &dump_trace,
 		    "dump raw trace in ASCII"),
 	OPT_BOOLEAN(0, "stats", &report.stats_mode, "Display event stats"),
@@ -1140,17 +1249,21 @@ int cmd_report(int argc, const char **argv)
 		    "Show per-thread event counters"),
 	OPT_STRING(0, "pretty", &report.pretty_printing_style, "key",
 		   "pretty printing style key: normal raw"),
+#ifdef HAVE_SLANG_SUPPORT
 	OPT_BOOLEAN(0, "tui", &report.use_tui, "Use the TUI interface"),
+#endif
+#ifdef HAVE_GTK2_SUPPORT
 	OPT_BOOLEAN(0, "gtk", &report.use_gtk, "Use the GTK2 interface"),
+#endif
 	OPT_BOOLEAN(0, "stdio", &report.use_stdio,
 		    "Use the stdio interface"),
 	OPT_BOOLEAN(0, "header", &report.header, "Show data header."),
 	OPT_BOOLEAN(0, "header-only", &report.header_only,
 		    "Show only data header."),
 	OPT_STRING('s', "sort", &sort_order, "key[,key2...]",
-		   sort_help("sort by key(s):")),
+		   sort_order_help),
 	OPT_STRING('F', "fields", &field_order, "key[,keys...]",
-		   sort_help("output field(s): overhead period sample ")),
+		   field_order_help),
 	OPT_BOOLEAN(0, "show-cpu-utilization", &symbol_conf.show_cpu_utilization,
 		    "Show sample percentage for different cpu modes"),
 	OPT_BOOLEAN_FLAG(0, "showcpuutilization", &symbol_conf.show_cpu_utilization,
@@ -1216,6 +1329,10 @@ int cmd_report(int argc, const char **argv)
 		    "Show a column with the sum of periods"),
 	OPT_BOOLEAN_SET(0, "group", &symbol_conf.event_group, &report.group_set,
 		    "Show event group information together"),
+	OPT_INTEGER(0, "group-sort-idx", &symbol_conf.group_sort_idx,
+		    "Sort the output by the event at the index n in group. "
+		    "If n is invalid, sort by the first event. "
+		    "WARNING: should be used on grouped events."),
 	OPT_CALLBACK_NOOPT('b', "branch-stack", &branch_mode, "",
 		    "use branch records for per branch histogram filling",
 		    parse_branch_mode),
@@ -1241,6 +1358,8 @@ int cmd_report(int argc, const char **argv)
 			"Show full source file name path for source lines"),
 	OPT_BOOLEAN(0, "show-ref-call-graph", &symbol_conf.show_ref_callgraph,
 		    "Show callgraph from reference event"),
+	OPT_BOOLEAN(0, "stitch-lbr", &report.stitch_lbr,
+		    "Enable LBR callgraph stitching approach"),
 	OPT_INTEGER(0, "socket-filter", &report.socket_filter,
 		    "only show processor socket that match with this filter"),
 	OPT_BOOLEAN(0, "raw-trace", &symbol_conf.raw_trace,
@@ -1264,6 +1383,10 @@ int cmd_report(int argc, const char **argv)
 	OPTS_EVSWITCH(&report.evswitch),
 	OPT_BOOLEAN(0, "total-cycles", &report.total_cycles_mode,
 		    "Sort all blocks by 'Sampled Cycles%'"),
+	OPT_BOOLEAN(0, "disable-order", &report.disable_order,
+		    "Disable raw trace ordering"),
+	OPT_BOOLEAN(0, "skip-empty", &report.skip_empty,
+		    "Do not display empty (or dummy) events in the output"),
 	OPT_END()
 	};
 	struct perf_data data = {
@@ -1273,11 +1396,11 @@ int cmd_report(int argc, const char **argv)
 	char sort_tmp[128];
 
 	if (ret < 0)
-		return ret;
+		goto exit;
 
 	ret = perf_config(report__config, &report);
 	if (ret)
-		return ret;
+		goto exit;
 
 	argc = parse_options(argc, argv, options, report_usage, 0);
 	if (argc) {
@@ -1291,32 +1414,30 @@ int cmd_report(int argc, const char **argv)
 		report.symbol_filter_str = argv[0];
 	}
 
-	if (annotate_check_args(&report.annotation_opts) < 0)
-		return -EINVAL;
+	if (annotate_check_args(&report.annotation_opts) < 0) {
+		ret = -EINVAL;
+		goto exit;
+	}
 
 	if (report.mmaps_mode)
 		report.tasks_mode = true;
 
+	if (dump_trace && report.disable_order)
+		report.tool.ordered_events = false;
+
 	if (quiet)
 		perf_quiet_option();
 
-	if (symbol_conf.vmlinux_name &&
-	    access(symbol_conf.vmlinux_name, R_OK)) {
-		pr_err("Invalid file: %s\n", symbol_conf.vmlinux_name);
-		return -EINVAL;
-	}
-	if (symbol_conf.kallsyms_name &&
-	    access(symbol_conf.kallsyms_name, R_OK)) {
-		pr_err("Invalid file: %s\n", symbol_conf.kallsyms_name);
-		return -EINVAL;
-	}
+	ret = symbol__validate_sym_arguments();
+	if (ret)
+		goto exit;
 
 	if (report.inverted_callchain)
 		callchain_param.order = ORDER_CALLER;
 	if (symbol_conf.cumulate_callchain && !callchain_param.order_set)
 		callchain_param.order = ORDER_CALLER;
 
-	if (itrace_synth_opts.callchain &&
+	if ((itrace_synth_opts.callchain || itrace_synth_opts.add_callchain) &&
 	    (int)itrace_synth_opts.callchain_sz > report.max_stack)
 		report.max_stack = itrace_synth_opts.callchain_sz;
 
@@ -1331,13 +1452,15 @@ int cmd_report(int argc, const char **argv)
 	data.force = symbol_conf.force;
 
 repeat:
-	session = perf_session__new(&data, false, &report.tool);
-	if (IS_ERR(session))
-		return PTR_ERR(session);
+	session = perf_session__new(&data, &report.tool);
+	if (IS_ERR(session)) {
+		ret = PTR_ERR(session);
+		goto exit;
+	}
 
 	ret = evswitch__init(&report.evswitch, session->evlist, stderr);
 	if (ret)
-		return ret;
+		goto exit;
 
 	if (zstd_init(&(session->zstd_data), 0) < 0)
 		pr_warning("Decompression initialization failed. Reported data may be incomplete.\n");
@@ -1353,12 +1476,18 @@ repeat:
 
 	has_br_stack = perf_header__has_feat(&session->header,
 					     HEADER_BRANCH_STACK);
-	if (perf_evlist__combined_sample_type(session->evlist) & PERF_SAMPLE_STACK_USER)
+	if (evlist__combined_sample_type(session->evlist) & PERF_SAMPLE_STACK_USER)
 		has_br_stack = false;
 
 	setup_forced_leader(&report, session->evlist);
 
-	if (itrace_synth_opts.last_branch)
+	if (symbol_conf.group_sort_idx && !session->evlist->core.nr_groups) {
+		parse_options_usage(NULL, options, "group-sort-idx", 0);
+		ret = -EINVAL;
+		goto error;
+	}
+
+	if (itrace_synth_opts.last_branch || itrace_synth_opts.add_last_branch)
 		has_br_stack = true;
 
 	if (has_br_stack && branch_call_mode)
@@ -1378,7 +1507,7 @@ repeat:
 	}
 	if (branch_call_mode) {
 		callchain_param.key = CCKEY_ADDRESS;
-		callchain_param.branch_callstack = 1;
+		callchain_param.branch_callstack = true;
 		symbol_conf.use_callchain = true;
 		callchain_register_param(&callchain_param);
 		if (sort_order == NULL)
@@ -1410,10 +1539,14 @@ repeat:
 
 	if (report.use_stdio)
 		use_browser = 0;
+#ifdef HAVE_SLANG_SUPPORT
 	else if (report.use_tui)
 		use_browser = 1;
+#endif
+#ifdef HAVE_GTK2_SUPPORT
 	else if (report.use_gtk)
 		use_browser = 2;
+#endif
 
 	/* Force tty output for header output and per-thread stat. */
 	if (report.header || report.header_only || report.show_threads)
@@ -1459,7 +1592,7 @@ repeat:
 		sort_order = sort_tmp;
 	}
 
-	if ((last_key != K_SWITCH_INPUT_DATA) &&
+	if ((last_key != K_SWITCH_INPUT_DATA && last_key != K_RELOAD) &&
 	    (setup_sorting(session->evlist) < 0)) {
 		if (sort_order)
 			parse_options_usage(report_usage, options, "s", 1);
@@ -1473,6 +1606,13 @@ repeat:
 		perf_session__fprintf_info(session, stdout,
 					   report.show_full_info);
 		if (report.header_only) {
+			if (data.is_pipe) {
+				/*
+				 * we need to process first few records
+				 * which contains PERF_RECORD_HEADER_FEATURE.
+				 */
+				perf_session__process_events(session);
+			}
 			ret = 0;
 			goto error;
 		}
@@ -1507,7 +1647,7 @@ repeat:
 			symbol_conf.priv_size += sizeof(u32);
 			symbol_conf.sort_by_name = true;
 		}
-		annotation_config__init();
+		annotation_config__init(&report.annotation_opts);
 	}
 
 	if (symbol__init(&session->header.env) < 0)
@@ -1526,6 +1666,7 @@ repeat:
 						  report.range_num);
 	}
 
+#ifdef HAVE_LIBTRACEEVENT
 	if (session->tevent.pevent &&
 	    tep_set_function_resolver(session->tevent.pevent,
 				      machine__resolve_kernel_addr,
@@ -1534,11 +1675,11 @@ repeat:
 		       __func__);
 		return -1;
 	}
-
+#endif
 	sort__setup_elide(stdout);
 
 	ret = __cmd_report(&report);
-	if (ret == K_SWITCH_INPUT_DATA) {
+	if (ret == K_SWITCH_INPUT_DATA || ret == K_RELOAD) {
 		perf_session__delete(session);
 		last_key = K_SWITCH_INPUT_DATA;
 		goto repeat;
@@ -1551,10 +1692,16 @@ error:
 		zfree(&report.ptime_range);
 	}
 
-	if (report.block_reports)
-		zfree(&report.block_reports);
+	if (report.block_reports) {
+		block_info__free_report(report.block_reports,
+					report.nr_block_reports);
+		report.block_reports = NULL;
+	}
 
 	zstd_fini(&(session->zstd_data));
 	perf_session__delete(session);
+exit:
+	free(sort_order_help);
+	free(field_order_help);
 	return ret;
 }

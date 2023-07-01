@@ -252,6 +252,12 @@ static const struct omap_clkctrl_reg_data dra7_l3instr_clkctrl_regs[] __initcons
 	{ 0 },
 };
 
+static const struct omap_clkctrl_reg_data dra7_iva_clkctrl_regs[] __initconst = {
+	{ DRA7_IVA_CLKCTRL, NULL, CLKF_HW_SUP | CLKF_NO_IDLEST, "dpll_iva_h12x2_ck" },
+	{ DRA7_SL2IF_CLKCTRL, NULL, CLKF_HW_SUP, "dpll_iva_h12x2_ck" },
+	{ 0 },
+};
+
 static const char * const dra7_dss_dss_clk_parents[] __initconst = {
 	"dpll_per_h12x2_ck",
 	NULL,
@@ -312,15 +318,6 @@ static const char * const dra7_gpu_hyd_mux_parents[] __initconst = {
 	NULL,
 };
 
-static const char * const dra7_gpu_sys_clk_parents[] __initconst = {
-	"sys_clkin",
-	NULL,
-};
-
-static const struct omap_clkctrl_div_data dra7_gpu_sys_clk_data __initconst = {
-	.max_div = 2,
-};
-
 static const struct omap_clkctrl_bit_data dra7_gpu_core_bit_data[] __initconst = {
 	{ 24, TI_CLK_MUX, dra7_gpu_core_mux_parents, NULL, },
 	{ 26, TI_CLK_MUX, dra7_gpu_hyd_mux_parents, NULL, },
@@ -328,7 +325,7 @@ static const struct omap_clkctrl_bit_data dra7_gpu_core_bit_data[] __initconst =
 };
 
 static const struct omap_clkctrl_reg_data dra7_gpu_clkctrl_regs[] __initconst = {
-	{ DRA7_GPU_CLKCTRL, dra7_gpu_core_bit_data, CLKF_SW_SUP, "gpu_cm:clk:0000:24", },
+	{ DRA7_GPU_CLKCTRL, dra7_gpu_core_bit_data, CLKF_SW_SUP, "gpu-clkctrl:0000:24", },
 	{ 0 },
 };
 
@@ -644,8 +641,9 @@ static const struct omap_clkctrl_reg_data dra7_l4sec_clkctrl_regs[] __initconst 
 	{ DRA7_L4SEC_AES1_CLKCTRL, NULL, CLKF_HW_SUP, "l3_iclk_div" },
 	{ DRA7_L4SEC_AES2_CLKCTRL, NULL, CLKF_HW_SUP, "l3_iclk_div" },
 	{ DRA7_L4SEC_DES_CLKCTRL, NULL, CLKF_HW_SUP, "l3_iclk_div" },
-	{ DRA7_L4SEC_RNG_CLKCTRL, NULL, CLKF_HW_SUP | CLKF_SOC_NONSEC, "" },
+	{ DRA7_L4SEC_RNG_CLKCTRL, NULL, CLKF_HW_SUP | CLKF_SOC_NONSEC, "l4_root_clk_div" },
 	{ DRA7_L4SEC_SHAM_CLKCTRL, NULL, CLKF_HW_SUP, "l3_iclk_div" },
+	{ DRA7_L4SEC_SHAM2_CLKCTRL, NULL, CLKF_HW_SUP, "l3_iclk_div" },
 	{ 0 },
 };
 
@@ -815,7 +813,7 @@ static const struct omap_clkctrl_reg_data dra7_wkupaon_clkctrl_regs[] __initcons
 	{ DRA7_WKUPAON_COUNTER_32K_CLKCTRL, NULL, 0, "wkupaon_iclk_mux" },
 	{ DRA7_WKUPAON_UART10_CLKCTRL, dra7_uart10_bit_data, CLKF_SW_SUP, "wkupaon-clkctrl:0060:24" },
 	{ DRA7_WKUPAON_DCAN1_CLKCTRL, dra7_dcan1_bit_data, CLKF_SW_SUP, "wkupaon-clkctrl:0068:24" },
-	{ DRA7_WKUPAON_ADC_CLKCTRL, NULL, CLKF_SW_SUP, "mcan_clk" },
+	{ DRA7_WKUPAON_ADC_CLKCTRL, NULL, CLKF_SW_SUP | CLKF_SOC_DRA76, "mcan_clk" },
 	{ 0 },
 };
 
@@ -835,6 +833,7 @@ const struct omap_clkctrl_data dra7_clkctrl_data[] __initconst = {
 	{ 0x4a008c00, dra7_atl_clkctrl_regs },
 	{ 0x4a008d20, dra7_l4cfg_clkctrl_regs },
 	{ 0x4a008e20, dra7_l3instr_clkctrl_regs },
+	{ 0x4a008f20, dra7_iva_clkctrl_regs },
 	{ 0x4a009020, dra7_cam_clkctrl_regs },
 	{ 0x4a009120, dra7_dss_clkctrl_regs },
 	{ 0x4a009220, dra7_gpu_clkctrl_regs },
@@ -947,10 +946,7 @@ int __init dra7xx_dt_clk_init(void)
 	int rc;
 	struct clk *dpll_ck, *hdcp_ck;
 
-	if (ti_clk_get_features()->flags & TI_CLK_CLKCTRL_COMPAT)
-		ti_dt_clocks_register(dra7xx_compat_clks);
-	else
-		ti_dt_clocks_register(dra7xx_clks);
+	ti_dt_clocks_register(dra7xx_clks);
 
 	omap2_clk_disable_autoidle_all();
 

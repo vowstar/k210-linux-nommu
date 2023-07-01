@@ -93,7 +93,6 @@ static const struct drm_display_mode ls037v7dw01_mode = {
 	.vsync_start = 640 + 1,
 	.vsync_end = 640 + 1 + 1,
 	.vtotal = 640 + 1 + 1 + 1,
-	.vrefresh = 58,
 	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
 	.flags = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC,
 	.width_mm = 56,
@@ -147,22 +146,19 @@ static int ls037v7dw01_probe(struct platform_device *pdev)
 	lcd->pdev = pdev;
 
 	lcd->vdd = devm_regulator_get(&pdev->dev, "envdd");
-	if (IS_ERR(lcd->vdd)) {
-		dev_err(&pdev->dev, "failed to get regulator\n");
-		return PTR_ERR(lcd->vdd);
-	}
+	if (IS_ERR(lcd->vdd))
+		return dev_err_probe(&pdev->dev, PTR_ERR(lcd->vdd),
+				     "failed to get regulator\n");
 
 	lcd->ini_gpio = devm_gpiod_get(&pdev->dev, "enable", GPIOD_OUT_LOW);
-	if (IS_ERR(lcd->ini_gpio)) {
-		dev_err(&pdev->dev, "failed to get enable gpio\n");
-		return PTR_ERR(lcd->ini_gpio);
-	}
+	if (IS_ERR(lcd->ini_gpio))
+		return dev_err_probe(&pdev->dev, PTR_ERR(lcd->ini_gpio),
+				     "failed to get enable gpio\n");
 
 	lcd->resb_gpio = devm_gpiod_get(&pdev->dev, "reset", GPIOD_OUT_LOW);
-	if (IS_ERR(lcd->resb_gpio)) {
-		dev_err(&pdev->dev, "failed to get reset gpio\n");
-		return PTR_ERR(lcd->resb_gpio);
-	}
+	if (IS_ERR(lcd->resb_gpio))
+		return dev_err_probe(&pdev->dev, PTR_ERR(lcd->resb_gpio),
+				     "failed to get reset gpio\n");
 
 	lcd->mo_gpio = devm_gpiod_get_index(&pdev->dev, "mode", 0,
 					    GPIOD_OUT_LOW);
@@ -188,7 +184,9 @@ static int ls037v7dw01_probe(struct platform_device *pdev)
 	drm_panel_init(&lcd->panel, &pdev->dev, &ls037v7dw01_funcs,
 		       DRM_MODE_CONNECTOR_DPI);
 
-	return drm_panel_add(&lcd->panel);
+	drm_panel_add(&lcd->panel);
+
+	return 0;
 }
 
 static int ls037v7dw01_remove(struct platform_device *pdev)

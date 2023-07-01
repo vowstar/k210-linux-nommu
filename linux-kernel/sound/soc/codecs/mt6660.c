@@ -1,15 +1,13 @@
-// SPDX-License-Identifier: GPL-2.0 //
+// SPDX-License-Identifier: GPL-2.0
 
 // Copyright (c) 2019 MediaTek Inc.
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/version.h>
 #include <linux/err.h>
 #include <linux/i2c.h>
 #include <linux/pm_runtime.h>
 #include <linux/delay.h>
-#include <linux/debugfs.h>
 #include <sound/soc.h>
 #include <sound/tlv.h>
 #include <sound/pcm_params.h>
@@ -49,13 +47,12 @@ static int mt6660_reg_write(void *context, unsigned int reg, unsigned int val)
 	struct mt6660_chip *chip = context;
 	int size = mt6660_get_reg_size(reg);
 	u8 reg_data[4];
-	int i, ret;
+	int i;
 
 	for (i = 0; i < size; i++)
 		reg_data[size - i - 1] = (val >> (8 * i)) & 0xff;
 
-	ret = i2c_smbus_write_i2c_block_data(chip->i2c, reg, size, reg_data);
-	return ret;
+	return i2c_smbus_write_i2c_block_data(chip->i2c, reg, size, reg_data);
 }
 
 static int mt6660_reg_read(void *context, unsigned int reg, unsigned int *val)
@@ -225,14 +222,87 @@ static int _mt6660_chip_power_on(struct mt6660_chip *chip, int on_off)
 				 0x01, on_off ? 0x00 : 0x01);
 }
 
+struct reg_table {
+	uint32_t addr;
+	uint32_t mask;
+	uint32_t val;
+};
+
+static const struct reg_table mt6660_setting_table[] = {
+	{ 0x20, 0x80, 0x00 },
+	{ 0x30, 0x01, 0x00 },
+	{ 0x50, 0x1c, 0x04 },
+	{ 0xB1, 0x0c, 0x00 },
+	{ 0xD3, 0x03, 0x03 },
+	{ 0xE0, 0x01, 0x00 },
+	{ 0x98, 0x44, 0x04 },
+	{ 0xB9, 0xff, 0x82 },
+	{ 0xB7, 0x7777, 0x7273 },
+	{ 0xB6, 0x07, 0x03 },
+	{ 0x6B, 0xe0, 0x20 },
+	{ 0x07, 0xff, 0x70 },
+	{ 0xBB, 0xff, 0x20 },
+	{ 0x69, 0xff, 0x40 },
+	{ 0xBD, 0xffff, 0x17f8 },
+	{ 0x70, 0xff, 0x15 },
+	{ 0x7C, 0xff, 0x00 },
+	{ 0x46, 0xff, 0x1d },
+	{ 0x1A, 0xffffffff, 0x7fdb7ffe },
+	{ 0x1B, 0xffffffff, 0x7fdb7ffe },
+	{ 0x51, 0xff, 0x58 },
+	{ 0xA2, 0xff, 0xce },
+	{ 0x33, 0xffff, 0x7fff },
+	{ 0x4C, 0xffff, 0x0116 },
+	{ 0x16, 0x1800, 0x0800 },
+	{ 0x68, 0x1f, 0x07 },
+};
+
+static int mt6660_component_setting(struct snd_soc_component *component)
+{
+	struct mt6660_chip *chip = snd_soc_component_get_drvdata(component);
+	int ret = 0;
+	size_t i = 0;
+
+	ret = _mt6660_chip_power_on(chip, 1);
+	if (ret < 0) {
+		dev_err(component->dev, "%s chip power on failed\n", __func__);
+		return ret;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(mt6660_setting_table); i++) {
+		ret = snd_soc_component_update_bits(component,
+				mt6660_setting_table[i].addr,
+				mt6660_setting_table[i].mask,
+				mt6660_setting_table[i].val);
+		if (ret < 0) {
+			dev_err(component->dev, "%s update 0x%02x failed\n",
+				__func__, mt6660_setting_table[i].addr);
+			return ret;
+		}
+	}
+
+	ret = _mt6660_chip_power_on(chip, 0);
+	if (ret < 0) {
+		dev_err(component->dev, "%s chip power off failed\n", __func__);
+		return ret;
+	}
+
+	return 0;
+}
+
 static int mt6660_component_probe(struct snd_soc_component *component)
 {
 	struct mt6660_chip *chip = snd_soc_component_get_drvdata(component);
+	int ret;
 
 	dev_dbg(component->dev, "%s\n", __func__);
 	snd_soc_component_init_regmap(component, chip->regmap);
 
-	return 0;
+	ret = mt6660_component_setting(component);
+	if (ret < 0)
+		dev_err(chip->dev, "mt6660 component setting failed\n");
+
+	return ret;
 }
 
 static void mt6660_component_remove(struct snd_soc_component *component)
@@ -253,6 +323,7 @@ static const struct snd_soc_component_driver mt6660_component_driver = {
 	.num_dapm_routes = ARRAY_SIZE(mt6660_component_dapm_routes),
 
 	.idle_bias_on = false, /* idle_bias_off = true */
+	.endianness = 1,
 };
 
 static int mt6660_component_aif_hw_params(struct snd_pcm_substream *substream,
@@ -333,9 +404,9 @@ static struct snd_soc_dai_driver mt6660_codec_dai = {
 		.formats = STUB_FORMATS,
 	},
 	/* dai properties */
-	.symmetric_rates = 1,
+	.symmetric_rate = 1,
 	.symmetric_channels = 1,
-	.symmetric_samplebits = 1,
+	.symmetric_sample_bits = 1,
 	/* dai operations */
 	.ops = &mt6660_component_aif_ops,
 };
@@ -386,8 +457,7 @@ static int _mt6660_read_chip_revision(struct mt6660_chip *chip)
 	return 0;
 }
 
-static int mt6660_i2c_probe(struct i2c_client *client,
-			    const struct i2c_device_id *id)
+static int mt6660_i2c_probe(struct i2c_client *client)
 {
 	struct mt6660_chip *chip = NULL;
 	int ret;
@@ -439,21 +509,24 @@ static int mt6660_i2c_probe(struct i2c_client *client,
 	ret = devm_snd_soc_register_component(chip->dev,
 					       &mt6660_component_driver,
 					       &mt6660_codec_dai, 1);
+	if (ret)
+		pm_runtime_disable(chip->dev);
+
 	return ret;
+
 probe_fail:
 	_mt6660_chip_power_on(chip, 0);
 	mutex_destroy(&chip->io_lock);
 	return ret;
 }
 
-static int mt6660_i2c_remove(struct i2c_client *client)
+static void mt6660_i2c_remove(struct i2c_client *client)
 {
 	struct mt6660_chip *chip = i2c_get_clientdata(client);
 
 	pm_runtime_disable(chip->dev);
 	pm_runtime_set_suspended(chip->dev);
 	mutex_destroy(&chip->io_lock);
-	return 0;
 }
 
 static int __maybe_unused mt6660_i2c_runtime_suspend(struct device *dev)
@@ -497,7 +570,7 @@ static struct i2c_driver mt6660_i2c_driver = {
 		.of_match_table = of_match_ptr(mt6660_of_id),
 		.pm = &mt6660_dev_pm_ops,
 	},
-	.probe = mt6660_i2c_probe,
+	.probe_new = mt6660_i2c_probe,
 	.remove = mt6660_i2c_remove,
 	.id_table = mt6660_i2c_id,
 };
@@ -506,4 +579,4 @@ module_i2c_driver(mt6660_i2c_driver);
 MODULE_AUTHOR("Jeff Chang <jeff_chang@richtek.com>");
 MODULE_DESCRIPTION("MT6660 SPKAMP Driver");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("1.0.7_G");
+MODULE_VERSION("1.0.8_G");

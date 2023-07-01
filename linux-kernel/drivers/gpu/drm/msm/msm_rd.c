@@ -29,8 +29,6 @@
  * or shader programs (if not emitted inline in cmdstream).
  */
 
-#ifdef CONFIG_DEBUG_FS
-
 #include <linux/circ_buf.h>
 #include <linux/debugfs.h>
 #include <linux/kfifo.h>
@@ -43,9 +41,11 @@
 #include "msm_gpu.h"
 #include "msm_gem.h"
 
-static bool rd_full = false;
+bool rd_full = false;
 MODULE_PARM_DESC(rd_full, "If true, $debugfs/.../rd will snapshot all buffer contents");
 module_param_named(rd_full, rd_full, bool, 0600);
+
+#ifdef CONFIG_DEBUG_FS
 
 enum rd_sect_type {
 	RD_NONE,
@@ -62,6 +62,7 @@ enum rd_sect_type {
 	RD_FRAG_SHADER,
 	RD_BUFFER_CONTENTS,
 	RD_GPU_ID,
+	RD_CHIP_ID,
 };
 
 #define BUF_SZ 512  /* should be power of 2 */
@@ -86,7 +87,7 @@ struct msm_rd_state {
 	struct msm_gem_submit *submit;
 
 	/* fifo access is synchronized on the producer side by
-	 * struct_mutex held by submit code (otherwise we could
+	 * gpu->lock held by submit code (otherwise we could
 	 * end up w/ cmds logged in different order than they
 	 * were executed).  And read_lock synchronizes the reads
 	 */
@@ -179,11 +180,15 @@ static int rd_open(struct inode *inode, struct file *file)
 	struct msm_gpu *gpu = priv->gpu;
 	uint64_t val;
 	uint32_t gpu_id;
+	uint32_t zero = 0;
 	int ret = 0;
 
-	mutex_lock(&dev->struct_mutex);
+	if (!gpu)
+		return -ENODEV;
 
-	if (rd->open || !gpu) {
+	mutex_lock(&gpu->lock);
+
+	if (rd->open) {
 		ret = -EBUSY;
 		goto out;
 	}
@@ -191,16 +196,24 @@ static int rd_open(struct inode *inode, struct file *file)
 	file->private_data = rd;
 	rd->open = true;
 
+	/* Reset fifo to clear any previously unread data: */
+	rd->fifo.head = rd->fifo.tail = 0;
+
 	/* the parsing tools need to know gpu-id to know which
 	 * register database to load.
+	 *
+	 * Note: These particular params do not require a context
 	 */
-	gpu->funcs->get_param(gpu, MSM_PARAM_GPU_ID, &val);
+	gpu->funcs->get_param(gpu, NULL, MSM_PARAM_GPU_ID, &val, &zero);
 	gpu_id = val;
 
 	rd_write_section(rd, RD_GPU_ID, &gpu_id, sizeof(gpu_id));
 
+	gpu->funcs->get_param(gpu, NULL, MSM_PARAM_CHIP_ID, &val, &zero);
+	rd_write_section(rd, RD_CHIP_ID, &val, sizeof(val));
+
 out:
-	mutex_unlock(&dev->struct_mutex);
+	mutex_unlock(&gpu->lock);
 	return ret;
 }
 
@@ -325,28 +338,25 @@ static void snapshot_buf(struct msm_rd_state *rd,
 	if (!(submit->bos[idx].flags & MSM_SUBMIT_BO_READ))
 		return;
 
+	msm_gem_lock(&obj->base);
 	buf = msm_gem_get_vaddr_active(&obj->base);
 	if (IS_ERR(buf))
-		return;
+		goto out_unlock;
 
 	buf += offset;
 
 	rd_write_section(rd, RD_BUFFER_CONTENTS, buf, size);
 
-	msm_gem_put_vaddr(&obj->base);
+	msm_gem_put_vaddr_locked(&obj->base);
+
+out_unlock:
+	msm_gem_unlock(&obj->base);
 }
 
-static bool
-should_dump(struct msm_gem_submit *submit, int idx)
-{
-	return rd_full || (submit->bos[idx].flags & MSM_SUBMIT_BO_DUMP);
-}
-
-/* called under struct_mutex */
+/* called under gpu->lock */
 void msm_rd_dump_submit(struct msm_rd_state *rd, struct msm_gem_submit *submit,
 		const char *fmt, ...)
 {
-	struct drm_device *dev = submit->dev;
 	struct task_struct *task;
 	char msg[256];
 	int i, n;
@@ -357,7 +367,7 @@ void msm_rd_dump_submit(struct msm_rd_state *rd, struct msm_gem_submit *submit,
 	/* writing into fifo is serialized by caller, and
 	 * rd->read_lock is used to serialize the reads
 	 */
-	WARN_ON(!mutex_is_locked(&dev->struct_mutex));
+	WARN_ON(!mutex_is_locked(&submit->gpu->lock));
 
 	if (fmt) {
 		va_list args;

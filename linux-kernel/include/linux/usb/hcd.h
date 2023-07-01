@@ -1,20 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
  * Copyright (c) 2001-2002 by David Brownell
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2 of the License, or (at your
- * option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
- * or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
- * for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #ifndef __USB_CORE_HCD_H
@@ -59,13 +45,14 @@
  * USB Host Controller Driver (usb_hcd) framework
  *
  * Since "struct usb_bus" is so thin, you can't share much code in it.
- * This framework is a layer over that, and should be more sharable.
+ * This framework is a layer over that, and should be more shareable.
  */
 
 /*-------------------------------------------------------------------------*/
 
 struct giveback_urb_bh {
 	bool running;
+	bool high_prio;
 	spinlock_t lock;
 	struct list_head  head;
 	struct tasklet_struct bh;
@@ -124,6 +111,7 @@ struct usb_hcd {
 #define HCD_FLAG_RH_RUNNING		5	/* root hub is running? */
 #define HCD_FLAG_DEAD			6	/* controller has died? */
 #define HCD_FLAG_INTF_AUTHORIZED	7	/* authorize interfaces? */
+#define HCD_FLAG_DEFER_RH_REGISTER	8	/* Defer roothub registration */
 
 	/* The flags can be tested using these macros; they are likely to
 	 * be slightly faster than test_bit().
@@ -134,6 +122,7 @@ struct usb_hcd {
 #define HCD_WAKEUP_PENDING(hcd)	((hcd)->flags & (1U << HCD_FLAG_WAKEUP_PENDING))
 #define HCD_RH_RUNNING(hcd)	((hcd)->flags & (1U << HCD_FLAG_RH_RUNNING))
 #define HCD_DEAD(hcd)		((hcd)->flags & (1U << HCD_FLAG_DEAD))
+#define HCD_DEFER_RH_REGISTER(hcd) ((hcd)->flags & (1U << HCD_FLAG_DEFER_RH_REGISTER))
 
 	/*
 	 * Specifies if interfaces are authorized by default
@@ -228,7 +217,7 @@ struct usb_hcd {
 	/* The HC driver's private data is stored at the end of
 	 * this structure.
 	 */
-	unsigned long hcd_priv[0]
+	unsigned long hcd_priv[]
 			__attribute__ ((aligned(sizeof(s64))));
 };
 
@@ -280,6 +269,9 @@ struct hc_driver {
 	/* called after entering D0 (etc), before resuming the hub */
 	int	(*pci_resume)(struct usb_hcd *hcd, bool hibernated);
 
+	/* called just before hibernate final D3 state, allows host to poweroff parts */
+	int	(*pci_poweroff_late)(struct usb_hcd *hcd, bool do_wakeup);
+
 	/* cleanly make HCD stop writing memory and doing I/O */
 	void	(*stop) (struct usb_hcd *hcd);
 
@@ -299,7 +291,7 @@ struct hc_driver {
 	 * (optional) these hooks allow an HCD to override the default DMA
 	 * mapping and unmapping routines.  In general, they shouldn't be
 	 * necessary unless the host controller has special DMA requirements,
-	 * such as alignment contraints.  If these are not specified, the
+	 * such as alignment constraints.  If these are not specified, the
 	 * general usb_hcd_(un)?map_urb_for_dma functions will be used instead
 	 * (and it may be a good idea to call these functions in your HCD
 	 * implementation)
@@ -409,7 +401,10 @@ struct hc_driver {
 	int	(*find_raw_port_number)(struct usb_hcd *, int);
 	/* Call for power on/off the port if necessary */
 	int	(*port_power)(struct usb_hcd *hcd, int portnum, bool enable);
-
+	/* Call for SINGLE_STEP_SET_FEATURE Test for USB2 EH certification */
+#define EHSET_TEST_SINGLE_STEP_SET_FEATURE 0x06
+	int	(*submit_single_step_set_feature)(struct usb_hcd *,
+			struct urb *, int);
 };
 
 static inline int hcd_giveback_urb_in_bh(struct usb_hcd *hcd)
@@ -474,12 +469,20 @@ int usb_hcd_setup_local_mem(struct usb_hcd *hcd, phys_addr_t phys_addr,
 
 struct platform_device;
 extern void usb_hcd_platform_shutdown(struct platform_device *dev);
+#ifdef CONFIG_USB_HCD_TEST_MODE
+extern int ehset_single_step_set_feature(struct usb_hcd *hcd, int port);
+#else
+static inline int ehset_single_step_set_feature(struct usb_hcd *hcd, int port)
+{
+	return 0;
+}
+#endif /* CONFIG_USB_HCD_TEST_MODE */
 
 #ifdef CONFIG_USB_PCI
 struct pci_dev;
 struct pci_device_id;
 extern int usb_hcd_pci_probe(struct pci_dev *dev,
-				const struct pci_device_id *id);
+			     const struct hc_driver *driver);
 extern void usb_hcd_pci_remove(struct pci_dev *dev);
 extern void usb_hcd_pci_shutdown(struct pci_dev *dev);
 
@@ -732,10 +735,6 @@ static inline void usbmon_urb_complete(struct usb_bus *bus, struct urb *urb,
 /*-------------------------------------------------------------------------*/
 
 /* random stuff */
-
-#define	RUN_CONTEXT (in_irq() ? "in_irq" \
-		: (in_interrupt() ? "in_interrupt" : "can sleep"))
-
 
 /* This rwsem is for use only by the hub driver and ehci-hcd.
  * Nobody else should touch it.

@@ -16,7 +16,6 @@
 #include <asm/eeh_event.h>
 #include <asm/ppc-pci.h>
 #include <asm/pci-bridge.h>
-#include <asm/prom.h>
 #include <asm/rtas.h>
 
 struct eeh_rmv_data {
@@ -104,13 +103,13 @@ static bool eeh_edev_actionable(struct eeh_dev *edev)
  */
 static inline struct pci_driver *eeh_pcid_get(struct pci_dev *pdev)
 {
-	if (!pdev || !pdev->driver)
+	if (!pdev || !pdev->dev.driver)
 		return NULL;
 
-	if (!try_module_get(pdev->driver->driver.owner))
+	if (!try_module_get(pdev->dev.driver->owner))
 		return NULL;
 
-	return pdev->driver;
+	return to_pci_driver(pdev->dev.driver);
 }
 
 /**
@@ -122,10 +121,10 @@ static inline struct pci_driver *eeh_pcid_get(struct pci_dev *pdev)
  */
 static inline void eeh_pcid_put(struct pci_dev *pdev)
 {
-	if (!pdev || !pdev->driver)
+	if (!pdev || !pdev->dev.driver)
 		return;
 
-	module_put(pdev->driver->driver.owner);
+	module_put(pdev->dev.driver->owner);
 }
 
 /**
@@ -214,7 +213,7 @@ static void eeh_dev_save_state(struct eeh_dev *edev, void *userdata)
 	pci_save_state(pdev);
 }
 
-static void eeh_set_channel_state(struct eeh_pe *root, enum pci_channel_state s)
+static void eeh_set_channel_state(struct eeh_pe *root, pci_channel_state_t s)
 {
 	struct eeh_pe *pe;
 	struct eeh_dev *edev, *tmp;
@@ -425,8 +424,8 @@ static enum pci_ers_result eeh_report_resume(struct eeh_dev *edev,
 
 	pci_uevent_ers(edev->pdev, PCI_ERS_RESULT_RECOVERED);
 #ifdef CONFIG_PCI_IOV
-	if (eeh_ops->notify_resume && eeh_dev_to_pdn(edev))
-		eeh_ops->notify_resume(eeh_dev_to_pdn(edev));
+	if (eeh_ops->notify_resume)
+		eeh_ops->notify_resume(edev);
 #endif
 	return PCI_ERS_RESULT_NONE;
 }
@@ -477,7 +476,7 @@ static void *eeh_add_virt_device(struct eeh_dev *edev)
 	}
 
 #ifdef CONFIG_PCI_IOV
-	pci_iov_add_virtfn(edev->physfn, eeh_dev_to_pdn(edev)->vf_index);
+	pci_iov_add_virtfn(edev->physfn, edev->vf_index);
 #endif
 	return NULL;
 }
@@ -521,9 +520,7 @@ static void eeh_rmv_device(struct eeh_dev *edev, void *userdata)
 
 	if (edev->physfn) {
 #ifdef CONFIG_PCI_IOV
-		struct pci_dn *pdn = eeh_dev_to_pdn(edev);
-
-		pci_iov_remove_virtfn(edev->physfn, pdn->vf_index);
+		pci_iov_remove_virtfn(edev->physfn, edev->vf_index);
 		edev->pdev = NULL;
 #endif
 		if (rmv_data)
@@ -544,7 +541,7 @@ static void *eeh_pe_detach_dev(struct eeh_pe *pe, void *userdata)
 			continue;
 
 		edev->mode &= ~(EEH_DEV_DISCONNECTED | EEH_DEV_IRQ_DISABLED);
-		eeh_rmv_from_parent_pe(edev);
+		eeh_pe_tree_remove(edev);
 	}
 
 	return NULL;
@@ -753,7 +750,7 @@ static void eeh_pe_cleanup(struct eeh_pe *pe)
  * @pdev: pci_dev to check
  *
  * This function may return a false positive if we can't determine the slot's
- * presence state. This might happen for for PCIe slots if the PE containing
+ * presence state. This might happen for PCIe slots if the PE containing
  * the upstream bridge is also frozen, or the bridge is part of the same PE
  * as the device.
  *
@@ -907,18 +904,19 @@ void eeh_handle_normal_event(struct eeh_pe *pe)
 	}
 #endif /* CONFIG_STACKTRACE */
 
+	eeh_for_each_pe(pe, tmp_pe)
+		eeh_pe_for_each_dev(tmp_pe, edev, tmp)
+			edev->mode &= ~EEH_DEV_NO_HANDLER;
+
 	eeh_pe_update_time_stamp(pe);
 	pe->freeze_count++;
 	if (pe->freeze_count > eeh_max_freezes) {
 		pr_err("EEH: PHB#%x-PE#%x has failed %d times in the last hour and has been permanently disabled.\n",
 		       pe->phb->global_number, pe->addr,
 		       pe->freeze_count);
-		result = PCI_ERS_RESULT_DISCONNECT;
-	}
 
-	eeh_for_each_pe(pe, tmp_pe)
-		eeh_pe_for_each_dev(tmp_pe, edev, tmp)
-			edev->mode &= ~EEH_DEV_NO_HANDLER;
+		goto recover_failed;
+	}
 
 	/* Walk the various device drivers attached to this slot through
 	 * a reset sequence, giving each an opportunity to do what it needs
@@ -930,39 +928,38 @@ void eeh_handle_normal_event(struct eeh_pe *pe)
 	 * the error. Override the result if necessary to have partially
 	 * hotplug for this case.
 	 */
-	if (result != PCI_ERS_RESULT_DISCONNECT) {
-		pr_warn("EEH: This PCI device has failed %d times in the last hour and will be permanently disabled after %d failures.\n",
-			pe->freeze_count, eeh_max_freezes);
-		pr_info("EEH: Notify device drivers to shutdown\n");
-		eeh_set_channel_state(pe, pci_channel_io_frozen);
-		eeh_set_irq_state(pe, false);
-		eeh_pe_report("error_detected(IO frozen)", pe,
-			      eeh_report_error, &result);
-		if ((pe->type & EEH_PE_PHB) &&
-		    result != PCI_ERS_RESULT_NONE &&
-		    result != PCI_ERS_RESULT_NEED_RESET)
-			result = PCI_ERS_RESULT_NEED_RESET;
-	}
+	pr_warn("EEH: This PCI device has failed %d times in the last hour and will be permanently disabled after %d failures.\n",
+		pe->freeze_count, eeh_max_freezes);
+	pr_info("EEH: Notify device drivers to shutdown\n");
+	eeh_set_channel_state(pe, pci_channel_io_frozen);
+	eeh_set_irq_state(pe, false);
+	eeh_pe_report("error_detected(IO frozen)", pe,
+		      eeh_report_error, &result);
+	if (result == PCI_ERS_RESULT_DISCONNECT)
+		goto recover_failed;
+
+	/*
+	 * Error logged on a PHB are always fences which need a full
+	 * PHB reset to clear so force that to happen.
+	 */
+	if ((pe->type & EEH_PE_PHB) && result != PCI_ERS_RESULT_NONE)
+		result = PCI_ERS_RESULT_NEED_RESET;
 
 	/* Get the current PCI slot state. This can take a long time,
 	 * sometimes over 300 seconds for certain systems.
 	 */
-	if (result != PCI_ERS_RESULT_DISCONNECT) {
-		rc = eeh_wait_state(pe, MAX_WAIT_FOR_RECOVERY*1000);
-		if (rc < 0 || rc == EEH_STATE_NOT_SUPPORT) {
-			pr_warn("EEH: Permanent failure\n");
-			result = PCI_ERS_RESULT_DISCONNECT;
-		}
+	rc = eeh_wait_state(pe, MAX_WAIT_FOR_RECOVERY * 1000);
+	if (rc < 0 || rc == EEH_STATE_NOT_SUPPORT) {
+		pr_warn("EEH: Permanent failure\n");
+		goto recover_failed;
 	}
 
 	/* Since rtas may enable MMIO when posting the error log,
 	 * don't post the error log until after all dev drivers
 	 * have been informed.
 	 */
-	if (result != PCI_ERS_RESULT_DISCONNECT) {
-		pr_info("EEH: Collect temporary log\n");
-		eeh_slot_error_detail(pe, EEH_LOG_TEMP);
-	}
+	pr_info("EEH: Collect temporary log\n");
+	eeh_slot_error_detail(pe, EEH_LOG_TEMP);
 
 	/* If all device drivers were EEH-unaware, then shut
 	 * down all of the device drivers, and hope they
@@ -972,9 +969,8 @@ void eeh_handle_normal_event(struct eeh_pe *pe)
 		pr_info("EEH: Reset with hotplug activity\n");
 		rc = eeh_reset_device(pe, bus, NULL, false);
 		if (rc) {
-			pr_warn("%s: Unable to reset, err=%d\n",
-				__func__, rc);
-			result = PCI_ERS_RESULT_DISCONNECT;
+			pr_warn("%s: Unable to reset, err=%d\n", __func__, rc);
+			goto recover_failed;
 		}
 	}
 
@@ -982,10 +978,10 @@ void eeh_handle_normal_event(struct eeh_pe *pe)
 	if (result == PCI_ERS_RESULT_CAN_RECOVER) {
 		pr_info("EEH: Enable I/O for affected devices\n");
 		rc = eeh_pci_enable(pe, EEH_OPT_THAW_MMIO);
+		if (rc < 0)
+			goto recover_failed;
 
-		if (rc < 0) {
-			result = PCI_ERS_RESULT_DISCONNECT;
-		} else if (rc) {
+		if (rc) {
 			result = PCI_ERS_RESULT_NEED_RESET;
 		} else {
 			pr_info("EEH: Notify device drivers to resume I/O\n");
@@ -993,15 +989,13 @@ void eeh_handle_normal_event(struct eeh_pe *pe)
 				      eeh_report_mmio_enabled, &result);
 		}
 	}
-
-	/* If all devices reported they can proceed, then re-enable DMA */
 	if (result == PCI_ERS_RESULT_CAN_RECOVER) {
 		pr_info("EEH: Enabled DMA for affected devices\n");
 		rc = eeh_pci_enable(pe, EEH_OPT_THAW_DMA);
+		if (rc < 0)
+			goto recover_failed;
 
-		if (rc < 0) {
-			result = PCI_ERS_RESULT_DISCONNECT;
-		} else if (rc) {
+		if (rc) {
 			result = PCI_ERS_RESULT_NEED_RESET;
 		} else {
 			/*
@@ -1019,16 +1013,15 @@ void eeh_handle_normal_event(struct eeh_pe *pe)
 		pr_info("EEH: Reset without hotplug activity\n");
 		rc = eeh_reset_device(pe, bus, &rmv_data, true);
 		if (rc) {
-			pr_warn("%s: Cannot reset, err=%d\n",
-				__func__, rc);
-			result = PCI_ERS_RESULT_DISCONNECT;
-		} else {
-			result = PCI_ERS_RESULT_NONE;
-			eeh_set_channel_state(pe, pci_channel_io_normal);
-			eeh_set_irq_state(pe, true);
-			eeh_pe_report("slot_reset", pe, eeh_report_reset,
-				      &result);
+			pr_warn("%s: Cannot reset, err=%d\n", __func__, rc);
+			goto recover_failed;
 		}
+
+		result = PCI_ERS_RESULT_NONE;
+		eeh_set_channel_state(pe, pci_channel_io_normal);
+		eeh_set_irq_state(pe, true);
+		eeh_pe_report("slot_reset", pe, eeh_report_reset,
+			      &result);
 	}
 
 	if ((result == PCI_ERS_RESULT_RECOVERED) ||
@@ -1056,45 +1049,47 @@ void eeh_handle_normal_event(struct eeh_pe *pe)
 		}
 
 		pr_info("EEH: Recovery successful.\n");
-	} else  {
-		/*
-		 * About 90% of all real-life EEH failures in the field
-		 * are due to poorly seated PCI cards. Only 10% or so are
-		 * due to actual, failed cards.
-		 */
-		pr_err("EEH: Unable to recover from failure from PHB#%x-PE#%x.\n"
-		       "Please try reseating or replacing it\n",
-			pe->phb->global_number, pe->addr);
+		goto out;
+	}
 
-		eeh_slot_error_detail(pe, EEH_LOG_PERM);
+recover_failed:
+	/*
+	 * About 90% of all real-life EEH failures in the field
+	 * are due to poorly seated PCI cards. Only 10% or so are
+	 * due to actual, failed cards.
+	 */
+	pr_err("EEH: Unable to recover from failure from PHB#%x-PE#%x.\n"
+		"Please try reseating or replacing it\n",
+		pe->phb->global_number, pe->addr);
 
-		/* Notify all devices that they're about to go down. */
-		eeh_set_channel_state(pe, pci_channel_io_perm_failure);
-		eeh_set_irq_state(pe, false);
-		eeh_pe_report("error_detected(permanent failure)", pe,
-			      eeh_report_failure, NULL);
+	eeh_slot_error_detail(pe, EEH_LOG_PERM);
 
-		/* Mark the PE to be removed permanently */
-		eeh_pe_state_mark(pe, EEH_PE_REMOVED);
+	/* Notify all devices that they're about to go down. */
+	eeh_set_irq_state(pe, false);
+	eeh_pe_report("error_detected(permanent failure)", pe,
+		      eeh_report_failure, NULL);
+	eeh_set_channel_state(pe, pci_channel_io_perm_failure);
 
-		/*
-		 * Shut down the device drivers for good. We mark
-		 * all removed devices correctly to avoid access
-		 * the their PCI config any more.
-		 */
-		if (pe->type & EEH_PE_VF) {
-			eeh_pe_dev_traverse(pe, eeh_rmv_device, NULL);
-			eeh_pe_dev_mode_mark(pe, EEH_DEV_REMOVED);
-		} else {
-			eeh_pe_state_clear(pe, EEH_PE_PRI_BUS, true);
-			eeh_pe_dev_mode_mark(pe, EEH_DEV_REMOVED);
+	/* Mark the PE to be removed permanently */
+	eeh_pe_state_mark(pe, EEH_PE_REMOVED);
 
-			pci_lock_rescan_remove();
-			pci_hp_remove_devices(bus);
-			pci_unlock_rescan_remove();
-			/* The passed PE should no longer be used */
-			return;
-		}
+	/*
+	 * Shut down the device drivers for good. We mark
+	 * all removed devices correctly to avoid access
+	 * the their PCI config any more.
+	 */
+	if (pe->type & EEH_PE_VF) {
+		eeh_pe_dev_traverse(pe, eeh_rmv_device, NULL);
+		eeh_pe_dev_mode_mark(pe, EEH_DEV_REMOVED);
+	} else {
+		eeh_pe_state_clear(pe, EEH_PE_PRI_BUS, true);
+		eeh_pe_dev_mode_mark(pe, EEH_DEV_REMOVED);
+
+		pci_lock_rescan_remove();
+		pci_hp_remove_devices(bus);
+		pci_unlock_rescan_remove();
+		/* The passed PE should no longer be used */
+		return;
 	}
 
 out:
@@ -1184,6 +1179,17 @@ void eeh_handle_special_event(void)
 			eeh_pe_state_mark(pe, EEH_PE_RECOVERING);
 			eeh_handle_normal_event(pe);
 		} else {
+			eeh_for_each_pe(pe, tmp_pe)
+				eeh_pe_for_each_dev(tmp_pe, edev, tmp_edev)
+					edev->mode &= ~EEH_DEV_NO_HANDLER;
+
+			/* Notify all devices to be down */
+			eeh_pe_state_clear(pe, EEH_PE_PRI_BUS, true);
+			eeh_pe_report(
+				"error_detected(permanent failure)", pe,
+				eeh_report_failure, NULL);
+			eeh_set_channel_state(pe, pci_channel_io_perm_failure);
+
 			pci_lock_rescan_remove();
 			list_for_each_entry(hose, &hose_list, list_node) {
 				phb_pe = eeh_phb_pe_get(hose);
@@ -1192,16 +1198,6 @@ void eeh_handle_special_event(void)
 				    (phb_pe->state & EEH_PE_RECOVERING))
 					continue;
 
-				eeh_for_each_pe(pe, tmp_pe)
-					eeh_pe_for_each_dev(tmp_pe, edev, tmp_edev)
-						edev->mode &= ~EEH_DEV_NO_HANDLER;
-
-				/* Notify all devices to be down */
-				eeh_pe_state_clear(pe, EEH_PE_PRI_BUS, true);
-				eeh_set_channel_state(pe, pci_channel_io_perm_failure);
-				eeh_pe_report(
-					"error_detected(permanent failure)", pe,
-					eeh_report_failure, NULL);
 				bus = eeh_pe_bus_get(phb_pe);
 				if (!bus) {
 					pr_err("%s: Cannot find PCI bus for "

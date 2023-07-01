@@ -189,8 +189,7 @@ static const struct regmap_irq max77843_muic_irq[] = {
 static const struct regmap_irq_chip max77843_muic_irq_chip = {
 	.name           = "max77843-muic",
 	.status_base    = MAX77843_MUIC_REG_INT1,
-	.mask_base      = MAX77843_MUIC_REG_INTMASK1,
-	.mask_invert    = true,
+	.unmask_base    = MAX77843_MUIC_REG_INTMASK1,
 	.num_regs       = 3,
 	.irqs           = max77843_muic_irq,
 	.num_irqs       = ARRAY_SIZE(max77843_muic_irq),
@@ -845,7 +844,7 @@ static int max77843_muic_probe(struct platform_device *pdev)
 			max77843_extcon_cable);
 	if (IS_ERR(info->edev)) {
 		dev_err(&pdev->dev, "Failed to allocate memory for extcon\n");
-		ret = -ENODEV;
+		ret = PTR_ERR(info->edev);
 		goto err_muic_irq;
 	}
 

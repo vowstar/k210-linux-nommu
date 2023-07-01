@@ -51,6 +51,12 @@
 			cache-size = <0x80000>;
 			cache-line-size = <64>;
 			cache-sets = <512>;
+			cache-level = <2>;
 		};
+	};
+
+	thermal-zones {
+		/delete-node/ ap-thermal-cpu2;
+		/delete-node/ ap-thermal-cpu3;
 	};
 };

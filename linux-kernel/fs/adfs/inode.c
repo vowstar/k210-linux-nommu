@@ -38,9 +38,9 @@ static int adfs_writepage(struct page *page, struct writeback_control *wbc)
 	return block_write_full_page(page, adfs_get_block, wbc);
 }
 
-static int adfs_readpage(struct file *file, struct page *page)
+static int adfs_read_folio(struct file *file, struct folio *folio)
 {
-	return block_read_full_page(page, adfs_get_block);
+	return block_read_full_folio(folio, adfs_get_block);
 }
 
 static void adfs_write_failed(struct address_space *mapping, loff_t to)
@@ -52,13 +52,13 @@ static void adfs_write_failed(struct address_space *mapping, loff_t to)
 }
 
 static int adfs_write_begin(struct file *file, struct address_space *mapping,
-			loff_t pos, unsigned len, unsigned flags,
+			loff_t pos, unsigned len,
 			struct page **pagep, void **fsdata)
 {
 	int ret;
 
 	*pagep = NULL;
-	ret = cont_write_begin(file, mapping, pos, len, flags, pagep, fsdata,
+	ret = cont_write_begin(file, mapping, pos, len, pagep, fsdata,
 				adfs_get_block,
 				&ADFS_I(mapping->host)->mmu_private);
 	if (unlikely(ret))
@@ -73,7 +73,9 @@ static sector_t _adfs_bmap(struct address_space *mapping, sector_t block)
 }
 
 static const struct address_space_operations adfs_aops = {
-	.readpage	= adfs_readpage,
+	.dirty_folio	= block_dirty_folio,
+	.invalidate_folio = block_invalidate_folio,
+	.read_folio	= adfs_read_folio,
 	.writepage	= adfs_writepage,
 	.write_begin	= adfs_write_begin,
 	.write_end	= generic_write_end,
@@ -292,14 +294,15 @@ out:
  * later.
  */
 int
-adfs_notify_change(struct dentry *dentry, struct iattr *attr)
+adfs_notify_change(struct mnt_idmap *idmap, struct dentry *dentry,
+		   struct iattr *attr)
 {
 	struct inode *inode = d_inode(dentry);
 	struct super_block *sb = inode->i_sb;
 	unsigned int ia_valid = attr->ia_valid;
 	int error;
 	
-	error = setattr_prepare(dentry, attr);
+	error = setattr_prepare(&nop_mnt_idmap, dentry, attr);
 
 	/*
 	 * we can't change the UID or GID of any file -
@@ -353,7 +356,6 @@ int adfs_write_inode(struct inode *inode, struct writeback_control *wbc)
 {
 	struct super_block *sb = inode->i_sb;
 	struct object_info obj;
-	int ret;
 
 	obj.indaddr	= ADFS_I(inode)->indaddr;
 	obj.name_len	= 0;
@@ -363,6 +365,5 @@ int adfs_write_inode(struct inode *inode, struct writeback_control *wbc)
 	obj.attr	= ADFS_I(inode)->attr;
 	obj.size	= inode->i_size;
 
-	ret = adfs_dir_update(sb, &obj, wbc->sync_mode == WB_SYNC_ALL);
-	return ret;
+	return adfs_dir_update(sb, &obj, wbc->sync_mode == WB_SYNC_ALL);
 }

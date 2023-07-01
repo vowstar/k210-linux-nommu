@@ -336,12 +336,15 @@ fail:
 	return NULL;
 }
 
-void sctp_ulpevent_nofity_peer_addr_change(struct sctp_transport *transport,
+void sctp_ulpevent_notify_peer_addr_change(struct sctp_transport *transport,
 					   int state, int error)
 {
 	struct sctp_association *asoc = transport->asoc;
 	struct sockaddr_storage addr;
 	struct sctp_ulpevent *event;
+
+	if (asoc->state < SCTP_STATE_ESTABLISHED)
+		return;
 
 	memset(&addr, 0, sizeof(struct sockaddr_storage));
 	memcpy(&addr, &transport->ipaddr, transport->af_specific->sockaddr_len);
@@ -1060,7 +1063,7 @@ void sctp_ulpevent_read_nxtinfo(const struct sctp_ulpevent *event,
 	struct sk_buff *skb;
 	int err;
 
-	skb = sctp_skb_recv_datagram(sk, MSG_PEEK, 1, &err);
+	skb = sctp_skb_recv_datagram(sk, MSG_PEEK | MSG_DONTWAIT, &err);
 	if (skb != NULL) {
 		__sctp_ulpevent_read_nxtinfo(sctp_skb2event(skb),
 					     msghdr, skb);

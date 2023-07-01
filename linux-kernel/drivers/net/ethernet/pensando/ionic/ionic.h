@@ -12,14 +12,18 @@ struct ionic_lif;
 
 #define IONIC_DRV_NAME		"ionic"
 #define IONIC_DRV_DESCRIPTION	"Pensando Ethernet NIC Driver"
-#define IONIC_DRV_VERSION	"0.20.0-k"
 
 #define PCI_VENDOR_ID_PENSANDO			0x1dd8
 
 #define PCI_DEVICE_ID_PENSANDO_IONIC_ETH_PF	0x1002
 #define PCI_DEVICE_ID_PENSANDO_IONIC_ETH_VF	0x1003
 
-#define DEVCMD_TIMEOUT  10
+#define DEVCMD_TIMEOUT			5
+#define IONIC_ADMINQ_TIME_SLICE		msecs_to_jiffies(100)
+
+#define IONIC_PHC_UPDATE_NS	10000000000	    /* 10s in nanoseconds */
+#define NORMAL_PPB		1000000000	    /* one billion parts per billion */
+#define SCALED_PPM		(1000000ull << 16)  /* 2^16 million parts per 2^16 million */
 
 struct ionic_vf {
 	u16	 index;
@@ -43,13 +47,11 @@ struct ionic {
 	struct ionic_dev_bar bars[IONIC_BARS_MAX];
 	unsigned int num_bars;
 	struct ionic_identity ident;
-	struct list_head lifs;
-	struct ionic_lif *master_lif;
+	struct ionic_lif *lif;
 	unsigned int nnqs_per_lif;
 	unsigned int neqs_per_lif;
 	unsigned int ntxqs_per_lif;
 	unsigned int nrxqs_per_lif;
-	DECLARE_BITMAP(lifbits, IONIC_LIFS_MAX);
 	unsigned int nintrs;
 	DECLARE_BITMAP(intrs, IONIC_INTR_CTRL_REGS_MAX);
 	struct work_struct nb_work;
@@ -67,11 +69,18 @@ struct ionic_admin_ctx {
 	union ionic_adminq_comp comp;
 };
 
-int ionic_napi(struct napi_struct *napi, int budget, ionic_cq_cb cb,
-	       ionic_cq_done_cb done_cb, void *done_arg);
-
+int ionic_adminq_post(struct ionic_lif *lif, struct ionic_admin_ctx *ctx);
+int ionic_adminq_wait(struct ionic_lif *lif, struct ionic_admin_ctx *ctx,
+		      const int err, const bool do_msg);
 int ionic_adminq_post_wait(struct ionic_lif *lif, struct ionic_admin_ctx *ctx);
+int ionic_adminq_post_wait_nomsg(struct ionic_lif *lif, struct ionic_admin_ctx *ctx);
+void ionic_adminq_netdev_err_print(struct ionic_lif *lif, u8 opcode,
+				   u8 status, int err);
+
 int ionic_dev_cmd_wait(struct ionic *ionic, unsigned long max_wait);
+int ionic_dev_cmd_wait_nomsg(struct ionic *ionic, unsigned long max_wait);
+void ionic_dev_cmd_dev_err_print(struct ionic *ionic, u8 opcode, u8 status,
+				 int err);
 int ionic_set_dma_mask(struct ionic *ionic);
 int ionic_setup(struct ionic *ionic);
 
@@ -82,5 +91,7 @@ int ionic_reset(struct ionic *ionic);
 int ionic_port_identify(struct ionic *ionic);
 int ionic_port_init(struct ionic *ionic);
 int ionic_port_reset(struct ionic *ionic);
+
+const char *ionic_vf_attr_to_str(enum ionic_vf_attr attr);
 
 #endif /* _IONIC_H_ */

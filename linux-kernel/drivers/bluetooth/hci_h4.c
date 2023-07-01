@@ -71,8 +71,6 @@ static int h4_close(struct hci_uart *hu)
 {
 	struct h4_struct *h4 = hu->priv;
 
-	hu->priv = NULL;
-
 	BT_DBG("hu %p", hu);
 
 	skb_queue_purge(&h4->txq);
@@ -85,7 +83,7 @@ static int h4_close(struct hci_uart *hu)
 	return 0;
 }
 
-/* Enqueue frame for transmittion (padding, crc, etc) */
+/* Enqueue frame for transmission (padding, crc, etc) */
 static int h4_enqueue(struct hci_uart *hu, struct sk_buff *skb)
 {
 	struct h4_struct *h4 = hu->priv;
@@ -254,7 +252,7 @@ struct sk_buff *h4_recv_buf(struct hci_dev *hdev, struct sk_buff *skb,
 			}
 
 			if (!dlen) {
-				hu->padding = (skb->len - 1) % alignment;
+				hu->padding = (skb->len + 1) % alignment;
 				hu->padding = (alignment - hu->padding) % alignment;
 
 				/* No more data, complete frame */
@@ -262,7 +260,7 @@ struct sk_buff *h4_recv_buf(struct hci_dev *hdev, struct sk_buff *skb,
 				skb = NULL;
 			}
 		} else {
-			hu->padding = (skb->len - 1) % alignment;
+			hu->padding = (skb->len + 1) % alignment;
 			hu->padding = (alignment - hu->padding) % alignment;
 
 			/* Complete frame */

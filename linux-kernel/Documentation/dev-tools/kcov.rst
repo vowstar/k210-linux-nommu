@@ -50,6 +50,7 @@ program using kcov:
     #include <sys/mman.h>
     #include <unistd.h>
     #include <fcntl.h>
+    #include <linux/types.h>
 
     #define KCOV_INIT_TRACE			_IOR('c', 1, unsigned long)
     #define KCOV_ENABLE			_IO('c', 100)
@@ -177,6 +178,8 @@ Comparison operands collection is similar to coverage collection:
 	/* Read number of comparisons collected. */
 	n = __atomic_load_n(&cover[0], __ATOMIC_RELAXED);
 	for (i = 0; i < n; i++) {
+		uint64_t ip;
+
 		type = cover[i * KCOV_WORDS_PER_CMP + 1];
 		/* arg1 and arg2 - operands of the comparison. */
 		arg1 = cover[i * KCOV_WORDS_PER_CMP + 2];
@@ -217,14 +220,15 @@ This allows to collect coverage from two types of kernel background
 threads: the global ones, that are spawned during kernel boot in a limited
 number of instances (e.g. one USB hub_event() worker thread is spawned per
 USB HCD); and the local ones, that are spawned when a user interacts with
-some kernel interface (e.g. vhost workers).
+some kernel interface (e.g. vhost workers); as well as from soft
+interrupts.
 
-To enable collecting coverage from a global background thread, a unique
-global handle must be assigned and passed to the corresponding
-kcov_remote_start() call. Then a userspace process can pass a list of such
-handles to the KCOV_REMOTE_ENABLE ioctl in the handles array field of the
-kcov_remote_arg struct. This will attach the used kcov device to the code
-sections, that are referenced by those handles.
+To enable collecting coverage from a global background thread or from a
+softirq, a unique global handle must be assigned and passed to the
+corresponding kcov_remote_start() call. Then a userspace process can pass
+a list of such handles to the KCOV_REMOTE_ENABLE ioctl in the handles
+array field of the kcov_remote_arg struct. This will attach the used kcov
+device to the code sections, that are referenced by those handles.
 
 Since there might be many local background threads spawned from different
 userspace processes, we can't use a single global handle per annotation.
@@ -242,13 +246,15 @@ handles as they don't belong to a particular subsystem. The bytes 4-7 are
 currently reserved and must be zero. In the future the number of bytes
 used for the subsystem or handle ids might be increased.
 
-When a particular userspace proccess collects coverage by via a common
+When a particular userspace process collects coverage via a common
 handle, kcov will collect coverage for each code section that is annotated
 to use the common handle obtained as kcov_handle from the current
 task_struct. However non common handles allow to collect coverage
 selectively from different subsystems.
 
 .. code-block:: c
+
+    /* Same includes and defines as above. */
 
     struct kcov_remote_arg {
 	__u32		trace_mode;

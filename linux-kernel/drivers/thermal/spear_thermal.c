@@ -91,7 +91,6 @@ static int spear_thermal_probe(struct platform_device *pdev)
 	struct thermal_zone_device *spear_thermal = NULL;
 	struct spear_thermal_dev *stdev;
 	struct device_node *np = pdev->dev.of_node;
-	struct resource *res;
 	int ret = 0, val;
 
 	if (!np || !of_property_read_u32(np, "st,thermal-flags", &val)) {
@@ -104,8 +103,7 @@ static int spear_thermal_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	/* Enable thermal sensor */
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	stdev->thermal_base = devm_ioremap_resource(&pdev->dev, res);
+	stdev->thermal_base = devm_platform_get_and_ioremap_resource(pdev, 0, NULL);
 	if (IS_ERR(stdev->thermal_base))
 		return PTR_ERR(stdev->thermal_base);
 
@@ -131,6 +129,11 @@ static int spear_thermal_probe(struct platform_device *pdev)
 		ret = PTR_ERR(spear_thermal);
 		goto disable_clk;
 	}
+	ret = thermal_zone_device_enable(spear_thermal);
+	if (ret) {
+		dev_err(&pdev->dev, "Cannot enable thermal zone\n");
+		goto unregister_tzd;
+	}
 
 	platform_set_drvdata(pdev, spear_thermal);
 
@@ -139,6 +142,8 @@ static int spear_thermal_probe(struct platform_device *pdev)
 
 	return 0;
 
+unregister_tzd:
+	thermal_zone_device_unregister(spear_thermal);
 disable_clk:
 	clk_disable(stdev->clk);
 

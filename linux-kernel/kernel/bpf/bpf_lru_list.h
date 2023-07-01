@@ -4,6 +4,7 @@
 #ifndef __BPF_LRU_LIST_H_
 #define __BPF_LRU_LIST_H_
 
+#include <linux/cache.h>
 #include <linux/list.h>
 #include <linux/spinlock_types.h>
 
@@ -30,7 +31,7 @@ struct bpf_lru_node {
 struct bpf_lru_list {
 	struct list_head lists[NR_BPF_LRU_LIST_T];
 	unsigned int counts[NR_BPF_LRU_LIST_COUNT];
-	/* The next inacitve list rotation starts from here */
+	/* The next inactive list rotation starts from here */
 	struct list_head *next_inactive_rotation;
 
 	raw_spinlock_t lock ____cacheline_aligned_in_smp;

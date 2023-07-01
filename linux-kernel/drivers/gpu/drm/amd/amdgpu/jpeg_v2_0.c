@@ -26,30 +26,11 @@
 #include "amdgpu_pm.h"
 #include "soc15.h"
 #include "soc15d.h"
+#include "jpeg_v2_0.h"
 
 #include "vcn/vcn_2_0_0_offset.h"
 #include "vcn/vcn_2_0_0_sh_mask.h"
 #include "ivsrcid/vcn/irqsrcs_vcn_2_0.h"
-
-#define mmUVD_JRBC_EXTERNAL_REG_INTERNAL_OFFSET 			0x1bfff
-#define mmUVD_JPEG_GPCOM_CMD_INTERNAL_OFFSET				0x4029
-#define mmUVD_JPEG_GPCOM_DATA0_INTERNAL_OFFSET				0x402a
-#define mmUVD_JPEG_GPCOM_DATA1_INTERNAL_OFFSET				0x402b
-#define mmUVD_LMI_JRBC_RB_MEM_WR_64BIT_BAR_LOW_INTERNAL_OFFSET		0x40ea
-#define mmUVD_LMI_JRBC_RB_MEM_WR_64BIT_BAR_HIGH_INTERNAL_OFFSET 	0x40eb
-#define mmUVD_LMI_JRBC_IB_VMID_INTERNAL_OFFSET				0x40cf
-#define mmUVD_LMI_JPEG_VMID_INTERNAL_OFFSET				0x40d1
-#define mmUVD_LMI_JRBC_IB_64BIT_BAR_LOW_INTERNAL_OFFSET 		0x40e8
-#define mmUVD_LMI_JRBC_IB_64BIT_BAR_HIGH_INTERNAL_OFFSET		0x40e9
-#define mmUVD_JRBC_IB_SIZE_INTERNAL_OFFSET				0x4082
-#define mmUVD_LMI_JRBC_RB_MEM_RD_64BIT_BAR_LOW_INTERNAL_OFFSET		0x40ec
-#define mmUVD_LMI_JRBC_RB_MEM_RD_64BIT_BAR_HIGH_INTERNAL_OFFSET 	0x40ed
-#define mmUVD_JRBC_RB_COND_RD_TIMER_INTERNAL_OFFSET			0x4085
-#define mmUVD_JRBC_RB_REF_DATA_INTERNAL_OFFSET				0x4084
-#define mmUVD_JRBC_STATUS_INTERNAL_OFFSET				0x4089
-#define mmUVD_JPEG_PITCH_INTERNAL_OFFSET				0x401f
-
-#define JRBC_DEC_EXTERNAL_REG_WRITE_ADDR				0x18000
 
 static void jpeg_v2_0_set_dec_ring_funcs(struct amdgpu_device *adev);
 static void jpeg_v2_0_set_irq_funcs(struct amdgpu_device *adev);
@@ -106,7 +87,8 @@ static int jpeg_v2_0_sw_init(void *handle)
 	ring->use_doorbell = true;
 	ring->doorbell_index = (adev->doorbell_index.vcn.vcn_ring0_1 << 1) + 1;
 	sprintf(ring->name, "jpeg_dec");
-	r = amdgpu_ring_init(adev, ring, 512, &adev->jpeg.inst->irq, 0);
+	r = amdgpu_ring_init(adev, ring, 512, &adev->jpeg.inst->irq,
+			     0, AMDGPU_RING_PRIO_DEFAULT, NULL);
 	if (r)
 		return r;
 
@@ -169,13 +151,12 @@ static int jpeg_v2_0_hw_init(void *handle)
 static int jpeg_v2_0_hw_fini(void *handle)
 {
 	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
-	struct amdgpu_ring *ring = &adev->jpeg.inst->ring_dec;
+
+	cancel_delayed_work_sync(&adev->vcn.idle_work);
 
 	if (adev->jpeg.cur_state != AMD_PG_STATE_GATE &&
 	      RREG32_SOC15(JPEG, 0, mmUVD_JRBC_STATUS))
 		jpeg_v2_0_set_powergating_state(adev, AMD_PG_STATE_GATE);
-
-	ring->sched.ready = false;
 
 	return 0;
 }
@@ -231,9 +212,9 @@ static int jpeg_v2_0_disable_power_gating(struct amdgpu_device *adev)
 		data = 1 << UVD_PGFSM_CONFIG__UVDJ_PWR_CONFIG__SHIFT;
 		WREG32(SOC15_REG_OFFSET(JPEG, 0, mmUVD_PGFSM_CONFIG), data);
 
-		SOC15_WAIT_ON_RREG(JPEG, 0,
+		r = SOC15_WAIT_ON_RREG(JPEG, 0,
 			mmUVD_PGFSM_STATUS, UVD_PGFSM_STATUS_UVDJ_PWR_ON,
-			UVD_PGFSM_STATUS__UVDJ_PWR_STATUS_MASK, r);
+			UVD_PGFSM_STATUS__UVDJ_PWR_STATUS_MASK);
 
 		if (r) {
 			DRM_ERROR("amdgpu: JPEG disable power gating failed\n");
@@ -248,7 +229,7 @@ static int jpeg_v2_0_disable_power_gating(struct amdgpu_device *adev)
 	return 0;
 }
 
-static int jpeg_v2_0_enable_power_gating(struct amdgpu_device* adev)
+static int jpeg_v2_0_enable_power_gating(struct amdgpu_device *adev)
 {
 	if (adev->pg_flags & AMD_PG_SUPPORT_JPEG) {
 		uint32_t data;
@@ -262,9 +243,9 @@ static int jpeg_v2_0_enable_power_gating(struct amdgpu_device* adev)
 		data = 2 << UVD_PGFSM_CONFIG__UVDJ_PWR_CONFIG__SHIFT;
 		WREG32(SOC15_REG_OFFSET(JPEG, 0, mmUVD_PGFSM_CONFIG), data);
 
-		SOC15_WAIT_ON_RREG(JPEG, 0, mmUVD_PGFSM_STATUS,
+		r = SOC15_WAIT_ON_RREG(JPEG, 0, mmUVD_PGFSM_STATUS,
 			(2 << UVD_PGFSM_STATUS__UVDJ_PWR_STATUS__SHIFT),
-			UVD_PGFSM_STATUS__UVDJ_PWR_STATUS_MASK, r);
+			UVD_PGFSM_STATUS__UVDJ_PWR_STATUS_MASK);
 
 		if (r) {
 			DRM_ERROR("amdgpu: JPEG enable power gating failed\n");
@@ -275,7 +256,7 @@ static int jpeg_v2_0_enable_power_gating(struct amdgpu_device* adev)
 	return 0;
 }
 
-static void jpeg_v2_0_disable_clock_gating(struct amdgpu_device* adev)
+static void jpeg_v2_0_disable_clock_gating(struct amdgpu_device *adev)
 {
 	uint32_t data;
 
@@ -298,7 +279,7 @@ static void jpeg_v2_0_disable_clock_gating(struct amdgpu_device* adev)
 	WREG32_SOC15(JPEG, 0, mmJPEG_CGC_GATE, data);
 }
 
-static void jpeg_v2_0_enable_clock_gating(struct amdgpu_device* adev)
+static void jpeg_v2_0_enable_clock_gating(struct amdgpu_device *adev)
 {
 	uint32_t data;
 
@@ -426,7 +407,7 @@ static uint64_t jpeg_v2_0_dec_ring_get_wptr(struct amdgpu_ring *ring)
 	struct amdgpu_device *adev = ring->adev;
 
 	if (ring->use_doorbell)
-		return adev->wb.wb[ring->wptr_offs];
+		return *ring->wptr_cpu_addr;
 	else
 		return RREG32_SOC15(JPEG, 0, mmUVD_JRBC_RB_WPTR);
 }
@@ -443,7 +424,7 @@ static void jpeg_v2_0_dec_ring_set_wptr(struct amdgpu_ring *ring)
 	struct amdgpu_device *adev = ring->adev;
 
 	if (ring->use_doorbell) {
-		adev->wb.wb[ring->wptr_offs] = lower_32_bits(ring->wptr);
+		*ring->wptr_cpu_addr = lower_32_bits(ring->wptr);
 		WDOORBELL32(ring->doorbell_index, lower_32_bits(ring->wptr));
 	} else {
 		WREG32_SOC15(JPEG, 0, mmUVD_JRBC_RB_WPTR, lower_32_bits(ring->wptr));
@@ -490,7 +471,9 @@ void jpeg_v2_0_dec_ring_insert_end(struct amdgpu_ring *ring)
  * jpeg_v2_0_dec_ring_emit_fence - emit an fence & trap command
  *
  * @ring: amdgpu_ring pointer
- * @fence: fence to emit
+ * @addr: address
+ * @seq: sequence number
+ * @flags: fence related flags
  *
  * Write a fence and a trap command to the ring.
  */
@@ -539,7 +522,9 @@ void jpeg_v2_0_dec_ring_emit_fence(struct amdgpu_ring *ring, u64 addr, u64 seq,
  * jpeg_v2_0_dec_ring_emit_ib - execute indirect buffer
  *
  * @ring: amdgpu_ring pointer
+ * @job: job to retrieve vmid from
  * @ib: indirect buffer to execute
+ * @flags: unused
  *
  * Write ring commands to execute the indirect buffer.
  */
@@ -549,6 +534,10 @@ void jpeg_v2_0_dec_ring_emit_ib(struct amdgpu_ring *ring,
 				uint32_t flags)
 {
 	unsigned vmid = AMDGPU_JOB_GET_VMID(job);
+
+	amdgpu_ring_write(ring,	PACKETJ(mmUVD_JPEG_IH_CTRL_INTERNAL_OFFSET,
+		0, 0, PACKETJ_TYPE0));
+	amdgpu_ring_write(ring, (vmid << JPEG_IH_CTRL__IH_VMID__SHIFT));
 
 	amdgpu_ring_write(ring, PACKETJ(mmUVD_LMI_JRBC_IB_VMID_INTERNAL_OFFSET,
 		0, 0, PACKETJ_TYPE0));
@@ -630,7 +619,7 @@ void jpeg_v2_0_dec_ring_emit_vm_flush(struct amdgpu_ring *ring,
 	pd_addr = amdgpu_gmc_emit_flush_gpu_tlb(ring, vmid, pd_addr);
 
 	/* wait for register write */
-	data0 = hub->ctx0_ptb_addr_lo32 + vmid * 2;
+	data0 = hub->ctx0_ptb_addr_lo32 + vmid * hub->ctx_addr_distance;
 	data1 = lower_32_bits(pd_addr);
 	mask = 0xffffffff;
 	jpeg_v2_0_dec_ring_emit_reg_wait(ring, data0, data1, mask);
@@ -678,10 +667,10 @@ static bool jpeg_v2_0_is_idle(void *handle)
 static int jpeg_v2_0_wait_for_idle(void *handle)
 {
 	struct amdgpu_device *adev = (struct amdgpu_device *)handle;
-	int ret = 0;
+	int ret;
 
-	SOC15_WAIT_ON_RREG(JPEG, 0, mmUVD_JRBC_STATUS, UVD_JRBC_STATUS__RB_JOB_DONE_MASK,
-		UVD_JRBC_STATUS__RB_JOB_DONE_MASK, ret);
+	ret = SOC15_WAIT_ON_RREG(JPEG, 0, mmUVD_JRBC_STATUS, UVD_JRBC_STATUS__RB_JOB_DONE_MASK,
+		UVD_JRBC_STATUS__RB_JOB_DONE_MASK);
 
 	return ret;
 }
@@ -693,7 +682,7 @@ static int jpeg_v2_0_set_clockgating_state(void *handle,
 	bool enable = (state == AMD_CG_STATE_GATE);
 
 	if (enable) {
-		if (jpeg_v2_0_is_idle(handle))
+		if (!jpeg_v2_0_is_idle(handle))
 			return -EBUSY;
 		jpeg_v2_0_enable_clock_gating(adev);
 	} else {
@@ -783,7 +772,7 @@ static const struct amdgpu_ring_funcs jpeg_v2_0_dec_ring_vm_funcs = {
 		8 + /* jpeg_v2_0_dec_ring_emit_vm_flush */
 		18 + 18 + /* jpeg_v2_0_dec_ring_emit_fence x2 vm fence */
 		8 + 16,
-	.emit_ib_size = 22, /* jpeg_v2_0_dec_ring_emit_ib */
+	.emit_ib_size = 24, /* jpeg_v2_0_dec_ring_emit_ib */
 	.emit_ib = jpeg_v2_0_dec_ring_emit_ib,
 	.emit_fence = jpeg_v2_0_dec_ring_emit_fence,
 	.emit_vm_flush = jpeg_v2_0_dec_ring_emit_vm_flush,

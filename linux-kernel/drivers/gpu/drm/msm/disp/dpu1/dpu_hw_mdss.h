@@ -95,6 +95,9 @@ enum dpu_hw_blk_type {
 	DPU_HW_BLK_PINGPONG,
 	DPU_HW_BLK_INTF,
 	DPU_HW_BLK_WB,
+	DPU_HW_BLK_DSPP,
+	DPU_HW_BLK_MERGE_3D,
+	DPU_HW_BLK_DSC,
 	DPU_HW_BLK_MAX,
 };
 
@@ -117,6 +120,8 @@ enum dpu_sspp {
 	SSPP_DMA1,
 	SSPP_DMA2,
 	SSPP_DMA3,
+	SSPP_DMA4,
+	SSPP_DMA5,
 	SSPP_CURSOR0,
 	SSPP_CURSOR1,
 	SSPP_MAX
@@ -170,7 +175,19 @@ enum dpu_ctl {
 	CTL_2,
 	CTL_3,
 	CTL_4,
+	CTL_5,
 	CTL_MAX
+};
+
+enum dpu_dsc {
+	DSC_NONE = 0,
+	DSC_0,
+	DSC_1,
+	DSC_2,
+	DSC_3,
+	DSC_4,
+	DSC_5,
+	DSC_MAX
 };
 
 enum dpu_pingpong {
@@ -179,8 +196,19 @@ enum dpu_pingpong {
 	PINGPONG_2,
 	PINGPONG_3,
 	PINGPONG_4,
+	PINGPONG_5,
+	PINGPONG_6,
+	PINGPONG_7,
 	PINGPONG_S0,
 	PINGPONG_MAX
+};
+
+enum dpu_merge_3d {
+	MERGE_3D_0 = 1,
+	MERGE_3D_1,
+	MERGE_3D_2,
+	MERGE_3D_3,
+	MERGE_3D_MAX
 };
 
 enum dpu_intf {
@@ -191,17 +219,26 @@ enum dpu_intf {
 	INTF_4,
 	INTF_5,
 	INTF_6,
+	INTF_7,
+	INTF_8,
 	INTF_MAX
 };
 
+/*
+ * Historically these values correspond to the values written to the
+ * DISP_INTF_SEL register, which had to programmed manually. On newer MDP
+ * generations this register is NOP, but we keep the values for historical
+ * reasons.
+ */
 enum dpu_intf_type {
 	INTF_NONE = 0x0,
 	INTF_DSI = 0x1,
 	INTF_HDMI = 0x3,
 	INTF_LCDC = 0x5,
+	/* old eDP found on 8x74 and 8x84 */
 	INTF_EDP = 0x9,
+	/* both DP and eDP,  handled by the new DP driver */
 	INTF_DP = 0xa,
-	INTF_TYPE_MAX,
 
 	/* virtual interfaces */
 	INTF_WB = 0x100,
@@ -243,11 +280,9 @@ enum dpu_wd_timer {
 };
 
 enum dpu_vbif {
-	VBIF_0,
-	VBIF_1,
+	VBIF_RT,
+	VBIF_NRT,
 	VBIF_MAX,
-	VBIF_RT = VBIF_0,
-	VBIF_NRT = VBIF_1
 };
 
 /**
@@ -332,7 +367,7 @@ enum dpu_3d_blend_mode {
 
 /** struct dpu_format - defines the format configuration which
  * allows DPU HW to correctly fetch and decode the format
- * @base: base msm_format struture containing fourcc code
+ * @base: base msm_format structure containing fourcc code
  * @fetch_planes: how the color components are packed in pixel format
  * @element: element color ordering
  * @bits: element bit widths
@@ -425,5 +460,7 @@ struct dpu_mdss_color {
 #define DPU_DBG_MASK_TOP      (1 << 7)
 #define DPU_DBG_MASK_VBIF     (1 << 8)
 #define DPU_DBG_MASK_ROT      (1 << 9)
+#define DPU_DBG_MASK_DSPP     (1 << 10)
+#define DPU_DBG_MASK_DSC      (1 << 11)
 
 #endif  /* _DPU_HW_MDSS_H */

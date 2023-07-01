@@ -100,9 +100,10 @@ socket type, not the processor's actual capabilities.  Therefore, if you
 are using an AM3 processor on an AM2+ mainboard, you can safely use the
 "force=1" parameter.
 
-There is one temperature measurement value, available as temp1_input in
-sysfs. It is measured in degrees Celsius with a resolution of 1/8th degree.
-Please note that it is defined as a relative value; to quote the AMD manual::
+For CPUs older than Family 17h, there is one temperature measurement value,
+available as temp1_input in sysfs. It is measured in degrees Celsius with a
+resolution of 1/8th degree.  Please note that it is defined as a relative
+value; to quote the AMD manual::
 
   Tctl is the processor temperature control value, used by the platform to
   control cooling systems. Tctl is a non-physical temperature on an
@@ -126,3 +127,8 @@ it.
 
 Models from 17h family report relative temperature, the driver aims to
 compensate and report the real temperature.
+
+On Family 17h and Family 18h CPUs, additional temperature sensors may report
+Core Complex Die (CCD) temperatures. Up to 8 such temperatures are reported
+as temp{3..10}_input, labeled Tccd{1..8}. Actual support depends on the CPU
+variant.

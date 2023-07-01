@@ -186,7 +186,7 @@ static int wdt_startup(void)
 static int wdt_turnoff(void)
 {
 	/* Stop the timer */
-	del_timer(&timer);
+	del_timer_sync(&timer);
 
 	/* Stop the watchdog */
 	wdt_config(0);
@@ -321,7 +321,7 @@ static long fop_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 		wdt_keepalive();
 	}
-		/* Fall through */
+		fallthrough;
 	case WDIOC_GETTIMEOUT:
 		return put_user(timeout, p);
 	default:

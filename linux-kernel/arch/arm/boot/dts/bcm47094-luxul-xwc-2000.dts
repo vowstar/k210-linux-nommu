@@ -16,15 +16,16 @@
 		bootargs = "earlycon";
 	};
 
-	memory {
-		reg = <0x00000000 0x08000000
-		       0x88000000 0x18000000>;
+	memory@0 {
+		device_type = "memory";
+		reg = <0x00000000 0x08000000>,
+		      <0x88000000 0x18000000>;
 	};
 
 	leds {
 		compatible = "gpio-leds";
 
-		status	{
+		led-status {
 			label = "bcm53xx:green:status";
 			gpios = <&chipcommon 18 GPIO_ACTIVE_LOW>;
 			linux,default-trigger = "timer";
@@ -33,10 +34,8 @@
 
 	gpio-keys {
 		compatible = "gpio-keys";
-		#address-cells = <1>;
-		#size-cells = <0>;
 
-		restart {
+		button-restart {
 			label = "Reset";
 			linux,code = <KEY_RESTART>;
 			gpios = <&chipcommon 19 GPIO_ACTIVE_LOW>;
@@ -50,4 +49,21 @@
 
 &spi_nor {
 	status = "okay";
+};
+
+&srab {
+	status = "okay";
+
+	ports {
+		port@0 {
+			reg = <0>;
+			label = "lan";
+		};
+
+		port@5 {
+			reg = <5>;
+			label = "cpu";
+			ethernet = <&gmac0>;
+		};
+	};
 };

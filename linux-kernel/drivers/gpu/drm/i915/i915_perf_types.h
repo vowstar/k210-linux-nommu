@@ -15,12 +15,15 @@
 #include <linux/types.h>
 #include <linux/uuid.h>
 #include <linux/wait.h>
+#include <uapi/drm/i915_drm.h>
 
-#include "i915_reg.h"
+#include "gt/intel_sseu.h"
+#include "i915_reg_defs.h"
 #include "intel_wakeref.h"
 
 struct drm_i915_private;
 struct file;
+struct i915_active;
 struct i915_gem_context;
 struct i915_perf;
 struct i915_vma;
@@ -52,7 +55,7 @@ struct i915_oa_config {
 
 	struct attribute_group sysfs_metric;
 	struct attribute *attrs[2];
-	struct device_attribute sysfs_metric_id;
+	struct kobj_attribute sysfs_metric_id;
 
 	struct kref ref;
 	struct rcu_head rcu;
@@ -142,6 +145,11 @@ struct i915_perf_stream {
 	 * @engine: Engine associated with this performance stream.
 	 */
 	struct intel_engine_cs *engine;
+
+	/**
+	 * @lock: Lock associated with operations on stream
+	 */
+	struct mutex lock;
 
 	/**
 	 * @sample_flags: Flags representing the `DRM_I915_PERF_PROP_SAMPLE_*`
@@ -242,11 +250,10 @@ struct i915_perf_stream {
 	 * @oa_buffer: State of the OA buffer.
 	 */
 	struct {
+		const struct i915_oa_format *format;
 		struct i915_vma *vma;
 		u8 *vaddr;
 		u32 last_ctx_id;
-		int format;
-		int format_size;
 		int size_exponent;
 
 		/**
@@ -272,21 +279,10 @@ struct i915_perf_stream {
 		spinlock_t ptr_lock;
 
 		/**
-		 * @tails: One 'aging' tail pointer and one 'aged' tail pointer ready to
-		 * used for reading.
-		 *
-		 * Initial values of 0xffffffff are invalid and imply that an
-		 * update is required (and should be ignored by an attempted
-		 * read)
+		 * @aging_tail: The last HW tail reported by HW. The data
+		 * might not have made it to memory yet though.
 		 */
-		struct {
-			u32 offset;
-		} tails[2];
-
-		/**
-		 * @aged_tail_idx: Index for the aged tail ready to read() data up to.
-		 */
-		unsigned int aged_tail_idx;
+		u32 aging_tail;
 
 		/**
 		 * @aging_timestamp: A monotonic timestamp for when the current aging tail pointer
@@ -302,6 +298,11 @@ struct i915_perf_stream {
 		 * OA buffer data to userspace.
 		 */
 		u32 head;
+
+		/**
+		 * @tail: The last verified tail that can be read by userspace.
+		 */
+		u32 tail;
 	} oa_buffer;
 
 	/**
@@ -309,6 +310,18 @@ struct i915_perf_stream {
 	 * reprogrammed.
 	 */
 	struct i915_vma *noa_wait;
+
+	/**
+	 * @poll_oa_period: The period in nanoseconds at which the OA
+	 * buffer should be checked for available data.
+	 */
+	u64 poll_oa_period;
+
+	/**
+	 * @override_gucrc: GuC RC has been overridden for the perf stream,
+	 * and we need to restore the default configuration on release.
+	 */
+	bool override_gucrc;
 };
 
 /**
@@ -339,7 +352,8 @@ struct i915_oa_ops {
 	 * counter reports being sampled. May apply system constraints such as
 	 * disabling EU clock gating as required.
 	 */
-	int (*enable_metric_set)(struct i915_perf_stream *stream);
+	int (*enable_metric_set)(struct i915_perf_stream *stream,
+				 struct i915_active *active);
 
 	/**
 	 * @disable_metric_set: Remove system constraints associated with using
@@ -376,6 +390,26 @@ struct i915_oa_ops {
 	u32 (*oa_hw_tail_read)(struct i915_perf_stream *stream);
 };
 
+struct i915_perf_gt {
+	/*
+	 * Lock associated with anything below within this structure.
+	 */
+	struct mutex lock;
+
+	/**
+	 * @sseu: sseu configuration selected to run while perf is active,
+	 * applies to all contexts.
+	 */
+	struct intel_sseu sseu;
+
+	/*
+	 * @exclusive_stream: The stream currently using the OA unit. This is
+	 * sometimes accessed outside a syscall associated to its file
+	 * descriptor.
+	 */
+	struct i915_perf_stream *exclusive_stream;
+};
+
 struct i915_perf {
 	struct drm_i915_private *i915;
 
@@ -393,26 +427,17 @@ struct i915_perf {
 	 */
 	struct idr metrics_idr;
 
-	/*
-	 * Lock associated with anything below within this structure
-	 * except exclusive_stream.
-	 */
-	struct mutex lock;
-
-	/*
-	 * The stream currently using the OA unit. If accessed
-	 * outside a syscall associated to its file
-	 * descriptor.
-	 */
-	struct i915_perf_stream *exclusive_stream;
-
 	/**
 	 * For rate limiting any notifications of spurious
 	 * invalid OA reports
 	 */
 	struct ratelimit_state spurious_report_rs;
 
-	struct i915_oa_config test_config;
+	/**
+	 * For rate limiting any notifications of tail pointer
+	 * race.
+	 */
+	struct ratelimit_state tail_pointer_race;
 
 	u32 gen7_latched_oastatus1;
 	u32 ctx_oactxctrl_offset;
@@ -427,6 +452,13 @@ struct i915_perf {
 
 	struct i915_oa_ops ops;
 	const struct i915_oa_format *oa_formats;
+
+	/**
+	 * Use a format mask to store the supported formats
+	 * for a platform.
+	 */
+#define FORMAT_MASK_SIZE DIV_ROUND_UP(I915_OA_FORMAT_MAX - 1, BITS_PER_LONG)
+	unsigned long format_mask[FORMAT_MASK_SIZE];
 
 	atomic64_t noa_programming_delay;
 };

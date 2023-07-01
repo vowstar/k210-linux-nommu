@@ -22,6 +22,7 @@
  */
 #include "amdgpu.h"
 #include "gfxhub_v1_0.h"
+#include "gfxhub_v1_1.h"
 
 #include "gc/gc_9_0_offset.h"
 #include "gc/gc_9_0_sh_mask.h"
@@ -30,40 +31,61 @@
 
 #include "soc15_common.h"
 
-u64 gfxhub_v1_0_get_mc_fb_offset(struct amdgpu_device *adev)
+static u64 gfxhub_v1_0_get_mc_fb_offset(struct amdgpu_device *adev)
 {
 	return (u64)RREG32_SOC15(GC, 0, mmMC_VM_FB_OFFSET) << 24;
 }
 
-void gfxhub_v1_0_setup_vm_pt_regs(struct amdgpu_device *adev, uint32_t vmid,
-				uint64_t page_table_base)
+static void gfxhub_v1_0_setup_vm_pt_regs(struct amdgpu_device *adev,
+					 uint32_t vmid,
+					 uint64_t page_table_base)
 {
-	/* two registers distance between mmVM_CONTEXT0_* to mmVM_CONTEXT1_* */
-	int offset = mmVM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32
-			- mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32;
+	struct amdgpu_vmhub *hub = &adev->vmhub[AMDGPU_GFXHUB_0];
 
 	WREG32_SOC15_OFFSET(GC, 0, mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32,
-				offset * vmid, lower_32_bits(page_table_base));
+			    hub->ctx_addr_distance * vmid,
+			    lower_32_bits(page_table_base));
 
 	WREG32_SOC15_OFFSET(GC, 0, mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32,
-				offset * vmid, upper_32_bits(page_table_base));
+			    hub->ctx_addr_distance * vmid,
+			    upper_32_bits(page_table_base));
 }
 
 static void gfxhub_v1_0_init_gart_aperture_regs(struct amdgpu_device *adev)
 {
-	uint64_t pt_base = amdgpu_gmc_pd_addr(adev->gart.bo);
+	uint64_t pt_base;
+
+	if (adev->gmc.pdb0_bo)
+		pt_base = amdgpu_gmc_pd_addr(adev->gmc.pdb0_bo);
+	else
+		pt_base = amdgpu_gmc_pd_addr(adev->gart.bo);
 
 	gfxhub_v1_0_setup_vm_pt_regs(adev, 0, pt_base);
 
-	WREG32_SOC15(GC, 0, mmVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32,
-		     (u32)(adev->gmc.gart_start >> 12));
-	WREG32_SOC15(GC, 0, mmVM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32,
-		     (u32)(adev->gmc.gart_start >> 44));
+	/* If use GART for FB translation, vmid0 page table covers both
+	 * vram and system memory (gart)
+	 */
+	if (adev->gmc.pdb0_bo) {
+		WREG32_SOC15(GC, 0, mmVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32,
+				(u32)(adev->gmc.fb_start >> 12));
+		WREG32_SOC15(GC, 0, mmVM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32,
+				(u32)(adev->gmc.fb_start >> 44));
 
-	WREG32_SOC15(GC, 0, mmVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32,
-		     (u32)(adev->gmc.gart_end >> 12));
-	WREG32_SOC15(GC, 0, mmVM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32,
-		     (u32)(adev->gmc.gart_end >> 44));
+		WREG32_SOC15(GC, 0, mmVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32,
+				(u32)(adev->gmc.gart_end >> 12));
+		WREG32_SOC15(GC, 0, mmVM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32,
+				(u32)(adev->gmc.gart_end >> 44));
+	} else {
+		WREG32_SOC15(GC, 0, mmVM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32,
+				(u32)(adev->gmc.gart_start >> 12));
+		WREG32_SOC15(GC, 0, mmVM_CONTEXT0_PAGE_TABLE_START_ADDR_HI32,
+				(u32)(adev->gmc.gart_start >> 44));
+
+		WREG32_SOC15(GC, 0, mmVM_CONTEXT0_PAGE_TABLE_END_ADDR_LO32,
+				(u32)(adev->gmc.gart_end >> 12));
+		WREG32_SOC15(GC, 0, mmVM_CONTEXT0_PAGE_TABLE_END_ADDR_HI32,
+				(u32)(adev->gmc.gart_end >> 44));
+	}
 }
 
 static void gfxhub_v1_0_init_system_aperture_regs(struct amdgpu_device *adev)
@@ -80,7 +102,7 @@ static void gfxhub_v1_0_init_system_aperture_regs(struct amdgpu_device *adev)
 		WREG32_SOC15_RLC(GC, 0, mmMC_VM_SYSTEM_APERTURE_LOW_ADDR,
 			min(adev->gmc.fb_start, adev->gmc.agp_start) >> 18);
 
-		if (adev->asic_type == CHIP_RAVEN && adev->rev_id >= 0x8)
+		if (adev->apu_flags & AMD_APU_IS_RAVEN2)
 			/*
 			* Raven2 has a HW issue that it is unable to use the
 			* vram which is out of MC_VM_SYSTEM_APERTURE_HIGH_ADDR.
@@ -98,8 +120,7 @@ static void gfxhub_v1_0_init_system_aperture_regs(struct amdgpu_device *adev)
 				max(adev->gmc.fb_end, adev->gmc.agp_end) >> 18);
 
 		/* Set default page address. */
-		value = adev->vram_scratch.gpu_addr - adev->gmc.vram_start +
-			adev->vm_manager.vram_base_offset;
+		value = amdgpu_gmc_vram_mc2pa(adev, adev->mem_scratch.gpu_addr);
 		WREG32_SOC15(GC, 0, mmMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_LSB,
 			     (u32)(value >> 12));
 		WREG32_SOC15(GC, 0, mmMC_VM_SYSTEM_APERTURE_DEFAULT_ADDR_MSB,
@@ -113,6 +134,18 @@ static void gfxhub_v1_0_init_system_aperture_regs(struct amdgpu_device *adev)
 
 		WREG32_FIELD15(GC, 0, VM_L2_PROTECTION_FAULT_CNTL2,
 			       ACTIVE_PAGE_MIGRATION_PTE_READ_RETRY, 1);
+	}
+
+	/* In the case squeezing vram into GART aperture, we don't use
+	 * FB aperture and AGP aperture. Disable them.
+	 */
+	if (adev->gmc.pdb0_bo) {
+		WREG32_SOC15(GC, 0, mmMC_VM_FB_LOCATION_TOP, 0);
+		WREG32_SOC15(GC, 0, mmMC_VM_FB_LOCATION_BASE, 0x00FFFFFF);
+		WREG32_SOC15(GC, 0, mmMC_VM_AGP_TOP, 0);
+		WREG32_SOC15(GC, 0, mmMC_VM_AGP_BOT, 0xFFFFFF);
+		WREG32_SOC15(GC, 0, mmMC_VM_SYSTEM_APERTURE_LOW_ADDR, 0x3FFFFFFF);
+		WREG32_SOC15(GC, 0, mmMC_VM_SYSTEM_APERTURE_HIGH_ADDR, 0);
 	}
 }
 
@@ -129,7 +162,6 @@ static void gfxhub_v1_0_init_tlb_regs(struct amdgpu_device *adev)
 			    ENABLE_ADVANCED_DRIVER_MODEL, 1);
 	tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL,
 			    SYSTEM_APERTURE_UNMAPPED_ACCESS, 0);
-	tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL, ECO_BITS, 0);
 	tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL,
 			    MTYPE, MTYPE_UC);/* XXX for emulation. */
 	tmp = REG_SET_FIELD(tmp, MC_VM_MX_L1_TLB_CNTL, ATC_EN, 1);
@@ -171,8 +203,13 @@ static void gfxhub_v1_0_init_cache_regs(struct amdgpu_device *adev)
 	WREG32_SOC15_RLC(GC, 0, mmVM_L2_CNTL3, tmp);
 
 	tmp = mmVM_L2_CNTL4_DEFAULT;
-	tmp = REG_SET_FIELD(tmp, VM_L2_CNTL4, VMC_TAP_PDE_REQUEST_PHYSICAL, 0);
-	tmp = REG_SET_FIELD(tmp, VM_L2_CNTL4, VMC_TAP_PTE_REQUEST_PHYSICAL, 0);
+	if (adev->gmc.xgmi.connected_to_cpu) {
+		tmp = REG_SET_FIELD(tmp, VM_L2_CNTL4, VMC_TAP_PDE_REQUEST_PHYSICAL, 1);
+		tmp = REG_SET_FIELD(tmp, VM_L2_CNTL4, VMC_TAP_PTE_REQUEST_PHYSICAL, 1);
+	} else {
+		tmp = REG_SET_FIELD(tmp, VM_L2_CNTL4, VMC_TAP_PDE_REQUEST_PHYSICAL, 0);
+		tmp = REG_SET_FIELD(tmp, VM_L2_CNTL4, VMC_TAP_PTE_REQUEST_PHYSICAL, 0);
+	}
 	WREG32_SOC15_RLC(GC, 0, mmVM_L2_CNTL4, tmp);
 }
 
@@ -182,7 +219,10 @@ static void gfxhub_v1_0_enable_system_domain(struct amdgpu_device *adev)
 
 	tmp = RREG32_SOC15(GC, 0, mmVM_CONTEXT0_CNTL);
 	tmp = REG_SET_FIELD(tmp, VM_CONTEXT0_CNTL, ENABLE_CONTEXT, 1);
-	tmp = REG_SET_FIELD(tmp, VM_CONTEXT0_CNTL, PAGE_TABLE_DEPTH, 0);
+	tmp = REG_SET_FIELD(tmp, VM_CONTEXT0_CNTL, PAGE_TABLE_DEPTH,
+			adev->gmc.vmid0_page_table_depth);
+	tmp = REG_SET_FIELD(tmp, VM_CONTEXT0_CNTL, PAGE_TABLE_BLOCK_SIZE,
+			adev->gmc.vmid0_page_table_block_size);
 	tmp = REG_SET_FIELD(tmp, VM_CONTEXT0_CNTL,
 			    RETRY_PERMISSION_OR_INVALID_PAGE_FAULT, 0);
 	WREG32_SOC15(GC, 0, mmVM_CONTEXT0_CNTL, tmp);
@@ -207,6 +247,7 @@ static void gfxhub_v1_0_disable_identity_aperture(struct amdgpu_device *adev)
 
 static void gfxhub_v1_0_setup_vmid_config(struct amdgpu_device *adev)
 {
+	struct amdgpu_vmhub *hub = &adev->vmhub[AMDGPU_GFXHUB_0];
 	unsigned num_level, block_size;
 	uint32_t tmp;
 	int i;
@@ -241,46 +282,44 @@ static void gfxhub_v1_0_setup_vmid_config(struct amdgpu_device *adev)
 		tmp = REG_SET_FIELD(tmp, VM_CONTEXT1_CNTL,
 				    PAGE_TABLE_BLOCK_SIZE,
 				    block_size);
-		/* Send no-retry XNACK on fault to suppress VM fault storm. */
+		/* Send no-retry XNACK on fault to suppress VM fault storm.
+		 * On Aldebaran, XNACK can be enabled in the SQ per-process.
+		 * Retry faults need to be enabled for that to work.
+		 */
 		tmp = REG_SET_FIELD(tmp, VM_CONTEXT1_CNTL,
 				    RETRY_PERMISSION_OR_INVALID_PAGE_FAULT,
-				    !amdgpu_noretry);
-		WREG32_SOC15_OFFSET(GC, 0, mmVM_CONTEXT1_CNTL, i, tmp);
-		WREG32_SOC15_OFFSET(GC, 0, mmVM_CONTEXT1_PAGE_TABLE_START_ADDR_LO32, i*2, 0);
-		WREG32_SOC15_OFFSET(GC, 0, mmVM_CONTEXT1_PAGE_TABLE_START_ADDR_HI32, i*2, 0);
-		WREG32_SOC15_OFFSET(GC, 0, mmVM_CONTEXT1_PAGE_TABLE_END_ADDR_LO32,  i*2,
-			lower_32_bits(adev->vm_manager.max_pfn - 1));
-		WREG32_SOC15_OFFSET(GC, 0, mmVM_CONTEXT1_PAGE_TABLE_END_ADDR_HI32, i*2,
-			upper_32_bits(adev->vm_manager.max_pfn - 1));
+				    !adev->gmc.noretry ||
+				    adev->asic_type == CHIP_ALDEBARAN);
+		WREG32_SOC15_OFFSET(GC, 0, mmVM_CONTEXT1_CNTL,
+				    i * hub->ctx_distance, tmp);
+		WREG32_SOC15_OFFSET(GC, 0, mmVM_CONTEXT1_PAGE_TABLE_START_ADDR_LO32,
+				    i * hub->ctx_addr_distance, 0);
+		WREG32_SOC15_OFFSET(GC, 0, mmVM_CONTEXT1_PAGE_TABLE_START_ADDR_HI32,
+				    i * hub->ctx_addr_distance, 0);
+		WREG32_SOC15_OFFSET(GC, 0, mmVM_CONTEXT1_PAGE_TABLE_END_ADDR_LO32,
+				    i * hub->ctx_addr_distance,
+				    lower_32_bits(adev->vm_manager.max_pfn - 1));
+		WREG32_SOC15_OFFSET(GC, 0, mmVM_CONTEXT1_PAGE_TABLE_END_ADDR_HI32,
+				    i * hub->ctx_addr_distance,
+				    upper_32_bits(adev->vm_manager.max_pfn - 1));
 	}
 }
 
 static void gfxhub_v1_0_program_invalidation(struct amdgpu_device *adev)
 {
+	struct amdgpu_vmhub *hub = &adev->vmhub[AMDGPU_GFXHUB_0];
 	unsigned i;
 
 	for (i = 0 ; i < 18; ++i) {
 		WREG32_SOC15_OFFSET(GC, 0, mmVM_INVALIDATE_ENG0_ADDR_RANGE_LO32,
-				    2 * i, 0xffffffff);
+				    i * hub->eng_addr_distance, 0xffffffff);
 		WREG32_SOC15_OFFSET(GC, 0, mmVM_INVALIDATE_ENG0_ADDR_RANGE_HI32,
-				    2 * i, 0x1f);
+				    i * hub->eng_addr_distance, 0x1f);
 	}
 }
 
-int gfxhub_v1_0_gart_enable(struct amdgpu_device *adev)
+static int gfxhub_v1_0_gart_enable(struct amdgpu_device *adev)
 {
-	if (amdgpu_sriov_vf(adev) && adev->asic_type != CHIP_ARCTURUS) {
-		/*
-		 * MC_VM_FB_LOCATION_BASE/TOP is NULL for VF, becuase they are
-		 * VF copy registers so vbios post doesn't program them, for
-		 * SRIOV driver need to program them
-		 */
-		WREG32_SOC15_RLC(GC, 0, mmMC_VM_FB_LOCATION_BASE,
-			     adev->gmc.vram_start >> 24);
-		WREG32_SOC15_RLC(GC, 0, mmMC_VM_FB_LOCATION_TOP,
-			     adev->gmc.vram_end >> 24);
-	}
-
 	/* GART Enable. */
 	gfxhub_v1_0_init_gart_aperture_regs(adev);
 	gfxhub_v1_0_init_system_aperture_regs(adev);
@@ -297,14 +336,20 @@ int gfxhub_v1_0_gart_enable(struct amdgpu_device *adev)
 	return 0;
 }
 
-void gfxhub_v1_0_gart_disable(struct amdgpu_device *adev)
+static void gfxhub_v1_0_gart_disable(struct amdgpu_device *adev)
 {
+	struct amdgpu_vmhub *hub = &adev->vmhub[AMDGPU_GFXHUB_0];
 	u32 tmp;
 	u32 i;
 
 	/* Disable all tables */
 	for (i = 0; i < 16; i++)
-		WREG32_SOC15_OFFSET(GC, 0, mmVM_CONTEXT0_CNTL, i, 0);
+		WREG32_SOC15_OFFSET(GC, 0, mmVM_CONTEXT0_CNTL,
+				    i * hub->ctx_distance, 0);
+
+	if (amdgpu_sriov_vf(adev))
+		/* Avoid write to GMC registers */
+		return;
 
 	/* Setup TLB control */
 	tmp = RREG32_SOC15(GC, 0, mmMC_VM_MX_L1_TLB_CNTL);
@@ -326,8 +371,8 @@ void gfxhub_v1_0_gart_disable(struct amdgpu_device *adev)
  * @adev: amdgpu_device pointer
  * @value: true redirects VM faults to the default page
  */
-void gfxhub_v1_0_set_fault_enable_default(struct amdgpu_device *adev,
-					  bool value)
+static void gfxhub_v1_0_set_fault_enable_default(struct amdgpu_device *adev,
+						 bool value)
 {
 	u32 tmp;
 	tmp = RREG32_SOC15(GC, 0, mmVM_L2_PROTECTION_FAULT_CNTL);
@@ -360,11 +405,11 @@ void gfxhub_v1_0_set_fault_enable_default(struct amdgpu_device *adev,
 				CRASH_ON_NO_RETRY_FAULT, 1);
 		tmp = REG_SET_FIELD(tmp, VM_L2_PROTECTION_FAULT_CNTL,
 				CRASH_ON_RETRY_FAULT, 1);
-    }
+	}
 	WREG32_SOC15(GC, 0, mmVM_L2_PROTECTION_FAULT_CNTL, tmp);
 }
 
-void gfxhub_v1_0_init(struct amdgpu_device *adev)
+static void gfxhub_v1_0_init(struct amdgpu_device *adev)
 {
 	struct amdgpu_vmhub *hub = &adev->vmhub[AMDGPU_GFXHUB_0];
 
@@ -386,4 +431,22 @@ void gfxhub_v1_0_init(struct amdgpu_device *adev)
 		SOC15_REG_OFFSET(GC, 0, mmVM_L2_PROTECTION_FAULT_STATUS);
 	hub->vm_l2_pro_fault_cntl =
 		SOC15_REG_OFFSET(GC, 0, mmVM_L2_PROTECTION_FAULT_CNTL);
+
+	hub->ctx_distance = mmVM_CONTEXT1_CNTL - mmVM_CONTEXT0_CNTL;
+	hub->ctx_addr_distance = mmVM_CONTEXT1_PAGE_TABLE_BASE_ADDR_LO32 -
+		mmVM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32;
+	hub->eng_distance = mmVM_INVALIDATE_ENG1_REQ - mmVM_INVALIDATE_ENG0_REQ;
+	hub->eng_addr_distance = mmVM_INVALIDATE_ENG1_ADDR_RANGE_LO32 -
+		mmVM_INVALIDATE_ENG0_ADDR_RANGE_LO32;
 }
+
+
+const struct amdgpu_gfxhub_funcs gfxhub_v1_0_funcs = {
+	.get_mc_fb_offset = gfxhub_v1_0_get_mc_fb_offset,
+	.setup_vm_pt_regs = gfxhub_v1_0_setup_vm_pt_regs,
+	.gart_enable = gfxhub_v1_0_gart_enable,
+	.gart_disable = gfxhub_v1_0_gart_disable,
+	.set_fault_enable_default = gfxhub_v1_0_set_fault_enable_default,
+	.init = gfxhub_v1_0_init,
+	.get_xgmi_info = gfxhub_v1_1_get_xgmi_info,
+};

@@ -607,7 +607,7 @@ static inline void xgmac_mac_disable(void __iomem *ioaddr)
 	writel(value, ioaddr + XGMAC_CONTROL);
 }
 
-static void xgmac_set_mac_addr(void __iomem *ioaddr, unsigned char *addr,
+static void xgmac_set_mac_addr(void __iomem *ioaddr, const unsigned char *addr,
 			       int num)
 {
 	u32 data;
@@ -711,7 +711,7 @@ static void xgmac_rx_refill(struct xgmac_priv *priv)
 }
 
 /**
- * init_xgmac_dma_desc_rings - init the RX/TX descriptor rings
+ * xgmac_dma_desc_rings_init - init the RX/TX descriptor rings
  * @dev: net device structure
  * Description:  this function initializes the DMA RX/TX descriptors
  * and allocates the socket buffers.
@@ -859,7 +859,7 @@ static void xgmac_free_dma_desc_rings(struct xgmac_priv *priv)
 }
 
 /**
- * xgmac_tx:
+ * xgmac_tx_complete:
  * @priv: private driver structure
  * Description: it reclaims resources after transmission completes.
  */
@@ -1040,7 +1040,7 @@ static int xgmac_open(struct net_device *dev)
 }
 
 /**
- *  xgmac_release - close entry point of the driver
+ *  xgmac_stop - close entry point of the driver
  *  @dev : device pointer.
  *  Description:
  *  This is the stop entry point of the driver.
@@ -1224,7 +1224,7 @@ static int xgmac_rx(struct xgmac_priv *priv, int limit)
  *  @budget : maximum number of packets that the current CPU can receive from
  *	      all interfaces.
  *  Description :
- *   This function implements the the reception process.
+ *   This function implements the reception process.
  *   Also it runs the TX completion thread
  */
 static int xgmac_poll(struct napi_struct *napi, int budget)
@@ -1246,6 +1246,8 @@ static int xgmac_poll(struct napi_struct *napi, int budget)
 /**
  *  xgmac_tx_timeout
  *  @dev : Pointer to net device structure
+ *  @txqueue: index of the hung transmit queue
+ *
  *  Description: this function is called when a packet transmission fails to
  *   complete within a reasonable tmrate. The driver will mark the error in the
  *   netdev structure and arrange for the device to be reset to a sane state
@@ -1477,7 +1479,7 @@ static int xgmac_set_mac_address(struct net_device *dev, void *p)
 	if (!is_valid_ether_addr(addr->sa_data))
 		return -EADDRNOTAVAIL;
 
-	memcpy(dev->dev_addr, addr->sa_data, dev->addr_len);
+	eth_hw_addr_set(dev, addr->sa_data);
 
 	xgmac_set_mac_addr(ioaddr, dev->dev_addr, 0);
 
@@ -1691,6 +1693,7 @@ static int xgmac_probe(struct platform_device *pdev)
 	struct resource *res;
 	struct net_device *ndev = NULL;
 	struct xgmac_priv *priv = NULL;
+	u8 addr[ETH_ALEN];
 	u32 uid;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -1783,12 +1786,13 @@ static int xgmac_probe(struct platform_device *pdev)
 	ndev->max_mtu = XGMAC_MAX_MTU;
 
 	/* Get the MAC address */
-	xgmac_get_mac_addr(priv->base, ndev->dev_addr, 0);
+	xgmac_get_mac_addr(priv->base, addr, 0);
+	eth_hw_addr_set(ndev, addr);
 	if (!is_valid_ether_addr(ndev->dev_addr))
 		netdev_warn(ndev, "MAC address %pM not valid",
 			 ndev->dev_addr);
 
-	netif_napi_add(ndev, &priv->napi, xgmac_poll, 64);
+	netif_napi_add(ndev, &priv->napi, xgmac_poll);
 	ret = register_netdev(ndev);
 	if (ret)
 		goto err_reg;
@@ -1810,7 +1814,7 @@ err_alloc:
 }
 
 /**
- * xgmac_dvr_remove
+ * xgmac_remove
  * @pdev: platform device pointer
  * Description: this function resets the TX/RX processes, disables the MAC RX/TX
  * changes the link status, releases the DMA descriptor rings,

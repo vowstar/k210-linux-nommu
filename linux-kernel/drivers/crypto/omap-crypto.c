@@ -178,10 +178,15 @@ static void omap_crypto_copy_data(struct scatterlist *src,
 		amt = min(src->length - srco, dst->length - dsto);
 		amt = min(len, amt);
 
-		srcb = sg_virt(src) + srco;
-		dstb = sg_virt(dst) + dsto;
+		srcb = kmap_atomic(sg_page(src)) + srco + src->offset;
+		dstb = kmap_atomic(sg_page(dst)) + dsto + dst->offset;
 
 		memcpy(dstb, srcb, amt);
+
+		flush_dcache_page(sg_page(dst));
+
+		kunmap_atomic(srcb);
+		kunmap_atomic(dstb);
 
 		srco += amt;
 		dsto += amt;
@@ -205,7 +210,7 @@ void omap_crypto_cleanup(struct scatterlist *sg, struct scatterlist *orig,
 	buf = sg_virt(sg);
 	pages = get_order(len);
 
-	if (orig && (flags & OMAP_CRYPTO_COPY_MASK))
+	if (orig && (flags & OMAP_CRYPTO_DATA_COPIED))
 		omap_crypto_copy_data(sg, orig, offset, len);
 
 	if (flags & OMAP_CRYPTO_DATA_COPIED)

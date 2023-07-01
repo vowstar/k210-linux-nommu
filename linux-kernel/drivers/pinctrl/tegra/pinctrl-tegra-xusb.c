@@ -8,11 +8,14 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/phy/phy.h>
-#include <linux/pinctrl/pinctrl.h>
-#include <linux/pinctrl/pinmux.h>
 #include <linux/platform_device.h>
 #include <linux/reset.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
+
+#include <linux/pinctrl/pinconf.h>
+#include <linux/pinctrl/pinctrl.h>
+#include <linux/pinctrl/pinmux.h>
 
 #include <dt-bindings/pinctrl/pinctrl-tegra-xusb.h>
 
@@ -123,7 +126,7 @@ static int tegra_xusb_padctl_get_group_pins(struct pinctrl_dev *pinctrl,
 					    unsigned *num_pins)
 {
 	/*
-	 * For the tegra-xusb pad controller groups are synonomous
+	 * For the tegra-xusb pad controller groups are synonymous
 	 * with lanes/pins and there is always one lane/pin per group.
 	 */
 	*pins = &pinctrl->desc->pins[group].number;

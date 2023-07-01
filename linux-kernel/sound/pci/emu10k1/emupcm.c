@@ -25,7 +25,8 @@ static void snd_emu10k1_pcm_interrupt(struct snd_emu10k1 *emu,
 {
 	struct snd_emu10k1_pcm *epcm;
 
-	if ((epcm = voice->epcm) == NULL)
+	epcm = voice->epcm;
+	if (!epcm)
 		return;
 	if (epcm->substream == NULL)
 		return;
@@ -123,7 +124,7 @@ static int snd_emu10k1_pcm_channel_alloc(struct snd_emu10k1_pcm * epcm, int voic
 	epcm->voices[0]->epcm = epcm;
 	if (voices > 1) {
 		for (i = 1; i < voices; i++) {
-			epcm->voices[i] = &epcm->emu->voices[epcm->voices[0]->number + i];
+			epcm->voices[i] = &epcm->emu->voices[(epcm->voices[0]->number + i) % NUM_G];
 			epcm->voices[i]->epcm = epcm;
 		}
 	}
@@ -399,7 +400,8 @@ static int snd_emu10k1_playback_hw_params(struct snd_pcm_substream *substream,
 	size_t alloc_size;
 	int err;
 
-	if ((err = snd_emu10k1_pcm_channel_alloc(epcm, params_channels(hw_params))) < 0)
+	err = snd_emu10k1_pcm_channel_alloc(epcm, params_channels(hw_params));
+	if (err < 0)
 		return err;
 
 	alloc_size = params_buffer_bytes(hw_params);
@@ -753,7 +755,7 @@ static int snd_emu10k1_playback_trigger(struct snd_pcm_substream *substream,
 	case SNDRV_PCM_TRIGGER_START:
 		snd_emu10k1_playback_invalidate_cache(emu, 1, epcm->extra);	/* do we need this? */
 		snd_emu10k1_playback_invalidate_cache(emu, 0, epcm->voices[0]);
-		/* fall through */
+		fallthrough;
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
 	case SNDRV_PCM_TRIGGER_RESUME:
 		if (cmd == SNDRV_PCM_TRIGGER_PAUSE_RELEASE)
@@ -902,8 +904,7 @@ static int snd_emu10k1_efx_playback_trigger(struct snd_pcm_substream *substream,
 			snd_emu10k1_playback_invalidate_cache(emu, 0, epcm->voices[i]);
 		}
 		snd_emu10k1_playback_invalidate_cache(emu, 1, epcm->extra);
-
-		/* fall through */
+		fallthrough;
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
 	case SNDRV_PCM_TRIGGER_RESUME:
 		snd_emu10k1_playback_prepare_voice(emu, epcm->extra, 1, 1, NULL);
@@ -1125,11 +1126,13 @@ static int snd_emu10k1_playback_open(struct snd_pcm_substream *substream)
 	runtime->private_data = epcm;
 	runtime->private_free = snd_emu10k1_pcm_free_substream;
 	runtime->hw = snd_emu10k1_playback;
-	if ((err = snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS)) < 0) {
+	err = snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS);
+	if (err < 0) {
 		kfree(epcm);
 		return err;
 	}
-	if ((err = snd_pcm_hw_constraint_minmax(runtime, SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 256, UINT_MAX)) < 0) {
+	err = snd_pcm_hw_constraint_minmax(runtime, SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 256, UINT_MAX);
+	if (err < 0) {
 		kfree(epcm);
 		return err;
 	}
@@ -1233,7 +1236,7 @@ static int snd_emu10k1_capture_mic_close(struct snd_pcm_substream *substream)
 {
 	struct snd_emu10k1 *emu = snd_pcm_substream_chip(substream);
 
-	emu->capture_interrupt = NULL;
+	emu->capture_mic_interrupt = NULL;
 	emu->pcm_capture_mic_substream = NULL;
 	return 0;
 }
@@ -1341,7 +1344,7 @@ static int snd_emu10k1_capture_efx_close(struct snd_pcm_substream *substream)
 {
 	struct snd_emu10k1 *emu = snd_pcm_substream_chip(substream);
 
-	emu->capture_interrupt = NULL;
+	emu->capture_efx_interrupt = NULL;
 	emu->pcm_capture_efx_substream = NULL;
 	return 0;
 }
@@ -1381,7 +1384,8 @@ int snd_emu10k1_pcm(struct snd_emu10k1 *emu, int device)
 	struct snd_pcm_substream *substream;
 	int err;
 
-	if ((err = snd_pcm_new(emu->card, "emu10k1", device, 32, 1, &pcm)) < 0)
+	err = snd_pcm_new(emu->card, "emu10k1", device, 32, 1, &pcm);
+	if (err < 0)
 		return err;
 
 	pcm->private_data = emu;
@@ -1413,7 +1417,8 @@ int snd_emu10k1_pcm_multi(struct snd_emu10k1 *emu, int device)
 	struct snd_pcm_substream *substream;
 	int err;
 
-	if ((err = snd_pcm_new(emu->card, "emu10k1", device, 1, 0, &pcm)) < 0)
+	err = snd_pcm_new(emu->card, "emu10k1", device, 1, 0, &pcm);
+	if (err < 0)
 		return err;
 
 	pcm->private_data = emu;
@@ -1447,7 +1452,8 @@ int snd_emu10k1_pcm_mic(struct snd_emu10k1 *emu, int device)
 	struct snd_pcm *pcm;
 	int err;
 
-	if ((err = snd_pcm_new(emu->card, "emu10k1 mic", device, 0, 1, &pcm)) < 0)
+	err = snd_pcm_new(emu->card, "emu10k1 mic", device, 0, 1, &pcm);
+	if (err < 0)
 		return err;
 
 	pcm->private_data = emu;
@@ -1775,16 +1781,21 @@ int snd_emu10k1_pcm_efx(struct snd_emu10k1 *emu, int device)
 	struct snd_kcontrol *kctl;
 	int err;
 
-	if ((err = snd_pcm_new(emu->card, "emu10k1 efx", device, 8, 1, &pcm)) < 0)
+	err = snd_pcm_new(emu->card, "emu10k1 efx", device, emu->audigy ? 0 : 8, 1, &pcm);
+	if (err < 0)
 		return err;
 
 	pcm->private_data = emu;
 
-	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_emu10k1_fx8010_playback_ops);
+	if (!emu->audigy)
+		snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &snd_emu10k1_fx8010_playback_ops);
 	snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &snd_emu10k1_capture_efx_ops);
 
 	pcm->info_flags = 0;
-	strcpy(pcm->name, "Multichannel Capture/PT Playback");
+	if (emu->audigy)
+		strcpy(pcm->name, "Multichannel Capture");
+	else
+		strcpy(pcm->name, "Multichannel Capture/PT Playback");
 	emu->pcm_efx = pcm;
 
 	/* EFX capture - record the "FXBUS2" channels, by default we connect the EXTINs 

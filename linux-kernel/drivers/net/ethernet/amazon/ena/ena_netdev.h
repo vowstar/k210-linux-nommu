@@ -1,33 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0 OR Linux-OpenIB */
 /*
- * Copyright 2015 Amazon.com, Inc. or its affiliates.
- *
- * This software is available to you under a choice of one of two
- * licenses.  You may choose to be licensed under the terms of the GNU
- * General Public License (GPL) Version 2, available from the file
- * COPYING in the main directory of this source tree, or the
- * BSD license below:
- *
- *     Redistribution and use in source and binary forms, with or
- *     without modification, are permitted provided that the following
- *     conditions are met:
- *
- *      - Redistributions of source code must retain the above
- *        copyright notice, this list of conditions and the following
- *        disclaimer.
- *
- *      - Redistributions in binary form must reproduce the above
- *        copyright notice, this list of conditions and the following
- *        disclaimer in the documentation and/or other materials
- *        provided with the distribution.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
+ * Copyright 2015-2020 Amazon.com, Inc. or its affiliates. All rights reserved.
  */
 
 #ifndef ENA_H
@@ -41,21 +14,16 @@
 #include <linux/interrupt.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
+#include <uapi/linux/bpf.h>
 
 #include "ena_com.h"
 #include "ena_eth_com.h"
 
-#define DRV_MODULE_VER_MAJOR	2
-#define DRV_MODULE_VER_MINOR	1
-#define DRV_MODULE_VER_SUBMINOR 0
+#define DRV_MODULE_GEN_MAJOR	2
+#define DRV_MODULE_GEN_MINOR	1
+#define DRV_MODULE_GEN_SUBMINOR 0
 
 #define DRV_MODULE_NAME		"ena"
-#ifndef DRV_MODULE_VERSION
-#define DRV_MODULE_VERSION \
-	__stringify(DRV_MODULE_VER_MAJOR) "."	\
-	__stringify(DRV_MODULE_VER_MINOR) "."	\
-	__stringify(DRV_MODULE_VER_SUBMINOR) "K"
-#endif
 
 #define DEVICE_NAME	"Elastic Network Adapter (ENA)"
 
@@ -69,7 +37,7 @@
  * 16kB.
  */
 #if PAGE_SIZE > SZ_16K
-#define ENA_PAGE_SIZE SZ_16K
+#define ENA_PAGE_SIZE (_AC(SZ_16K, UL))
 #else
 #define ENA_PAGE_SIZE PAGE_SIZE
 #endif
@@ -88,12 +56,6 @@
 #define ENA_TX_WAKEUP_THRESH		(MAX_SKB_FRAGS + 2)
 #define ENA_DEFAULT_RX_COPYBREAK	(256 - NET_IP_ALIGN)
 
-/* limit the buffer size to 600 bytes to handle MTU changes from very
- * small to very large, in which case the number of buffers per packet
- * could exceed ENA_PKT_MAX_BUFS
- */
-#define ENA_DEFAULT_MIN_RX_BUFF_ALLOC_SIZE 600
-
 #define ENA_MIN_MTU		128
 
 #define ENA_NAME_MAX_LEN	20
@@ -103,8 +65,6 @@
 
 #define ENA_RX_RSS_TABLE_LOG_SIZE  7
 #define ENA_RX_RSS_TABLE_SIZE	(1 << ENA_RX_RSS_TABLE_LOG_SIZE)
-
-#define ENA_HASH_KEY_SIZE	40
 
 /* The number of tx packet completions that will be handled each NAPI poll
  * cycle is ring_size / ENA_TX_POLL_BUDGET_DIVIDER.
@@ -130,10 +90,14 @@
 
 #define ENA_IO_TXQ_IDX(q)	(2 * (q))
 #define ENA_IO_RXQ_IDX(q)	(2 * (q) + 1)
+#define ENA_IO_TXQ_IDX_TO_COMBINED_IDX(q)	((q) / 2)
+#define ENA_IO_RXQ_IDX_TO_COMBINED_IDX(q)	(((q) - 1) / 2)
 
 #define ENA_MGMNT_IRQ_IDX		0
 #define ENA_IO_IRQ_FIRST_IDX		1
 #define ENA_IO_IRQ_IDX(q)		(ENA_IO_IRQ_FIRST_IDX + (q))
+
+#define ENA_ADMIN_POLL_DELAY_US 100
 
 /* ENA device should send keep alive msg every 1 sec.
  * We wait for 6 sec just to be on the safe side.
@@ -149,8 +113,9 @@
  * The buffer size we share with the device is defined to be ENA_PAGE_SIZE
  */
 
-#define ENA_XDP_MAX_MTU (ENA_PAGE_SIZE - ETH_HLEN - ETH_FCS_LEN - \
-				VLAN_HLEN - XDP_PACKET_HEADROOM)
+#define ENA_XDP_MAX_MTU (ENA_PAGE_SIZE - ETH_HLEN - ETH_FCS_LEN -	\
+			 VLAN_HLEN - XDP_PACKET_HEADROOM -		\
+			 SKB_DATA_ALIGN(sizeof(struct skb_shared_info)))
 
 #define ENA_IS_XDP_INDEX(adapter, index) (((index) >= (adapter)->xdp_first_ring) && \
 	((index) < (adapter)->xdp_first_ring + (adapter)->xdp_num_queues))
@@ -165,25 +130,14 @@ struct ena_irq {
 };
 
 struct ena_napi {
-	struct napi_struct napi ____cacheline_aligned;
+	u8 first_interrupt ____cacheline_aligned;
+	u8 interrupts_masked;
+	struct napi_struct napi;
 	struct ena_ring *tx_ring;
 	struct ena_ring *rx_ring;
 	struct ena_ring *xdp_ring;
-	bool first_interrupt;
 	u32 qid;
 	struct dim dim;
-};
-
-struct ena_calc_queue_size_ctx {
-	struct ena_com_dev_get_features_ctx *get_feat_ctx;
-	struct ena_com_dev *ena_dev;
-	struct pci_dev *pdev;
-	u32 tx_queue_size;
-	u32 rx_queue_size;
-	u32 max_tx_queue_size;
-	u32 max_rx_queue_size;
-	u16 max_tx_sgl_size;
-	u16 max_rx_sgl_size;
 };
 
 struct ena_tx_buffer {
@@ -199,12 +153,6 @@ struct ena_tx_buffer {
 	 * the xdp queues
 	 */
 	struct xdp_frame *xdpf;
-	/* The rx page for the rx buffer that was received in rx and
-	 * re transmitted on xdp tx queues as a result of XDP_TX action.
-	 * We need to free the page once we finished cleaning the buffer in
-	 * clean_xdp_irq()
-	 */
-	struct page *xdp_rx_page;
 
 	/* Indicate if bufs[0] map the linear data of the skb. */
 	u8 map_linear_data;
@@ -246,6 +194,8 @@ struct ena_stats_tx {
 	u64 bad_req_id;
 	u64 llq_buffer_copy;
 	u64 missed_tx;
+	u64 unmask_interrupt;
+	u64 last_napi_jiffies;
 };
 
 struct ena_stats_rx {
@@ -254,7 +204,7 @@ struct ena_stats_rx {
 	u64 rx_copybreak_pkt;
 	u64 csum_good;
 	u64 refil_partial;
-	u64 bad_csum;
+	u64 csum_bad;
 	u64 page_alloc_fail;
 	u64 skb_alloc_fail;
 	u64 dma_mapping_err;
@@ -262,6 +212,12 @@ struct ena_stats_rx {
 	u64 bad_req_id;
 	u64 empty_rx_ring;
 	u64 csum_unchecked;
+	u64 xdp_aborted;
+	u64 xdp_drop;
+	u64 xdp_pass;
+	u64 xdp_tx;
+	u64 xdp_invalid;
+	u64 xdp_redirect;
 };
 
 struct ena_ring {
@@ -286,6 +242,11 @@ struct ena_ring {
 	struct ena_com_io_sq *ena_com_io_sq;
 	struct bpf_prog *xdp_bpf_prog;
 	struct xdp_rxq_info xdp_rxq;
+	spinlock_t xdp_tx_lock;	/* synchronize XDP TX/Redirect traffic */
+	/* Used for rx queues only to point to the xdp tx ring, to
+	 * which traffic should be redirected from this rx ring.
+	 */
+	struct ena_ring *xdp_ring;
 
 	u16 next_to_use;
 	u16 next_to_clean;
@@ -298,12 +259,14 @@ struct ena_ring {
 	/* The maximum header length the device can handle */
 	u8 tx_max_header_size;
 
-	bool first_interrupt;
+	bool disable_meta_caching;
 	u16 no_interrupt_event_cnt;
 
-	/* cpu for TPH */
+	/* cpu and NUMA for TPH */
 	int cpu;
-	 /* number of tx/rx_buffer_info's entries */
+	int numa_node;
+
+	/* number of tx/rx_buffer_info's entries */
 	int ring_size;
 
 	enum ena_admin_placement_policy_type tx_mem_queue_type;
@@ -331,6 +294,7 @@ struct ena_stats_dev {
 	u64 interface_down;
 	u64 admin_q_pause;
 	u64 rx_drops;
+	u64 tx_drops;
 };
 
 enum ena_flags_t {
@@ -399,10 +363,12 @@ struct ena_adapter {
 
 	bool wd_state;
 	bool dev_up_before_reset;
+	bool disable_meta_caching;
 	unsigned long last_keep_alive_jiffies;
 
 	struct u64_stats_sync syncp;
 	struct ena_stats_dev dev_stats;
+	struct ena_admin_eni_stats eni_stats;
 
 	/* last queue index that was checked for uncompleted tx packets */
 	u32 last_monitored_tx_qid;
@@ -420,13 +386,26 @@ void ena_dump_stats_to_dmesg(struct ena_adapter *adapter);
 
 void ena_dump_stats_to_buf(struct ena_adapter *adapter, u8 *buf);
 
+int ena_update_hw_stats(struct ena_adapter *adapter);
+
 int ena_update_queue_sizes(struct ena_adapter *adapter,
 			   u32 new_tx_size,
 			   u32 new_rx_size);
 
 int ena_update_queue_count(struct ena_adapter *adapter, u32 new_channel_count);
 
+int ena_set_rx_copybreak(struct ena_adapter *adapter, u32 rx_copybreak);
+
 int ena_get_sset_count(struct net_device *netdev, int sset);
+
+static inline void ena_reset_device(struct ena_adapter *adapter,
+				    enum ena_regs_reset_reason_types reset_reason)
+{
+	adapter->reset_reason = reset_reason;
+	/* Make sure reset reason is set before triggering the reset */
+	smp_mb__before_atomic();
+	set_bit(ENA_FLAG_TRIGGER_RESET, &adapter->flags);
+}
 
 enum ena_xdp_errors_t {
 	ENA_XDP_ALLOWED = 0,
@@ -434,10 +413,14 @@ enum ena_xdp_errors_t {
 	ENA_XDP_NO_ENOUGH_QUEUES,
 };
 
-static inline bool ena_xdp_queues_present(struct ena_adapter *adapter)
-{
-	return adapter->xdp_first_ring != 0;
-}
+enum ENA_XDP_ACTIONS {
+	ENA_XDP_PASS		= 0,
+	ENA_XDP_TX		= BIT(0),
+	ENA_XDP_REDIRECT	= BIT(1),
+	ENA_XDP_DROP		= BIT(2)
+};
+
+#define ENA_XDP_FORWARDED (ENA_XDP_TX | ENA_XDP_REDIRECT)
 
 static inline bool ena_xdp_present(struct ena_adapter *adapter)
 {
@@ -449,8 +432,8 @@ static inline bool ena_xdp_present_ring(struct ena_ring *ring)
 	return !!ring->xdp_bpf_prog;
 }
 
-static inline int ena_xdp_legal_queue_count(struct ena_adapter *adapter,
-					    u32 queues)
+static inline bool ena_xdp_legal_queue_count(struct ena_adapter *adapter,
+					     u32 queues)
 {
 	return 2 * queues <= adapter->max_num_io_queues;
 }

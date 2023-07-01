@@ -52,7 +52,7 @@ static inline int iscsi_sna_gte(u32 n1, u32 n2)
 }
 
 /*
- * useful common(control and data pathes) macro
+ * useful common(control and data paths) macro
  */
 #define ntoh24(p) (((p)[0] << 16) | ((p)[1] << 8) | ((p)[2]))
 #define hton24(p, v) { \
@@ -627,7 +627,6 @@ struct iscsi_reject {
 #define ISCSI_REASON_BOOKMARK_INVALID	9
 #define ISCSI_REASON_BOOKMARK_NO_RESOURCES	10
 #define ISCSI_REASON_NEGOTIATION_RESET	11
-#define ISCSI_REASON_WAITING_FOR_LOGOUT	12
 
 /* Max. number of Key=Value pairs in a text message */
 #define MAX_KEY_VALUE_PAIRS	8192

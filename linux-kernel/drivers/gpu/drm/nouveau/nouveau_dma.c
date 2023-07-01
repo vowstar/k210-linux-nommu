@@ -30,19 +30,6 @@
 
 #include <nvif/user.h>
 
-void
-OUT_RINGp(struct nouveau_channel *chan, const void *data, unsigned nr_dwords)
-{
-	bool is_iomem;
-	u32 *mem = ttm_kmap_obj_virtual(&chan->push.buffer->kmap, &is_iomem);
-	mem = &mem[chan->dma.cur];
-	if (is_iomem)
-		memcpy_toio((void __force __iomem *)mem, data, nr_dwords * 4);
-	else
-		memcpy(mem, data, nr_dwords * 4);
-	chan->dma.cur += nr_dwords;
-}
-
 /* Fetch and adjust GPU GET pointer
  *
  * Returns:
@@ -55,9 +42,9 @@ READ_GET(struct nouveau_channel *chan, uint64_t *prev_get, int *timeout)
 {
 	uint64_t val;
 
-	val = nvif_rd32(&chan->user, chan->user_get);
+	val = nvif_rd32(chan->userd, chan->user_get);
         if (chan->user_get_hi)
-                val |= (uint64_t)nvif_rd32(&chan->user, chan->user_get_hi) << 32;
+		val |= (uint64_t)nvif_rd32(chan->userd, chan->user_get_hi) << 32;
 
 	/* reset counter as long as GET is still advancing, this is
 	 * to avoid misdetecting a GPU lockup if the GPU happens to
@@ -99,7 +86,7 @@ nv50_dma_push(struct nouveau_channel *chan, u64 offset, int length)
 	/* Flush writes. */
 	nouveau_bo_rd32(pb, 0);
 
-	nvif_wr32(&chan->user, 0x8c, chan->dma.ib_put);
+	nvif_wr32(chan->userd, 0x8c, chan->dma.ib_put);
 	if (user->func && user->func->doorbell)
 		user->func->doorbell(user, chan->token);
 	chan->dma.ib_free--;
@@ -111,7 +98,7 @@ nv50_dma_push_wait(struct nouveau_channel *chan, int count)
 	uint32_t cnt = 0, prev_get = 0;
 
 	while (chan->dma.ib_free < count) {
-		uint32_t get = nvif_rd32(&chan->user, 0x88);
+		uint32_t get = nvif_rd32(chan->userd, 0x88);
 		if (get != prev_get) {
 			prev_get = get;
 			cnt = 0;

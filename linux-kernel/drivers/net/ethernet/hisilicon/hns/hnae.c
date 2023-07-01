@@ -270,7 +270,7 @@ static void hnae_fini_queue(struct hnae_queue *q)
 	hnae_fini_ring(&q->rx_ring);
 }
 
-/**
+/*
  * ae_chain - define ae chain head
  */
 static RAW_NOTIFIER_HEAD(ae_chain);
@@ -419,10 +419,10 @@ int hnae_ae_register(struct hnae_ae_dev *hdev, struct module *owner)
 	hdev->cls_dev.release = hnae_release;
 	(void)dev_set_name(&hdev->cls_dev, "hnae%d", hdev->id);
 	ret = device_register(&hdev->cls_dev);
-	if (ret)
+	if (ret) {
+		put_device(&hdev->cls_dev);
 		return ret;
-
-	__module_get(THIS_MODULE);
+	}
 
 	INIT_LIST_HEAD(&hdev->handle_list);
 	spin_lock_init(&hdev->lock);
@@ -438,12 +438,11 @@ EXPORT_SYMBOL(hnae_ae_register);
 
 /**
  * hnae_ae_unregister - unregisters a HNAE AE engine
- * @cdev: the device to unregister
+ * @hdev: the device to unregister
  */
 void hnae_ae_unregister(struct hnae_ae_dev *hdev)
 {
 	device_unregister(&hdev->cls_dev);
-	module_put(THIS_MODULE);
 }
 EXPORT_SYMBOL(hnae_ae_unregister);
 

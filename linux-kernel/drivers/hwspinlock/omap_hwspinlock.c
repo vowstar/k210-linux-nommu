@@ -2,11 +2,12 @@
 /*
  * OMAP hardware spinlock driver
  *
- * Copyright (C) 2010-2015 Texas Instruments Incorporated - http://www.ti.com
+ * Copyright (C) 2010-2021 Texas Instruments Incorporated - https://www.ti.com
  *
  * Contact: Simon Que <sque@ti.com>
  *          Hari Kanigeri <h-kanigeri2@ti.com>
  *          Ohad Ben-Cohen <ohad@wizery.com>
+ *          Suman Anna <s-anna@ti.com>
  */
 
 #include <linux/kernel.h>
@@ -93,11 +94,9 @@ static int omap_hwspinlock_probe(struct platform_device *pdev)
 	 * the module SYSSTATUS register
 	 */
 	pm_runtime_enable(&pdev->dev);
-	ret = pm_runtime_get_sync(&pdev->dev);
-	if (ret < 0) {
-		pm_runtime_put_noidle(&pdev->dev);
+	ret = pm_runtime_resume_and_get(&pdev->dev);
+	if (ret < 0)
 		goto runtime_err;
-	}
 
 	/* Determine number of locks */
 	i = readl(io_base + SYSSTATUS_OFFSET);
@@ -164,6 +163,7 @@ static int omap_hwspinlock_remove(struct platform_device *pdev)
 
 static const struct of_device_id omap_hwspinlock_of_match[] = {
 	{ .compatible = "ti,omap4-hwspinlock", },
+	{ .compatible = "ti,am64-hwspinlock", },
 	{ .compatible = "ti,am654-hwspinlock", },
 	{ /* end */ },
 };

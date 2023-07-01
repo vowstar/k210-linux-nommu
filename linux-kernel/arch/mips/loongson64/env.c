@@ -14,15 +14,23 @@
  * Author: Wu Zhangjin, wuzhangjin@gmail.com
  */
 #include <linux/export.h>
+#include <linux/pci_ids.h>
 #include <asm/bootinfo.h>
 #include <loongson.h>
 #include <boot_param.h>
+#include <builtin_dtbs.h>
 #include <workarounds.h>
+
+#define HOST_BRIDGE_CONFIG_ADDR	((void __iomem *)TO_UNCAC(0x1a000000))
 
 u32 cpu_clock_freq;
 EXPORT_SYMBOL(cpu_clock_freq);
 struct efi_memory_map_loongson *loongson_memmap;
 struct loongson_system_configuration loongson_sysconf;
+
+struct board_devices *eboard;
+struct interface_info *einter;
+struct loongson_special_attribute *especial;
 
 u64 loongson_chipcfg[MAX_PACKAGES] = {0xffffffffbfc00180};
 u64 loongson_chiptemp[MAX_PACKAGES];
@@ -35,13 +43,26 @@ const char *get_system_type(void)
 	return "Generic Loongson64 System";
 }
 
-void __init prom_init_env(void)
+
+void __init prom_dtb_init_env(void)
+{
+	if ((fw_arg2 < CKSEG0 || fw_arg2 > CKSEG1)
+		&& (fw_arg2 < XKPHYS || fw_arg2 > XKSEG))
+
+		loongson_fdt_blob = __dtb_loongson64_2core_2k1000_begin;
+	else
+		loongson_fdt_blob = (void *)fw_arg2;
+}
+
+void __init prom_lefi_init_env(void)
 {
 	struct boot_params *boot_p;
 	struct loongson_params *loongson_p;
 	struct system_loongson *esys;
 	struct efi_cpuinfo_loongson *ecpu;
 	struct irq_source_routing_table *eirq_source;
+	u32 id;
+	u16 vendor;
 
 	/* firmware arguments are initialized in head.S */
 	boot_p = (struct boot_params *)fw_arg2;
@@ -51,6 +72,12 @@ void __init prom_init_env(void)
 		((u64)loongson_p + loongson_p->system_offset);
 	ecpu = (struct efi_cpuinfo_loongson *)
 		((u64)loongson_p + loongson_p->cpu_offset);
+	eboard = (struct board_devices *)
+		((u64)loongson_p + loongson_p->boarddev_table_offset);
+	einter = (struct interface_info *)
+		((u64)loongson_p + loongson_p->interface_offset);
+	especial = (struct loongson_special_attribute *)
+		((u64)loongson_p + loongson_p->special_offset);
 	eirq_source = (struct irq_source_routing_table *)
 		((u64)loongson_p + loongson_p->irq_offset);
 	loongson_memmap = (struct efi_memory_map_loongson *)
@@ -79,7 +106,6 @@ void __init prom_init_env(void)
 		loongson_freqctrl[1] = 0x900010001fe001d0;
 		loongson_freqctrl[2] = 0x900020001fe001d0;
 		loongson_freqctrl[3] = 0x900030001fe001d0;
-		loongson_sysconf.ht_control_base = 0x90000EFDFB000000;
 		loongson_sysconf.workarounds = WORKAROUND_CPUFREQ;
 		break;
 	case Legacy_3B:
@@ -102,7 +128,6 @@ void __init prom_init_env(void)
 		loongson_freqctrl[1] = 0x900020001fe001d0;
 		loongson_freqctrl[2] = 0x900040001fe001d0;
 		loongson_freqctrl[3] = 0x900060001fe001d0;
-		loongson_sysconf.ht_control_base = 0x90001EFDFB000000;
 		loongson_sysconf.workarounds = WORKAROUND_CPUHOTPLUG;
 		break;
 	default:
@@ -120,9 +145,6 @@ void __init prom_init_env(void)
 		loongson_sysconf.cores_per_node - 1) /
 		loongson_sysconf.cores_per_node;
 
-	loongson_sysconf.pci_mem_start_addr = eirq_source->pci_mem_start_addr;
-	loongson_sysconf.pci_mem_end_addr = eirq_source->pci_mem_end_addr;
-	loongson_sysconf.pci_io_base = eirq_source->pci_io_start_addr;
 	loongson_sysconf.dma_mask_bits = eirq_source->dma_mask_bits;
 	if (loongson_sysconf.dma_mask_bits < 32 ||
 		loongson_sysconf.dma_mask_bits > 64)
@@ -137,22 +159,65 @@ void __init prom_init_env(void)
 		loongson_sysconf.poweroff_addr, loongson_sysconf.restart_addr,
 		loongson_sysconf.vgabios_addr);
 
-	memset(loongson_sysconf.ecname, 0, 32);
-	if (esys->has_ec)
-		memcpy(loongson_sysconf.ecname, esys->ec_name, 32);
 	loongson_sysconf.workarounds |= esys->workarounds;
 
-	loongson_sysconf.nr_uarts = esys->nr_uarts;
-	if (esys->nr_uarts < 1 || esys->nr_uarts > MAX_UARTS)
-		loongson_sysconf.nr_uarts = 1;
-	memcpy(loongson_sysconf.uarts, esys->uarts,
-		sizeof(struct uart_device) * loongson_sysconf.nr_uarts);
-
-	loongson_sysconf.nr_sensors = esys->nr_sensors;
-	if (loongson_sysconf.nr_sensors > MAX_SENSORS)
-		loongson_sysconf.nr_sensors = 0;
-	if (loongson_sysconf.nr_sensors)
-		memcpy(loongson_sysconf.sensors, esys->sensors,
-			sizeof(struct sensor_device) * loongson_sysconf.nr_sensors);
 	pr_info("CpuClock = %u\n", cpu_clock_freq);
+
+	/* Read the ID of PCI host bridge to detect bridge type */
+	id = readl(HOST_BRIDGE_CONFIG_ADDR);
+	vendor = id & 0xffff;
+
+	switch (vendor) {
+	case PCI_VENDOR_ID_LOONGSON:
+		pr_info("The bridge chip is LS7A\n");
+		loongson_sysconf.bridgetype = LS7A;
+		loongson_sysconf.early_config = ls7a_early_config;
+		break;
+	case PCI_VENDOR_ID_AMD:
+	case PCI_VENDOR_ID_ATI:
+		pr_info("The bridge chip is RS780E or SR5690\n");
+		loongson_sysconf.bridgetype = RS780E;
+		loongson_sysconf.early_config = rs780e_early_config;
+		break;
+	default:
+		pr_info("The bridge chip is VIRTUAL\n");
+		loongson_sysconf.bridgetype = VIRTUAL;
+		loongson_sysconf.early_config = virtual_early_config;
+		loongson_fdt_blob = __dtb_loongson64v_4core_virtio_begin;
+		break;
+	}
+
+	if ((read_c0_prid() & PRID_IMP_MASK) == PRID_IMP_LOONGSON_64C) {
+		switch (read_c0_prid() & PRID_REV_MASK) {
+		case PRID_REV_LOONGSON3A_R1:
+		case PRID_REV_LOONGSON3A_R2_0:
+		case PRID_REV_LOONGSON3A_R2_1:
+		case PRID_REV_LOONGSON3A_R3_0:
+		case PRID_REV_LOONGSON3A_R3_1:
+			switch (loongson_sysconf.bridgetype) {
+			case LS7A:
+				loongson_fdt_blob = __dtb_loongson64c_4core_ls7a_begin;
+				break;
+			case RS780E:
+				loongson_fdt_blob = __dtb_loongson64c_4core_rs780e_begin;
+				break;
+			default:
+				break;
+			}
+			break;
+		case PRID_REV_LOONGSON3B_R1:
+		case PRID_REV_LOONGSON3B_R2:
+			if (loongson_sysconf.bridgetype == RS780E)
+				loongson_fdt_blob = __dtb_loongson64c_8core_rs780e_begin;
+			break;
+		default:
+			break;
+		}
+	} else if ((read_c0_prid() & PRID_IMP_MASK) == PRID_IMP_LOONGSON_64G) {
+		if (loongson_sysconf.bridgetype == LS7A)
+			loongson_fdt_blob = __dtb_loongson64g_4core_ls7a_begin;
+	}
+
+	if (!loongson_fdt_blob)
+		pr_err("Failed to determine built-in Loongson64 dtb\n");
 }

@@ -35,7 +35,7 @@ nvkm_sw_mthd(struct nvkm_sw *sw, int chid, int subc, u32 mthd, u32 data)
 
 	spin_lock_irqsave(&sw->engine.lock, flags);
 	list_for_each_entry(chan, &sw->chan, head) {
-		if (chan->fifo->chid == chid) {
+		if (chan->fifo->id == chid) {
 			handled = nvkm_sw_chan_mthd(chan, subc, mthd, data);
 			list_del(&chan->head);
 			list_add(&chan->head, &sw->chan);
@@ -97,7 +97,7 @@ nvkm_sw = {
 
 int
 nvkm_sw_new_(const struct nvkm_sw_func *func, struct nvkm_device *device,
-	     int index, struct nvkm_sw **psw)
+	     enum nvkm_subdev_type type, int inst, struct nvkm_sw **psw)
 {
 	struct nvkm_sw *sw;
 
@@ -106,5 +106,5 @@ nvkm_sw_new_(const struct nvkm_sw_func *func, struct nvkm_device *device,
 	INIT_LIST_HEAD(&sw->chan);
 	sw->func = func;
 
-	return nvkm_engine_ctor(&nvkm_sw, device, index, true, &sw->engine);
+	return nvkm_engine_ctor(&nvkm_sw, device, type, inst, true, &sw->engine);
 }

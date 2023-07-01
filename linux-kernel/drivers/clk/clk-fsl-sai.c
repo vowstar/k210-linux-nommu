@@ -58,13 +58,13 @@ static int fsl_sai_clk_probe(struct platform_device *pdev)
 	/* set clock direction, we are the BCLK master */
 	writel(CR2_BCD, base + I2S_CR2);
 
-	hw = clk_hw_register_composite_pdata(dev, dev->of_node->name,
-					     &pdata, 1, NULL, NULL,
-					     &sai_clk->div.hw,
-					     &clk_divider_ops,
-					     &sai_clk->gate.hw,
-					     &clk_gate_ops,
-					     CLK_SET_RATE_GATE);
+	hw = devm_clk_hw_register_composite_pdata(dev, dev->of_node->name,
+						  &pdata, 1, NULL, NULL,
+						  &sai_clk->div.hw,
+						  &clk_divider_ops,
+						  &sai_clk->gate.hw,
+						  &clk_gate_ops,
+						  CLK_SET_RATE_GATE);
 	if (IS_ERR(hw))
 		return PTR_ERR(hw);
 
@@ -88,5 +88,4 @@ module_platform_driver(fsl_sai_clk_driver);
 
 MODULE_DESCRIPTION("Freescale SAI bitclock-as-a-clock driver");
 MODULE_AUTHOR("Michael Walle <michael@walle.cc>");
-MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:fsl-sai-clk");

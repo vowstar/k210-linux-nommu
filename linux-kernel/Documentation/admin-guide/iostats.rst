@@ -76,7 +76,7 @@ Field  3 -- # of sectors read (unsigned long)
 
 Field  4 -- # of milliseconds spent reading (unsigned int)
     This is the total number of milliseconds spent by all reads (as
-    measured from __make_request() to end_that_request_last()).
+    measured from blk_mq_alloc_request() to __blk_mq_end_request()).
 
 Field  5 -- # of writes completed (unsigned long)
     This is the total number of writes completed successfully.
@@ -89,7 +89,7 @@ Field  7 -- # of sectors written (unsigned long)
 
 Field  8 -- # of milliseconds spent writing (unsigned int)
     This is the total number of milliseconds spent by all writes (as
-    measured from __make_request() to end_that_request_last()).
+    measured from blk_mq_alloc_request() to __blk_mq_end_request()).
 
 Field  9 -- # of I/Os currently in progress (unsigned int)
     The only field that should go to zero. Incremented as requests are
@@ -100,7 +100,7 @@ Field 10 -- # of milliseconds spent doing I/Os (unsigned int)
 
     Since 5.0 this field counts jiffies when at least one request was
     started or completed. If request runs more than 2 jiffies then some
-    I/O time will not be accounted unless there are other requests.
+    I/O time might be not accounted in case of concurrent requests.
 
 Field 11 -- weighted # of milliseconds spent doing I/Os (unsigned int)
     This field is incremented at each I/O start, I/O completion, I/O
@@ -120,7 +120,7 @@ Field 14 -- # of sectors discarded (unsigned long)
 
 Field 15 -- # of milliseconds spent discarding (unsigned int)
     This is the total number of milliseconds spent by all discards (as
-    measured from __make_request() to end_that_request_last()).
+    measured from blk_mq_alloc_request() to __blk_mq_end_request()).
 
 Field 16 -- # of flush requests completed
     This is the total number of flush requests completed successfully.
@@ -142,6 +142,9 @@ almost a non-issue.  When the statistics are read, the per-CPU counters
 are summed (possibly overflowing the unsigned long variable they are
 summed to) and the result given to the user.  There is no convenient
 user interface for accessing the per-CPU counters themselves.
+
+Since 4.19 request times are measured with nanoseconds precision and
+truncated to milliseconds before showing in this interface.
 
 Disks vs Partitions
 -------------------

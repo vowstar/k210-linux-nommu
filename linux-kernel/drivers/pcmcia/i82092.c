@@ -112,6 +112,7 @@ static int i82092aa_pci_probe(struct pci_dev *dev,
 	for (i = 0; i < socket_count; i++) {
 		sockets[i].card_state = 1; /* 1 = present but empty */
 		sockets[i].io_base = pci_resource_start(dev, 0);
+		sockets[i].dev = dev;
 		sockets[i].socket.features |= SS_CAP_PCCARD;
 		sockets[i].socket.map_size = 0x1000;
 		sockets[i].socket.irq_mask = 0;
@@ -660,12 +661,12 @@ static int i82092aa_set_mem_map(struct pcmcia_socket *socket,
 	return 0;
 }
 
-static int i82092aa_module_init(void)
+static int __init i82092aa_module_init(void)
 {
 	return pci_register_driver(&i82092aa_pci_driver);
 }
 
-static void i82092aa_module_exit(void)
+static void __exit i82092aa_module_exit(void)
 {
 	pci_unregister_driver(&i82092aa_pci_driver);
 	if (sockets[0].io_base > 0)

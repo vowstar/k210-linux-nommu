@@ -78,7 +78,7 @@ struct axp_mc_drvdata {
 	char msg[128];
 };
 
-/* derived from "DRAM Address Multiplexing" in the ARAMDA XP Functional Spec */
+/* derived from "DRAM Address Multiplexing" in the ARMADA XP Functional Spec */
 static uint32_t axp_mc_calc_address(struct axp_mc_drvdata *drvdata,
 				    uint8_t cs, uint8_t bank, uint16_t row,
 				    uint16_t col)
@@ -160,12 +160,12 @@ static void axp_mc_check(struct mem_ctl_info *mci)
 		if (cnt_sbe)
 			cnt_sbe--;
 		else
-			dev_warn(mci->pdev, "inconsistent SBE count detected");
+			dev_warn(mci->pdev, "inconsistent SBE count detected\n");
 	} else {
 		if (cnt_dbe)
 			cnt_dbe--;
 		else
-			dev_warn(mci->pdev, "inconsistent DBE count detected");
+			dev_warn(mci->pdev, "inconsistent DBE count detected\n");
 	}
 
 	/* report earlier errors */
@@ -178,7 +178,7 @@ static void axp_mc_check(struct mem_ctl_info *mci)
 				     "details unavailable (multiple errors)");
 	if (cnt_dbe)
 		edac_mc_handle_error(HW_EVENT_ERR_UNCORRECTED, mci,
-				     cnt_sbe, /* error count */
+				     cnt_dbe, /* error count */
 				     0, 0, 0, /* pfn, offset, syndrome */
 				     -1, -1, -1, /* top, mid, low layer */
 				     mci->ctl_name,
@@ -286,17 +286,10 @@ static int axp_mc_probe(struct platform_device *pdev)
 	struct edac_mc_layer layers[1];
 	const struct of_device_id *id;
 	struct mem_ctl_info *mci;
-	struct resource *r;
 	void __iomem *base;
 	uint32_t config;
 
-	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!r) {
-		dev_err(&pdev->dev, "Unable to get mem resource\n");
-		return -ENODEV;
-	}
-
-	base = devm_ioremap_resource(&pdev->dev, r);
+	base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(base)) {
 		dev_err(&pdev->dev, "Unable to map regs\n");
 		return PTR_ERR(base);
@@ -304,7 +297,7 @@ static int axp_mc_probe(struct platform_device *pdev)
 
 	config = readl(base + SDRAM_CONFIG_REG);
 	if (!(config & SDRAM_CONFIG_ECC_MASK)) {
-		dev_warn(&pdev->dev, "SDRAM ECC is not enabled");
+		dev_warn(&pdev->dev, "SDRAM ECC is not enabled\n");
 		return -EINVAL;
 	}
 
@@ -429,26 +422,26 @@ static void aurora_l2_check(struct edac_device_ctl_info *dci)
 
 	src = (attr_cap & AURORA_ERR_ATTR_SRC_MSK) >> AURORA_ERR_ATTR_SRC_OFF;
 	if (src <= 3)
-		len += snprintf(msg+len, size-len, "src=CPU%d ", src);
+		len += scnprintf(msg+len, size-len, "src=CPU%d ", src);
 	else
-		len += snprintf(msg+len, size-len, "src=IO ");
+		len += scnprintf(msg+len, size-len, "src=IO ");
 
 	txn =  (attr_cap & AURORA_ERR_ATTR_TXN_MSK) >> AURORA_ERR_ATTR_TXN_OFF;
 	switch (txn) {
 	case 0:
-		len += snprintf(msg+len, size-len, "txn=Data-Read ");
+		len += scnprintf(msg+len, size-len, "txn=Data-Read ");
 		break;
 	case 1:
-		len += snprintf(msg+len, size-len, "txn=Isn-Read ");
+		len += scnprintf(msg+len, size-len, "txn=Isn-Read ");
 		break;
 	case 2:
-		len += snprintf(msg+len, size-len, "txn=Clean-Flush ");
+		len += scnprintf(msg+len, size-len, "txn=Clean-Flush ");
 		break;
 	case 3:
-		len += snprintf(msg+len, size-len, "txn=Eviction ");
+		len += scnprintf(msg+len, size-len, "txn=Eviction ");
 		break;
 	case 4:
-		len += snprintf(msg+len, size-len,
+		len += scnprintf(msg+len, size-len,
 				"txn=Read-Modify-Write ");
 		break;
 	}
@@ -456,19 +449,19 @@ static void aurora_l2_check(struct edac_device_ctl_info *dci)
 	err = (attr_cap & AURORA_ERR_ATTR_ERR_MSK) >> AURORA_ERR_ATTR_ERR_OFF;
 	switch (err) {
 	case 0:
-		len += snprintf(msg+len, size-len, "err=CorrECC ");
+		len += scnprintf(msg+len, size-len, "err=CorrECC ");
 		break;
 	case 1:
-		len += snprintf(msg+len, size-len, "err=UnCorrECC ");
+		len += scnprintf(msg+len, size-len, "err=UnCorrECC ");
 		break;
 	case 2:
-		len += snprintf(msg+len, size-len, "err=TagParity ");
+		len += scnprintf(msg+len, size-len, "err=TagParity ");
 		break;
 	}
 
-	len += snprintf(msg+len, size-len, "addr=0x%x ", addr_cap & AURORA_ERR_ADDR_CAP_ADDR_MASK);
-	len += snprintf(msg+len, size-len, "index=0x%x ", (way_cap & AURORA_ERR_WAY_IDX_MSK) >> AURORA_ERR_WAY_IDX_OFF);
-	len += snprintf(msg+len, size-len, "way=0x%x", (way_cap & AURORA_ERR_WAY_CAP_WAY_MASK) >> AURORA_ERR_WAY_CAP_WAY_OFFSET);
+	len += scnprintf(msg+len, size-len, "addr=0x%x ", addr_cap & AURORA_ERR_ADDR_CAP_ADDR_MASK);
+	len += scnprintf(msg+len, size-len, "index=0x%x ", (way_cap & AURORA_ERR_WAY_IDX_MSK) >> AURORA_ERR_WAY_IDX_OFF);
+	len += scnprintf(msg+len, size-len, "way=0x%x", (way_cap & AURORA_ERR_WAY_CAP_WAY_MASK) >> AURORA_ERR_WAY_CAP_WAY_OFFSET);
 
 	/* clear error capture registers */
 	writel(AURORA_ERR_ATTR_CAP_VALID, drvdata->base + AURORA_ERR_ATTR_CAP_REG);
@@ -516,15 +509,8 @@ static int aurora_l2_probe(struct platform_device *pdev)
 	const struct of_device_id *id;
 	uint32_t l2x0_aux_ctrl;
 	void __iomem *base;
-	struct resource *r;
 
-	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!r) {
-		dev_err(&pdev->dev, "Unable to get mem resource\n");
-		return -ENODEV;
-	}
-
-	base = devm_ioremap_resource(&pdev->dev, r);
+	base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(base)) {
 		dev_err(&pdev->dev, "Unable to map regs\n");
 		return PTR_ERR(base);
@@ -532,9 +518,9 @@ static int aurora_l2_probe(struct platform_device *pdev)
 
 	l2x0_aux_ctrl = readl(base + L2X0_AUX_CTRL);
 	if (!(l2x0_aux_ctrl & AURORA_ACR_PARITY_EN))
-		dev_warn(&pdev->dev, "tag parity is not enabled");
+		dev_warn(&pdev->dev, "tag parity is not enabled\n");
 	if (!(l2x0_aux_ctrl & AURORA_ACR_ECC_EN))
-		dev_warn(&pdev->dev, "data ECC is not enabled");
+		dev_warn(&pdev->dev, "data ECC is not enabled\n");
 
 	dci = edac_device_alloc_ctl_info(sizeof(*drvdata),
 					 "cpu", 1, "L", 1, 2, NULL, 0, 0);
@@ -613,12 +599,15 @@ static int __init armada_xp_edac_init(void)
 {
 	int res;
 
+	if (ghes_get_devices())
+		return -EBUSY;
+
 	/* only polling is supported */
 	edac_op_state = EDAC_OPSTATE_POLL;
 
 	res = platform_register_drivers(drivers, ARRAY_SIZE(drivers));
 	if (res)
-		pr_warn("Aramda XP EDAC drivers fail to register\n");
+		pr_warn("Armada XP EDAC drivers fail to register\n");
 
 	return 0;
 }

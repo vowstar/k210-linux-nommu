@@ -75,6 +75,24 @@ update it, its value is mostly useless. The DRM core prints it to the
 kernel log at initialization time and passes it to userspace through the
 DRM_IOCTL_VERSION ioctl.
 
+Module Initialization
+---------------------
+
+.. kernel-doc:: include/drm/drm_module.h
+   :doc: overview
+
+Managing Ownership of the Framebuffer Aperture
+----------------------------------------------
+
+.. kernel-doc:: drivers/gpu/drm/drm_aperture.c
+   :doc: overview
+
+.. kernel-doc:: include/drm/drm_aperture.h
+   :internal:
+
+.. kernel-doc:: drivers/gpu/drm/drm_aperture.c
+   :export:
+
 Device Instance and Driver Handling
 -----------------------------------
 
@@ -99,15 +117,6 @@ Component Helper Usage
 .. kernel-doc:: drivers/gpu/drm/drm_drv.c
    :doc: component helper usage recommendations
 
-IRQ Helper Library
-~~~~~~~~~~~~~~~~~~
-
-.. kernel-doc:: drivers/gpu/drm/drm_irq.c
-   :doc: irq helpers
-
-.. kernel-doc:: drivers/gpu/drm/drm_irq.c
-   :export:
-
 Memory Manager Initialization
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -131,6 +140,18 @@ been mapped and any necessary information has been extracted, it should
 be unmapped; on many devices, the ROM address decoder is shared with
 other BARs, so leaving it mapped could cause undesired behaviour like
 hangs or memory corruption.
+
+Managed Resources
+-----------------
+
+.. kernel-doc:: drivers/gpu/drm/drm_managed.c
+   :doc: managed resources
+
+.. kernel-doc:: drivers/gpu/drm/drm_managed.c
+   :export:
+
+.. kernel-doc:: include/drm/drm_managed.h
+   :internal:
 
 Bus-specific Device Registration and PCI Support
 ------------------------------------------------
@@ -184,6 +205,38 @@ Utilities
 
 .. kernel-doc:: include/drm/drm_util.h
    :internal:
+
+
+Unit testing
+============
+
+KUnit
+-----
+
+KUnit (Kernel unit testing framework) provides a common framework for unit tests
+within the Linux kernel.
+
+This section covers the specifics for the DRM subsystem. For general information
+about KUnit, please refer to Documentation/dev-tools/kunit/start.rst.
+
+How to run the tests?
+~~~~~~~~~~~~~~~~~~~~~
+
+In order to facilitate running the test suite, a configuration file is present
+in ``drivers/gpu/drm/tests/.kunitconfig``. It can be used by ``kunit.py`` as
+follows:
+
+.. code-block:: bash
+
+	$ ./tools/testing/kunit/kunit.py run --kunitconfig=drivers/gpu/drm/tests \
+		--kconfig_add CONFIG_VIRTIO_UML=y \
+		--kconfig_add CONFIG_UML_PCI_OVER_VIRTIO=y
+
+.. note::
+	The configuration included in ``.kunitconfig`` should be as generic as
+	possible.
+	``CONFIG_VIRTIO_UML`` and ``CONFIG_UML_PCI_OVER_VIRTIO`` are not
+	included in it because they are only required for User Mode Linux.
 
 
 Legacy Support Code

@@ -34,9 +34,7 @@
 #include <net/addrconf.h>
 #include <net/xfrm.h>
 
-#include <linux/cryptohash.h>
 #include <crypto/hash.h>
-#include <crypto/sha.h>
 #include <net/seg6.h>
 #include <net/genetlink.h>
 #include <net/seg6_hmac.h>
@@ -401,17 +399,13 @@ int __init seg6_hmac_init(void)
 {
 	return seg6_hmac_init_algo();
 }
-EXPORT_SYMBOL(seg6_hmac_init);
 
 int __net_init seg6_hmac_net_init(struct net *net)
 {
 	struct seg6_pernet_data *sdata = seg6_pernet(net);
 
-	rhashtable_init(&sdata->hmac_infos, &rht_params);
-
-	return 0;
+	return rhashtable_init(&sdata->hmac_infos, &rht_params);
 }
-EXPORT_SYMBOL(seg6_hmac_net_init);
 
 void seg6_hmac_exit(void)
 {

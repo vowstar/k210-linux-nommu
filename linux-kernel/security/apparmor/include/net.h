@@ -59,6 +59,7 @@ struct aa_sk_ctx {
 	DEFINE_AUDIT_DATA(NAME,						  \
 			  ((SK) && (F) != AF_UNIX) ? LSM_AUDIT_DATA_NET : \
 						     LSM_AUDIT_DATA_NONE, \
+						     AA_CLASS_NET,        \
 			  OP);						  \
 	NAME.u.net = &(NAME ## _net);					  \
 	aad(&NAME)->net.type = (T);					  \
@@ -107,6 +108,6 @@ int aa_sock_file_perm(struct aa_label *label, const char *op, u32 request,
 		      struct socket *sock);
 
 int apparmor_secmark_check(struct aa_label *label, char *op, u32 request,
-			   u32 secid, struct sock *sk);
+			   u32 secid, const struct sock *sk);
 
 #endif /* __AA_NET_H */

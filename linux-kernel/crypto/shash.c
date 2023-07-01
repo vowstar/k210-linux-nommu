@@ -18,6 +18,8 @@
 
 #include "internal.h"
 
+#define MAX_SHASH_ALIGNMASK 63
+
 static const struct crypto_type crypto_shash_type;
 
 int shash_no_setkey(struct crypto_shash *tfm, const u8 *key,
@@ -44,7 +46,7 @@ static int shash_setkey_unaligned(struct crypto_shash *tfm, const u8 *key,
 	alignbuffer = (u8 *)ALIGN((unsigned long)buffer, alignmask + 1);
 	memcpy(alignbuffer, key, keylen);
 	err = shash->setkey(tfm, alignbuffer, keylen);
-	kzfree(buffer);
+	kfree_sensitive(buffer);
 	return err;
 }
 
@@ -88,7 +90,7 @@ static int shash_update_unaligned(struct shash_desc *desc, const u8 *data,
 	 * We cannot count on __aligned() working for large values:
 	 * https://patchwork.kernel.org/patch/9507697/
 	 */
-	u8 ubuf[MAX_ALGAPI_ALIGNMASK * 2];
+	u8 ubuf[MAX_SHASH_ALIGNMASK * 2];
 	u8 *buf = PTR_ALIGN(&ubuf[0], alignmask + 1);
 	int err;
 
@@ -130,7 +132,7 @@ static int shash_final_unaligned(struct shash_desc *desc, u8 *out)
 	 * We cannot count on __aligned() working for large values:
 	 * https://patchwork.kernel.org/patch/9507697/
 	 */
-	u8 ubuf[MAX_ALGAPI_ALIGNMASK + HASH_MAX_DIGESTSIZE];
+	u8 ubuf[MAX_SHASH_ALIGNMASK + HASH_MAX_DIGESTSIZE];
 	u8 *buf = PTR_ALIGN(&ubuf[0], alignmask + 1);
 	int err;
 
@@ -205,6 +207,22 @@ int crypto_shash_digest(struct shash_desc *desc, const u8 *data,
 	return shash->digest(desc, data, len, out);
 }
 EXPORT_SYMBOL_GPL(crypto_shash_digest);
+
+int crypto_shash_tfm_digest(struct crypto_shash *tfm, const u8 *data,
+			    unsigned int len, u8 *out)
+{
+	SHASH_DESC_ON_STACK(desc, tfm);
+	int err;
+
+	desc->tfm = tfm;
+
+	err = crypto_shash_digest(desc, data, len, out);
+
+	shash_desc_zero(desc);
+
+	return err;
+}
+EXPORT_SYMBOL_GPL(crypto_shash_tfm_digest);
 
 static int shash_default_export(struct shash_desc *desc, void *out)
 {
@@ -302,10 +320,10 @@ int shash_ahash_digest(struct ahash_request *req, struct shash_desc *desc)
 	     nbytes <= min(sg->length, ((unsigned int)(PAGE_SIZE)) - offset))) {
 		void *data;
 
-		data = kmap_atomic(sg_page(sg));
+		data = kmap_local_page(sg_page(sg));
 		err = crypto_shash_digest(desc, data + offset, nbytes,
 					  req->result);
-		kunmap_atomic(data);
+		kunmap_local(data);
 	} else
 		err = crypto_shash_init(desc) ?:
 		      shash_ahash_finup(req, desc);
@@ -493,6 +511,12 @@ struct crypto_shash *crypto_alloc_shash(const char *alg_name, u32 type,
 }
 EXPORT_SYMBOL_GPL(crypto_alloc_shash);
 
+int crypto_has_shash(const char *alg_name, u32 type, u32 mask)
+{
+	return crypto_type_has_alg(alg_name, &crypto_shash_type, type, mask);
+}
+EXPORT_SYMBOL_GPL(crypto_has_shash);
+
 static int shash_prepare_alg(struct shash_alg *alg)
 {
 	struct crypto_alg *base = &alg->base;
@@ -500,6 +524,9 @@ static int shash_prepare_alg(struct shash_alg *alg)
 	if (alg->digestsize > HASH_MAX_DIGESTSIZE ||
 	    alg->descsize > HASH_MAX_DESCSIZE ||
 	    alg->statesize > HASH_MAX_STATESIZE)
+		return -EINVAL;
+
+	if (base->cra_alignmask > MAX_SHASH_ALIGNMASK)
 		return -EINVAL;
 
 	if ((alg->export && !alg->import) || (alg->import && !alg->export))

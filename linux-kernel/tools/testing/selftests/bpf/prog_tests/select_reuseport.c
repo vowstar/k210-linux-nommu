@@ -18,7 +18,6 @@
 #include <netinet/in.h>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
-#include "bpf_rlimit.h"
 #include "bpf_util.h"
 
 #include "test_progs.h"
@@ -36,6 +35,7 @@ static int result_map, tmp_index_ovr_map, linum_map, data_check_map;
 static __u32 expected_results[NR_RESULTS];
 static int sk_fds[REUSEPORT_ARRAY_SIZE];
 static int reuseport_array = -1, outer_map = -1;
+static enum bpf_map_type inner_map_type;
 static int select_by_skb_data_prog;
 static int saved_tcp_syncookie = -1;
 static struct bpf_object *obj;
@@ -63,30 +63,23 @@ static union sa46 {
 	}								\
 })
 
-static int create_maps(void)
+static int create_maps(enum bpf_map_type inner_type)
 {
-	struct bpf_create_map_attr attr = {};
+	LIBBPF_OPTS(bpf_map_create_opts, opts);
+
+	inner_map_type = inner_type;
 
 	/* Creating reuseport_array */
-	attr.name = "reuseport_array";
-	attr.map_type = BPF_MAP_TYPE_REUSEPORT_SOCKARRAY;
-	attr.key_size = sizeof(__u32);
-	attr.value_size = sizeof(__u32);
-	attr.max_entries = REUSEPORT_ARRAY_SIZE;
-
-	reuseport_array = bpf_create_map_xattr(&attr);
-	RET_ERR(reuseport_array == -1, "creating reuseport_array",
+	reuseport_array = bpf_map_create(inner_type, "reuseport_array",
+					 sizeof(__u32), sizeof(__u32), REUSEPORT_ARRAY_SIZE, NULL);
+	RET_ERR(reuseport_array < 0, "creating reuseport_array",
 		"reuseport_array:%d errno:%d\n", reuseport_array, errno);
 
 	/* Creating outer_map */
-	attr.name = "outer_map";
-	attr.map_type = BPF_MAP_TYPE_ARRAY_OF_MAPS;
-	attr.key_size = sizeof(__u32);
-	attr.value_size = sizeof(__u32);
-	attr.max_entries = 1;
-	attr.inner_map_fd = reuseport_array;
-	outer_map = bpf_create_map_xattr(&attr);
-	RET_ERR(outer_map == -1, "creating outer_map",
+	opts.inner_map_fd = reuseport_array;
+	outer_map = bpf_map_create(BPF_MAP_TYPE_ARRAY_OF_MAPS, "outer_map",
+				   sizeof(__u32), sizeof(__u32), 1, &opts);
+	RET_ERR(outer_map < 0, "creating outer_map",
 		"outer_map:%d errno:%d\n", outer_map, errno);
 
 	return 0;
@@ -98,9 +91,10 @@ static int prepare_bpf_obj(void)
 	struct bpf_map *map;
 	int err;
 
-	obj = bpf_object__open("test_select_reuseport_kern.o");
-	RET_ERR(IS_ERR_OR_NULL(obj), "open test_select_reuseport_kern.o",
-		"obj:%p PTR_ERR(obj):%ld\n", obj, PTR_ERR(obj));
+	obj = bpf_object__open("test_select_reuseport_kern.bpf.o");
+	err = libbpf_get_error(obj);
+	RET_ERR(err, "open test_select_reuseport_kern.bpf.o",
+		"obj:%p PTR_ERR(obj):%d\n", obj, err);
 
 	map = bpf_object__find_map_by_name(obj, "outer_map");
 	RET_ERR(!map, "find outer_map", "!map\n");
@@ -110,34 +104,34 @@ static int prepare_bpf_obj(void)
 	err = bpf_object__load(obj);
 	RET_ERR(err, "load bpf_object", "err:%d\n", err);
 
-	prog = bpf_program__next(NULL, obj);
+	prog = bpf_object__next_program(obj, NULL);
 	RET_ERR(!prog, "get first bpf_program", "!prog\n");
 	select_by_skb_data_prog = bpf_program__fd(prog);
-	RET_ERR(select_by_skb_data_prog == -1, "get prog fd",
+	RET_ERR(select_by_skb_data_prog < 0, "get prog fd",
 		"select_by_skb_data_prog:%d\n", select_by_skb_data_prog);
 
 	map = bpf_object__find_map_by_name(obj, "result_map");
 	RET_ERR(!map, "find result_map", "!map\n");
 	result_map = bpf_map__fd(map);
-	RET_ERR(result_map == -1, "get result_map fd",
+	RET_ERR(result_map < 0, "get result_map fd",
 		"result_map:%d\n", result_map);
 
 	map = bpf_object__find_map_by_name(obj, "tmp_index_ovr_map");
 	RET_ERR(!map, "find tmp_index_ovr_map\n", "!map");
 	tmp_index_ovr_map = bpf_map__fd(map);
-	RET_ERR(tmp_index_ovr_map == -1, "get tmp_index_ovr_map fd",
+	RET_ERR(tmp_index_ovr_map < 0, "get tmp_index_ovr_map fd",
 		"tmp_index_ovr_map:%d\n", tmp_index_ovr_map);
 
 	map = bpf_object__find_map_by_name(obj, "linum_map");
 	RET_ERR(!map, "find linum_map", "!map\n");
 	linum_map = bpf_map__fd(map);
-	RET_ERR(linum_map == -1, "get linum_map fd",
+	RET_ERR(linum_map < 0, "get linum_map fd",
 		"linum_map:%d\n", linum_map);
 
 	map = bpf_object__find_map_by_name(obj, "data_check_map");
 	RET_ERR(!map, "find data_check_map", "!map\n");
 	data_check_map = bpf_map__fd(map);
-	RET_ERR(data_check_map == -1, "get data_check_map fd",
+	RET_ERR(data_check_map < 0, "get data_check_map fd",
 		"data_check_map:%d\n", data_check_map);
 
 	return 0;
@@ -234,7 +228,7 @@ static long get_linum(void)
 	int err;
 
 	err = bpf_map_lookup_elem(linum_map, &index_zero, &linum);
-	RET_ERR(err == -1, "lookup_elem(linum_map)", "err:%d errno:%d\n",
+	RET_ERR(err < 0, "lookup_elem(linum_map)", "err:%d errno:%d\n",
 		err, errno);
 
 	return linum;
@@ -251,11 +245,11 @@ static void check_data(int type, sa_family_t family, const struct cmd *cmd,
 	addrlen = sizeof(cli_sa);
 	err = getsockname(cli_fd, (struct sockaddr *)&cli_sa,
 			  &addrlen);
-	RET_IF(err == -1, "getsockname(cli_fd)", "err:%d errno:%d\n",
+	RET_IF(err < 0, "getsockname(cli_fd)", "err:%d errno:%d\n",
 	       err, errno);
 
 	err = bpf_map_lookup_elem(data_check_map, &index_zero, &result);
-	RET_IF(err == -1, "lookup_elem(data_check_map)", "err:%d errno:%d\n",
+	RET_IF(err < 0, "lookup_elem(data_check_map)", "err:%d errno:%d\n",
 	       err, errno);
 
 	if (type == SOCK_STREAM) {
@@ -344,7 +338,7 @@ static void check_results(void)
 
 	for (i = 0; i < NR_RESULTS; i++) {
 		err = bpf_map_lookup_elem(result_map, &i, &results[i]);
-		RET_IF(err == -1, "lookup_elem(result_map)",
+		RET_IF(err < 0, "lookup_elem(result_map)",
 		       "i:%u err:%d errno:%d\n", i, err, errno);
 	}
 
@@ -506,9 +500,6 @@ static void test_syncookie(int type, sa_family_t family)
 		.pass_on_failure = 0,
 	};
 
-	if (type != SOCK_STREAM)
-		return;
-
 	/*
 	 * +1 for TCP-SYN and
 	 * +1 for the TCP-ACK (ack the syncookie)
@@ -524,12 +515,12 @@ static void test_syncookie(int type, sa_family_t family)
 	 */
 	err = bpf_map_update_elem(tmp_index_ovr_map, &index_zero,
 				  &tmp_index, BPF_ANY);
-	RET_IF(err == -1, "update_elem(tmp_index_ovr_map, 0, 1)",
+	RET_IF(err < 0, "update_elem(tmp_index_ovr_map, 0, 1)",
 	       "err:%d errno:%d\n", err, errno);
 	do_test(type, family, &cmd, PASS);
 	err = bpf_map_lookup_elem(tmp_index_ovr_map, &index_zero,
 				  &tmp_index);
-	RET_IF(err == -1 || tmp_index != -1,
+	RET_IF(err < 0 || tmp_index >= 0,
 	       "lookup_elem(tmp_index_ovr_map)",
 	       "err:%d errno:%d tmp_index:%d\n",
 	       err, errno, tmp_index);
@@ -569,7 +560,7 @@ static void test_detach_bpf(int type, sa_family_t family)
 
 	for (i = 0; i < NR_RESULTS; i++) {
 		err = bpf_map_lookup_elem(result_map, &i, &tmp);
-		RET_IF(err == -1, "lookup_elem(result_map)",
+		RET_IF(err < 0, "lookup_elem(result_map)",
 		       "i:%u err:%d errno:%d\n", i, err, errno);
 		nr_run_before += tmp;
 	}
@@ -584,7 +575,7 @@ static void test_detach_bpf(int type, sa_family_t family)
 
 	for (i = 0; i < NR_RESULTS; i++) {
 		err = bpf_map_lookup_elem(result_map, &i, &tmp);
-		RET_IF(err == -1, "lookup_elem(result_map)",
+		RET_IF(err < 0, "lookup_elem(result_map)",
 		       "i:%u err:%d errno:%d\n", i, err, errno);
 		nr_run_after += tmp;
 	}
@@ -632,24 +623,24 @@ static void prepare_sk_fds(int type, sa_family_t family, bool inany)
 					 SO_ATTACH_REUSEPORT_EBPF,
 					 &select_by_skb_data_prog,
 					 sizeof(select_by_skb_data_prog));
-			RET_IF(err == -1, "setsockopt(SO_ATTACH_REUEPORT_EBPF)",
+			RET_IF(err < 0, "setsockopt(SO_ATTACH_REUEPORT_EBPF)",
 			       "err:%d errno:%d\n", err, errno);
 		}
 
 		err = bind(sk_fds[i], (struct sockaddr *)&srv_sa, addrlen);
-		RET_IF(err == -1, "bind()", "sk_fds[%d] err:%d errno:%d\n",
+		RET_IF(err < 0, "bind()", "sk_fds[%d] err:%d errno:%d\n",
 		       i, err, errno);
 
 		if (type == SOCK_STREAM) {
 			err = listen(sk_fds[i], 10);
-			RET_IF(err == -1, "listen()",
+			RET_IF(err < 0, "listen()",
 			       "sk_fds[%d] err:%d errno:%d\n",
 			       i, err, errno);
 		}
 
 		err = bpf_map_update_elem(reuseport_array, &i, &sk_fds[i],
 					  BPF_NOEXIST);
-		RET_IF(err == -1, "update_elem(reuseport_array)",
+		RET_IF(err < 0, "update_elem(reuseport_array)",
 		       "sk_fds[%d] err:%d errno:%d\n", i, err, errno);
 
 		if (i == first) {
@@ -682,7 +673,7 @@ static void setup_per_test(int type, sa_family_t family, bool inany,
 	prepare_sk_fds(type, family, inany);
 	err = bpf_map_update_elem(tmp_index_ovr_map, &index_zero, &ovr,
 				  BPF_ANY);
-	RET_IF(err == -1, "update_elem(tmp_index_ovr_map, 0, -1)",
+	RET_IF(err < 0, "update_elem(tmp_index_ovr_map, 0, -1)",
 	       "err:%d errno:%d\n", err, errno);
 
 	/* Install reuseport_array to outer_map? */
@@ -691,7 +682,7 @@ static void setup_per_test(int type, sa_family_t family, bool inany,
 
 	err = bpf_map_update_elem(outer_map, &index_zero, &reuseport_array,
 				  BPF_ANY);
-	RET_IF(err == -1, "update_elem(outer_map, 0, reuseport_array)",
+	RET_IF(err < 0, "update_elem(outer_map, 0, reuseport_array)",
 	       "err:%d errno:%d\n", err, errno);
 }
 
@@ -720,18 +711,42 @@ static void cleanup_per_test(bool no_inner_map)
 		return;
 
 	err = bpf_map_delete_elem(outer_map, &index_zero);
-	RET_IF(err == -1, "delete_elem(outer_map)",
+	RET_IF(err < 0, "delete_elem(outer_map)",
 	       "err:%d errno:%d\n", err, errno);
 }
 
 static void cleanup(void)
 {
-	if (outer_map != -1)
+	if (outer_map >= 0) {
 		close(outer_map);
-	if (reuseport_array != -1)
+		outer_map = -1;
+	}
+
+	if (reuseport_array >= 0) {
 		close(reuseport_array);
-	if (obj)
+		reuseport_array = -1;
+	}
+
+	if (obj) {
 		bpf_object__close(obj);
+		obj = NULL;
+	}
+
+	memset(expected_results, 0, sizeof(expected_results));
+}
+
+static const char *maptype_str(enum bpf_map_type type)
+{
+	switch (type) {
+	case BPF_MAP_TYPE_REUSEPORT_SOCKARRAY:
+		return "reuseport_sockarray";
+	case BPF_MAP_TYPE_SOCKMAP:
+		return "sockmap";
+	case BPF_MAP_TYPE_SOCKHASH:
+		return "sockhash";
+	default:
+		return "unknown";
+	}
 }
 
 static const char *family_str(sa_family_t family)
@@ -758,7 +773,7 @@ static const char *sotype_str(int sotype)
 	}
 }
 
-#define TEST_INIT(fn, ...) { fn, #fn, __VA_ARGS__ }
+#define TEST_INIT(fn_, ...) { .fn = fn_, .name = #fn_, __VA_ARGS__ }
 
 static void test_config(int sotype, sa_family_t family, bool inany)
 {
@@ -766,12 +781,15 @@ static void test_config(int sotype, sa_family_t family, bool inany)
 		void (*fn)(int sotype, sa_family_t family);
 		const char *name;
 		bool no_inner_map;
+		int need_sotype;
 	} tests[] = {
-		TEST_INIT(test_err_inner_map, true /* no_inner_map */),
+		TEST_INIT(test_err_inner_map,
+			  .no_inner_map = true),
 		TEST_INIT(test_err_skb_data),
 		TEST_INIT(test_err_sk_select_port),
 		TEST_INIT(test_pass),
-		TEST_INIT(test_syncookie),
+		TEST_INIT(test_syncookie,
+			  .need_sotype = SOCK_STREAM),
 		TEST_INIT(test_pass_on_err),
 		TEST_INIT(test_detach_bpf),
 	};
@@ -779,7 +797,11 @@ static void test_config(int sotype, sa_family_t family, bool inany)
 	const struct test *t;
 
 	for (t = tests; t < tests + ARRAY_SIZE(tests); t++) {
-		snprintf(s, sizeof(s), "%s/%s %s %s",
+		if (t->need_sotype && t->need_sotype != sotype)
+			continue; /* test not compatible with socket type */
+
+		snprintf(s, sizeof(s), "%s %s/%s %s %s",
+			 maptype_str(inner_map_type),
 			 family_str(family), sotype_str(sotype),
 			 inany ? "INANY" : "LOOPBACK", t->name);
 
@@ -814,16 +836,25 @@ static void test_all(void)
 		test_config(c->sotype, c->family, c->inany);
 }
 
-void test_select_reuseport(void)
+void test_map_type(enum bpf_map_type mt)
 {
-	if (create_maps())
+	if (create_maps(mt))
 		goto out;
 	if (prepare_bpf_obj())
 		goto out;
 
+	test_all();
+out:
+	cleanup();
+}
+
+void serial_test_select_reuseport(void)
+{
 	saved_tcp_fo = read_int_sysctl(TCP_FO_SYSCTL);
+	if (saved_tcp_fo < 0)
+		goto out;
 	saved_tcp_syncookie = read_int_sysctl(TCP_SYNCOOKIE_SYSCTL);
-	if (saved_tcp_syncookie < 0 || saved_tcp_syncookie < 0)
+	if (saved_tcp_syncookie < 0)
 		goto out;
 
 	if (enable_fastopen())
@@ -831,8 +862,9 @@ void test_select_reuseport(void)
 	if (disable_syncookie())
 		goto out;
 
-	test_all();
+	test_map_type(BPF_MAP_TYPE_REUSEPORT_SOCKARRAY);
+	test_map_type(BPF_MAP_TYPE_SOCKMAP);
+	test_map_type(BPF_MAP_TYPE_SOCKHASH);
 out:
-	cleanup();
 	restore_sysctls();
 }

@@ -22,6 +22,8 @@ Parameters
      - Permanent
    * - ``msix_vec_per_pf_min``
      - Permanent
+   * - ``enable_remote_dev_reset``
+     - Runtime
 
 The ``bnxt`` driver also implements the following driver-specific
 parameters.
@@ -51,6 +53,9 @@ The ``bnxt_en`` driver reports the following versions
    * - Name
      - Type
      - Description
+   * - ``board.id``
+     - fixed
+     - Part number identifying the board design
    * - ``asic.id``
      - fixed
      - ASIC design identifier
@@ -63,12 +68,15 @@ The ``bnxt_en`` driver reports the following versions
    * - ``fw``
      - stored, running
      - Overall board firmware version
-   * - ``fw.app``
-     - stored, running
-     - Data path firmware version
    * - ``fw.mgmt``
      - stored, running
-     - Management firmware version
+     - NIC hardware resource management firmware version
+   * - ``fw.mgmt.api``
+     - running
+     - Minimum firmware interface spec version supported between driver and firmware
+   * - ``fw.nsci``
+     - stored, running
+     - General platform management firmware version
    * - ``fw.roce``
      - stored, running
      - RoCE management firmware version

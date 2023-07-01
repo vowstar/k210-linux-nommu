@@ -15,23 +15,15 @@
 
 #include <sound/dmaengine_pcm.h>
 
+static unsigned int prealloc_buffer_size_kbytes = 512;
+module_param(prealloc_buffer_size_kbytes, uint, 0444);
+MODULE_PARM_DESC(prealloc_buffer_size_kbytes, "Preallocate DMA buffer size (KB).");
+
 /*
  * The platforms dmaengine driver does not support reporting the amount of
  * bytes that are still left to transfer.
  */
 #define SND_DMAENGINE_PCM_FLAG_NO_RESIDUE BIT(31)
-
-struct dmaengine_pcm {
-	struct dma_chan *chan[SNDRV_PCM_STREAM_LAST + 1];
-	const struct snd_dmaengine_pcm_config *config;
-	struct snd_soc_component component;
-	unsigned int flags;
-};
-
-static struct dmaengine_pcm *soc_component_to_pcm(struct snd_soc_component *p)
-{
-	return container_of(p, struct dmaengine_pcm, component);
-}
 
 static struct device *dmaengine_dma_dev(struct dmaengine_pcm *pcm,
 	struct snd_pcm_substream *substream)
@@ -58,11 +50,17 @@ static struct device *dmaengine_dma_dev(struct dmaengine_pcm *pcm,
 int snd_dmaengine_pcm_prepare_slave_config(struct snd_pcm_substream *substream,
 	struct snd_pcm_hw_params *params, struct dma_slave_config *slave_config)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
 	struct snd_dmaengine_dai_dma_data *dma_data;
 	int ret;
 
-	dma_data = snd_soc_dai_get_dma_data(rtd->cpu_dai, substream);
+	if (rtd->dai_link->num_cpus > 1) {
+		dev_err(rtd->dev,
+			"%s doesn't support Multi CPU yet\n", __func__);
+		return -EINVAL;
+	}
+
+	dma_data = snd_soc_dai_get_dma_data(asoc_rtd_to_cpu(rtd, 0), substream);
 
 	ret = snd_hwparams_to_dma_slave_config(substream, params, slave_config);
 	if (ret)
@@ -81,55 +79,52 @@ static int dmaengine_pcm_hw_params(struct snd_soc_component *component,
 {
 	struct dmaengine_pcm *pcm = soc_component_to_pcm(component);
 	struct dma_chan *chan = snd_dmaengine_pcm_get_chan(substream);
-	int (*prepare_slave_config)(struct snd_pcm_substream *substream,
-			struct snd_pcm_hw_params *params,
-			struct dma_slave_config *slave_config);
 	struct dma_slave_config slave_config;
 	int ret;
 
+	if (!pcm->config->prepare_slave_config)
+		return 0;
+
 	memset(&slave_config, 0, sizeof(slave_config));
 
-	if (!pcm->config)
-		prepare_slave_config = snd_dmaengine_pcm_prepare_slave_config;
-	else
-		prepare_slave_config = pcm->config->prepare_slave_config;
+	ret = pcm->config->prepare_slave_config(substream, params, &slave_config);
+	if (ret)
+		return ret;
 
-	if (prepare_slave_config) {
-		ret = prepare_slave_config(substream, params, &slave_config);
-		if (ret)
-			return ret;
-
-		ret = dmaengine_slave_config(chan, &slave_config);
-		if (ret)
-			return ret;
-	}
-
-	return 0;
+	return dmaengine_slave_config(chan, &slave_config);
 }
 
 static int
 dmaengine_pcm_set_runtime_hwparams(struct snd_soc_component *component,
 				   struct snd_pcm_substream *substream)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_pcm_runtime *rtd = asoc_substream_to_rtd(substream);
 	struct dmaengine_pcm *pcm = soc_component_to_pcm(component);
 	struct device *dma_dev = dmaengine_dma_dev(pcm, substream);
 	struct dma_chan *chan = pcm->chan[substream->stream];
 	struct snd_dmaengine_dai_dma_data *dma_data;
 	struct snd_pcm_hardware hw;
 
-	if (pcm->config && pcm->config->pcm_hardware)
+	if (rtd->dai_link->num_cpus > 1) {
+		dev_err(rtd->dev,
+			"%s doesn't support Multi CPU yet\n", __func__);
+		return -EINVAL;
+	}
+
+	if (pcm->config->pcm_hardware)
 		return snd_soc_set_runtime_hwparams(substream,
 				pcm->config->pcm_hardware);
 
-	dma_data = snd_soc_dai_get_dma_data(rtd->cpu_dai, substream);
+	dma_data = snd_soc_dai_get_dma_data(asoc_rtd_to_cpu(rtd, 0), substream);
 
 	memset(&hw, 0, sizeof(hw));
 	hw.info = SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_MMAP_VALID |
 			SNDRV_PCM_INFO_INTERLEAVED;
 	hw.periods_min = 2;
 	hw.periods_max = UINT_MAX;
-	hw.period_bytes_min = 256;
+	hw.period_bytes_min = dma_data->maxburst * DMA_SLAVE_BUSWIDTH_8_BYTES;
+	if (!hw.period_bytes_min)
+		hw.period_bytes_min = 256;
 	hw.period_bytes_max = dma_get_max_seg_size(dma_dev);
 	hw.buffer_bytes_max = SIZE_MAX;
 	hw.fifo_size = dma_data->fifo_size;
@@ -183,20 +178,23 @@ static struct dma_chan *dmaengine_pcm_compat_request_channel(
 {
 	struct dmaengine_pcm *pcm = soc_component_to_pcm(component);
 	struct snd_dmaengine_dai_dma_data *dma_data;
-	dma_filter_fn fn = NULL;
 
-	dma_data = snd_soc_dai_get_dma_data(rtd->cpu_dai, substream);
+	if (rtd->dai_link->num_cpus > 1) {
+		dev_err(rtd->dev,
+			"%s doesn't support Multi CPU yet\n", __func__);
+		return NULL;
+	}
+
+	dma_data = snd_soc_dai_get_dma_data(asoc_rtd_to_cpu(rtd, 0), substream);
 
 	if ((pcm->flags & SND_DMAENGINE_PCM_FLAG_HALF_DUPLEX) && pcm->chan[0])
 		return pcm->chan[0];
 
-	if (pcm->config && pcm->config->compat_request_channel)
+	if (pcm->config->compat_request_channel)
 		return pcm->config->compat_request_channel(rtd, substream);
 
-	if (pcm->config)
-		fn = pcm->config->compat_filter_fn;
-
-	return snd_dmaengine_pcm_request_channel(fn, dma_data->filter_data);
+	return snd_dmaengine_pcm_request_channel(pcm->config->compat_filter_fn,
+						 dma_data->filter_data);
 }
 
 static bool dmaengine_pcm_can_report_residue(struct device *dev,
@@ -224,25 +222,26 @@ static int dmaengine_pcm_new(struct snd_soc_component *component,
 	struct dmaengine_pcm *pcm = soc_component_to_pcm(component);
 	const struct snd_dmaengine_pcm_config *config = pcm->config;
 	struct device *dev = component->dev;
-	struct snd_pcm_substream *substream;
 	size_t prealloc_buffer_size;
 	size_t max_buffer_size;
 	unsigned int i;
 
-	if (config && config->prealloc_buffer_size) {
+	if (config->prealloc_buffer_size)
 		prealloc_buffer_size = config->prealloc_buffer_size;
-		max_buffer_size = config->pcm_hardware->buffer_bytes_max;
-	} else {
-		prealloc_buffer_size = 512 * 1024;
-		max_buffer_size = SIZE_MAX;
-	}
+	else
+		prealloc_buffer_size = prealloc_buffer_size_kbytes * 1024;
 
-	for (i = SNDRV_PCM_STREAM_PLAYBACK; i <= SNDRV_PCM_STREAM_CAPTURE; i++) {
-		substream = rtd->pcm->streams[i].substream;
+	if (config->pcm_hardware && config->pcm_hardware->buffer_bytes_max)
+		max_buffer_size = config->pcm_hardware->buffer_bytes_max;
+	else
+		max_buffer_size = SIZE_MAX;
+
+	for_each_pcm_streams(i) {
+		struct snd_pcm_substream *substream = rtd->pcm->streams[i].substream;
 		if (!substream)
 			continue;
 
-		if (!pcm->chan[i] && config && config->chan_names[i])
+		if (!pcm->chan[i] && config->chan_names[i])
 			pcm->chan[i] = dma_request_slave_channel(dev,
 				config->chan_names[i]);
 
@@ -301,14 +300,13 @@ static int dmaengine_copy_user(struct snd_soc_component *component,
 	bool is_playback = substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
 	void *dma_ptr = runtime->dma_area + hwoff +
 			channel * (runtime->dma_bytes / runtime->channels);
-	int ret;
 
 	if (is_playback)
 		if (copy_from_user(dma_ptr, buf, bytes))
 			return -EFAULT;
 
 	if (process) {
-		ret = process(substream, channel, hwoff, (__force void *)buf, bytes);
+		int ret = process(substream, channel, hwoff, (__force void *)buf, bytes);
 		if (ret < 0)
 			return ret;
 	}
@@ -356,10 +354,10 @@ static int dmaengine_pcm_request_chan_of(struct dmaengine_pcm *pcm,
 	struct dma_chan *chan;
 
 	if ((pcm->flags & SND_DMAENGINE_PCM_FLAG_NO_DT) || (!dev->of_node &&
-	    !(config && config->dma_dev && config->dma_dev->of_node)))
+	    !(config->dma_dev && config->dma_dev->of_node)))
 		return 0;
 
-	if (config && config->dma_dev) {
+	if (config->dma_dev) {
 		/*
 		 * If this warning is seen, it probably means that your Linux
 		 * device structure does not match your HW device structure.
@@ -371,16 +369,20 @@ static int dmaengine_pcm_request_chan_of(struct dmaengine_pcm *pcm,
 		dev = config->dma_dev;
 	}
 
-	for (i = SNDRV_PCM_STREAM_PLAYBACK; i <= SNDRV_PCM_STREAM_CAPTURE;
-	     i++) {
+	for_each_pcm_streams(i) {
 		if (pcm->flags & SND_DMAENGINE_PCM_FLAG_HALF_DUPLEX)
 			name = "rx-tx";
 		else
 			name = dmaengine_pcm_dma_channel_names[i];
-		if (config && config->chan_names[i])
+		if (config->chan_names[i])
 			name = config->chan_names[i];
 		chan = dma_request_chan(dev, name);
 		if (IS_ERR(chan)) {
+			/*
+			 * Only report probe deferral errors, channels
+			 * might not be present for devices that
+			 * support only TX or only RX.
+			 */
 			if (PTR_ERR(chan) == -EPROBE_DEFER)
 				return -EPROBE_DEFER;
 			pcm->chan[i] = NULL;
@@ -401,8 +403,7 @@ static void dmaengine_pcm_release_chan(struct dmaengine_pcm *pcm)
 {
 	unsigned int i;
 
-	for (i = SNDRV_PCM_STREAM_PLAYBACK; i <= SNDRV_PCM_STREAM_CAPTURE;
-	     i++) {
+	for_each_pcm_streams(i) {
 		if (!pcm->chan[i])
 			continue;
 		dma_release_channel(pcm->chan[i]);
@@ -410,6 +411,10 @@ static void dmaengine_pcm_release_chan(struct dmaengine_pcm *pcm)
 			break;
 	}
 }
+
+static const struct snd_dmaengine_pcm_config snd_dmaengine_pcm_default_config = {
+	.prepare_slave_config = snd_dmaengine_pcm_prepare_slave_config,
+};
 
 /**
  * snd_dmaengine_pcm_register - Register a dmaengine based PCM device
@@ -420,6 +425,7 @@ static void dmaengine_pcm_release_chan(struct dmaengine_pcm *pcm)
 int snd_dmaengine_pcm_register(struct device *dev,
 	const struct snd_dmaengine_pcm_config *config, unsigned int flags)
 {
+	const struct snd_soc_component_driver *driver;
 	struct dmaengine_pcm *pcm;
 	int ret;
 
@@ -430,6 +436,8 @@ int snd_dmaengine_pcm_register(struct device *dev,
 #ifdef CONFIG_DEBUG_FS
 	pcm->component.debugfs_prefix = "dma";
 #endif
+	if (!config)
+		config = &snd_dmaengine_pcm_default_config;
 	pcm->config = config;
 	pcm->flags = flags;
 
@@ -437,13 +445,16 @@ int snd_dmaengine_pcm_register(struct device *dev,
 	if (ret)
 		goto err_free_dma;
 
-	if (config && config->process)
-		ret = snd_soc_add_component(dev, &pcm->component,
-					    &dmaengine_pcm_component_process,
-					    NULL, 0);
+	if (config->process)
+		driver = &dmaengine_pcm_component_process;
 	else
-		ret = snd_soc_add_component(dev, &pcm->component,
-					    &dmaengine_pcm_component, NULL, 0);
+		driver = &dmaengine_pcm_component;
+
+	ret = snd_soc_component_initialize(&pcm->component, driver, dev);
+	if (ret)
+		goto err_free_dma;
+
+	ret = snd_soc_add_component(&pcm->component, NULL, 0);
 	if (ret)
 		goto err_free_dma;
 
@@ -474,7 +485,7 @@ void snd_dmaengine_pcm_unregister(struct device *dev)
 
 	pcm = soc_component_to_pcm(component);
 
-	snd_soc_unregister_component(dev);
+	snd_soc_unregister_component_by_driver(dev, component->driver);
 	dmaengine_pcm_release_chan(pcm);
 	kfree(pcm);
 }

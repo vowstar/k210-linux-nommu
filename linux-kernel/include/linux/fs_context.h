@@ -85,7 +85,7 @@ struct p_log {
  * Superblock creation fills in ->root whereas reconfiguration begins with this
  * already set.
  *
- * See Documentation/filesystems/mount_api.txt
+ * See Documentation/filesystems/mount_api.rst
  */
 struct fs_context {
 	const struct fs_context_operations *ops;
@@ -99,7 +99,7 @@ struct fs_context {
 	const struct cred	*cred;		/* The mounter's credentials */
 	struct p_log		log;		/* Logging buffer */
 	const char		*source;	/* The source name (eg. dev path) */
-	void			*security;	/* Linux S&M options */
+	void			*security;	/* LSM options */
 	void			*s_fs_info;	/* Proposed s_fs_info */
 	unsigned int		sb_flags;	/* Proposed superblock flags (SB_*) */
 	unsigned int		sb_flags_mask;	/* Superblock flags that were changed */
@@ -109,6 +109,7 @@ struct fs_context {
 	enum fs_context_phase	phase:8;	/* The phase the context is in */
 	bool			need_free:1;	/* Need to call ops->free() */
 	bool			global:1;	/* Goes into &init_user_ns */
+	bool			oldapi:1;	/* Coming from mount(2) */
 };
 
 struct fs_context_operations {
@@ -138,20 +139,11 @@ extern int vfs_parse_fs_string(struct fs_context *fc, const char *key,
 extern int generic_parse_monolithic(struct fs_context *fc, void *data);
 extern int vfs_get_tree(struct fs_context *fc);
 extern void put_fs_context(struct fs_context *fc);
-
-/*
- * sget() wrappers to be called from the ->get_tree() op.
- */
-enum vfs_get_super_keying {
-	vfs_get_single_super,	/* Only one such superblock may exist */
-	vfs_get_single_reconf_super, /* As above, but reconfigure if it exists */
-	vfs_get_keyed_super,	/* Superblocks with different s_fs_info keys may exist */
-	vfs_get_independent_super, /* Multiple independent superblocks may exist */
-};
-extern int vfs_get_super(struct fs_context *fc,
-			 enum vfs_get_super_keying keying,
-			 int (*fill_super)(struct super_block *sb,
-					   struct fs_context *fc));
+extern int vfs_parse_fs_param_source(struct fs_context *fc,
+				     struct fs_parameter *param);
+extern void fc_drop_locked(struct fs_context *fc);
+int reconfigure_single(struct super_block *s,
+		       int flags, void *data);
 
 extern int get_tree_nodev(struct fs_context *fc,
 			 int (*fill_super)(struct super_block *sb,

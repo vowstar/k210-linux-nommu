@@ -26,6 +26,9 @@
 
 #include <linux/types.h>
 
+struct drm_atomic_state;
+struct drm_bridge;
+struct drm_bridge_state;
 struct drm_crtc;
 struct drm_crtc_state;
 struct drm_plane;
@@ -69,6 +72,9 @@ void __drm_atomic_helper_connector_reset(struct drm_connector *connector,
 					 struct drm_connector_state *conn_state);
 void drm_atomic_helper_connector_reset(struct drm_connector *connector);
 void drm_atomic_helper_connector_tv_reset(struct drm_connector *connector);
+int drm_atomic_helper_connector_tv_check(struct drm_connector *connector,
+					 struct drm_atomic_state *state);
+void drm_atomic_helper_connector_tv_margins_reset(struct drm_connector *connector);
 void
 __drm_atomic_helper_connector_duplicate_state(struct drm_connector *connector,
 					   struct drm_connector_state *state);
@@ -80,3 +86,14 @@ void drm_atomic_helper_connector_destroy_state(struct drm_connector *connector,
 					  struct drm_connector_state *state);
 void __drm_atomic_helper_private_obj_duplicate_state(struct drm_private_obj *obj,
 						     struct drm_private_state *state);
+
+void __drm_atomic_helper_bridge_duplicate_state(struct drm_bridge *bridge,
+						struct drm_bridge_state *state);
+struct drm_bridge_state *
+drm_atomic_helper_bridge_duplicate_state(struct drm_bridge *bridge);
+void drm_atomic_helper_bridge_destroy_state(struct drm_bridge *bridge,
+					    struct drm_bridge_state *state);
+void __drm_atomic_helper_bridge_reset(struct drm_bridge *bridge,
+				      struct drm_bridge_state *state);
+struct drm_bridge_state *
+drm_atomic_helper_bridge_reset(struct drm_bridge *bridge);

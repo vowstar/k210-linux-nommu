@@ -280,9 +280,20 @@ Originally planned to be added as a git submodule, but some people said that thi
 In order to be able to compile smoothly, I shamelessly put the ROOTFS ``k210.cpio`` binary file into the kernel source directory. This file should not be submitted to the source directory. This is a negative example, please do not do this like me.
 
 ```bash
-cd "$PROJ_ROOT/linux-kernel"
 export PATH=/opt/riscv64-uclibc/bin:$PATH
+cd "$PROJ_ROOT/linux-kernel"
 make ARCH=riscv CROSS_COMPILE=riscv64-linux- nommu_k210_defconfig
+make ARCH=riscv CROSS_COMPILE=riscv64-linux- -j
+```
+
+### Build kernel with SD support
+
+You can also use the SD card for rootfs. This can be done with the patched config as follows:
+
+```bash
+export PATH=/opt/riscv64-uclibc/bin:$PATH
+cd "$PROJ_ROOT/linux-kernel"
+make ARCH=riscv CROSS_COMPILE=riscv64-linux- nommu_k210_sdcard_defconfig
 make ARCH=riscv CROSS_COMPILE=riscv64-linux- -j
 ```
 
@@ -333,3 +344,58 @@ tcc -run main.c
 You will get the hello world output.
 
 Enjoy!
+
+## Using u-boot
+
+This is a short list of commands to download and build u-boot, and setup linux booting.
+These instructions are MAIX-BIT specifix, for other boards you need diferent configs. Look these up for your board. The u-boot config and the `CONFIG_SOC_CANAAN_K210_DTB_SOURCE`, `arch/riscv/configs/nommu_k210_sdcard_defconfig`, and the dtb moved to the SD card needs to be changes
+
+Clone the sources:
+
+```
+git clone https://source.denx.de/u-boot/u-boot.git
+```
+
+Build for RISC-V:
+
+```
+export PATH=/opt/riscv64-uclibc/bin:$PATH
+make sipeed_maix_bitm_defconfig
+make CROSS_COMPILE=<your cross compile prefix>
+```
+
+### prepare SD card
+
+Grab an SD card, and partition it with partition 1 being FAT32 and partition 2 EXT2.
+
+If you intend to use non-SDcard linux config, the second partition is not needed, and all instructions using it can be skipped.
+
+Mount both partiions, here the mountpoints will be called P1 and P2.
+
+Go to the u-boot root and execute:
+```
+tools/mkimage -A riscv -O linux -T kernel -C none -a 0x80000000 -e 0x80000000 -n linux -d {Path to linux "Image" file} P1/uImage
+```
+
+Note that the Image file is called Image, it is not the loader.bin used above, but is in the same directory.
+
+Copy the dtb over (required by u-boot)
+```
+cd $PROJ_ROOT
+cp arch/riscv/boot/dts/canaan/sipeed_maix_bit.dtb P1/k210.dtb
+```
+
+Copy the rootfs:
+```
+cd "$PROJ_ROOT/rootfs_k210"
+cp * P2 -r
+```
+
+Unmount the SD card, put it in your device.
+
+Then flash u-boot:
+```
+kflash -tp /dev/ttyUSB0 -B goE u-boot-dtb.bin
+```
+
+This will automatically open the miniterm, you should see u-boot booting. It should show a countdown until automatic boot, once it hits 0 it should boot linux with the shell as earlier.
